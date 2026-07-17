@@ -5,7 +5,8 @@ defmodule CatalystWeb.ShellLiveTest do
   import Phoenix.LiveViewTest
 
   alias Catalyst.Agent.Event
-  alias Catalyst.Message
+  alias Catalyst.LLM.Event, as: LLMEvent
+  alias Catalyst.{Content, Message}
   alias Catalyst.Session.Server
   alias CatalystWeb.UI.Registry
 
@@ -77,6 +78,61 @@ defmodule CatalystWeb.ShellLiveTest do
     {:ok, view, html} = live(conn, ~p"/")
     assert html =~ "Ask Catalyst to inspect this project."
     assert has_element?(view, "#message-stream")
+  end
+
+  test "streaming shows a loader and hides partial deltas until the final assistant message",
+       %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    send(view.pid, {:agent_event, %Event.MessageStart{message: %Message.Assistant{content: []}}})
+
+    assert has_element?(view, "#streaming-message")
+    assert render(view) =~ "Assistant is working"
+
+    send(
+      view.pid,
+      {:agent_event,
+       %Event.MessageUpdate{llm_event: %LLMEvent.TextDelta{delta: "- partial `item`"}}}
+    )
+
+    html = render(view)
+    assert html =~ "Assistant is working"
+    refute html =~ "partial"
+
+    final = %Message.Assistant{content: Content.text("- final `item`")}
+    send(view.pid, {:agent_event, %Event.MessageEnd{message: final}})
+
+    refute has_element?(view, "#streaming-message")
+    assert has_element?(view, "ul li")
+    assert has_element?(view, "code", "item")
+    assert render(view) =~ "final"
+  end
+
+  test "tool execution indicators and results render immediately", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    send(
+      view.pid,
+      {:agent_event, %Event.ToolExecutionStart{call_id: "call-1", name: "grep", args: %{}}}
+    )
+
+    assert render(view) =~ "running"
+    assert has_element?(view, "code", "grep")
+
+    result = %Message.ToolResult{
+      tool_call_id: "call-1",
+      tool_name: "grep",
+      content: Content.text("found it")
+    }
+
+    send(view.pid, {:agent_event, %Event.MessageEnd{message: result}})
+
+    assert has_element?(view, ~s([data-message-role="tool-result"]))
+    assert render(view) =~ "found it"
+
+    send(view.pid, {:agent_event, %Event.ToolExecutionEnd{call_id: "call-1"}})
+
+    refute render(view) =~ "running"
   end
 
   test "the web self-modification tools are registered into the core tool set" do

@@ -238,16 +238,16 @@ defmodule CatalystWeb.ShellLive do
     do: assign(socket, streaming: true)
 
   defp apply_event(
-         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{delta: d}},
+         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{}},
          socket
        ),
-       do: push_stream_delta(socket, "text", d)
+       do: ensure_streaming(socket)
 
   defp apply_event(
-         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.ThinkingDelta{delta: d}},
+         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.ThinkingDelta{}},
          socket
        ),
-       do: push_stream_delta(socket, "thinking", d)
+       do: ensure_streaming(socket)
 
   defp apply_event(%Event.MessageEnd{message: message}, socket) do
     # A MessageEnd broadcast between reattach's subscribe and snapshot call
@@ -287,15 +287,9 @@ defmodule CatalystWeb.ShellLive do
 
   defp apply_event(_event, socket), do: socket
 
-  # Send only the delta; the StreamingMessage JS hook appends it client-side,
-  # so wire traffic stays O(total text) instead of O(n²).
-  defp push_stream_delta(socket, kind, delta) do
-    socket
-    |> ensure_streaming()
-    |> push_event("stream_delta", %{kind: kind, delta: delta})
-  end
-
-  # A delta with no open bubble (e.g. reattached mid-stream) still gets one.
+  # A delta with no open bubble (e.g. reattached mid-stream) still gets a
+  # placeholder, but streamed text is only rendered once the assistant message
+  # finishes and flows through MessageRenderer as a complete response.
   defp ensure_streaming(socket) do
     if socket.assigns.streaming, do: socket, else: assign(socket, streaming: true)
   end
@@ -372,16 +366,9 @@ defmodule CatalystWeb.ShellLive do
       start_session(socket, :demo)
   end
 
-  # Rebuild the in-flight bubble from the snapshot's accumulated deltas, so a
-  # mid-stream UI reload doesn't lose already-streamed text (new deltas keep
-  # appending client-side after these).
-  defp seed_streaming(socket, %Message.Assistant{content: [_ | _] = blocks}) do
-    Enum.reduce(blocks, socket, fn
-      %Catalyst.Content.Thinking{thinking: t}, sock -> push_stream_delta(sock, "thinking", t)
-      %Catalyst.Content.Text{text: t}, sock -> push_stream_delta(sock, "text", t)
-      _block, sock -> sock
-    end)
-  end
+  # Rebuild only the in-flight placeholder. The session still accumulates the
+  # streamed content internally; the UI renders it after the final MessageEnd.
+  defp seed_streaming(socket, %Message.Assistant{}), do: assign(socket, streaming: true)
 
   defp seed_streaming(socket, _none), do: socket
 

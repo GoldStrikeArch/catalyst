@@ -39,23 +39,21 @@ defmodule CatalystWeb.Pages.ChatPage do
           </div>
         </div>
 
-        <%!-- Deltas are appended client-side by the StreamingMessage hook
-        (push_event "stream_delta"); the server never re-sends accumulated text. --%>
+        <%!-- The model is working, but partial text stays internal until MessageEnd.
+        The final assistant message then renders through MessageRenderer once. --%>
         <div
           :if={@streaming}
           id="streaming-message"
-          phx-hook="StreamingMessage"
           data-message-role="assistant-streaming"
           class="flex justify-start"
         >
-          <div class="max-w-[82%] rounded-3xl rounded-bl-md border border-slate-200 bg-white/85 px-4 py-3 text-sm leading-6 text-slate-700 shadow-sm shadow-slate-200/50 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:text-slate-100 dark:shadow-black/20">
-            <span
-              data-stream="thinking"
-              class="mb-2 hidden whitespace-pre-wrap border-l-2 border-indigo-300 pl-3 text-xs italic text-slate-500 dark:border-indigo-400/60 dark:text-slate-400"
-            >
+          <div class="inline-flex items-center gap-1.5 rounded-3xl rounded-bl-md border border-slate-200 bg-white/85 px-4 py-3 text-slate-500 shadow-sm shadow-slate-200/50 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:text-slate-300 dark:shadow-black/20">
+            <span class="sr-only">Assistant is working</span>
+            <span class="size-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.2s]">
             </span>
-            <span data-stream="text" class="whitespace-pre-wrap"></span>
-            <span class="ml-0.5 animate-pulse text-indigo-500">▌</span>
+            <span class="size-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.1s]">
+            </span>
+            <span class="size-1.5 animate-bounce rounded-full bg-indigo-500"></span>
           </div>
         </div>
 
