@@ -27,6 +27,29 @@ defmodule Catalyst.ToolsTest do
     assert_raise File.Error, fn -> Read.execute(%{"path" => "nope.txt"}, ctx) end
   end
 
+  test "read reports an offset beyond the end of the file", %{ctx: ctx} do
+    Write.execute(%{"path" => "eof.txt", "content" => "1\n2\n3\n"}, ctx)
+    res = Read.execute(%{"path" => "eof.txt", "offset" => 10}, ctx)
+    assert text(res) =~ "offset 10 is beyond the end of the file (3 lines)"
+  end
+
+  test "read details include whole-file line totals, not just the slice", %{ctx: ctx} do
+    Write.execute(%{"path" => "whole.txt", "content" => "1\n2\n3\n4\n5\n"}, ctx)
+    res = Read.execute(%{"path" => "whole.txt", "offset" => 2, "limit" => 2}, ctx)
+    assert text(res) == "2\n3"
+    assert res.details.file_lines == 5
+    assert res.details.offset == 2
+  end
+
+  test "streamed read reports an offset beyond the end of the file", %{tmp: tmp, ctx: ctx} do
+    # > 16MB forces the streamed path.
+    line = String.duplicate("x", 999) <> "\n"
+    File.write!(Path.join(tmp, "big_stream.txt"), String.duplicate(line, 20_000))
+
+    res = Read.execute(%{"path" => "big_stream.txt", "offset" => 50_000}, ctx)
+    assert text(res) =~ "offset 50000 is beyond the end of the file"
+  end
+
   test "ls suffixes directories", %{ctx: ctx} do
     Write.execute(%{"path" => "lib/x.ex", "content" => "x"}, ctx)
     out = text(Ls.execute(%{}, ctx))
@@ -76,6 +99,54 @@ defmodule Catalyst.ToolsTest do
     assert text(Read.execute(%{"path" => "r.txt"}, ctx)) == "DONE and DONE"
   end
 
+  test "replace (sd) reports when the pattern matched nothing", %{ctx: ctx} do
+    Write.execute(%{"path" => "nm.txt", "content" => "alpha beta\n"}, ctx)
+
+    res =
+      Sd.execute(
+        %{"pattern" => "ZZZ", "replacement" => "Y", "path" => "nm.txt", "string_mode" => true},
+        ctx
+      )
+
+    assert text(res) =~ ~s(No occurrences of "ZZZ" found in)
+    assert res.details.matched == false
+    assert text(Read.execute(%{"path" => "nm.txt"}, ctx)) =~ "alpha beta"
+  end
+
+  test "grep and find exclude .git internals but keep other hidden files", %{tmp: tmp, ctx: ctx} do
+    File.mkdir_p!(Path.join(tmp, ".git"))
+    File.write!(Path.join(tmp, ".git/config"), "NEEDLE inside git\n")
+    File.write!(Path.join(tmp, ".hidden.txt"), "NEEDLE hidden\n")
+
+    grep_out = text(Ripgrep.execute(%{"pattern" => "NEEDLE"}, ctx))
+    assert grep_out =~ ".hidden.txt"
+    refute grep_out =~ ".git"
+
+    find_out = text(Fd.execute(%{"pattern" => "*"}, ctx))
+    assert find_out =~ ".hidden.txt"
+    refute find_out =~ ".git"
+  end
+
+  test "find (fd) bounds child output but still flags the limit", %{tmp: tmp, ctx: ctx} do
+    for i <- 1..5, do: File.write!(Path.join(tmp, "cap#{i}.txt"), "x")
+
+    res = Fd.execute(%{"pattern" => "cap*.txt", "limit" => 3}, ctx)
+
+    assert res.details.result_limit_reached
+    assert res.details.result_count == 3
+    assert text(res) =~ "showing first 3 results; more exist"
+  end
+
+  test "grep caps runaway search output and says so", %{tmp: tmp, ctx: ctx} do
+    line = "NEEDLE " <> String.duplicate("x", 60) <> "\n"
+    File.write!(Path.join(tmp, "huge.txt"), String.duplicate(line, 200_000))
+
+    res = Ripgrep.execute(%{"pattern" => "NEEDLE", "path" => "huge.txt"}, ctx)
+
+    assert res.details.output_capped
+    assert text(res) =~ "search output capped"
+  end
+
   test "ast_grep searches and rewrites", %{ctx: ctx} do
     Write.execute(
       %{"path" => "lib/g.ex", "content" => "defmodule G do\n  def h, do: IO.puts(\"hi\")\nend\n"},
@@ -110,6 +181,11 @@ defmodule Catalyst.ToolsTest do
     out = text(Bash.execute(%{"command" => "echo hello && ls"}, ctx))
     assert out =~ "hello"
     assert out =~ "marker"
+  end
+
+  test "bash supports bashisms (runs real bash when available)", %{ctx: ctx} do
+    out = text(Bash.execute(%{"command" => "[[ -n yes ]] && echo BASHISM_OK"}, ctx))
+    assert out =~ "BASHISM_OK"
   end
 
   test "read refuses binary files", %{tmp: tmp, ctx: ctx} do

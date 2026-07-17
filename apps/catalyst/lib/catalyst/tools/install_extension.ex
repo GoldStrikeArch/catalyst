@@ -54,9 +54,15 @@ defmodule Catalyst.Tools.InstallExtension do
         result(describe(summary), summary)
 
       {:error, reason} ->
-        raise "Failed to compile/load the extension: #{reason}"
+        raise "Failed to compile/load the extension: #{format_reason(reason)}"
     end
   end
+
+  # Installer reasons may be strings (compile errors) or tuples (e.g.
+  # {:not_a_tool, Mod}, {kind, reason}); interpolating a tuple raises
+  # Protocol.UndefinedError and masks the real error.
+  defp format_reason(reason) when is_binary(reason), do: reason
+  defp format_reason(reason), do: inspect(reason)
 
   defp describe(%{owner: owner, tools: tools, extensions: exts}) do
     parts =

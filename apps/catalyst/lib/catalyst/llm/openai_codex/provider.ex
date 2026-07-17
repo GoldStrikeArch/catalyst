@@ -35,7 +35,40 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
     end
   end
 
+  # One forced-refresh retry on 401: the token can be revoked/expired server-side
+  # despite the local 60s freshness margin. A 401 means no SSE event has reached
+  # the sink (non-200 bodies are collected, not parsed), so the retry is
+  # invisible to the caller. 429/5xx retries are deliberately NOT done here.
   defp do_stream(model, context, opts, sink, token, account_id) do
+    case attempt(model, context, opts, sink, token, account_id) do
+      {:unauthorized, body} -> retry_unauthorized(model, context, opts, sink, body)
+      {:ok, assistant} -> {:ok, assistant}
+    end
+  end
+
+  defp retry_unauthorized(model, context, opts, sink, body) do
+    :ok = TokenStore.invalidate(@auth_provider)
+
+    case TokenStore.get_access_token(@auth_provider) do
+      {:ok, %{access: token, account_id: account_id}} ->
+        case attempt(model, context, opts, sink, token, account_id) do
+          # A second 401 is terminal — report it like any other HTTP error.
+          {:unauthorized, body2} -> {:ok, error_assistant(model, http_error(401, body2))}
+          {:ok, assistant} -> {:ok, assistant}
+        end
+
+      {:error, reason} ->
+        {:ok,
+         error_assistant(
+           model,
+           "#{http_error(401, body)} (token refresh also failed: #{inspect(reason)})"
+         )}
+    end
+  end
+
+  defp http_error(status, body), do: "HTTP #{status}: #{String.slice(body, 0, 600)}"
+
+  defp attempt(model, context, opts, sink, token, account_id) do
     url = resolve_url(model)
     session_id = opts[:session_id] || random_id()
     headers = Headers.build(token, account_id, session_id)
@@ -63,6 +96,11 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
         Debug.log(session_id, "codex.response", "200 ok")
         {:ok, StreamParser.finalize(parser, model)}
 
+      # Bubble a 401 up so do_stream can force-refresh and retry once.
+      {:ok, %{status: 401, error_body: body}} ->
+        Debug.log(session_id, "codex.response", "HTTP 401 body=#{Debug.truncate(body, 1_500)}")
+        {:unauthorized, body}
+
       {:ok, %{status: status, error_body: body}} ->
         Debug.log(
           session_id,
@@ -70,7 +108,7 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
           "HTTP #{status} body=#{Debug.truncate(body, 1_500)}"
         )
 
-        {:ok, error_assistant(model, "HTTP #{status}: #{String.slice(body, 0, 600)}")}
+        {:ok, error_assistant(model, http_error(status, body))}
 
       # Connection dropped after a 200 with partial data — keep what we parsed.
       {:error, reason, %{status: 200, parser: parser}} ->

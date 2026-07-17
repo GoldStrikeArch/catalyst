@@ -18,8 +18,6 @@ if config_env() == :prod do
     url: [host: "localhost", port: port, scheme: "http"],
     secret_key_base: secret_key_base
 
-  config :catalyst, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
-
   # Runtime asset rebuild (rebuild_assets / CatalystWeb.Assets) inside the packaged
   # app. The release `bundle_assets` step ships a self-contained asset workspace
   # (source + JS deps + esbuild/tailwind binaries) under the catalyst_web app dir;

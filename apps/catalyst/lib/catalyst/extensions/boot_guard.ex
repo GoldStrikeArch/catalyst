@@ -17,18 +17,22 @@ defmodule Catalyst.Extensions.BootGuard do
   """
 
   @doc "Path of the marker file (`~/.catalyst/boot_marker`; test-overridable)."
+  @spec marker_path() :: Path.t()
   def marker_path do
     Application.get_env(:catalyst, :boot_marker_path) ||
       Path.join(Path.dirname(Catalyst.Extensions.dir()), "boot_marker")
   end
 
   @doc "Record that extension loading is starting (called right before load_all at boot)."
+  @spec mark_booting() :: :ok
   def mark_booting, do: write("booting")
 
   @doc "Record that the app booted (or reloaded) cleanly with extensions active."
+  @spec mark_ok() :: :ok
   def mark_ok, do: write("ok")
 
   @doc "Whether the previous boot died before its extensions were marked stable."
+  @spec crashed_last_boot?() :: boolean()
   def crashed_last_boot? do
     case File.read(marker_path()) do
       {:ok, contents} -> String.trim(contents) == "booting"

@@ -14,12 +14,32 @@ defmodule Catalyst.Agent.ToolRunner do
 
   @type outcome :: %{message: Message.ToolResult.t(), terminate: boolean()}
 
-  @doc "Run the batch; returns `{tool_result_messages, terminate?}`."
+  @typedoc "A tool call issued by the assistant (`Catalyst.Content.ToolCall` or a compatible map)."
+  @type tool_call :: %{
+          required(:id) => String.t(),
+          required(:name) => String.t(),
+          required(:arguments) => map(),
+          optional(atom()) => any()
+        }
+
+  @doc """
+  Run the batch; returns `{tool_result_messages, terminate?}`.
+
+  `config` must carry `:tools` (the tool module list) and `:cwd`; optional keys
+  are `:tool_execution`, `:max_tool_concurrency`, `:tool_timeout`, `:assistant`,
+  and `:opts`. `emit` receives `Catalyst.Agent.Event` structs as side effects.
+  Results preserve the assistant's call order, and a raising/exiting tool
+  becomes an error tool-result instead of crashing the run.
+  """
+  @spec run_batch([tool_call()], map(), (struct() -> any())) ::
+          {[Message.ToolResult.t()], boolean()}
   def run_batch(tool_calls, config, emit) do
+    index = Registry.index(config.tools)
+
     outcomes =
-      case batch_mode(tool_calls, config) do
-        :sequential -> Enum.map(tool_calls, &run_one(&1, config, emit))
-        :parallel -> run_parallel(tool_calls, config, emit)
+      case batch_mode(tool_calls, config, index) do
+        :sequential -> Enum.map(tool_calls, &run_one(&1, index, config, emit))
+        :parallel -> run_parallel(tool_calls, index, config, emit)
       end
 
     results = Enum.map(outcomes, & &1.message)
@@ -27,9 +47,9 @@ defmodule Catalyst.Agent.ToolRunner do
     {results, terminate?}
   end
 
-  defp run_parallel(tool_calls, config, emit) do
+  defp run_parallel(tool_calls, index, config, emit) do
     tool_calls
-    |> Task.async_stream(&run_one(&1, config, emit),
+    |> Task.async_stream(&run_one(&1, index, config, emit),
       max_concurrency: Map.get(config, :max_tool_concurrency, System.schedulers_online()),
       ordered: true,
       timeout: Map.get(config, :tool_timeout, :infinity),
@@ -42,98 +62,135 @@ defmodule Catalyst.Agent.ToolRunner do
     end)
   end
 
-  defp batch_mode(tool_calls, config) do
+  defp batch_mode(tool_calls, config, index) do
     cond do
       Map.get(config, :tool_execution) == :sequential -> :sequential
-      Enum.any?(tool_calls, &(module_mode(&1, config) == :sequential)) -> :sequential
+      Enum.any?(tool_calls, &(module_mode(index, &1) == :sequential)) -> :sequential
       true -> :parallel
     end
   end
 
-  defp module_mode(tool_call, config) do
-    case Registry.fetch(config.tools, tool_call.name) do
-      nil -> :parallel
-      module -> module.execution_mode()
+  defp module_mode(index, tool_call) do
+    case Registry.fetch(index, tool_call.name) do
+      {:ok, module} -> declared_mode(module)
+      :error -> :parallel
+    end
+  end
+
+  # `execution_mode/0` is an optional callback (the default is injected by
+  # `use Catalyst.Tools.Tool`), so a bare behaviour implementation may omit it.
+  defp declared_mode(module) do
+    case Code.ensure_loaded?(module) and function_exported?(module, :execution_mode, 0) do
+      true -> module.execution_mode()
+      false -> :parallel
     end
   end
 
   defp failed_outcome(tool_call, reason, emit) do
     %{id: id, name: name} = tool_call
     content = Content.text("tool runner failed: #{inspect(reason)}")
+    details = %{}
 
-    emit.(%Event.ToolExecutionEnd{
-      call_id: id,
-      name: name,
-      result: %{content: content, details: %{}},
-      is_error: true
-    })
+    emit_tool_end(id, name, content, details, true, emit)
 
-    message = %Message.ToolResult{
-      tool_call_id: id,
-      tool_name: name,
-      content: content,
-      details: %{},
-      is_error: true,
-      timestamp: Message.now()
-    }
+    message = build_tool_result_message(id, name, content, details, true)
 
     %{message: message, terminate: false}
   end
 
-  defp run_one(tool_call, config, emit) do
-    %{id: id, name: name, arguments: args} = tool_call
-    emit.(%Event.ToolExecutionStart{call_id: id, name: name, args: args})
+  defp run_one(%{id: id, name: name, arguments: args} = tool_call, index, config, emit) do
+    emit_tool_start(id, name, args, emit)
 
-    hook_ctx = %{
+    hook_ctx = build_hook_context(id, name, args, config)
+
+    raw_result = run_registered_tool(index, name, args, tool_call, hook_ctx, config, emit)
+
+    {content, details, error?, terminate} = apply_after_tool_hook(raw_result, hook_ctx)
+
+    emit_tool_end(id, name, content, details, error?, emit)
+
+    message = build_tool_result_message(id, name, content, details, error?)
+    terminate? = terminate and not error?
+
+    %{message: message, terminate: terminate?}
+  end
+
+  defp emit_tool_start(id, name, args, emit) do
+    emit.(%Event.ToolExecutionStart{call_id: id, name: name, args: args})
+  end
+
+  defp build_hook_context(id, name, args, config) do
+    %{
       name: name,
       args: args,
       call_id: id,
       cwd: config.cwd,
       assistant: Map.get(config, :assistant)
     }
+  end
 
-    raw =
-      case Registry.fetch(config.tools, name) do
-        nil ->
-          {Content.text("unknown tool: #{name}"), %{}, true, false}
+  defp run_registered_tool(index, name, args, tool_call, hook_ctx, config, emit) do
+    case Registry.fetch(index, name) do
+      :error ->
+        unknown_tool_result(name)
 
-        module ->
-          case Hooks.before_tool_call(hook_ctx) do
-            {:block, reason} ->
-              {Content.text(to_string(reason)), %{blocked: true}, true, false}
+      {:ok, module} ->
+        run_resolved_tool(module, args, tool_call, hook_ctx, config, emit)
+    end
+  end
 
-            _ ->
-              ctx = %{
-                cwd: config.cwd,
-                call_id: id,
-                session_id: Keyword.get(config[:opts] || [], :session_id),
-                report: reporter(tool_call, emit)
-              }
+  defp run_resolved_tool(module, args, tool_call, hook_ctx, config, emit) do
+    case Hooks.before_tool_call(hook_ctx) do
+      {:block, reason} ->
+        blocked_tool_result(reason)
 
-              execute_tool(module, args, ctx)
-          end
-      end
+      _ ->
+        ctx = build_execution_context(tool_call, config, emit)
 
+        execute_tool(module, args, ctx)
+    end
+  end
+
+  defp build_execution_context(tool_call, config, emit) do
+    %{
+      cwd: config.cwd,
+      call_id: tool_call.id,
+      session_id: Keyword.get(config[:opts] || [], :session_id),
+      report: reporter(tool_call, emit)
+    }
+  end
+
+  defp unknown_tool_result(name) do
+    {Content.text("unknown tool: #{name}"), %{}, true, false}
+  end
+
+  defp blocked_tool_result(reason) do
+    {Content.text(to_string(reason)), %{blocked: true}, true, false}
+  end
+
+  defp apply_after_tool_hook(raw_result, hook_ctx) do
     # Hooks may override the result (content/details/is_error/terminate).
-    {content, details, is_error, terminate} = Hooks.after_tool_call(raw, hook_ctx)
+    Hooks.after_tool_call(raw_result, hook_ctx)
+  end
 
+  defp emit_tool_end(id, name, content, details, error?, emit) do
     emit.(%Event.ToolExecutionEnd{
       call_id: id,
       name: name,
       result: %{content: content, details: details},
-      is_error: is_error
+      is_error: error?
     })
+  end
 
-    message = %Message.ToolResult{
+  defp build_tool_result_message(id, name, content, details, error?) do
+    %Message.ToolResult{
       tool_call_id: id,
       tool_name: name,
       content: content,
       details: details,
-      is_error: is_error,
+      is_error: error?,
       timestamp: Message.now()
     }
-
-    %{message: message, terminate: terminate and not is_error}
   end
 
   defp execute_tool(module, args, ctx) do
@@ -156,15 +213,16 @@ defmodule Catalyst.Agent.ToolRunner do
   # Validate args against the tool's declared JSON Schema, so a malformed call
   # (most common with self-developed tools) becomes a clean, fixable error
   # result instead of a confusing crash inside execute/2. A schema that itself
-  # fails to resolve skips validation rather than blocking the tool.
+  # fails to resolve (or a crashing validator) skips validation rather than
+  # blocking the tool.
   defp validate_args(module, args) do
-    schema =
-      module.parameters()
-      # Normalize atom keys/values (hand-written schemas) to JSON shape.
-      |> Jason.encode!()
-      |> Jason.decode!()
-      |> ExJsonSchema.Schema.resolve()
+    case resolved_schema(module) do
+      {:ok, schema} -> check_args(schema, args)
+      :error -> :ok
+    end
+  end
 
+  defp check_args(schema, args) do
     case ExJsonSchema.Validator.validate(schema, args) do
       :ok ->
         :ok
@@ -177,6 +235,38 @@ defmodule Catalyst.Agent.ToolRunner do
     _ -> :ok
   catch
     _kind, _reason -> :ok
+  end
+
+  # Resolving a schema is expensive, so cache the result in :persistent_term.
+  # The key hashes the tool's current parameters: a hot-reloaded tool whose
+  # schema changed gets a fresh entry, while unchanged tools hit the cache.
+  defp resolved_schema(module) do
+    params = module.parameters()
+    key = {__MODULE__, module, :erlang.phash2(params)}
+
+    case :persistent_term.get(key, :unresolved) do
+      :unresolved -> cache_schema(key, params)
+      cached -> cached
+    end
+  rescue
+    _ -> :error
+  catch
+    _kind, _reason -> :error
+  end
+
+  defp cache_schema(key, params) do
+    resolved = resolve_schema(params)
+    :persistent_term.put(key, resolved)
+    resolved
+  end
+
+  defp resolve_schema(params) do
+    # Normalize atom keys/values (hand-written schemas) to JSON shape.
+    {:ok, params |> Jason.encode!() |> Jason.decode!() |> ExJsonSchema.Schema.resolve()}
+  rescue
+    _ -> :error
+  catch
+    _kind, _reason -> :error
   end
 
   defp reporter(tool_call, emit) do

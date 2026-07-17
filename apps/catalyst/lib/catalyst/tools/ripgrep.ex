@@ -4,6 +4,9 @@ defmodule Catalyst.Tools.Ripgrep do
   alias Catalyst.Tools.{Binaries, Exec, Paths, Truncate}
 
   @default_limit 100
+  # rg has no global output cap; bound the child's stdout so a pathological
+  # match set (huge lines, vendored blobs) can't be accumulated unboundedly.
+  @max_output_bytes 8 * 1024 * 1024
 
   @impl true
   def name, do: "grep"
@@ -49,29 +52,38 @@ defmodule Catalyst.Tools.Ripgrep do
     target = Paths.resolve(args["path"] || ".", ctx.cwd)
     limit = args["limit"] || @default_limit
 
+    # --hidden un-hides dotfiles, so explicitly re-exclude .git internals.
     rg_args =
-      ["--json", "--line-number", "--color=never", "--hidden"] ++
+      ["--json", "--line-number", "--color=never", "--hidden", "--glob", "!.git/"] ++
         flags(args) ++ ["--", pattern, target]
 
-    case Exec.collect(rg, rg_args, cwd: ctx.cwd) do
+    case Exec.collect(rg, rg_args, cwd: ctx.cwd, max_output_bytes: @max_output_bytes) do
       # rg: 0 = matches, 1 = no matches (both fine), >1 = real error
-      {:ok, %{out: out, status: status}} when status in [0, 1] ->
+      {:ok, %{out: out, status: status} = res} when status in [0, 1] ->
+        capped? = Map.get(res, :truncated, false)
         entries = parse_entries(out)
         total_matches = Enum.count(entries, &match?({:match, _}, &1))
         limited? = total_matches > limit
         shown = take_matches(entries, limit)
-        text = if shown == [], do: "No matches.", else: Enum.join(shown, "\n")
 
         text =
-          if limited?,
-            do: text <> "\n... [showing first #{limit} of #{total_matches} matches]",
-            else: text
+          case shown do
+            [] -> "No matches."
+            _ -> Enum.join(shown, "\n")
+          end
 
-        {body, info} = Truncate.head(text)
+        {text, info} =
+          Truncate.listing(text,
+            limited?: limited?,
+            limit: limit,
+            total: known_total(total_matches, capped?),
+            noun: "matches"
+          )
 
-        result(Truncate.notice(body, info, :head), %{
+        result(append_capped_notice(text, capped?), %{
           match_count: min(total_matches, limit),
           match_limit_reached: limited?,
+          output_capped: capped?,
           truncation: info
         })
 
@@ -82,6 +94,18 @@ defmodule Catalyst.Tools.Ripgrep do
         raise "ripgrep failed: #{inspect(reason)}"
     end
   end
+
+  # When the child's output was capped, total_matches is only a lower bound.
+  defp known_total(total, false = _capped?), do: total
+  defp known_total(_total, true = _capped?), do: :unknown
+
+  defp append_capped_notice(text, false), do: text
+
+  defp append_capped_notice(text, true),
+    do:
+      text <>
+        "\n... [search output capped at #{div(@max_output_bytes, 1024 * 1024)}MB; " <>
+        "narrow the pattern or path]"
 
   defp flags(args) do
     []

@@ -17,6 +17,7 @@ defmodule Catalyst.Tools.Binaries do
   }
 
   @doc "Known tool keys."
+  @spec tools() :: [atom()]
   def tools, do: Map.keys(@tools)
 
   @doc """
@@ -71,9 +72,14 @@ defmodule Catalyst.Tools.Binaries do
   end
 
   @doc "Directory for on-demand downloaded binaries."
+  @spec bin_dir() :: String.t()
   def bin_dir, do: Path.expand("~/.catalyst/bin")
 
-  @doc "Fast-tool binaries bundled into the release (`priv/bin`), if present."
+  @doc """
+  Fast-tool binaries bundled into the release (`priv/bin`). Returns `""` when
+  the app has no priv dir (e.g. in some dev/test layouts).
+  """
+  @spec bundled_dir() :: String.t()
   def bundled_dir do
     case :code.priv_dir(:catalyst) do
       {:error, _} -> ""

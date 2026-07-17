@@ -11,6 +11,7 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
   alias Catalyst.{Content, Message}
 
   @doc "Build the JSON-encodable request body map."
+  @spec build(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) :: map()
   def build(model, context, opts \\ []) do
     body = %{
       "model" => model.id,

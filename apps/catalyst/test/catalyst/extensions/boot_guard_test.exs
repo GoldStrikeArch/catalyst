@@ -2,6 +2,8 @@ defmodule Catalyst.Extensions.BootGuardTest do
   # async: false — the marker file and Extensions server are global.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Catalyst.Extensions
   alias Catalyst.Extensions.BootGuard
 
@@ -32,10 +34,27 @@ defmodule Catalyst.Extensions.BootGuardTest do
     assert BootGuard.crashed_last_boot?()
 
     File.mkdir_p!(Extensions.dir())
-    assert {:ok, _summaries} = Extensions.load_all()
+    assert {:ok, %{loaded: _, failed: []}} = Extensions.load_all()
 
     refute BootGuard.crashed_last_boot?()
     assert Extensions.boot_status() == :ok
+  end
+
+  test "a load_all with failures does NOT clear crash-detected safe mode" do
+    BootGuard.mark_booting()
+    assert BootGuard.crashed_last_boot?()
+
+    File.mkdir_p!(Extensions.dir())
+    broken = Path.join(Extensions.dir(), "guard_broken.ex")
+    File.write!(broken, "defmodule Catalyst.Ext.GuardBroken do @@@ end")
+    on_exit(fn -> File.rm_rf!(Extensions.dir()) end)
+
+    capture_log(fn ->
+      assert {:ok, %{failed: [{^broken, _reason}]}} = Extensions.load_all()
+    end)
+
+    # The broken extension is still in place — a relaunch must stay safe.
+    assert BootGuard.crashed_last_boot?()
   end
 
   test "reload_after_wiring skips and preserves crash-detected safe mode" do
@@ -60,7 +79,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
     # Pretend we're inside the stabilization window: marker still "booting".
     BootGuard.mark_booting()
 
-    assert {:ok, _summaries} = Extensions.reload_after_wiring()
+    assert {:ok, %{loaded: _, failed: _}} = Extensions.reload_after_wiring()
 
     # The marker is untouched — only the stabilization timer (or an explicit
     # load_all) may flip it to ok.

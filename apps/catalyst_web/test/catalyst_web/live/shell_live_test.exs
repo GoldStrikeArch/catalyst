@@ -80,13 +80,48 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "the web self-modification tools are registered into the core tool set" do
-    assert Catalyst.Extensions.fetch("rebuild_assets") == CatalystWeb.Tools.RebuildAssets
-    assert Catalyst.Extensions.fetch("reload_ui") == CatalystWeb.Tools.ReconnectUi
+    assert Catalyst.Extensions.fetch("rebuild_assets") == {:ok, CatalystWeb.Tools.RebuildAssets}
+    assert Catalyst.Extensions.fetch("reload_ui") == {:ok, CatalystWeb.Tools.ReconnectUi}
   end
 
   test "an asset reload broadcast triggers a full page reload in connected views", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
     CatalystWeb.Assets.reload()
     assert_redirect(view, "/")
+  end
+
+  test "an asset reload keeps users on their current (non-chat) page", %{conn: conn} do
+    on_exit(fn -> Registry.unregister_owner("e5_reload_page") end)
+
+    Registry.register_page("settings", {SettingsPage, :render},
+      owner: "e5_reload_page",
+      label: "Settings"
+    )
+
+    {:ok, view, _html} = live(conn, "/settings")
+    CatalystWeb.Assets.reload()
+    assert_redirect(view, "/settings")
+  end
+
+  test "re-clicking the active provider keeps the session and transcript", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+    assert submit_prompt(view, "list the files") =~ "list the files"
+
+    view |> element("button", "Demo") |> render_click()
+
+    # Same session, conversation intact — no restart for a no-op click.
+    assert session_id(view) == id
+    assert render(view) =~ "list the files"
+  end
+
+  test "a bare /cd flashes a usage hint instead of prompting the model", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view |> form("#chat-form", %{"message" => "/cd "}) |> render_submit()
+
+    assert render(view) =~ "usage: /cd"
+    # Nothing was sent to the agent.
+    assert has_element?(view, "#chat-empty-state")
   end
 end

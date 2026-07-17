@@ -89,14 +89,24 @@ defmodule CatalystWeb.ShellLive do
       text == "" or socket.assigns.running ->
         {:noreply, socket}
 
+      # A bare `/cd` is a mistyped command, not a prompt for the model.
+      text == "/cd" ->
+        {:noreply, put_flash(socket, :error, "usage: /cd <path>")}
+
       # `/cd <path>` points the session at a different working directory.
       String.starts_with?(text, "/cd ") ->
         {:noreply, set_cwd(socket, text |> String.replace_prefix("/cd ", "") |> String.trim())}
 
       true ->
         try do
-          Server.prompt(socket.assigns.session_pid, text)
-          {:noreply, socket |> assign_input("") |> assign(running: true)}
+          case Server.prompt(socket.assigns.session_pid, text) do
+            :ok ->
+              {:noreply, socket |> assign_input("") |> assign(running: true)}
+
+            # e.g. {:error, :no_provider} — keep the typed text and explain.
+            {:error, reason} ->
+              {:noreply, put_flash(socket, :error, "Can't start a run: #{inspect(reason)}")}
+          end
         catch
           # The session died (e.g. another window replaced it) — the :DOWN
           # handler reattaches; keep the typed text so nothing is lost.
@@ -114,16 +124,27 @@ defmodule CatalystWeb.ShellLive do
   def handle_event("new_session", _params, socket),
     do: {:noreply, start_session(socket, socket.assigns.provider)}
 
+  # Re-clicking the active provider must be a no-op: starting a new session
+  # would wipe the current conversation.
   def handle_event("set_provider", %{"provider" => "codex"}, socket) do
-    if socket.assigns.logged_in do
-      {:noreply, start_session(socket, :codex)}
-    else
-      {:noreply, put_flash(socket, :error, "Not signed in. Run `mix catalyst.login` first.")}
+    cond do
+      socket.assigns.provider == :codex ->
+        {:noreply, socket}
+
+      socket.assigns.logged_in ->
+        {:noreply, start_session(socket, :codex)}
+
+      true ->
+        {:noreply, put_flash(socket, :error, "Not signed in. Run `mix catalyst.login` first.")}
     end
   end
 
-  def handle_event("set_provider", %{"provider" => _demo}, socket),
-    do: {:noreply, start_session(socket, :demo)}
+  def handle_event("set_provider", %{"provider" => _demo}, socket) do
+    case socket.assigns.provider do
+      :demo -> {:noreply, socket}
+      _other -> {:noreply, start_session(socket, :demo)}
+    end
+  end
 
   # Run the ChatGPT OAuth flow in a supervised Task so the LiveView doesn't block
   # while the user completes login in their browser. Result arrives via handle_info.
@@ -147,8 +168,11 @@ defmodule CatalystWeb.ShellLive do
   @impl true
   def handle_info({:agent_event, event}, socket), do: {:noreply, apply_event(event, socket)}
 
-  # An asset rebuild happened — full reload so the new app.js/app.css are fetched.
-  def handle_info(:reload_assets, socket), do: {:noreply, redirect(socket, to: "/")}
+  # An asset rebuild happened — full reload so the new app.js/app.css are
+  # fetched. Reload the page the user is on, not "/", or every non-chat page
+  # would be kicked back to chat.
+  def handle_info(:reload_assets, socket),
+    do: {:noreply, redirect(socket, to: page_path(socket.assigns.page))}
 
   # Login task finished (matches only when the ref is our pending login task).
   def handle_info({ref, result}, %{assigns: %{login_ref: ref}} = socket) do
@@ -194,6 +218,10 @@ defmodule CatalystWeb.ShellLive do
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # The browser path for a page name (mirrors the router: "/" + "/:page").
+  defp page_path("chat"), do: "/"
+  defp page_path(page), do: "/#{page}"
 
   # Overridable so tests can stub the OAuth flow.
   defp login_fun,
@@ -336,12 +364,26 @@ defmodule CatalystWeb.ShellLive do
       message_count: seq,
       replayed_tail: snapshot.messages |> Enum.take(-10) |> Enum.map(&:erlang.phash2/1)
     )
+    |> seed_streaming(snapshot.streaming_message)
   catch
     # The server died between whereis and the state call — start fresh.
     kind, _reason when kind in [:exit, :error] ->
       Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
       start_session(socket, :demo)
   end
+
+  # Rebuild the in-flight bubble from the snapshot's accumulated deltas, so a
+  # mid-stream UI reload doesn't lose already-streamed text (new deltas keep
+  # appending client-side after these).
+  defp seed_streaming(socket, %Message.Assistant{content: [_ | _] = blocks}) do
+    Enum.reduce(blocks, socket, fn
+      %Catalyst.Content.Thinking{thinking: t}, sock -> push_stream_delta(sock, "thinking", t)
+      %Catalyst.Content.Text{text: t}, sock -> push_stream_delta(sock, "text", t)
+      _block, sock -> sock
+    end)
+  end
+
+  defp seed_streaming(socket, _none), do: socket
 
   defp start_session(socket, provider) do
     if old_id = socket.assigns.session_id do
@@ -559,7 +601,11 @@ defmodule CatalystWeb.ShellLive do
   # extension page must not crash-loop the LiveView — recovery (asking the
   # agent to reload_extensions) needs the very chat UI it would take down.
   defp render_active_page(assigns) do
-    {mod, fun} = UI.Registry.fetch_page(assigns.page) || {CatalystWeb.Pages.ChatPage, :render}
+    {mod, fun} =
+      case UI.Registry.fetch_page(assigns.page) do
+        {:ok, target} -> target
+        :error -> {CatalystWeb.Pages.ChatPage, :render}
+      end
 
     try do
       apply(mod, fun, [assigns])

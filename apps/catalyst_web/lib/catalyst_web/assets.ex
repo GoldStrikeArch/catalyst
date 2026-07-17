@@ -14,6 +14,11 @@ defmodule CatalystWeb.Assets do
   @topic "ui"
   @profile :catalyst_web
 
+  # Marks the tailwind `@source` line that points at the extensions dir in the
+  # bundled app.css (written by the root mix.exs `bundle_assets` release step).
+  @ext_source_marker "/* catalyst:extensions-source */"
+  @ext_source_re ~r/#{Regex.escape(@ext_source_marker)}\n@source "[^"]*";/
+
   @doc "PubSub topic used to signal UI/asset reloads to connected LiveViews."
   @spec topic() :: String.t()
   def topic, do: @topic
@@ -21,6 +26,8 @@ defmodule CatalystWeb.Assets do
   @doc "Rebuild CSS+JS, then (by default) ask clients to reload."
   @spec rebuild(keyword()) :: :ok | {:error, term()}
   def rebuild(opts \\ []) do
+    localize_extension_source()
+
     with :ok <- run(Tailwind, @profile),
          :ok <- run(Esbuild, @profile) do
       if Keyword.get(opts, :reload, true), do: reload()
@@ -31,6 +38,45 @@ defmodule CatalystWeb.Assets do
   @doc "Broadcast a reload request to every connected LiveView."
   @spec reload() :: :ok | {:error, term()}
   def reload, do: Phoenix.PubSub.broadcast(Catalyst.PubSub, @topic, :reload_assets)
+
+  @doc """
+  Rewrite the bundled app.css `@source` line that points at the extensions dir.
+
+  The release bakes the BUILD machine's `~/.catalyst/extensions` path into the
+  bundled app.css (root mix.exs `bundle_assets`), so on another user's machine
+  tailwind would scan a path that doesn't exist. This rewrites the marked line
+  for the machine we're actually running on; `rebuild/1` calls it before
+  invoking tailwind. Best effort: a missing profile config, css file, or marker
+  (dev, partial bundle) is a no-op — the dev css has no marker, so dev source
+  is never touched. Returns `:ok` (or a `File.write/2` error tuple).
+  """
+  @spec localize_extension_source() :: :ok | {:error, term()}
+  def localize_extension_source do
+    with {:ok, css_path} <- tailwind_input_path(),
+         {:ok, css} <- File.read(css_path) do
+      line = ~s[#{@ext_source_marker}\n@source "#{Catalyst.Extensions.dir()}";]
+      rewrite(css_path, css, Regex.replace(@ext_source_re, css, fn _ -> line end))
+    else
+      _ -> :ok
+    end
+  end
+
+  defp rewrite(_path, css, css), do: :ok
+  defp rewrite(path, _css, rewritten), do: File.write(path, rewritten)
+
+  # The css entrypoint of the tailwind profile (its `:cd` + `--input=` arg).
+  defp tailwind_input_path do
+    config = Application.get_env(:tailwind, @profile, [])
+    input = config |> Keyword.get(:args, []) |> Enum.find_value(&input_arg/1)
+
+    case {config[:cd], input} do
+      {cd, input} when is_binary(cd) and is_binary(input) -> {:ok, Path.expand(input, cd)}
+      _ -> :error
+    end
+  end
+
+  defp input_arg("--input=" <> path), do: path
+  defp input_arg(_), do: nil
 
   defp run(mod, profile) do
     cond do

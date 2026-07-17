@@ -21,6 +21,7 @@ defmodule Catalyst.Extensions.Installer do
   Write `source` as `<sanitized name>.ex` in the extensions dir, load it, and
   commit. Returns `{:ok, summary}` (with `:path` added) or `{:error, reason}`.
   """
+  @spec install(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def install(name, source, commit_prefix \\ "install") do
     case enabled?() do
       true ->
@@ -34,6 +35,7 @@ defmodule Catalyst.Extensions.Installer do
   end
 
   @doc "Whether the self-modification tools may write and compile code (default: true)."
+  @spec enabled?() :: boolean()
   def enabled? do
     System.get_env("CATALYST_DISABLE_SELF_MOD") not in ~w(1 true) and
       Application.get_env(:catalyst, :allow_self_modification, true)
@@ -62,6 +64,7 @@ defmodule Catalyst.Extensions.Installer do
   end
 
   @doc "File-safe extension name."
+  @spec sanitize(String.t()) :: String.t()
   def sanitize(name) do
     name
     |> String.downcase()

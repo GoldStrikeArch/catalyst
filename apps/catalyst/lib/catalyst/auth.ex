@@ -43,9 +43,18 @@ defmodule Catalyst.Auth do
   defp open_browser(url) do
     cmd =
       case :os.type() do
-        {:unix, :darwin} -> {"open", [url]}
-        {:win32, _} -> {"cmd", ["/c", "start", url]}
-        _ -> {"xdg-open", [url]}
+        {:unix, :darwin} ->
+          {"open", [url]}
+
+        # cmd's `start` quoting trap: an unquoted `&` in the URL splits the
+        # command, but quoting the URL makes `start` read it as the window
+        # TITLE (start treats the first quoted arg as the title). Passing an
+        # explicit empty title makes the URL land in the command position.
+        {:win32, _} ->
+          {"cmd", ["/c", "start", "", url]}
+
+        _ ->
+          {"xdg-open", [url]}
       end
 
     {bin, args} = cmd

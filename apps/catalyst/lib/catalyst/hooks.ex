@@ -79,12 +79,32 @@ defmodule Catalyst.Hooks do
 
   # ---- hot path (ETS reads only) --------------------------------------------
 
-  @doc "Fold `value` through every handler at `point` (handler: `(value, ctx) -> {:ok, new} | _`)."
-  def run_filter(point, value, ctx) do
+  @doc """
+  Fold `value` through every handler at `point` (handler: `(value, ctx) -> {:ok, new} | _`).
+
+  `valid?` guards the documented isolation promise: a handler returning
+  `{:ok, value}` of the wrong SHAPE (e.g. `{:ok, :done}` where a 4-tuple is
+  expected) is logged and skipped instead of poisoning the fold and crashing
+  the run when the caller destructures the result.
+  """
+  def run_filter(point, value, ctx, valid? \\ fn _ -> true end) do
     Enum.reduce(handlers(point), value, fn entry, acc ->
       case safe(entry, fn -> entry.fun.(acc, ctx) end) do
-        {:hook_ok, {:ok, new}} -> new
-        _ -> acc
+        {:hook_ok, {:ok, new}} ->
+          case valid?.(new) do
+            true ->
+              new
+
+            false ->
+              Logger.warning(
+                "[hooks] #{entry.point}/#{entry.id} returned a malformed value — skipped"
+              )
+
+              acc
+          end
+
+        _ ->
+          acc
       end
     end)
   end
@@ -101,14 +121,16 @@ defmodule Catalyst.Hooks do
 
   # Convenience wrappers used by Catalyst.Agent.Loop / ToolRunner.
 
-  def transform_context(messages, ctx), do: run_filter(:transform_context, messages, ctx)
+  def transform_context(messages, ctx),
+    do: run_filter(:transform_context, messages, ctx, &is_list/1)
 
   def before_tool_call(ctx), do: run_decision(:before_tool_call, ctx)
 
-  def after_tool_call(result_tuple, ctx), do: run_filter(:after_tool_call, result_tuple, ctx)
+  def after_tool_call(result_tuple, ctx),
+    do: run_filter(:after_tool_call, result_tuple, ctx, &match?({_, _, _, _}, &1))
 
   def prepare_next_turn(context, config, ctx),
-    do: run_filter(:prepare_next_turn, {context, config}, ctx)
+    do: run_filter(:prepare_next_turn, {context, config}, ctx, &match?({%{}, %{}}, &1))
 
   def should_stop?(ctx), do: run_decision(:should_stop_after_turn, ctx) == true
 

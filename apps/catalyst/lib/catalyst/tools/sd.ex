@@ -45,14 +45,7 @@ defmodule Catalyst.Tools.Sd do
 
     case Exec.collect(sd, sd_args, cwd: ctx.cwd) do
       {:ok, %{status: 0}} ->
-        diff = diff_against(original, abs)
-
-        result(
-          String.trim_trailing(
-            "Replaced occurrences of #{inspect(pattern)} in #{abs}\n\n" <> diff
-          ),
-          %{path: abs, diff: diff}
-        )
+        describe(original, abs, pattern)
 
       {:ok, %{out: out, status: status}} ->
         raise "sd error (status #{status}): #{String.slice(out, 0, 200)}"
@@ -60,6 +53,30 @@ defmodule Catalyst.Tools.Sd do
       {:error, reason} ->
         raise "sd failed: #{inspect(reason)}"
     end
+  end
+
+  # sd exits 0 even when the pattern matched nothing; for a file we could read
+  # beforehand, an empty diff means no occurrences — not a successful replace.
+  defp describe({:ok, _} = original, abs, pattern) do
+    case diff_against(original, abs) do
+      "" ->
+        result("No occurrences of #{inspect(pattern)} found in #{abs}", %{
+          path: abs,
+          matched: false
+        })
+
+      diff ->
+        result(
+          String.trim_trailing(
+            "Replaced occurrences of #{inspect(pattern)} in #{abs}\n\n" <> diff
+          ),
+          %{path: abs, diff: diff, matched: true}
+        )
+    end
+  end
+
+  defp describe({:error, _unreadable_before}, abs, pattern) do
+    result("Replaced occurrences of #{inspect(pattern)} in #{abs}", %{path: abs, diff: ""})
   end
 
   # sd edits in place, so diff the pre-read contents against the file after.
@@ -77,6 +94,4 @@ defmodule Catalyst.Tools.Sd do
         ""
     end
   end
-
-  defp diff_against(_unreadable_before, _abs), do: ""
 end

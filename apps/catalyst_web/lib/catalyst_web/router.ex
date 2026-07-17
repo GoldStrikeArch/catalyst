@@ -1,4 +1,9 @@
 defmodule CatalystWeb.Router do
+  @moduledoc """
+  HTTP routes. Everything renders through `CatalystWeb.ShellLive`: `/` plus a
+  `/:page` catch-all that resolves runtime-registered pages from
+  `CatalystWeb.UI.Registry` — no router recompile per extension page.
+  """
   use CatalystWeb, :router
 
   pipeline :browser do

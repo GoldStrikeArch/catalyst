@@ -106,9 +106,17 @@ defmodule Catalyst.Umbrella.MixProject do
       cp_bin!(Path.wildcard("_build/tailwind-*") |> List.first(), Path.join(ws, "bin/tailwind"))
 
       # Also scan the user's runtime extensions dir so Tailwind classes used by
-      # runtime-created UI components get compiled (same machine for a local app).
+      # runtime-created UI components get compiled. The build machine's path is
+      # only a placeholder: the marker comment lets the runtime rebuild
+      # (CatalystWeb.Assets) rewrite this line for the machine the app actually
+      # runs on before invoking tailwind.
       ext_dir = Path.expand("~/.catalyst/extensions")
-      File.write!(Path.join(ws, "assets/css/app.css"), ~s/\n@source "#{ext_dir}";\n/, [:append])
+
+      File.write!(
+        Path.join(ws, "assets/css/app.css"),
+        ~s[\n/* catalyst:extensions-source */\n@source "#{ext_dir}";\n],
+        [:append]
+      )
 
       IO.puts("bundle_assets: workspace at #{ws}")
     else

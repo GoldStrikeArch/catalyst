@@ -10,16 +10,25 @@ defmodule Catalyst.Tools.Exec do
 
   @default_timeout 120_000
 
-  @type collect_result :: {:ok, %{out: String.t(), status: integer()}} | {:error, term()}
+  @type collect_result ::
+          {:ok, %{:out => String.t(), :status => integer(), optional(:truncated) => true}}
+          | {:error, term()}
 
   @doc """
   Run `path` with `args` to completion. Options: `:cwd`, `:timeout` (ms),
-  `:env` (list of `{name, value}`). stderr is merged into stdout.
+  `:env` (list of `{name, value}`), `:max_output_bytes` (cap on accumulated
+  output). stderr is merged into stdout.
+
+  When `:max_output_bytes` is exceeded the child is killed and
+  `{:ok, %{out: partial, status: 0, truncated: true}}` is returned. The
+  `:truncated` key is present **only** on a capped result; uncapped results
+  keep the plain `%{out, status}` shape.
   """
   @spec collect(String.t(), [String.t()], keyword()) :: collect_result()
   def collect(path, args, opts \\ []) do
     cwd = Keyword.get(opts, :cwd) || File.cwd!()
     timeout = Keyword.get(opts, :timeout, @default_timeout)
+    max_bytes = Keyword.get(opts, :max_output_bytes, :infinity)
 
     port_opts =
       [
@@ -35,7 +44,7 @@ defmodule Catalyst.Tools.Exec do
     try do
       port = Port.open({:spawn_executable, path}, port_opts)
       deadline = System.monotonic_time(:millisecond) + timeout
-      collect_loop(port, [], deadline)
+      collect_loop(port, [], 0, deadline, max_bytes)
     rescue
       e -> {:error, e}
     end
@@ -49,26 +58,42 @@ defmodule Catalyst.Tools.Exec do
   end
 
   # The timeout is an absolute deadline: a process emitting output forever
-  # still gets killed when its budget runs out.
-  defp collect_loop(port, acc, deadline) do
+  # still gets killed when its budget runs out. Output is also bounded by
+  # max_bytes: past the cap the child is killed and the partial output is
+  # returned as a truncated success.
+  defp collect_loop(port, acc, bytes, deadline, max_bytes) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, data}} ->
-        collect_loop(port, [acc, data], deadline)
+        case over_budget?(bytes + byte_size(data), max_bytes) do
+          true ->
+            kill_port(port)
+            drain_port(port)
+            {:ok, %{out: scrub(IO.iodata_to_binary([acc, data])), status: 0, truncated: true}}
+
+          false ->
+            collect_loop(port, [acc, data], bytes + byte_size(data), deadline, max_bytes)
+        end
 
       {^port, {:exit_status, status}} ->
         {:ok, %{out: scrub(IO.iodata_to_binary(acc)), status: status}}
     after
       remaining ->
         kill_port(port)
+        drain_port(port)
         {:error, :timeout}
     end
   end
 
+  defp over_budget?(_bytes, :infinity), do: false
+  defp over_budget?(bytes, max_bytes), do: bytes > max_bytes
+
   defp kill_port(port) do
     case Port.info(port, :os_pid) do
       {:os_pid, os_pid} ->
+        # Note: `kill -KILL os_pid` only kills the direct child, not its
+        # descendants — a grandchild holding the pipe can keep running.
         System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
 
       _ ->
@@ -79,6 +104,17 @@ defmodule Catalyst.Tools.Exec do
       Port.close(port)
     rescue
       _ -> :ok
+    end
+  end
+
+  # Sequential tools run in the long-lived agent-loop process: `{port, ...}`
+  # messages already delivered before the kill would otherwise sit in that
+  # mailbox forever.
+  defp drain_port(port) do
+    receive do
+      {^port, _} -> drain_port(port)
+    after
+      0 -> :ok
     end
   end
 
@@ -96,7 +132,12 @@ defmodule Catalyst.Tools.Exec do
     cmd_opts =
       [cd: cwd, stderr_to_stdout: true] ++ timeout_opt(opts) ++ muontrap_env(opts)
 
-    case MuonTrap.cmd("sh", ["-c", command], cmd_opts) do
+    # The tool is named "bash", but on Debian-family systems `sh` is dash and
+    # bashisms would fail — resolve real bash when present. A per-call
+    # find_executable is a cheap PATH scan.
+    shell = System.find_executable("bash") || "sh"
+
+    case MuonTrap.cmd(shell, ["-c", command], cmd_opts) do
       {out, :timeout} -> {:error, {:timeout, scrub(out)}}
       {out, status} -> {:ok, %{out: scrub(out), status: status}}
     end

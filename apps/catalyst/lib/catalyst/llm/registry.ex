@@ -25,9 +25,12 @@ defmodule Catalyst.LLM.Registry do
 
   # ---- API ------------------------------------------------------------------
 
+  @doc "Start the (singleton, named) provider registry."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc "Resolve the provider MODULE for an api string (stable signature)."
+  @spec fetch(String.t()) :: {:ok, module()} | {:error, {:unknown_api, String.t()}}
   def fetch(api) when is_binary(api) do
     case lookup(api) do
       %ProviderConfig{module: module} -> {:ok, module}
@@ -35,6 +38,8 @@ defmodule Catalyst.LLM.Registry do
     end
   end
 
+  @doc "Like `fetch/1` but raises `ArgumentError` for an unknown api."
+  @spec fetch!(String.t()) :: module()
   def fetch!(api) do
     case fetch(api) do
       {:ok, module} ->
@@ -46,9 +51,11 @@ defmodule Catalyst.LLM.Registry do
   end
 
   @doc "The full `%ProviderConfig{}` for an api string, or nil."
+  @spec fetch_config(String.t()) :: ProviderConfig.t() | nil
   def fetch_config(api) when is_binary(api), do: lookup(api)
 
   @doc "All registered providers as `%{api => %ProviderConfig{}}`."
+  @spec list() :: %{String.t() => ProviderConfig.t()}
   def list do
     @table |> :ets.tab2list() |> Map.new()
   rescue
@@ -59,6 +66,7 @@ defmodule Catalyst.LLM.Registry do
   Register (or replace) a provider under `api`. Accepts a `%ProviderConfig{}` or a
   bare provider module. `opts[:owner]` tags it for purge-on-reload.
   """
+  @spec register_provider(String.t(), ProviderConfig.t() | module(), keyword()) :: :ok
   def register_provider(api, config, opts \\ [])
 
   def register_provider(api, %ProviderConfig{} = config, opts) when is_binary(api),
@@ -68,10 +76,12 @@ defmodule Catalyst.LLM.Registry do
     do: register_provider(api, %ProviderConfig{module: module}, opts)
 
   @doc "Remove a provider (restoring a built-in/config one if it was shadowed)."
+  @spec unregister_provider(String.t()) :: :ok
   def unregister_provider(api) when is_binary(api),
     do: GenServer.call(__MODULE__, {:unregister, api})
 
   @doc "Remove every provider registered by `owner` (extension purge hook)."
+  @spec unregister_owner(term()) :: :ok
   def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
 
   # ---- callbacks ------------------------------------------------------------

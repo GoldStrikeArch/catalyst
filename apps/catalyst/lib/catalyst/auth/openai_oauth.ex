@@ -15,11 +15,23 @@ defmodule Catalyst.Auth.OpenAIOAuth do
   @scope "openid profile email offline_access"
   @callback_port 1455
 
+  @typedoc "Stored credentials: access/refresh tokens, expiry (ms), account id."
+  @type credentials :: %{required(String.t()) => String.t() | integer() | nil}
+
+  @doc "The Codex CLI OAuth client id."
+  @spec client_id() :: String.t()
   def client_id, do: @client_id
+
+  @doc "The fixed localhost redirect URI registered for the Codex client."
+  @spec redirect_uri() :: String.t()
   def redirect_uri, do: @redirect_uri
+
+  @doc "The localhost port the redirect URI points at."
+  @spec callback_port() :: :inet.port_number()
   def callback_port, do: @callback_port
 
   @doc "Build the browser authorization URL for a PKCE challenge + state."
+  @spec authorize_url(String.t(), String.t(), String.t()) :: String.t()
   def authorize_url(challenge, state, originator \\ "catalyst") do
     query =
       URI.encode_query([
@@ -39,6 +51,7 @@ defmodule Catalyst.Auth.OpenAIOAuth do
   end
 
   @doc "Exchange an authorization code for credentials."
+  @spec exchange_code(String.t(), String.t()) :: {:ok, credentials()} | {:error, term()}
   def exchange_code(code, verifier) do
     post_token(%{
       "grant_type" => "authorization_code",
@@ -50,6 +63,7 @@ defmodule Catalyst.Auth.OpenAIOAuth do
   end
 
   @doc "Refresh an access token from a refresh token."
+  @spec refresh(String.t()) :: {:ok, credentials()} | {:error, term()}
   def refresh(refresh_token) do
     post_token(%{
       "grant_type" => "refresh_token",
@@ -81,5 +95,10 @@ defmodule Catalyst.Auth.OpenAIOAuth do
      }}
   end
 
-  defp credentials_from(body), do: {:error, {:token_response_missing_fields, body}}
+  # Only the KEYS go in the error: the body may carry a live access_token, and
+  # this tuple ends up in logs and rendered chat content.
+  defp credentials_from(%{} = body),
+    do: {:error, {:token_response_missing_fields, Map.keys(body)}}
+
+  defp credentials_from(_body), do: {:error, {:token_response_missing_fields, []}}
 end

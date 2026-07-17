@@ -36,12 +36,22 @@ defmodule Catalyst.Session.Server do
       # Whether the current run's AgentEnd was folded/broadcast — lets abort
       # tell "run finished cleanly" from "its tail events got dropped".
       agent_ended: false,
+      # Transcript, stored NEWEST-FIRST so per-event appends are O(1); reversed
+      # at the boundaries (Snapshot.of/1, start_run's loop context).
       messages: [],
       streaming_message: nil,
+      # Streamed deltas of the in-flight assistant message, accumulated as
+      # iodata so a reattaching UI can rebuild the partial bubble (Snapshot).
+      streaming_text: [],
+      streaming_thinking: [],
       pending_tool_calls: MapSet.new(),
       error_message: nil,
       steering: :queue.new(),
-      follow_up: :queue.new()
+      follow_up: :queue.new(),
+      # Messages handed to the run via drain_steering/drain_follow_up but not
+      # yet folded back as MessageEnd events — re-queued if the run dies, so an
+      # abort can't swallow a user's steering message. `{:steering | :follow_up, msg}`.
+      in_flight: []
     ]
   end
 
@@ -55,10 +65,14 @@ defmodule Catalyst.Session.Server do
   @doc "PubSub topic for a session id."
   def topic(id), do: "session:" <> id
 
-  @doc "Queue a user prompt and start a run. Returns `:ok` or `{:error, :busy}`."
+  @doc """
+  Queue a user prompt and start a run. Returns `:ok`, `{:error, :busy}`, or
+  `{:error, :no_provider | {:unknown_api, api}}` when the session has no
+  resolvable provider.
+  """
   def prompt(server, input), do: GenServer.call(server, {:prompt, normalize(input)})
 
-  @doc "Continue running (no new prompt) — e.g. after steering/follow-up."
+  @doc "Continue running (no new prompt) — e.g. after steering/follow-up. Same returns as `prompt/2`."
   def continue(server), do: GenServer.call(server, :continue)
 
   @doc "Inject a message mid-run, applied before the next LLM call."
@@ -73,7 +87,10 @@ defmodule Catalyst.Session.Server do
   @doc "Snapshot of the current session state."
   def state(server), do: GenServer.call(server, :state)
 
-  @doc "Clear the transcript (keeps the same session file appended)."
+  @doc """
+  Clear the transcript and abort any active run. A reset marker is appended to
+  the session file, so a crash-restarted (or resumed) session stays cleared.
+  """
   def reset(server), do: GenServer.cast(server, :reset)
 
   # ---- callbacks ------------------------------------------------------------
@@ -98,8 +115,8 @@ defmodule Catalyst.Session.Server do
       opts: Keyword.get(opts, :opts, []),
       store: store,
       # Resume the persisted transcript so a crash-restart (or reattach to a
-      # known id) doesn't lose the conversation.
-      messages: Store.load(store.path)
+      # known id) doesn't lose the conversation. Stored newest-first.
+      messages: store.path |> Store.load() |> Enum.reverse()
     }
 
     Catalyst.Debug.mark_latest(id)
@@ -107,24 +124,34 @@ defmodule Catalyst.Session.Server do
   end
 
   @impl true
-  def handle_call({:prompt, msg}, _from, %State{run: nil} = state),
-    do: {:reply, :ok, start_run(state, [msg])}
+  def handle_call({:prompt, msg}, _from, %State{run: nil} = state) do
+    case start_run(state, [msg]) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, _reason} = err -> {:reply, err, state}
+    end
+  end
 
   def handle_call({:prompt, _msg}, _from, state), do: {:reply, {:error, :busy}, state}
 
-  def handle_call(:continue, _from, %State{run: nil} = state),
-    do: {:reply, :ok, start_run(state, [])}
+  def handle_call(:continue, _from, %State{run: nil} = state) do
+    case start_run(state, []) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, _reason} = err -> {:reply, err, state}
+    end
+  end
 
   def handle_call(:continue, _from, state), do: {:reply, {:error, :busy}, state}
 
   def handle_call(:drain_steering, _from, state) do
     {msgs, q} = drain_queue(state.steering)
-    {:reply, msgs, %{state | steering: q}}
+    in_flight = state.in_flight ++ Enum.map(msgs, &{:steering, &1})
+    {:reply, msgs, %{state | steering: q, in_flight: in_flight}}
   end
 
   def handle_call(:drain_follow_up, _from, state) do
     {msgs, q} = drain_queue(state.follow_up)
-    {:reply, msgs, %{state | follow_up: q}}
+    in_flight = state.in_flight ++ Enum.map(msgs, &{:follow_up, &1})
+    {:reply, msgs, %{state | follow_up: q, in_flight: in_flight}}
   end
 
   def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
@@ -160,20 +187,45 @@ defmodule Catalyst.Session.Server do
 
   def handle_cast(:abort, state), do: {:noreply, state}
 
-  def handle_cast(:reset, state),
-    do:
-      {:noreply,
-       %{
-         state
-         | messages: [],
-           streaming_message: nil,
-           pending_tool_calls: MapSet.new(),
-           error_message: nil
-       }}
+  def handle_cast(:reset, state) do
+    state =
+      case state.run do
+        %Task{} = task ->
+          shutdown_run(task)
+          state = %{state | run: nil, run_ref: nil}
+          # Unlock subscribers waiting on the killed run. No aborted-turn
+          # marker is synthesized — the transcript is being cleared anyway.
+          broadcast(state, %Event.AgentEnd{messages: []})
+          state
+
+        _ ->
+          state
+      end
+
+    # Persist the reset: Store.load/1 discards everything before the marker,
+    # so a crash-restart or resume stays cleared.
+    Store.append_reset(state.store)
+
+    {:noreply,
+     %{
+       state
+       | messages: [],
+         streaming_message: nil,
+         streaming_text: [],
+         streaming_thinking: [],
+         pending_tool_calls: MapSet.new(),
+         error_message: nil,
+         agent_ended: false,
+         steering: :queue.new(),
+         follow_up: :queue.new(),
+         in_flight: []
+     }}
+  end
 
   def handle_cast({:agent_event, run_ref, event}, %State{run_ref: run_ref} = state)
       when run_ref != nil do
     Catalyst.Debug.log_event(state.id, event)
+    persist(state, event)
     state = Reducer.reduce(event, state)
     broadcast(state, event)
     {:noreply, track_agent_end(state, event)}
@@ -218,20 +270,28 @@ defmodule Catalyst.Session.Server do
     # so prompt edits and loop swaps take effect on the next run, no restart.
     context = %{
       system_prompt: state.system_prompt || Catalyst.SystemPrompt.get(),
-      messages: state.messages
+      messages: Enum.reverse(state.messages)
     }
 
-    config = RunConfig.build(state, server)
-    loop = Map.get(config, :loop, Loop)
-    emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
+    case RunConfig.build(state, server) do
+      {:ok, config} ->
+        loop = Map.get(config, :loop, Loop)
+        emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
 
-    task =
-      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-        loop.run(prompts, context, config, emit)
-      end)
+        task =
+          Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
+            loop.run(prompts, context, config, emit)
+          end)
 
-    %{state | run: task, run_ref: run_ref, agent_ended: false, error_message: nil}
+        {:ok, %{state | run: task, run_ref: run_ref, agent_ended: false, error_message: nil}}
+
+      {:error, _reason} = err ->
+        err
+    end
   end
+
+  defp persist(state, %Event.MessageEnd{message: m}), do: Store.append_message(state.store, m)
+  defp persist(_state, _event), do: :ok
 
   defp track_agent_end(state, %Event.AgentEnd{}), do: %{state | agent_ended: true}
   defp track_agent_end(state, _event), do: state
@@ -248,16 +308,30 @@ defmodule Catalyst.Session.Server do
 
     state = %{
       state
-      | messages: state.messages ++ [msg],
+      | messages: [msg | state.messages],
         error_message: msg.error_message,
         run: nil,
         pending_tool_calls: MapSet.new(),
-        streaming_message: nil
+        streaming_message: nil,
+        streaming_text: [],
+        streaming_thinking: [],
+        # Steering/follow-ups the dead run drained but never delivered go back
+        # to the front of their queues, so the user's message isn't lost.
+        steering: requeue(state.in_flight, :steering, state.steering),
+        follow_up: requeue(state.in_flight, :follow_up, state.follow_up),
+        in_flight: []
     }
 
     broadcast(state, %Event.MessageEnd{message: msg})
     broadcast(state, %Event.AgentEnd{messages: [msg]})
     state
+  end
+
+  defp requeue(in_flight, kind, queue) do
+    in_flight
+    |> Enum.filter(&match?({^kind, _}, &1))
+    |> Enum.reverse()
+    |> Enum.reduce(queue, fn {_kind, msg}, q -> :queue.in_r(msg, q) end)
   end
 
   defp broadcast(state, event),

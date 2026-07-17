@@ -35,15 +35,15 @@ defmodule CatalystWeb.UI.Registry do
   def register_page(path, target, opts \\ []),
     do: GenServer.call(__MODULE__, {:register_page, path, normalize_target(target), opts})
 
-  @doc "`{module, function}` for a page path, or nil."
-  @spec fetch_page(String.t()) :: {module(), atom()} | nil
+  @doc "The `{module, function}` registered for a page path. Returns `{:ok, {mod, fun}}` or `:error`."
+  @spec fetch_page(String.t()) :: {:ok, {module(), atom()}} | :error
   def fetch_page(path) do
     case :ets.lookup(@table, {:page, path}) do
-      [{_, entry} | _] -> {entry.mod, entry.fun}
-      [] -> nil
+      [{_, entry} | _] -> {:ok, {entry.mod, entry.fun}}
+      [] -> :error
     end
   rescue
-    ArgumentError -> nil
+    ArgumentError -> :error
   end
 
   @doc "All registered pages (`%{path, label, ...}`), sorted by label."

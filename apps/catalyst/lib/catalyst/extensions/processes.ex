@@ -14,6 +14,8 @@ defmodule Catalyst.Extensions.Processes do
   @registry Catalyst.Extensions.ProcessRegistry
 
   @doc "Start `child_spec` under `owner`'s supervisor (created on first use)."
+  @spec start_child(String.t(), Supervisor.child_spec() | {module(), term()} | module()) ::
+          DynamicSupervisor.on_start_child() | {:error, term()}
   def start_child(owner, child_spec) when is_binary(owner) do
     with {:ok, sup} <- owner_sup(owner) do
       DynamicSupervisor.start_child(sup, child_spec)
@@ -21,6 +23,7 @@ defmodule Catalyst.Extensions.Processes do
   end
 
   @doc "Terminate `owner`'s supervisor and every process under it (purge path)."
+  @spec stop_owner(String.t()) :: :ok | {:error, :not_found}
   def stop_owner(owner) do
     case Registry.lookup(@registry, owner) do
       [{pid, _}] -> DynamicSupervisor.terminate_child(@top, pid)
@@ -29,14 +32,21 @@ defmodule Catalyst.Extensions.Processes do
   end
 
   @doc "Pids of the processes currently running for `owner`."
+  @spec list(String.t()) :: [pid()]
   def list(owner) do
     case Registry.lookup(@registry, owner) do
-      [{sup, _}] ->
-        sup |> DynamicSupervisor.which_children() |> Enum.map(fn {_, pid, _, _} -> pid end)
-
-      [] ->
-        []
+      [{sup, _}] -> children(sup)
+      [] -> []
     end
+  end
+
+  # The Registry entry of a just-terminated owner supervisor is removed
+  # asynchronously, so the lookup can briefly return a dead pid — a dead
+  # supervisor has no children.
+  defp children(sup) do
+    sup |> DynamicSupervisor.which_children() |> Enum.map(fn {_, pid, _, _} -> pid end)
+  catch
+    :exit, _ -> []
   end
 
   defp owner_sup(owner) do

@@ -38,7 +38,11 @@ defmodule Catalyst.Tools.Tool do
     end
   end
 
-  @doc "Build a text result with optional structured details."
+  @doc """
+  Build a text result with optional structured `details` for programmatic
+  consumers (hooks, UIs, tests). Never terminates the loop (`terminate: false`).
+  """
+  @spec result(String.t(), map()) :: result()
   def result(text, details \\ %{}) when is_binary(text) do
     %{content: [%Content.Text{text: text}], details: details, terminate: false}
   end

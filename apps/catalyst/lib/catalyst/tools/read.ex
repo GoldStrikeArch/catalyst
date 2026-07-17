@@ -49,16 +49,42 @@ defmodule Catalyst.Tools.Read do
   end
 
   defp read_whole(abs, args) do
-    text =
-      abs
-      |> File.read!()
-      |> Truncate.scrub_utf8()
-      |> String.split("\n")
-      |> slice(args["offset"], args["limit"])
-      |> Enum.join("\n")
+    lines = abs |> File.read!() |> Truncate.scrub_utf8() |> String.split("\n")
+    total = logical_line_count(lines)
+    start = max((args["offset"] || 1) - 1, 0)
 
-    {out, info} = Truncate.head(text)
-    result(Truncate.notice(out, info, :head), %{path: abs, truncation: info})
+    case start >= total do
+      true ->
+        result("offset #{start + 1} is beyond the end of the file (#{total} lines)", %{
+          path: abs,
+          file_lines: total,
+          offset: start + 1
+        })
+
+      false ->
+        text = lines |> slice(args["offset"], args["limit"]) |> Enum.join("\n")
+        {out, info} = Truncate.head(text)
+
+        # `truncation` describes the requested slice; `file_lines` is the whole
+        # file (already in memory, so counting is cheap).
+        result(Truncate.notice(out, info, :head), %{
+          path: abs,
+          truncation: info,
+          file_lines: total,
+          offset: start + 1
+        })
+    end
+  end
+
+  # A single trailing newline terminates the last line; it does not open a
+  # phantom empty line, so "a\nb\n" is 2 lines for offset/EOF purposes.
+  defp logical_line_count([_single] = segments), do: length(segments)
+
+  defp logical_line_count(segments) do
+    case List.last(segments) do
+      "" -> length(segments) - 1
+      _ -> length(segments)
+    end
   end
 
   # Streamed path: drop to the offset, accumulate at most the line/byte budget,
@@ -81,22 +107,34 @@ defmodule Catalyst.Tools.Read do
         end
       end)
 
-    text =
-      lines
-      |> Enum.reverse()
-      |> IO.iodata_to_binary()
-      |> String.trim_trailing("\n")
-      |> Truncate.scrub_utf8()
+    case {count, start} do
+      # Nothing collected because the offset skipped the whole file.
+      {0, s} when s > 0 ->
+        result("offset #{start + 1} is beyond the end of the file (file is #{size} bytes)", %{
+          path: abs,
+          file_bytes: size,
+          lines_shown: 0,
+          offset: start + 1
+        })
 
-    {out, _info} = Truncate.head(text)
-    notice = "\n... [showing #{count} line(s) from line #{start + 1}; file is #{size} bytes]"
+      _ ->
+        text =
+          lines
+          |> Enum.reverse()
+          |> IO.iodata_to_binary()
+          |> String.trim_trailing("\n")
+          |> Truncate.scrub_utf8()
 
-    result(out <> notice, %{
-      path: abs,
-      file_bytes: size,
-      lines_shown: count,
-      offset: start + 1
-    })
+        {out, _info} = Truncate.head(text)
+        notice = "\n... [showing #{count} line(s) from line #{start + 1}; file is #{size} bytes]"
+
+        result(out <> notice, %{
+          path: abs,
+          file_bytes: size,
+          lines_shown: count,
+          offset: start + 1
+        })
+    end
   end
 
   defp slice(lines, offset, limit) do

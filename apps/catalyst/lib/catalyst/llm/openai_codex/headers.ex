@@ -1,7 +1,8 @@
 defmodule Catalyst.LLM.OpenAICodex.Headers do
   @moduledoc "Builds the Codex Responses SSE request headers (ported from PI's buildSSEHeaders)."
 
-  @doc "Header list for a streamed Codex request."
+  @doc "Header list for a streamed Codex request (nil-valued headers are dropped)."
+  @spec build(String.t(), String.t() | nil, String.t()) :: [{String.t(), String.t()}]
   def build(token, account_id, session_id) do
     [
       {"authorization", "Bearer #{token}"},

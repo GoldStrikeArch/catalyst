@@ -151,6 +151,27 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParserTest do
     assert Enum.any?(assistant.content, &match?(%Content.Text{text: "Hello wo"}, &1))
   end
 
+  test "a stream that drops mid-reasoning keeps the text but emits NO signature" do
+    events = [
+      %{
+        "type" => "response.output_item.added",
+        "item" => %{"type" => "reasoning", "id" => "rs_1"}
+      },
+      %{"type" => "response.reasoning_text.delta", "delta" => "thinking ab"}
+      # connection drops: no output_item.done (so no encrypted_content)
+    ]
+
+    assistant = run(events)
+    assert assistant.stop_reason == :error
+
+    # The partial item lacks encrypted_content; replaying it next turn risks a
+    # 400, so the signature must be nil (Request skips nil-signature thinking).
+    assert [%Content.Thinking{thinking: "thinking ab", signature: nil}, %Content.Text{}] =
+             assistant.content
+
+    assert_received {:ev, %Event.ThinkingDelta{delta: "thinking ab"}}
+  end
+
   test "a stream that drops mid-tool-call discards the partial call" do
     events = [
       %{

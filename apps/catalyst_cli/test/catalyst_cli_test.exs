@@ -25,6 +25,12 @@ defmodule CatalystCliTest do
     # The loaded tool upcases its input — seeing this proves NEW code ran in this VM.
     assert out =~ "PACKAGED HOT-LOAD WORKS"
     assert out =~ "loaded NEW code into the running VM"
+
+    # The selftest cleans up after itself: no leftover file or registration
+    # for later (GUI) boots to pick up.
+    assert out =~ "cleaned up"
+    refute File.exists?(Path.join(Catalyst.Extensions.dir(), "cli_shout.ex"))
+    assert Catalyst.Extensions.fetch("cli_shout") == :error
   end
 
   test "an unknown command prints usage and returns :error (drives a non-zero exit)" do

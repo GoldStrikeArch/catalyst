@@ -8,7 +8,6 @@ defmodule Catalyst.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {DNSCluster, query: Application.get_env(:catalyst, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Catalyst.PubSub},
       # HTTP pool for LLM SSE streaming.
       {Finch, name: Catalyst.Finch},

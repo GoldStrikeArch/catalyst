@@ -4,6 +4,10 @@ defmodule CatalystCli do
   Burrito binary — and to prove the key claim: a packaged binary can still
   compile and load an extension at runtime (because the Elixir compiler ships in
   the release).
+
+  `selftest` writes a scratch `cli_shout` extension into the real extensions
+  dir, loads and runs it, then uninstalls it and removes the file again
+  (best effort) so later boots don't load a leftover test tool.
   """
 
   @shout ~S'''
@@ -38,15 +42,19 @@ defmodule CatalystCli do
     path = Path.join(dir, "cli_shout.ex")
     File.write!(path, @shout)
 
-    case Catalyst.Extensions.load_file(path) do
-      {:ok, mods} ->
-        IO.puts("compiled + loaded at runtime: #{inspect(mods)}")
-        run_loaded_tool()
+    status =
+      case Catalyst.Extensions.load_file(path) do
+        {:ok, mods} ->
+          IO.puts("compiled + loaded at runtime: #{inspect(mods)}")
+          run_loaded_tool()
 
-      {:error, reason} ->
-        IO.puts("FAILED: #{inspect(reason)}")
-        :error
-    end
+        {:error, reason} ->
+          IO.puts("FAILED: #{inspect(reason)}")
+          :error
+      end
+
+    cleanup_selftest(path)
+    status
   end
 
   def run(argv) do
@@ -60,7 +68,7 @@ defmodule CatalystCli do
   defp run_loaded_tool do
     ctx = %{cwd: ".", call_id: "x", report: fn _ -> :ok end}
 
-    with tool when not is_nil(tool) <- Catalyst.Extensions.fetch("cli_shout"),
+    with {:ok, tool} <- Catalyst.Extensions.fetch("cli_shout"),
          %{content: content} <- tool.execute(%{"text" => "packaged hot-load works"}, ctx),
          text when is_binary(text) <- Catalyst.Content.text_of(content) do
       IO.puts("called the new tool -> " <> text)
@@ -71,5 +79,18 @@ defmodule CatalystCli do
         IO.puts("FAILED: tool loaded but did not run as expected (#{inspect(other)})")
         :error
     end
+  end
+
+  # Best-effort cleanup: the selftest writes into the user's REAL extensions
+  # dir, and a leftover cli_shout.ex would be loaded by every later (GUI) boot.
+  defp cleanup_selftest(path) do
+    Catalyst.Extensions.uninstall("cli_shout")
+    File.rm(path)
+    IO.puts("cleaned up: removed the cli_shout selftest extension")
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 end

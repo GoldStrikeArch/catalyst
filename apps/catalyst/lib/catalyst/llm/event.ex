@@ -3,9 +3,12 @@ defmodule Catalyst.LLM.Event do
   Normalized streaming events emitted by a provider's `sink` (PI's
   `AssistantMessageEvent`). The loop forwards these to the UI as
   `message_update`s; the authoritative message is the provider's final return.
+
+  Lifecycle (start/done/error) is not modeled here: the agent loop emits its own
+  `Catalyst.Agent.Event` lifecycle around each turn, and errors travel in the
+  final assistant message (`stop_reason: :error`).
   """
 
-  defmodule Start, do: defstruct([:partial])
   defmodule TextStart, do: defstruct([])
   defmodule TextDelta, do: defstruct([:delta])
   defmodule TextEnd, do: defstruct([])
@@ -13,18 +16,13 @@ defmodule Catalyst.LLM.Event do
   defmodule ToolCallStart, do: defstruct([:id, :name])
   defmodule ToolCallDelta, do: defstruct([:id, :delta])
   defmodule ToolCallEnd, do: defstruct([:id, :name, :arguments])
-  defmodule Done, do: defstruct([:reason, :message])
-  defmodule Error, do: defstruct([:reason, :message])
 
   @type t ::
-          %Start{}
-          | %TextStart{}
+          %TextStart{}
           | %TextDelta{}
           | %TextEnd{}
           | %ThinkingDelta{}
           | %ToolCallStart{}
           | %ToolCallDelta{}
           | %ToolCallEnd{}
-          | %Done{}
-          | %Error{}
 end

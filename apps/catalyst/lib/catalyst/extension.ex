@@ -46,6 +46,7 @@ defmodule Catalyst.Extension do
   end
 
   @doc "True if `module` is a loaded extension (exports `setup/1`)."
+  @spec extension_module?(module()) :: boolean()
   def extension_module?(module) do
     Code.ensure_loaded?(module) and function_exported?(module, :setup, 1)
   end

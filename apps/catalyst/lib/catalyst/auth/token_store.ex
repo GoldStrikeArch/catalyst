@@ -14,23 +14,45 @@ defmodule Catalyst.Auth.TokenStore do
 
   @skew_ms 60_000
 
+  @typedoc "What `get_access_token/1` serves to callers."
+  @type token :: %{access: String.t(), account_id: String.t() | nil}
+
   # ---- API ------------------------------------------------------------------
 
+  @doc "Start the (singleton, named) token store."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc "A fresh `{:ok, %{access, account_id}}` for a provider, refreshing if needed."
+  @spec get_access_token(String.t()) :: {:ok, token()} | {:error, term()}
   def get_access_token(provider \\ "openai-codex"),
     do: GenServer.call(__MODULE__, {:get, provider}, 60_000)
 
-  @doc "Store credentials (string- or atom-keyed) for a provider and persist."
+  @doc """
+  Store credentials (string- or atom-keyed) for a provider and persist.
+
+  Supersedes any in-flight refresh for the same provider: its waiters are
+  replied to with these credentials and its result is discarded.
+  """
+  @spec put(String.t(), map()) :: :ok
   def put(provider, creds), do: GenServer.call(__MODULE__, {:put, provider, normalize(creds)})
 
   @doc "Whether a provider has stored credentials."
+  @spec logged_in?(String.t()) :: boolean()
   def logged_in?(provider \\ "openai-codex"),
     do: GenServer.call(__MODULE__, {:logged_in?, provider})
 
   @doc "Forget a provider's credentials and persist."
+  @spec delete(String.t()) :: :ok
   def delete(provider), do: GenServer.call(__MODULE__, {:delete, provider})
+
+  @doc """
+  Mark a provider's cached access token as expired (in memory only) so the next
+  `get_access_token/1` forces a refresh through the usual single-flight path.
+  No-op when the provider has no stored credentials.
+  """
+  @spec invalidate(String.t()) :: :ok
+  def invalidate(provider), do: GenServer.call(__MODULE__, {:invalidate, provider})
 
   # ---- callbacks ------------------------------------------------------------
 
@@ -53,6 +75,7 @@ defmodule Catalyst.Auth.TokenStore do
   end
 
   def handle_call({:put, provider, creds}, _from, state) do
+    state = supersede_refresh(state, provider, creds)
     state = %{state | creds: Map.put(state.creds, provider, creds)}
     persist(state.creds)
     {:reply, :ok, state}
@@ -65,6 +88,19 @@ defmodule Catalyst.Auth.TokenStore do
     state = %{state | creds: Map.delete(state.creds, provider)}
     persist(state.creds)
     {:reply, :ok, state}
+  end
+
+  def handle_call({:invalidate, provider}, _from, state) do
+    case Map.get(state.creds, provider) do
+      nil ->
+        {:reply, :ok, state}
+
+      creds ->
+        # In-memory only: freshness is a cache hint, and the refresh that this
+        # forces will persist the real new expiry.
+        stale = Map.put(creds, "expires", 0)
+        {:reply, :ok, %{state | creds: Map.put(state.creds, provider, stale)}}
+    end
   end
 
   @impl true
@@ -116,6 +152,22 @@ defmodule Catalyst.Auth.TokenStore do
   # Injectable for tests; defaults to the real OAuth refresh.
   defp refresh_fun,
     do: Application.get_env(:catalyst, :oauth_refresh_fun, &OpenAIOAuth.refresh/1)
+
+  # A fresh login (`put/2`) during an in-flight refresh supersedes it: waiters
+  # get the new credentials now, and dropping the entry makes `pop_refresh/2`
+  # miss when the Task completes, so its result is discarded. Otherwise the
+  # refresh result would clobber the fresh login — with refresh-token rotation
+  # that can persist dead credentials.
+  defp supersede_refresh(state, provider, creds) do
+    case Map.pop(state.refreshing, provider) do
+      {nil, _refreshing} ->
+        state
+
+      {%{waiters: waiters}, refreshing} ->
+        Enum.each(waiters, &GenServer.reply(&1, {:ok, public(creds)}))
+        %{state | refreshing: refreshing}
+    end
+  end
 
   defp pop_refresh(state, ref) do
     case Enum.find(state.refreshing, fn {_p, %{ref: r}} -> r == ref end) do

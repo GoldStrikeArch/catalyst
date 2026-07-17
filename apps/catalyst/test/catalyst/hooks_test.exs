@@ -60,6 +60,33 @@ defmodule Catalyst.HooksTest do
     end)
   end
 
+  test "a malformed {:ok, value} is shape-checked, logged, and skipped", %{owner: owner} do
+    # The wrapper contracts promise a hook "can never take down a run": a hook
+    # returning the wrong shape must not poison the fold (the loop destructures
+    # after_tool_call as a 4-tuple and prepare_next_turn as a 2-tuple).
+    Hooks.register(:after_tool_call, fn _v, _ctx -> {:ok, :done} end, owner: owner, priority: 10)
+
+    Hooks.register(:after_tool_call, fn {c, d, e, t}, _ctx -> {:ok, {c <> "!", d, e, t}} end,
+      owner: owner,
+      priority: 20
+    )
+
+    log =
+      capture_log(fn ->
+        assert Hooks.after_tool_call({"out", %{}, false, false}, %{}) ==
+                 {"out!", %{}, false, false}
+      end)
+
+    assert log =~ "malformed"
+
+    Hooks.register(:prepare_next_turn, fn _v, _ctx -> {:ok, "nope"} end, owner: owner)
+
+    capture_log(fn ->
+      assert Hooks.prepare_next_turn(%{messages: []}, %{model: nil}, %{}) ==
+               {%{messages: []}, %{model: nil}}
+    end)
+  end
+
   test "unregister/1 removes only that owner's handlers", %{owner: owner} do
     other = "other_#{System.unique_integer([:positive])}"
     on_exit(fn -> Hooks.unregister(other) end)

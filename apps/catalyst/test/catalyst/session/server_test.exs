@@ -119,6 +119,47 @@ defmodule Catalyst.Session.ServerTest do
     assert Enum.any?(snap.messages, &match?(%Message.Assistant{stop_reason: :aborted}, &1))
   end
 
+  test "reset clears the transcript, aborts the run, and survives a restart", %{
+    tmp: tmp,
+    model: model
+  } do
+    script = [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}]
+    {id, pid} = start(tmp, model, script)
+
+    assert :ok = Server.prompt(pid, "long task")
+    Server.reset(pid)
+
+    # Subscribers waiting on the aborted run are unlocked.
+    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+
+    snap = Server.state(pid)
+    assert snap.messages == []
+    refute snap.running
+
+    # The reset marker persists: a restart with the same id stays cleared.
+    Manager.stop(id)
+    wait_until(fn -> Manager.whereis(id) == nil end)
+
+    {:ok, %{pid: pid2}} =
+      Manager.start_session(
+        id: id,
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        opts: [script: [{:text, "fresh"}]]
+      )
+
+    assert Server.state(pid2).messages == []
+  end
+
+  test "a session without a provider returns a tagged error instead of crashing", %{tmp: tmp} do
+    {:ok, %{pid: pid}} = Manager.start_session(cwd: tmp, provider: nil, model: nil)
+
+    assert {:error, :no_provider} = Server.prompt(pid, "hello")
+    # The server survived the misconfiguration and stays usable.
+    assert Server.state(pid).messages == []
+  end
+
   test "events from a dead run are dropped (abort race)", %{tmp: tmp, model: model} do
     script = [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}]
     {_id, pid} = start(tmp, model, script)

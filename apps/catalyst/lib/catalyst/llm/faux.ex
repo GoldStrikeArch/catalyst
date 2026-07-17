@@ -60,8 +60,6 @@ defmodule Catalyst.LLM.Faux do
   end
 
   defp emit_events(assistant, sink) do
-    sink.(%Event.Start{partial: assistant})
-
     Enum.each(assistant.content, fn
       %Content.Text{text: t} ->
         sink.(%Event.TextStart{})
@@ -75,7 +73,5 @@ defmodule Catalyst.LLM.Faux do
       _ ->
         :ok
     end)
-
-    sink.(%Event.Done{reason: assistant.stop_reason, message: assistant})
   end
 end

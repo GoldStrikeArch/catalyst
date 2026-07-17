@@ -15,6 +15,7 @@ defmodule Catalyst.LLM.Demo do
   @word_delay_ms 12
 
   @doc "A `%Model{}` tag for the demo provider."
+  @spec model() :: Model.t()
   def model, do: %Model{id: "demo", name: "Demo (offline)", api: "demo", provider: "demo"}
 
   @impl true
@@ -111,8 +112,6 @@ defmodule Catalyst.LLM.Demo do
     }
 
   defp emit(assistant, sink) do
-    sink.(%Event.Start{partial: assistant})
-
     Enum.each(assistant.content, fn
       %Content.Text{text: t} ->
         sink.(%Event.TextStart{})
@@ -126,8 +125,6 @@ defmodule Catalyst.LLM.Demo do
       _ ->
         :ok
     end)
-
-    sink.(%Event.Done{reason: assistant.stop_reason, message: assistant})
   end
 
   defp stream_words(text, sink) do

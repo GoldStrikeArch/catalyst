@@ -69,6 +69,23 @@ defmodule Catalyst.Session.StoreTest do
     assert [%Message.User{}] = Store.load(reopened.path)
   end
 
+  test "a reset marker clears everything before it on load" do
+    store = Store.new("/tmp/proj_reset")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    Store.append_message(store, Message.user("old one"))
+    Store.append_message(store, Message.user("old two"))
+    Store.append_reset(store)
+    Store.append_message(store, Message.user("fresh"))
+
+    assert [%Message.User{} = m] = Store.load(store.path)
+    assert Content.text_of(m.content) == "fresh"
+
+    # A trailing reset leaves the session empty.
+    Store.append_reset(store)
+    assert Store.load(store.path) == []
+  end
+
   test "load skips corrupt or unknown lines instead of crashing" do
     store = Store.new("/tmp/proj4")
     on_exit(fn -> File.rm_rf!(store.path) end)

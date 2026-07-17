@@ -1,4 +1,8 @@
 defmodule CatalystWeb.Telemetry do
+  @moduledoc """
+  Telemetry supervisor: runs the periodic VM measurement poller and defines the
+  Phoenix/VM metrics (`metrics/0`) that reporters can consume.
+  """
   use Supervisor
   import Telemetry.Metrics
 

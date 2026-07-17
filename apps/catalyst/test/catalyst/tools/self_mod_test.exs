@@ -53,9 +53,9 @@ defmodule Catalyst.Tools.SelfModTest do
   '''
 
   test "the self-modification tools are built in" do
-    assert Extensions.fetch("install_extension")
-    assert Extensions.fetch("reload_extensions")
-    assert Extensions.fetch("rollback_extension")
+    assert {:ok, _} = Extensions.fetch("install_extension")
+    assert {:ok, _} = Extensions.fetch("reload_extensions")
+    assert {:ok, _} = Extensions.fetch("rollback_extension")
   end
 
   test "install_extension registers a provider and a hook via setup (no tool needed)", %{ctx: ctx} do
@@ -71,6 +71,33 @@ defmodule Catalyst.Tools.SelfModTest do
 
     assert {:ok, Catalyst.Ext.MyProvider} = Registry.fetch("ext-echo")
     assert Enum.any?(Hooks.handlers(:before_tool_call), &(&1.owner == "provinstall"))
+  end
+
+  test "a tuple-shaped install error is formatted, not Protocol.UndefinedError", %{ctx: ctx} do
+    # `throw` during compilation produces an {:error, {kind, reason}} tuple;
+    # the tool must inspect it rather than interpolate it.
+    capture_log(fn ->
+      err =
+        assert_raise RuntimeError, fn ->
+          InstallExtension.execute(%{"name" => "tuplereason", "source" => "throw(:nope)"}, ctx)
+        end
+
+      assert err.message =~ "{:throw, :nope}"
+    end)
+  end
+
+  test "a tuple-shaped develop_tool error is formatted, not Protocol.UndefinedError", %{ctx: ctx} do
+    capture_log(fn ->
+      err =
+        assert_raise RuntimeError, fn ->
+          Catalyst.Tools.DevelopTool.execute(
+            %{"name" => "tuplereason2", "source" => "throw(:nope)"},
+            ctx
+          )
+        end
+
+      assert err.message =~ "{:throw, :nope}"
+    end)
   end
 
   test "a broken install errors and leaves no file behind", %{ctx: ctx} do
@@ -92,7 +119,29 @@ defmodule Catalyst.Tools.SelfModTest do
 
     capture_log(fn -> assert %{content: _} = ReloadTool.execute(%{}, ctx) end)
 
-    assert Extensions.fetch("reloaded_one") == Catalyst.Ext.ReloadedOne
+    assert Extensions.fetch("reloaded_one") == {:ok, Catalyst.Ext.ReloadedOne}
+  end
+
+  test "reload_extensions lists files that fail to compile in its result", %{ctx: ctx} do
+    on_exit(fn -> Extensions.uninstall("reloaded_one_file") end)
+    File.write!(Path.join(Extensions.dir(), "reloaded_one_file.ex"), @tool_ext)
+    File.write!(Path.join(Extensions.dir(), "broken_reload.ex"), "defmodule B do @@@ end")
+
+    capture_log(fn ->
+      %{content: content} = ReloadTool.execute(%{}, ctx)
+      text = Catalyst.Content.text_of(content)
+      assert text =~ "Reloaded 1 file(s)"
+      assert text =~ "FAILED"
+      assert text =~ "broken_reload.ex"
+    end)
+  end
+
+  test "reload_extensions raises when nothing loads and something failed", %{ctx: ctx} do
+    File.write!(Path.join(Extensions.dir(), "only_broken.ex"), "defmodule B do @@@ end")
+
+    capture_log(fn ->
+      assert_raise RuntimeError, ~r/Reload failed/, fn -> ReloadTool.execute(%{}, ctx) end
+    end)
   end
 
   @gittool_ext ~S'''
@@ -140,6 +189,48 @@ defmodule Catalyst.Tools.SelfModTest do
       assert :ok = Versioning.commit(dir, "add a")
       assert File.exists?(Path.join(dir, "a.ex"))
 
+      assert :ok = Versioning.rollback(dir)
+      refute File.exists?(Path.join(dir, "a.ex"))
+    end
+  end
+
+  @tag :git
+  test "committing byte-identical content is a no-op, not an empty commit" do
+    if Versioning.available?() do
+      dir = Path.join(System.tmp_dir!(), "catalyst_ver_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert :ok = Versioning.ensure_repo(dir)
+      File.write!(Path.join(dir, "a.ex"), "content")
+      assert :ok = Versioning.commit(dir, "add a")
+
+      # Re-installing identical source: a clean tree must not grow an empty
+      # commit, or the next rollback would revert the wrong change.
+      assert :ok = Versioning.commit(dir, "add a again")
+      {log, 0} = System.cmd("git", ["log", "--oneline"], cd: dir)
+      assert length(String.split(String.trim(log), "\n")) == 2
+
+      assert :ok = Versioning.rollback(dir)
+      refute File.exists?(Path.join(dir, "a.ex"))
+    end
+  end
+
+  @tag :git
+  test "a failed revert leaves no sequencer state behind (later rollbacks work)" do
+    if Versioning.available?() do
+      dir = Path.join(System.tmp_dir!(), "catalyst_ver_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert :ok = Versioning.ensure_repo(dir)
+
+      # HEAD is the empty init commit — reverting it fails (nothing to revert)...
+      assert {:error, _} = Versioning.rollback(dir)
+
+      # ...but a later, valid rollback must still work.
+      File.write!(Path.join(dir, "a.ex"), "content")
+      assert :ok = Versioning.commit(dir, "add a")
       assert :ok = Versioning.rollback(dir)
       refute File.exists?(Path.join(dir, "a.ex"))
     end

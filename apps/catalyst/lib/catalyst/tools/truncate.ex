@@ -72,34 +72,64 @@ defmodule Catalyst.Tools.Truncate do
     truncate(content, opts, :tail)
   end
 
+  @doc """
+  Finish a list-producing tool's output (grep/find/ls): when `:limited?`,
+  append a `"... [showing first N of M <noun>]"` marker (or
+  `"... [showing first N <noun>; more exist]"` when the true total is
+  `:unknown` because the child's output was capped), then head-truncate and
+  attach the standard truncation notice.
+
+  Returns `{text, info}` so each tool keeps its own details keys.
+
+  Options (all required): `:limited?` (boolean), `:limit` (pos_integer),
+  `:total` (non_neg_integer or `:unknown`), `:noun` (e.g. `"matches"`).
+  """
+  @spec listing(String.t(), keyword()) :: {String.t(), info()}
+  def listing(text, opts) when is_binary(text) do
+    marked =
+      append_limit_marker(
+        text,
+        Keyword.fetch!(opts, :limited?),
+        Keyword.fetch!(opts, :limit),
+        Keyword.fetch!(opts, :total),
+        Keyword.fetch!(opts, :noun)
+      )
+
+    {body, info} = head(marked)
+    {notice(body, info, :head), info}
+  end
+
+  defp append_limit_marker(text, false, _limit, _total, _noun), do: text
+
+  defp append_limit_marker(text, true, limit, :unknown, noun),
+    do: text <> "\n... [showing first #{limit} #{noun}; more exist]"
+
+  defp append_limit_marker(text, true, limit, total, noun),
+    do: text <> "\n... [showing first #{limit} of #{total} #{noun}]"
+
   defp truncate(content, opts, side) do
     max_lines = Keyword.get(opts, :max_lines, @default_max_lines)
     max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)
 
-    lines = String.split(content, "\n")
+    lines = split_lines(content)
     total_lines = length(lines)
     total_bytes = byte_size(content)
 
-    {kept_lines, by_lines?} =
-      if total_lines > max_lines do
-        sliced =
-          case side do
-            :head -> Enum.take(lines, max_lines)
-            :tail -> Enum.take(lines, -max_lines)
-          end
+    {text, by_lines?} =
+      case total_lines > max_lines do
+        true ->
+          {slice_lines(lines, max_lines, side), true}
 
-        {sliced, true}
-      else
-        {lines, false}
+        # Within budget: keep the content byte-identical (a trailing newline
+        # is preserved, not re-joined away).
+        false ->
+          {content, false}
       end
 
-    text = Enum.join(kept_lines, "\n")
-
     {text, by_bytes?} =
-      if byte_size(text) > max_bytes do
-        {clamp_bytes(text, max_bytes, side), true}
-      else
-        {text, false}
+      case byte_size(text) > max_bytes do
+        true -> {clamp_bytes(text, max_bytes, side), true}
+        false -> {text, false}
       end
 
     truncated = by_lines? or by_bytes?
@@ -116,9 +146,24 @@ defmodule Catalyst.Tools.Truncate do
        truncated: truncated,
        truncated_by: by,
        total_lines: total_lines,
-       output_lines: length(String.split(text, "\n")),
+       output_lines: text |> split_lines() |> length(),
        total_bytes: total_bytes
      }}
+  end
+
+  defp slice_lines(lines, max_lines, :head), do: lines |> Enum.take(max_lines) |> Enum.join("\n")
+  defp slice_lines(lines, max_lines, :tail), do: lines |> Enum.take(-max_lines) |> Enum.join("\n")
+
+  # Logical lines: a single trailing newline terminates the last line instead
+  # of opening a phantom empty one ("a\nb\n" is 2 lines, not 3 — matching what
+  # the model sees and avoiding truncated:true on byte-identical output).
+  defp split_lines(""), do: [""]
+
+  defp split_lines(content) do
+    case :binary.last(content) do
+      ?\n -> content |> binary_part(0, byte_size(content) - 1) |> String.split("\n")
+      _ -> String.split(content, "\n")
+    end
   end
 
   # Clamp on a UTF-8 boundary by trimming whole characters until under budget.

@@ -47,12 +47,23 @@ defmodule Catalyst.Session.Store do
     File.write!(path, line(%{"type" => "message", "message" => encode(message)}), [:append])
   end
 
-  @doc "Load the messages from a session file (header skipped)."
+  @doc """
+  Append a reset marker. `load/1` discards every message before the last
+  marker, so a session reset survives crash-restarts without rewriting the
+  append-only file.
+  """
+  @spec append_reset(handle()) :: :ok
+  def append_reset(%{path: path}) do
+    File.write!(path, line(%{"type" => "reset"}), [:append])
+  end
+
+  @doc "Load the messages from a session file (header skipped, last reset honored)."
   @spec load(String.t()) :: [Message.t()]
   def load(path) do
     path
     |> File.stream!()
-    |> Enum.flat_map(&decode_line/1)
+    |> Enum.reduce([], &fold_line/2)
+    |> Enum.reverse()
   end
 
   # ---- encoding -------------------------------------------------------------
@@ -134,14 +145,16 @@ defmodule Catalyst.Session.Store do
   # ---- decoding -------------------------------------------------------------
 
   # Best-effort: a corrupt or forward-versioned line must not make the whole
-  # session unloadable, so decode failures skip the line.
-  defp decode_line(line) do
+  # session unloadable, so decode failures skip the line. The accumulator is
+  # newest-first; a reset marker drops everything seen so far.
+  defp fold_line(line, acc) do
     case Jason.decode(String.trim(line)) do
-      {:ok, %{"type" => "message", "message" => m}} -> [decode(m)]
-      _ -> []
+      {:ok, %{"type" => "message", "message" => m}} -> [decode(m) | acc]
+      {:ok, %{"type" => "reset"}} -> []
+      _ -> acc
     end
   rescue
-    _ -> []
+    _ -> acc
   end
 
   @doc "Decode a JSON message map back into a struct."

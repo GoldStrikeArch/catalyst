@@ -51,8 +51,14 @@ defmodule CatalystWeb.Application do
   # clears the BootGuard marker — only an explicit reload_extensions does that.
   defp reload_extensions do
     case Catalyst.Extensions.reload_after_wiring() do
-      {:skipped, status} -> Logger.info("extension reload skipped: #{inspect(status)}")
-      {:ok, _summaries} -> :ok
+      {:skipped, status} ->
+        Logger.info("extension reload skipped: #{inspect(status)}")
+
+      {:ok, %{failed: []}} ->
+        :ok
+
+      {:ok, %{failed: failed}} ->
+        Logger.warning("extension reload after UI wiring: #{length(failed)} file(s) failed")
     end
   rescue
     e -> Logger.warning("extension reload after UI wiring failed: #{Exception.message(e)}")

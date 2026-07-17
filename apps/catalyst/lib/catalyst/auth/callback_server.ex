@@ -14,6 +14,7 @@ defmodule Catalyst.Auth.CallbackServer do
   Start the callback server, block until the redirect arrives (or `timeout`),
   then stop. Returns `{:ok, code}` or `{:error, reason}`.
   """
+  @spec await(String.t(), timeout()) :: {:ok, String.t()} | {:error, term()}
   def await(expected_state, timeout \\ 300_000) do
     parent = self()
     plug = {__MODULE__.Handler, %{parent: parent, state: expected_state}}

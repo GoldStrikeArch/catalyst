@@ -10,6 +10,7 @@ defmodule Catalyst.LLM.OpenAICodex do
   @base_url "https://chatgpt.com/backend-api"
 
   @doc "Build a Codex `%Model{}` for `id` (defaults to the configured codex_model)."
+  @spec model(String.t(), keyword()) :: Model.t()
   def model(id \\ default_model_id(), opts \\ []) do
     %Model{
       id: id,
@@ -24,5 +25,7 @@ defmodule Catalyst.LLM.OpenAICodex do
     }
   end
 
+  @doc "The configured default Codex model id (`config :catalyst, :codex_model`)."
+  @spec default_model_id() :: String.t()
   def default_model_id, do: Application.get_env(:catalyst, :codex_model, "gpt-5.4")
 end

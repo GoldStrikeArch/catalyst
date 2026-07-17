@@ -61,6 +61,15 @@ defmodule Catalyst.Tools.DiffTest do
     assert Catalyst.Content.text_of(res.content) =~ "+elixir"
   end
 
+  test "very large inputs suppress the diff with a size summary" do
+    old = Enum.map_join(1..3000, "\n", &"old #{&1}")
+    new = Enum.map_join(1..3000, "\n", &"new #{&1}")
+
+    assert Diff.unified(old, new) =~ "diff suppressed: file too large — 3000 -> 3000 lines"
+    # Equal contents still short-circuit to "" regardless of size.
+    assert Diff.unified(old, old) == ""
+  end
+
   test "max_lines caps the output with a truncation note" do
     old = Enum.map_join(1..100, "\n", &"old #{&1}")
     new = Enum.map_join(1..100, "\n", &"new #{&1}")

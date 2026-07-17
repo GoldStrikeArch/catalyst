@@ -35,23 +35,45 @@ defmodule Catalyst.Tools.Fd do
     limit = args["limit"] || @default_limit
 
     # `--` keeps a leading-dash pattern from being parsed as fd flags (e.g. -x = exec).
-    fd_args = ["--color", "never", "--hidden", "--glob", "--", pattern, target]
+    # --exclude .git: --hidden would otherwise surface .git internals.
+    # --max-results limit+1: bounds child output while keeping limited? detection.
+    fd_args =
+      [
+        "--color",
+        "never",
+        "--hidden",
+        "--exclude",
+        ".git",
+        "--max-results",
+        Integer.to_string(limit + 1),
+        "--glob",
+        "--",
+        pattern,
+        target
+      ]
 
     case Exec.collect(fd, fd_args, cwd: ctx.cwd) do
       {:ok, %{out: out, status: status}} when status in [0, 1] ->
         results = String.split(out, "\n", trim: true)
         limited? = length(results) > limit
         shown = Enum.take(results, limit)
-        text = if shown == [], do: "No files found.", else: Enum.join(shown, "\n")
 
         text =
-          if limited?,
-            do: text <> "\n... [showing first #{limit} of #{length(results)} results]",
-            else: text
+          case shown do
+            [] -> "No files found."
+            _ -> Enum.join(shown, "\n")
+          end
 
-        {body, info} = Truncate.head(text)
+        # Total is :unknown — fd's output was capped at limit + 1 results.
+        {text, info} =
+          Truncate.listing(text,
+            limited?: limited?,
+            limit: limit,
+            total: :unknown,
+            noun: "results"
+          )
 
-        result(Truncate.notice(body, info, :head), %{
+        result(text, %{
           result_count: length(shown),
           result_limit_reached: limited?,
           truncation: info

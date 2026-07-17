@@ -1,9 +1,10 @@
 defmodule Catalyst do
   @moduledoc """
-  Catalyst keeps the contexts that define your domain
-  and business logic.
-
-  Contexts are also responsible for managing your data, regardless
-  if it comes from the database, an external API or others.
+  Core of the Catalyst coding agent: sessions (`Catalyst.Session.*`), the
+  agentic loop (`Catalyst.Agent.*`), tools (`Catalyst.Tools.*`), LLM providers
+  (`Catalyst.LLM.*`), OAuth credentials (`Catalyst.Auth.*`), and the runtime
+  extension system (`Catalyst.Extensions`, `Catalyst.Hooks`) behind the
+  self-developing workflow. The web UI, desktop shell, and CLI live in their
+  own umbrella apps on top of this core.
   """
 end

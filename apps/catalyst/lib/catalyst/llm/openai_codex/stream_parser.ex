@@ -22,9 +22,22 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
             # finalize/2 marks the turn as errored when the stream ends without one.
             done: false
 
+  @type t :: %__MODULE__{
+          blocks: [Content.t()],
+          current: nil | {:reasoning, map()} | {:text, map()} | {:tool, map()},
+          response_id: String.t() | nil,
+          usage: Usage.t(),
+          stop_reason: Message.Assistant.stop_reason(),
+          error: String.t() | nil,
+          done: boolean()
+        }
+
+  @doc "A fresh parser state for one streamed response."
+  @spec new() :: t()
   def new, do: %__MODULE__{}
 
   @doc "Apply one decoded SSE event, emitting normalized events to `sink`."
+  @spec handle(t(), map(), Catalyst.LLM.Provider.sink()) :: t()
   def handle(%__MODULE__{} = s, %{"type" => type} = ev, sink), do: do_handle(type, ev, s, sink)
   def handle(s, _ev, _sink), do: s
 
@@ -36,7 +49,7 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp do_handle("response.output_item.added", %{"item" => item}, s, sink) do
     case item["type"] do
       "reasoning" ->
-        %{s | current: {:reasoning, %{thinking: "", item: item}}}
+        %{s | current: {:reasoning, %{thinking: ""}}}
 
       "message" ->
         sink.(%Event.TextStart{})
@@ -185,6 +198,7 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp do_handle(_type, _ev, s, _sink), do: s
 
   @doc "Build the final assistant message."
+  @spec finalize(t(), Catalyst.Model.t()) :: Message.Assistant.t()
   def finalize(%__MODULE__{} = s, model) do
     s = s |> flush_current() |> mark_truncated()
 
@@ -214,8 +228,12 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp flush_current(%{current: {:text, t}} = s),
     do: %{s | blocks: [%Content.Text{text: t.text} | s.blocks], current: nil}
 
+  # A mid-stream reasoning item was never completed, so its `output_item.added`
+  # payload lacks `encrypted_content`; replaying it next turn risks a 400. Keep
+  # the partial thinking text for the UI but emit no signature — Request skips
+  # nil-signature thinking blocks on replay.
   defp flush_current(%{current: {:reasoning, r}} = s) do
-    block = %Content.Thinking{thinking: r.thinking, signature: Jason.encode!(r.item)}
+    block = %Content.Thinking{thinking: r.thinking, signature: nil}
     %{s | blocks: [block | s.blocks], current: nil}
   end
 

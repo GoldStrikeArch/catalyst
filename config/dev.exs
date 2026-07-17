@@ -62,9 +62,6 @@ config :catalyst_web, CatalystWeb.Endpoint,
     ]
   ]
 
-# Enable dev routes for dashboard and mailbox
-config :catalyst_web, dev_routes: true
-
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"
 

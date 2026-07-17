@@ -12,9 +12,27 @@ defmodule CatalystCli.Application do
     Supervisor.start_link(children, strategy: :one_for_one, name: CatalystCli.Supervisor)
   end
 
+  # Always reach System.halt: if CatalystCli.run/1 raised and the Task died
+  # (it's a :temporary child), the headless release would hang forever with no
+  # exit code — convert any crash into a printed error + exit status 1.
   @spec run_and_halt() :: no_return()
   defp run_and_halt do
-    code = if CatalystCli.run(argv()) == :ok, do: 0, else: 1
+    code =
+      try do
+        case CatalystCli.run(argv()) do
+          :ok -> 0
+          :error -> 1
+        end
+      rescue
+        e ->
+          IO.puts(:stderr, "catalyst: " <> Exception.message(e))
+          1
+      catch
+        kind, reason ->
+          IO.puts(:stderr, "catalyst: #{kind}: #{inspect(reason)}")
+          1
+      end
+
     System.halt(code)
   end
 

@@ -36,7 +36,6 @@ defmodule Catalyst.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
-      {:dns_cluster, "~> 0.2.0"},
       {:phoenix_pubsub, "~> 2.1"},
       {:jason, "~> 1.4"},
       {:ex_json_schema, "~> 0.10"},

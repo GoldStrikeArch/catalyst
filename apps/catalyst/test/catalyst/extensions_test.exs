@@ -32,8 +32,8 @@ defmodule Catalyst.ExtensionsTest do
   '''
 
   test "the built-ins (incl. develop_tool) are seeded" do
-    assert Extensions.fetch("read")
-    assert Extensions.fetch("develop_tool") == DevelopTool
+    assert {:ok, _} = Extensions.fetch("read")
+    assert Extensions.fetch("develop_tool") == {:ok, DevelopTool}
     assert "ast_grep" in Extensions.names()
   end
 
@@ -45,7 +45,7 @@ defmodule Catalyst.ExtensionsTest do
     end)
 
     # The freshly written module is now a live, registered tool.
-    mod = Extensions.fetch("shout_test")
+    assert {:ok, mod} = Extensions.fetch("shout_test")
     assert mod == Catalyst.Ext.ShoutTest
     assert mod.execute(%{"text" => "hi"}, ctx).content |> hd() |> Map.get(:text) == "HI"
   end
@@ -125,7 +125,7 @@ defmodule Catalyst.ExtensionsTest do
     assert {:ok, summary} = Extensions.load_file(path)
     assert "mk_tool" in summary.tools
 
-    assert Extensions.fetch("mk_tool") == Catalyst.Ext.MultiKindTool
+    assert Extensions.fetch("mk_tool") == {:ok, Catalyst.Ext.MultiKindTool}
     assert length(owner_hooks("multikind")) == 1
   end
 
@@ -170,11 +170,11 @@ defmodule Catalyst.ExtensionsTest do
 
     assert {:ok, summary} = Extensions.load_file(path)
     assert summary.extensions == [Catalyst.Ext.SetupReg]
-    assert Extensions.fetch("setup_only_tool") == SetupOnlyTool
+    assert Extensions.fetch("setup_only_tool") == {:ok, SetupOnlyTool}
 
     # The setup-registered tool is owner-tracked, so uninstall removes it.
     Extensions.uninstall("setupreg")
-    assert Extensions.fetch("setup_only_tool") == nil
+    assert Extensions.fetch("setup_only_tool") == :error
   end
 
   @ephemeral_source ~S'''
@@ -195,12 +195,70 @@ defmodule Catalyst.ExtensionsTest do
     path = write_ext("ephemeral", @ephemeral_source)
 
     assert {:ok, _} = Extensions.load_file(path)
-    assert Extensions.fetch("ephemeral_tool")
+    assert {:ok, _} = Extensions.fetch("ephemeral_tool")
 
     # A rollback (or manual delete) removes the file; reload must deactivate it.
     File.rm!(path)
     capture_log(fn -> Extensions.load_all() end)
-    assert Extensions.fetch("ephemeral_tool") == nil
+    assert Extensions.fetch("ephemeral_tool") == :error
+  end
+
+  test "load_all keeps owners registered without a backing file (register_tool owner:)" do
+    on_exit(fn -> Extensions.uninstall("no_file_owner") end)
+    assert {:ok, _} = Extensions.register_tool(SetupOnlyTool, owner: "no_file_owner")
+
+    # The gone-file purge applies to file-backed owners only: this owner has no
+    # *.ex file, but its registration must survive a directory reload.
+    capture_log(fn -> Extensions.load_all() end)
+
+    assert Extensions.fetch("setup_only_tool") == {:ok, SetupOnlyTool}
+  end
+
+  test "load_all reports per-file failures alongside the loaded summaries" do
+    on_exit(fn -> Extensions.uninstall("goodfile") end)
+    write_ext("goodfile", @ephemeral_source)
+    broken_path = write_ext("badfile", "defmodule Catalyst.Ext.BadFile do @@@ end")
+
+    capture_log(fn ->
+      assert {:ok, %{loaded: loaded, failed: [{^broken_path, reason}]}} = Extensions.load_all()
+      assert Enum.any?(loaded, &(&1.owner == "goodfile"))
+      assert reason =~ "badfile.ex"
+    end)
+  end
+
+  @conflict_a ~S'''
+  defmodule Catalyst.Ext.SharedMod do
+    def origin, do: :a
+  end
+  '''
+
+  @conflict_b ~S'''
+  defmodule Catalyst.Ext.SharedMod do
+    def origin, do: :b
+  end
+  '''
+
+  test "redefining another owner's module is warned about and surfaced in the summary" do
+    on_exit(fn ->
+      Extensions.uninstall("conflict_a")
+      Extensions.uninstall("conflict_b")
+    end)
+
+    path_a = write_ext("conflict_a", @conflict_a)
+    path_b = write_ext("conflict_b", @conflict_b)
+
+    capture_log(fn ->
+      assert {:ok, summary_a} = Extensions.load_file(path_a)
+      refute Map.has_key?(summary_a, :conflicts)
+    end)
+
+    log =
+      capture_log(fn ->
+        assert {:ok, summary_b} = Extensions.load_file(path_b)
+        assert summary_b.conflicts == [{"conflict_a", [Catalyst.Ext.SharedMod]}]
+      end)
+
+    assert log =~ "also defined by extension"
   end
 
   test "purging an extension removes its modules from the VM" do
@@ -227,7 +285,7 @@ defmodule Catalyst.ExtensionsTest do
 
     # Not just unregistered — the module itself is gone from the VM.
     refute Code.ensure_loaded?(Catalyst.Ext.VanishingTool)
-    assert Extensions.fetch("vanishing_tool") == nil
+    assert Extensions.fetch("vanishing_tool") == :error
   end
 
   test "purging an extension that shadowed a module restores the original beam" do
@@ -282,7 +340,7 @@ defmodule Catalyst.ExtensionsTest do
       Extensions.load_file(path)
     end)
 
-    assert Extensions.fetch("mk_tool") == Catalyst.Ext.MultiKindTool
+    assert Extensions.fetch("mk_tool") == {:ok, Catalyst.Ext.MultiKindTool}
     assert Catalyst.Ext.MultiKindTool.execute(%{}, %{}).content
   end
 
@@ -306,7 +364,7 @@ defmodule Catalyst.ExtensionsTest do
     path = write_ext("brokenext", source)
 
     assert {:error, _reason} = Extensions.load_file(path)
-    assert Extensions.fetch("broken_tool") == nil
+    assert Extensions.fetch("broken_tool") == :error
   end
 
   defp write_ext(name, source) do
