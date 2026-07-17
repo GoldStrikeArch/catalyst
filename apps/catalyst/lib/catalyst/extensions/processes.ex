@@ -13,12 +13,44 @@ defmodule Catalyst.Extensions.Processes do
   @top Catalyst.Extensions.ProcessSupervisor
   @registry Catalyst.Extensions.ProcessRegistry
 
+  # Reloading an extension purges its owner supervisor and immediately starts
+  # new children (commit_load → stop_owner → setup/1 → start_child), but the
+  # Registry removes a dead supervisor's `:via` entry ASYNCHRONOUSLY — so for a
+  # brief window lookups return a dead pid and re-registration is refused. The
+  # start path rides that window out with a short bounded retry instead of
+  # reporting a phantom success with no processes started.
+  @stale_retry_ms 5
+  @stale_retries 10
+
   @doc "Start `child_spec` under `owner`'s supervisor (created on first use)."
   @spec start_child(String.t(), Supervisor.child_spec() | {module(), term()} | module()) ::
           DynamicSupervisor.on_start_child() | {:error, term()}
   def start_child(owner, child_spec) when is_binary(owner) do
-    with {:ok, sup} <- owner_sup(owner) do
-      DynamicSupervisor.start_child(sup, child_spec)
+    do_start_child(owner, child_spec, @stale_retries)
+  end
+
+  defp do_start_child(owner, child_spec, retries) do
+    case owner_sup(owner) do
+      {:ok, sup} ->
+        try do
+          DynamicSupervisor.start_child(sup, child_spec)
+        catch
+          # The sup died between lookup and call (a purge racing this start):
+          # back off briefly and start a fresh one.
+          :exit, {:noproc, _} when retries > 0 ->
+            Process.sleep(@stale_retry_ms)
+            do_start_child(owner, child_spec, retries - 1)
+        end
+
+      {:error, :stale_registry} when retries > 0 ->
+        Process.sleep(@stale_retry_ms)
+        do_start_child(owner, child_spec, retries - 1)
+
+      {:error, :stale_registry} ->
+        {:error, :stale_registry}
+
+      error ->
+        error
     end
   end
 
@@ -50,11 +82,11 @@ defmodule Catalyst.Extensions.Processes do
   end
 
   defp owner_sup(owner) do
-    case Registry.lookup(@registry, owner) do
-      [{pid, _}] ->
+    case live_lookup(owner) do
+      {:ok, pid} ->
         {:ok, pid}
 
-      [] ->
+      :absent ->
         spec = %{
           id: {:ext_sup, owner},
           start:
@@ -67,10 +99,27 @@ defmodule Catalyst.Extensions.Processes do
         }
 
         case DynamicSupervisor.start_child(@top, spec) do
-          {:ok, pid} -> {:ok, pid}
-          {:error, {:already_started, pid}} -> {:ok, pid}
-          error -> error
+          {:ok, pid} ->
+            {:ok, pid}
+
+          {:error, {:already_started, pid}} ->
+            # A LIVE pid means someone else created it concurrently — use it.
+            # A DEAD pid means the Registry hasn't finished removing a purged
+            # sup's name yet: report stale so do_start_child retries shortly.
+            if Process.alive?(pid), do: {:ok, pid}, else: {:error, :stale_registry}
+
+          error ->
+            error
         end
+    end
+  end
+
+  # A lookup that returns a dead pid is the stale-Registry window after a
+  # purge — treat it as absent rather than handing callers a corpse.
+  defp live_lookup(owner) do
+    case Registry.lookup(@registry, owner) do
+      [{pid, _}] -> if Process.alive?(pid), do: {:ok, pid}, else: :absent
+      [] -> :absent
     end
   end
 end

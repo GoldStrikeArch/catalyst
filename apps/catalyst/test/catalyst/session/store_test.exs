@@ -1,6 +1,8 @@
 defmodule Catalyst.Session.StoreTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Catalyst.{Content, Message, Usage}
   alias Catalyst.Session.Store
 
@@ -102,5 +104,53 @@ defmodule Catalyst.Session.StoreTest do
 
     loaded = Store.load(store.path)
     assert [%Message.User{}, %Message.Assistant{stop_reason: :stop}] = loaded
+  end
+
+  test "unexpected content shapes degrade to text instead of crashing the append" do
+    store = Store.new("/tmp/proj_duck_typed")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    # Tool results are duck-typed: an extension/LLM-authored tool can hand the
+    # loop content that is not a block list at all…
+    bare = %Message.ToolResult{
+      tool_call_id: "call_1",
+      tool_name: "custom",
+      content: {:unexpected, :tuple},
+      timestamp: 1
+    }
+
+    # …or a list holding blocks the store has never heard of.
+    unknown_block = %Message.ToolResult{
+      tool_call_id: "call_2",
+      tool_name: "custom",
+      content: [%{weird: "block"}],
+      timestamp: 2
+    }
+
+    assert :ok = Store.append_message(store, bare)
+    assert :ok = Store.append_message(store, unknown_block)
+
+    # Both lines stayed decodable, with the foreign shapes inspected into text.
+    assert [%Message.ToolResult{} = a, %Message.ToolResult{} = b] = Store.load(store.path)
+    assert Content.text_of(a.content) == inspect({:unexpected, :tuple})
+    assert Content.text_of(b.content) == inspect(%{weird: "block"})
+  end
+
+  test "a write failure logs a warning instead of raising" do
+    store = Store.new("/tmp/proj_unwritable")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    # Replace the session file with a directory so appends fail at the disk.
+    File.rm!(store.path)
+    File.mkdir_p!(store.path)
+
+    log =
+      capture_log(fn ->
+        assert :ok = Store.append_message(store, Message.user("lost, but quietly"))
+        assert :ok = Store.append_reset(store)
+      end)
+
+    assert log =~ store.id
+    assert log =~ "failed to append"
   end
 end

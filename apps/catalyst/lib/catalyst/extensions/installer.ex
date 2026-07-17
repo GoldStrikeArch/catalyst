@@ -2,9 +2,15 @@ defmodule Catalyst.Extensions.Installer do
   @moduledoc """
   Shared write → compile/load → commit pipeline for the self-modification tools
   (`develop_tool`, `install_extension`). On a failed load the file's prior
-  content is restored (or a brand-new file removed) and nothing is committed,
-  so the extensions repo's HEAD always matches the loaded state — which is what
-  `rollback_extension`'s `git revert HEAD` relies on.
+  content is restored — and, for an update of an existing extension, RE-LOADED,
+  since a partial multi-module compile may have redefined modules in the VM
+  before failing (a brand-new file is removed instead; `Catalyst.Extensions`
+  purges its partial modules). Nothing is committed on failure, so the
+  extensions repo's HEAD matches the loaded state — which is what
+  `rollback_extension`'s history walk relies on. The one tolerated divergence:
+  if a successful install fails to git-commit (e.g. git missing or wedged), the
+  install is kept and the summary flags it as unversioned (`versioned: false` +
+  `:warning`) — rollback simply can't revert that change.
 
   Self-modification is full code execution in the host VM by design (the user's
   own agent on their machine), but it can be switched off — e.g. when running
@@ -13,6 +19,8 @@ defmodule Catalyst.Extensions.Installer do
   `config :catalyst, :allow_self_modification, false`. `install/3` then refuses
   with a tagged error instead of writing or compiling anything.
   """
+
+  require Logger
 
   alias Catalyst.Extensions
   alias Catalyst.Extensions.Versioning
@@ -44,6 +52,10 @@ defmodule Catalyst.Extensions.Installer do
   defp do_install(name, source, commit_prefix) do
     dir = Extensions.dir()
     File.mkdir_p!(dir)
+    # The repo is normally ensured by the boot-time load path, but that is
+    # skipped in safe mode — and an install must still be committable then.
+    # Idempotent and cheap once the repo exists.
+    Versioning.ensure_repo(dir)
     path = Path.join(dir, sanitize(name) <> ".ex")
     existed = File.exists?(path)
     backup = if existed, do: File.read!(path), else: nil
@@ -52,16 +64,62 @@ defmodule Catalyst.Extensions.Installer do
 
     case Extensions.load_file(path) do
       {:ok, summary} ->
-        Versioning.commit(dir, "#{commit_prefix} #{summary.owner}")
-        {:ok, Map.put(summary, :path, path)}
+        commit_install(dir, path, summary, commit_prefix)
 
       {:error, reason} ->
         # Restore the prior version (or remove a brand-new broken file) so a
         # failed install leaves neither broken source nor an uncommitted diff.
-        if existed, do: File.write!(path, backup), else: File.rm(path)
+        restore_prior(path, existed, backup)
         {:error, reason}
     end
   end
+
+  # A versioning failure must not undo a successful install — the code is live
+  # and the file is written. But the change has no commit, so rollback can't
+  # revert it: flag the summary so the agent/user knows.
+  defp commit_install(dir, path, summary, commit_prefix) do
+    case Versioning.commit(dir, "#{commit_prefix} #{summary.owner}") do
+      :ok ->
+        {:ok, Map.put(summary, :path, path)}
+
+      {:error, reason} ->
+        Logger.warning("[installer] could not git-commit #{path}: #{inspect(reason)}")
+
+        {:ok,
+         summary
+         |> Map.put(:path, path)
+         |> Map.put(:versioned, false)
+         |> Map.put(
+           :warning,
+           "the change was NOT git-versioned (#{inspect(reason)}) — " <>
+             "rollback_extension cannot revert it"
+         )}
+    end
+  end
+
+  # On a failed load over an existing file, restoring the bytes on disk is not
+  # enough: Code.compile_file/1 defines modules sequentially, so a partial
+  # compile may have redefined some of the prior version's modules before
+  # failing. Re-load the restored source so the VM runs the prior definitions
+  # again. (For a brand-new file, Extensions purges the partial modules itself
+  # and there is nothing to re-load.)
+  defp restore_prior(path, true = _existed, backup) do
+    File.write!(path, backup)
+
+    case Extensions.load_file(path) do
+      {:ok, _summary} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "[installer] failed to re-load the restored prior version of #{path} " <>
+            "after a failed install: #{inspect(reason)} — the VM may still be " <>
+            "running modules from the failed attempt until the file is reloaded"
+        )
+    end
+  end
+
+  defp restore_prior(path, false = _existed, _backup), do: File.rm(path)
 
   @doc "File-safe extension name."
   @spec sanitize(String.t()) :: String.t()

@@ -79,7 +79,7 @@ defmodule Catalyst.LLM.RegistryTest do
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
     Server.prompt(pid, "hi")
 
-    assert_receive {:agent_event, %Catalyst.Agent.Event.AgentEnd{}}, 2_000
+    assert_receive {:agent_event, ^id, %Catalyst.Agent.Event.AgentEnd{}}, 2_000
 
     last = Server.state(pid).messages |> List.last()
     assert Content.text_of(last.content) == "echo!"

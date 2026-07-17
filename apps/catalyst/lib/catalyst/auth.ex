@@ -46,12 +46,14 @@ defmodule Catalyst.Auth do
         {:unix, :darwin} ->
           {"open", [url]}
 
-        # cmd's `start` quoting trap: an unquoted `&` in the URL splits the
-        # command, but quoting the URL makes `start` read it as the window
-        # TITLE (start treats the first quoted arg as the title). Passing an
-        # explicit empty title makes the URL land in the command position.
+        # Not `cmd /c start`: ERTS only quotes args containing whitespace, so
+        # the whitespace-free URL reaches cmd.exe unquoted, where `&` is a
+        # command separator — the browser gets the URL truncated at the first
+        # query param and the rest runs as bogus commands. rundll32 hands the
+        # URL straight to the default-browser handler, bypassing cmd's
+        # metacharacter parsing entirely.
         {:win32, _} ->
-          {"cmd", ["/c", "start", "", url]}
+          {"rundll32", ["url.dll,FileProtocolHandler", url]}
 
         _ ->
           {"xdg-open", [url]}

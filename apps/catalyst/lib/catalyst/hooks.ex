@@ -22,11 +22,14 @@ defmodule Catalyst.Hooks do
 
   Handlers are stored in an ETS bag (like `Catalyst.Extensions`), tagged with an
   `owner` so a reloaded extension can revoke its prior handlers (`unregister/1`).
-  The hot path (`run_filter/3`, `run_decision/2`, `notify/1`) reads ETS directly
-  and never calls the GenServer, so it works even if this process is down (an
-  absent table just yields no handlers). **Every handler runs inside a
-  try/rescue/catch: a crashing or misbehaving hook is logged and skipped — it can
-  never take down a run.**
+  The table is owned by `Catalyst.Hooks.TableOwner`, not by this server, so a
+  crash here cannot destroy the registered handlers (which nothing would
+  re-register — `before_tool_call` gates would silently fail open). The hot path
+  (`run_filter/3`, `run_decision/2`, `notify/1`) reads ETS directly and never
+  calls the GenServer, so it works even if this process is down (an absent table
+  just yields no handlers). **Every handler runs inside a try/rescue/catch: a
+  crashing or misbehaving hook is logged and skipped — it can never take down a
+  run.**
   """
 
   use GenServer
@@ -144,8 +147,24 @@ defmodule Catalyst.Hooks do
 
   @impl true
   def init(:ok) do
-    :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
-    {:ok, %{seq: 0}}
+    # The table is normally created (and owned) by Catalyst.Hooks.TableOwner,
+    # started just before this server, so handlers survive a crash here.
+    # Creating it ourselves is a fallback for tests that start Hooks standalone.
+    if :ets.whereis(@table) == :undefined do
+      :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
+    end
+
+    # Resume the seq counter past any surviving entries, or a restart would
+    # hand out duplicate seqs and scramble the documented "priority then
+    # registration order" tie-break.
+    next_seq =
+      @table
+      |> :ets.tab2list()
+      |> Enum.map(fn {_point, entry} -> entry.seq end)
+      |> Enum.max(fn -> -1 end)
+      |> Kernel.+(1)
+
+    {:ok, %{seq: next_seq}}
   end
 
   @impl true

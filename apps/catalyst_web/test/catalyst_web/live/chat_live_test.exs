@@ -13,13 +13,15 @@ defmodule CatalystWeb.ChatLiveTest do
   end
 
   defp submit_prompt(view, prompt) do
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(session_id(view)))
+    id = session_id(view)
+    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
 
     view
     |> form("#chat-form", %{"message" => prompt})
     |> render_submit()
 
-    assert_receive {:agent_event, %Event.AgentEnd{}}, 5_000
+    # Broadcasts are tagged with the broadcasting session's id.
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
     render(view)
   end
 

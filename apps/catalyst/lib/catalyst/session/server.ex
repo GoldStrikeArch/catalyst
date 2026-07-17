@@ -4,9 +4,10 @@ defmodule Catalyst.Session.Server do
 
   The single writer of the transcript, model, queues, and pending-tool state. A
   `prompt`/`continue` runs `Catalyst.Agent.Loop` in a supervised Task; the loop
-  emits events back as `{:agent_event, e}` casts, which this server folds into
-  state (append on `message_end`, persist to JSONL, track pending tool calls) and
-  re-broadcasts on `"session:<id>"` for any subscribers (LiveViews/CLI).
+  emits events back as `{:agent_event, run_ref, e}` casts, which this server folds
+  into state (append on `message_end`, persist to JSONL, track pending tool calls)
+  and re-broadcasts as `{:agent_event, id, e}` on `"session:<id>"` for any
+  subscribers (LiveViews/CLI).
 
   Cancellation shuts down the active run task; its linked ports/MuonTrap daemons
   die with it, and an aborted turn is synthesized.
@@ -142,17 +143,28 @@ defmodule Catalyst.Session.Server do
 
   def handle_call(:continue, _from, state), do: {:reply, {:error, :busy}, state}
 
-  def handle_call(:drain_steering, _from, state) do
+  # Drains are scoped to the run that asked: a drain from a dead run (buffered
+  # behind the abort that cleared run_ref) carries a stale ref and must reply []
+  # WITHOUT touching the queues — otherwise it would move queued messages into
+  # in_flight for a run that can never deliver them, and the next run's AgentEnd
+  # would silently drop them.
+  def handle_call({:drain_steering, ref}, _from, %State{run_ref: ref} = state)
+      when ref != nil do
     {msgs, q} = drain_queue(state.steering)
     in_flight = state.in_flight ++ Enum.map(msgs, &{:steering, &1})
     {:reply, msgs, %{state | steering: q, in_flight: in_flight}}
   end
 
-  def handle_call(:drain_follow_up, _from, state) do
+  def handle_call({:drain_steering, _stale_ref}, _from, state), do: {:reply, [], state}
+
+  def handle_call({:drain_follow_up, ref}, _from, %State{run_ref: ref} = state)
+      when ref != nil do
     {msgs, q} = drain_queue(state.follow_up)
     in_flight = state.in_flight ++ Enum.map(msgs, &{:follow_up, &1})
     {:reply, msgs, %{state | follow_up: q, in_flight: in_flight}}
   end
+
+  def handle_call({:drain_follow_up, _stale_ref}, _from, state), do: {:reply, [], state}
 
   def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
 
@@ -273,7 +285,7 @@ defmodule Catalyst.Session.Server do
       messages: Enum.reverse(state.messages)
     }
 
-    case RunConfig.build(state, server) do
+    case RunConfig.build(state, server, run_ref) do
       {:ok, config} ->
         loop = Map.get(config, :loop, Loop)
         emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
@@ -334,8 +346,11 @@ defmodule Catalyst.Session.Server do
     |> Enum.reduce(queue, fn {_kind, msg}, q -> :queue.in_r(msg, q) end)
   end
 
-  defp broadcast(state, event),
-    do: Phoenix.PubSub.broadcast(Catalyst.PubSub, topic(state.id), {:agent_event, event})
+  # Tagged with the session id so a subscriber that switched sessions can drop
+  # events from the old one still buffered in its mailbox.
+  defp broadcast(state, event) do
+    Phoenix.PubSub.broadcast(Catalyst.PubSub, topic(state.id), {:agent_event, state.id, event})
+  end
 
   defp shutdown_run(%Task{} = task), do: Task.shutdown(task, :brutal_kill)
 

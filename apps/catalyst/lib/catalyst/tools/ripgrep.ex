@@ -58,10 +58,19 @@ defmodule Catalyst.Tools.Ripgrep do
         flags(args) ++ ["--", pattern, target]
 
     case Exec.collect(rg, rg_args, cwd: ctx.cwd, max_output_bytes: @max_output_bytes) do
-      # rg: 0 = matches, 1 = no matches (both fine), >1 = real error
-      {:ok, %{out: out, status: status} = res} when status in [0, 1] ->
+      # rg: 0 = matches, 1 = no matches (both fine). 2 = an error occurred —
+      # but rg exits 2 even when it also found matches (e.g. one unreadable
+      # path among many). The stderr noise merged into stdout fails
+      # Jason.decode and is dropped by decode_entry, so salvage whatever
+      # parses with a note, and only raise when nothing parsed at all.
+      {:ok, %{out: out, status: status} = res} when status in [0, 1, 2] ->
         capped? = Map.get(res, :truncated, false)
         entries = parse_entries(out)
+
+        if status == 2 and entries == [] do
+          raise "ripgrep error (status 2): #{String.slice(out, 0, 200)}"
+        end
+
         total_matches = Enum.count(entries, &match?({:match, _}, &1))
         limited? = total_matches > limit
         shown = take_matches(entries, limit)
@@ -80,7 +89,9 @@ defmodule Catalyst.Tools.Ripgrep do
             noun: "matches"
           )
 
-        result(append_capped_notice(text, capped?), %{
+        text = text |> append_capped_notice(capped?) |> append_error_note(status == 2, out)
+
+        result(text, %{
           match_count: min(total_matches, limit),
           match_limit_reached: limited?,
           output_capped: capped?,
@@ -106,6 +117,21 @@ defmodule Catalyst.Tools.Ripgrep do
       text <>
         "\n... [search output capped at #{div(@max_output_bytes, 1024 * 1024)}MB; " <>
         "narrow the pattern or path]"
+
+  # Status 2 with salvaged matches: tell the model the result set may be
+  # incomplete. The sample is the first stderr line (non-JSON in rg's
+  # otherwise JSON-lines output).
+  defp append_error_note(text, false = _partial_error?, _out), do: text
+
+  defp append_error_note(text, true = _partial_error?, out) do
+    sample =
+      out
+      |> String.split("\n", trim: true)
+      |> Enum.find("", &match?({:error, _}, Jason.decode(&1)))
+      |> String.slice(0, 200)
+
+    text <> "\n... [some paths could not be searched: #{sample}]"
+  end
 
   defp flags(args) do
     []

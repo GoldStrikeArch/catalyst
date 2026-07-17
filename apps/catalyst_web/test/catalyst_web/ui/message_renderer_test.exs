@@ -1,10 +1,19 @@
 defmodule CatalystWeb.UI.MessageRendererTest do
-  use ExUnit.Case, async: true
+  # async: false — registers into the global CatalystWeb.UI.Registry.
+  use ExUnit.Case, async: false
 
   import Phoenix.LiveViewTest
 
   alias Catalyst.{Content, Message}
-  alias CatalystWeb.UI.MessageRenderer
+  alias CatalystWeb.UI.{MessageRenderer, Registry}
+
+  defmodule BrokenRenderer do
+    use CatalystWeb, :html
+    # Building this template succeeds; @missing_assign is only fetched (and
+    # raises) when the Rendered's dynamics are evaluated — i.e. at diff time,
+    # which is exactly what safe_render's forced evaluation must trap.
+    def card(assigns), do: ~H|<div>BROKEN-CARD:{@missing_assign}</div>|
+  end
 
   defp render_html(msg), do: rendered_to_string(MessageRenderer.render_message(%{msg: msg}))
   defp render_doc(msg), do: msg |> render_html() |> LazyHTML.from_fragment()
@@ -121,5 +130,30 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     assert html =~ "bash"
     assert html =~ "boom"
     assert html =~ "error"
+  end
+
+  test "an extension renderer that raises at diff time falls back to built-in" do
+    on_exit(fn -> Registry.unregister_owner("broken_renderer_test") end)
+
+    Registry.register_renderer(
+      :message,
+      fn msg -> match?(%Message.ToolResult{tool_name: "broken-card"}, msg) end,
+      &BrokenRenderer.card/1,
+      owner: "broken_renderer_test"
+    )
+
+    msg = %Message.ToolResult{
+      tool_call_id: "c9",
+      tool_name: "broken-card",
+      content: Content.text("still visible")
+    }
+
+    # The template raises only when its dynamics run (missing assign), so a
+    # guard around the lazy build alone would let the diff engine crash the
+    # LiveView. Forced evaluation falls back to the built-in tool card.
+    html = render_html(msg)
+    refute html =~ "BROKEN-CARD"
+    assert html =~ ~s(data-message-role="tool-result")
+    assert html =~ "still visible"
   end
 end

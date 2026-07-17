@@ -109,4 +109,34 @@ defmodule Catalyst.HooksTest do
 
     assert_receive {:obs, {:sentinel, ^ref}}
   end
+
+  test "registered handlers survive a Hooks crash (table owned by TableOwner)", %{owner: owner} do
+    Hooks.register(:test_filter, fn v, _ctx -> {:ok, v <> "survived"} end, owner: owner)
+
+    pid = Process.whereis(Hooks)
+    assert pid, "expected Catalyst.Hooks to be running under the app supervisor"
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+
+    # Wait for the supervisor to restart it.
+    new_pid =
+      Enum.find_value(1..200, fn _ ->
+        case Process.whereis(Hooks) do
+          nil -> Process.sleep(10) && nil
+          p when p == pid -> Process.sleep(10) && nil
+          p -> p
+        end
+      end)
+
+    assert new_pid, "expected the supervisor to restart Catalyst.Hooks"
+
+    # The table outlived the crash: the handler registered before still fires...
+    assert Hooks.run_filter(:test_filter, "", %{}) == "survived"
+
+    # ...and the restarted server keeps registering into the same table, with
+    # the seq counter resumed (priority tie-break stays registration-ordered).
+    Hooks.register(:test_filter, fn v, _ctx -> {:ok, v <> "+new"} end, owner: owner)
+    assert Hooks.run_filter(:test_filter, "", %{}) == "survived+new"
+  end
 end

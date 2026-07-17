@@ -165,8 +165,19 @@ defmodule CatalystWeb.ShellLive do
 
   # ---- info -----------------------------------------------------------------
 
+  # Agent events arrive tagged with the broadcasting session's id (see
+  # Session.Server.broadcast/2). Only events for the session this view is
+  # attached to are applied; a mismatched id — e.g. a straggler from a previous
+  # session still queued in the mailbox during a switch — is silently dropped,
+  # so cross-session leakage is excluded by construction.
   @impl true
-  def handle_info({:agent_event, event}, socket), do: {:noreply, apply_event(event, socket)}
+  def handle_info({:agent_event, id, event}, socket) do
+    if id == socket.assigns.session_id do
+      {:noreply, apply_event(event, socket)}
+    else
+      {:noreply, socket}
+    end
+  end
 
   # An asset rebuild happened — full reload so the new app.js/app.css are
   # fetched. Reload the page the user is on, not "/", or every non-chat page
@@ -253,6 +264,9 @@ defmodule CatalystWeb.ShellLive do
     # A MessageEnd broadcast between reattach's subscribe and snapshot call
     # arrives again here; duplicates form an in-order suffix of the replayed
     # snapshot tail. Drop them; the first genuinely new message ends the window.
+    # Only this session's own replays can reach the dedup: events are
+    # session-tagged and mismatches are dropped in handle_info, so the window
+    # never has to consider another session's messages.
     case split_replayed(socket.assigns.replayed_tail, :erlang.phash2(message)) do
       {:duplicate, rest} ->
         assign(socket, replayed_tail: rest)
@@ -333,6 +347,9 @@ defmodule CatalystWeb.ShellLive do
   # Subscribe BEFORE snapshotting so no event can fall in between: anything
   # broadcast before the snapshot answered arrives again via PubSub and is
   # dropped by the replayed_tail dedup (see the MessageEnd apply_event clause).
+  # The dedup only ever sees this session's events — broadcasts carry the
+  # session id and handle_info drops mismatches, so a switch can't leak another
+  # session's messages into the replay window.
   defp reattach_session(socket, id, pid, provider) do
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
     snapshot = Server.state(pid)
@@ -374,6 +391,9 @@ defmodule CatalystWeb.ShellLive do
 
   defp start_session(socket, provider) do
     if old_id = socket.assigns.session_id do
+      # Unsubscribe doesn't flush the mailbox, but any already-delivered event
+      # from the old session carries old_id and is dropped by the handle_info
+      # session-id check once the new id is assigned below.
       Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(old_id))
       Manager.stop(old_id)
     end
@@ -586,7 +606,16 @@ defmodule CatalystWeb.ShellLive do
 
   # Render the active page from the registry (falling back to chat). A broken
   # extension page must not crash-loop the LiveView — recovery (asking the
-  # agent to reload_extensions) needs the very chat UI it would take down.
+  # agent to reload_extensions) needs the very chat UI it would take down, and
+  # the page path persists in the URL, so a remount would just re-render it.
+  #
+  # Calling a ~H page function only BUILDS a %Phoenix.LiveView.Rendered{}; its
+  # dynamic closures run later in the diff engine, outside any guard here. So
+  # for extension pages the template is forced to iodata INSIDE the guard
+  # (raise/throw/exit — e.g. a bad assign or a GenServer call in the template —
+  # all fall back to chat). That trades fine-grained diffs for real isolation,
+  # on extension content only: the built-in chat page (the app's own compiled
+  # code) stays on the normal lazy/diffable path.
   defp render_active_page(assigns) do
     {mod, fun} =
       case UI.Registry.fetch_page(assigns.page) do
@@ -594,19 +623,28 @@ defmodule CatalystWeb.ShellLive do
         :error -> {CatalystWeb.Pages.ChatPage, :render}
       end
 
-    try do
+    # The registry's only seeded builtin page is ChatPage (owner: nil), but
+    # fetch_page/1 doesn't expose the owner tag — so trust exactly the app's
+    # own ChatPage module. That's reliable: extension code can register any
+    # path, but it can never BE the compiled CatalystWeb.Pages.ChatPage.
+    if mod == CatalystWeb.Pages.ChatPage do
       apply(mod, fun, [assigns])
-    rescue
-      e ->
-        Logger.warning(
-          "[ui] page #{inspect(mod)}.#{fun} raised: #{Exception.message(e)} — falling back to chat"
-        )
+    else
+      try do
+        rendered = apply(mod, fun, [assigns])
+        {:safe, Phoenix.HTML.Safe.to_iodata(rendered)}
+      rescue
+        e ->
+          Logger.warning(
+            "[ui] page #{inspect(mod)}.#{fun} raised: #{Exception.message(e)} — falling back to chat"
+          )
 
-        CatalystWeb.Pages.ChatPage.render(assigns)
-    catch
-      kind, reason ->
-        Logger.warning("[ui] page #{inspect(mod)}.#{fun} #{kind}: #{inspect(reason)}")
-        CatalystWeb.Pages.ChatPage.render(assigns)
+          CatalystWeb.Pages.ChatPage.render(assigns)
+      catch
+        kind, reason ->
+          Logger.warning("[ui] page #{inspect(mod)}.#{fun} #{kind}: #{inspect(reason)}")
+          CatalystWeb.Pages.ChatPage.render(assigns)
+      end
     end
   end
 
@@ -622,9 +660,13 @@ defmodule CatalystWeb.ShellLive do
   end
 
   # A broken extension slot component renders as nothing rather than crashing
-  # the whole shell on every render.
+  # the whole shell on every render. Slot components only ever come from
+  # runtime (extension) registration — the registry seeds no builtins here —
+  # so every one is forced to iodata inside the guard: calling the ~H fun only
+  # builds a lazy Rendered whose dynamics would otherwise run later in the
+  # diff engine, outside this rescue. raise/throw/exit all render as nothing.
   defp safe_component(fun, assigns) do
-    fun.(assigns)
+    {:safe, Phoenix.HTML.Safe.to_iodata(fun.(assigns))}
   rescue
     e ->
       Logger.warning("[ui] slot component raised: #{Exception.message(e)}")

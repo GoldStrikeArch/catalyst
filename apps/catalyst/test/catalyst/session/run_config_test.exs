@@ -19,7 +19,7 @@ defmodule Catalyst.Session.RunConfigTest do
   end
 
   defp build!(state) do
-    {:ok, config} = RunConfig.build(state, self())
+    {:ok, config} = RunConfig.build(state, self(), make_ref())
     config
   end
 
@@ -45,9 +45,9 @@ defmodule Catalyst.Session.RunConfigTest do
   end
 
   test "a session without a resolvable provider is a tagged error, not a raise" do
-    assert {:error, :no_provider} = RunConfig.build(state(provider: nil), self())
+    assert {:error, :no_provider} = RunConfig.build(state(provider: nil), self(), make_ref())
 
     assert {:error, {:unknown_api, "nope"}} =
-             RunConfig.build(state(provider: "nope"), self())
+             RunConfig.build(state(provider: "nope"), self(), make_ref())
   end
 end

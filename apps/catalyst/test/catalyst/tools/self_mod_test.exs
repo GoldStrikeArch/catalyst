@@ -6,7 +6,7 @@ defmodule Catalyst.Tools.SelfModTest do
   import ExUnit.CaptureLog
 
   alias Catalyst.{Extensions, Hooks}
-  alias Catalyst.Extensions.Versioning
+  alias Catalyst.Extensions.{Installer, Versioning}
   alias Catalyst.LLM.Registry
   alias Catalyst.Tools.{InstallExtension, ReloadTool, RollbackTool}
 
@@ -97,6 +97,40 @@ defmodule Catalyst.Tools.SelfModTest do
         end
 
       assert err.message =~ "{:throw, :nope}"
+    end)
+  end
+
+  @reinstall_v1 ~S'''
+  defmodule Catalyst.Ext.ReinstallProbe do
+    def version, do: :v1
+  end
+  '''
+
+  @reinstall_v2_broken ~S'''
+  defmodule Catalyst.Ext.ReinstallProbe do
+    def version, do: :v2
+  end
+
+  defmodule Catalyst.Ext.ReinstallBoom do
+    raise "boom at compile time"
+  end
+  '''
+
+  test "a failed reinstall restores the prior version's loaded code, not just its file" do
+    on_exit(fn -> Extensions.uninstall("reinstall_probe") end)
+
+    capture_log(fn ->
+      assert {:ok, _} = Installer.install("reinstall_probe", @reinstall_v1)
+      assert Catalyst.Ext.ReinstallProbe.version() == :v1
+
+      # v2's first module compiles (redefining the probe to :v2) before its
+      # second module raises: restoring the backup bytes on disk alone would
+      # leave the half-compiled v2 live in the VM with v1 in the file.
+      assert {:error, _} = Installer.install("reinstall_probe", @reinstall_v2_broken)
+      assert Catalyst.Ext.ReinstallProbe.version() == :v1
+
+      # The file on disk is the restored v1 source, matching the loaded code.
+      assert File.read!(Path.join(Extensions.dir(), "reinstall_probe.ex")) =~ ":v1"
     end)
   end
 

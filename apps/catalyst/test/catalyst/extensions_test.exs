@@ -351,6 +351,32 @@ defmodule Catalyst.ExtensionsTest do
     result
   end
 
+  @partial_source ~S'''
+  defmodule Catalyst.Ext.PartialFirst do
+    def marker, do: :first
+  end
+
+  defmodule Catalyst.Ext.PartialBoom do
+    raise "boom at compile time"
+  end
+  '''
+
+  test "a failed multi-module compile purges the modules it partially defined" do
+    refute Code.ensure_loaded?(Catalyst.Ext.PartialFirst)
+
+    path = write_ext("partial_new", @partial_source)
+
+    capture_log(fn ->
+      assert {:error, reason} = Extensions.load_file(path)
+      assert reason =~ "boom"
+    end)
+
+    # Code.compile_file/1 defined PartialFirst before PartialBoom raised — the
+    # failed load must not leave half the file's code live in the VM.
+    refute Code.ensure_loaded?(Catalyst.Ext.PartialFirst)
+    assert Extensions.fetch("partial_first") == :error
+  end
+
   test "a broken extension file registers nothing and returns an error" do
     source = ~S'''
     defmodule Catalyst.Ext.BrokenTool do

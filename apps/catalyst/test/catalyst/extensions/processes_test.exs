@@ -52,6 +52,28 @@ defmodule Catalyst.Extensions.ProcessesTest do
     refute Process.alive?(new_pid)
   end
 
+  test "start_child immediately after stop_owner succeeds (stale Registry window)" do
+    owner = "proc_race_#{System.unique_integer([:positive])}"
+    on_exit(fn -> ExtensionAPI.purge_owner(owner) end)
+
+    spec = fn id ->
+      %{id: id, start: {Agent, :start_link, [fn -> :alive end]}, restart: :temporary}
+    end
+
+    # The reload path purges the owner sup and immediately starts new children;
+    # Registry cleanup of the dead sup's name is async, so the lookup can still
+    # return a corpse. Loop to give the race a real chance to fire — every
+    # iteration must come up with a live child either way.
+    for i <- 1..10 do
+      {:ok, _} = Processes.start_child(owner, spec.({:probe_a, i}))
+      assert :ok = Processes.stop_owner(owner)
+
+      assert {:ok, pid} = Processes.start_child(owner, spec.({:probe_b, i}))
+      assert Process.alive?(pid)
+      assert [^pid] = Processes.list(owner)
+    end
+  end
+
   @proc_ext_source ~S'''
   defmodule Catalyst.Ext.ProcOwner do
     use Catalyst.Extension

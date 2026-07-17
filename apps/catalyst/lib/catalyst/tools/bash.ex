@@ -1,5 +1,5 @@
 defmodule Catalyst.Tools.Bash do
-  @moduledoc "Run a shell command in the session cwd (MuonTrap-backed, tail-truncated output)."
+  @moduledoc "Run a shell command in the session cwd (muontrap-wrapped for group kill; output capped and tail-truncated)."
   use Catalyst.Tools.Tool
   alias Catalyst.Tools.{Exec, Truncate}
 
@@ -38,11 +38,14 @@ defmodule Catalyst.Tools.Bash do
     timeout_s = timeout_seconds(args["timeout"])
 
     case Exec.bash(command, cwd: ctx.cwd, timeout: timeout_s * 1000) do
-      {:ok, %{out: out, status: status}} ->
+      {:ok, %{out: out, status: status} = res} ->
+        # truncated: true means Exec.bash killed the command at its output
+        # cap — tell the model, the way a timeout is reported.
+        capped? = Map.get(res, :truncated, false)
         {text, info} = Truncate.tail(out)
-        text = Truncate.notice(text, info, :tail)
+        text = text |> Truncate.notice(info, :tail) |> append_capped_notice(capped?)
         body = if status == 0, do: text, else: text <> "\n[exit status: #{status}]"
-        result(body, %{exit_status: status, truncation: info})
+        result(body, %{exit_status: status, output_capped: capped?, truncation: info})
 
       {:error, {:timeout, partial}} ->
         {tail, _info} = Truncate.tail(partial, max_lines: 50)
@@ -54,6 +57,14 @@ defmodule Catalyst.Tools.Bash do
         raise "bash failed: #{inspect(reason)}"
     end
   end
+
+  defp append_capped_notice(text, false), do: text
+
+  defp append_capped_notice(text, true),
+    do:
+      text <>
+        "\n[output capped at #{div(Exec.bash_max_output_bytes(), 1024 * 1024)}MB; " <>
+        "command killed before completion]"
 
   defp timeout_seconds(s) when is_integer(s) and s > 0, do: s
   defp timeout_seconds(s) when is_float(s) and s > 0, do: round(s)

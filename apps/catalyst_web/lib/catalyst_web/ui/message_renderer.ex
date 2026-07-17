@@ -12,7 +12,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   alias CatalystWeb.UI.{Markdown, Registry}
 
   @doc "Render a message: a registered `:message` renderer if one matches, else built-in."
-  @spec render_message(map()) :: Phoenix.LiveView.Rendered.t()
+  @spec render_message(map()) :: Phoenix.LiveView.Rendered.t() | Phoenix.HTML.safe()
   def render_message(assigns) do
     case Registry.renderer(:message, assigns.msg) do
       nil -> message(assigns)
@@ -21,7 +21,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   end
 
   @doc "Render a content block: a registered `:block` renderer if one matches, else built-in."
-  @spec render_block(map()) :: Phoenix.LiveView.Rendered.t()
+  @spec render_block(map()) :: Phoenix.LiveView.Rendered.t() | Phoenix.HTML.safe()
   def render_block(assigns) do
     case Registry.renderer(:block, assigns.block) do
       nil -> block(assigns)
@@ -31,9 +31,15 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   # A broken extension renderer must not crash-loop the LiveView on every
   # render of the transcript (recovery — asking the agent to reload_extensions
-  # — needs the chat UI it would take down). Fall back to built-in rendering.
+  # — needs the chat UI it would take down). Every fun reaching here is
+  # extension-registered (the built-in clauses below never pass through), and
+  # calling a ~H fun only BUILDS a lazy %Phoenix.LiveView.Rendered{} whose
+  # dynamics would otherwise run later in the diff engine, outside this rescue
+  # — so the template is forced to iodata INSIDE the guard. raise/throw/exit
+  # (e.g. a bad assign or a GenServer call in the template) all fall back to
+  # built-in rendering, which stays on the normal lazy/diffable path.
   defp safe_render(fun, assigns, fallback) do
-    fun.(assigns)
+    {:safe, Phoenix.HTML.Safe.to_iodata(fun.(assigns))}
   rescue
     e ->
       Logger.warning("[ui] extension renderer raised: #{Exception.message(e)} — using built-in")

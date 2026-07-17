@@ -14,6 +14,8 @@ defmodule Catalyst.ExtensionAPI do
   Handlers and purgers live in `:persistent_term` (read-mostly, set once at boot).
   """
 
+  require Logger
+
   defstruct [:owner, :source_path]
 
   @type t :: %__MODULE__{owner: String.t() | nil, source_path: String.t() | nil}
@@ -56,10 +58,19 @@ defmodule Catalyst.ExtensionAPI do
   @spec purge_owner(term()) :: :ok
   def purge_owner(owner) do
     Enum.each(purgers(), fn fun ->
+      # `catch _, _`, not just `rescue` (mirrors Hooks.safe/2): purgers call
+      # into other registries' GenServers, and a dead or busy one EXITs
+      # (:noproc/:timeout) rather than raising. The purge paths run inside the
+      # Catalyst.Extensions server, so an uncaught exit would take down the
+      # live tools table along with it.
       try do
         fun.(owner)
-      rescue
-        _ -> :ok
+      catch
+        kind, reason ->
+          Logger.warning(
+            "[extension_api] purger #{inspect(fun)} for #{inspect(owner)} " <>
+              "#{kind}: #{inspect(reason)}"
+          )
       end
     end)
   end

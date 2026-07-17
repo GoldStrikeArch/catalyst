@@ -10,6 +10,8 @@ defmodule Catalyst.Session.Store do
 
   alias Catalyst.{Content, Message, Usage}
 
+  require Logger
+
   @type handle :: %{id: String.t(), path: String.t(), cwd: String.t()}
 
   @doc "Root directory for all session logs (override with `config :catalyst, :sessions_root`)."
@@ -41,20 +43,35 @@ defmodule Catalyst.Session.Store do
     %{id: id, path: path, cwd: cwd}
   end
 
-  @doc "Append one message as a JSONL line."
+  @doc """
+  Append one message as a JSONL line. Best-effort, like `load/1`: the session
+  server (the single caller) appends inline while folding run events, so an
+  encode or disk failure is logged and swallowed rather than crashing the run.
+  """
   @spec append_message(handle(), Message.t()) :: :ok
-  def append_message(%{path: path}, message) do
-    File.write!(path, line(%{"type" => "message", "message" => encode(message)}), [:append])
+  def append_message(handle, message) do
+    append_line(handle, fn -> %{"type" => "message", "message" => encode(message)} end)
   end
 
   @doc """
   Append a reset marker. `load/1` discards every message before the last
   marker, so a session reset survives crash-restarts without rewriting the
-  append-only file.
+  append-only file. Best-effort, like `append_message/2`.
   """
   @spec append_reset(handle()) :: :ok
-  def append_reset(%{path: path}) do
-    File.write!(path, line(%{"type" => "reset"}), [:append])
+  def append_reset(handle) do
+    append_line(handle, fn -> %{"type" => "reset"} end)
+  end
+
+  # Encode + write inside the rescue, so neither a Jason failure (tool results
+  # can carry values JSON can't represent) nor a disk error propagates into the
+  # session server.
+  defp append_line(%{id: id, path: path}, build) do
+    File.write!(path, line(build.()), [:append])
+  rescue
+    error ->
+      Logger.warning("session #{id}: failed to append to #{path}: #{Exception.message(error)}")
+      :ok
   end
 
   @doc "Load the messages from a session file (header skipped, last reset honored)."
@@ -116,6 +133,10 @@ defmodule Catalyst.Session.Store do
 
   defp encode_content(content) when is_list(content), do: Enum.map(content, &encode_block/1)
 
+  # Tool results are duck-typed (extension/LLM-authored tools return arbitrary
+  # shapes), so non-list content is wrapped as a single block rather than crash.
+  defp encode_content(other), do: [encode_block(other)]
+
   defp encode_block(%Content.Text{text: t}), do: %{"type" => "text", "text" => t}
 
   defp encode_block(%Content.Thinking{} = b),
@@ -131,6 +152,9 @@ defmodule Catalyst.Session.Store do
 
   defp encode_block(%Content.ToolCall{id: id, name: n, arguments: a}),
     do: %{"type" => "toolCall", "id" => id, "name" => n, "arguments" => a}
+
+  # Unknown block shapes degrade to inspected text so the line stays decodable.
+  defp encode_block(other), do: %{"type" => "text", "text" => inspect(other)}
 
   # Details are best-effort JSON; drop anything not encodable rather than crash.
   defp encodable(nil), do: nil

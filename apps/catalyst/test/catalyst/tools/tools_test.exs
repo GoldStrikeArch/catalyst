@@ -147,6 +147,43 @@ defmodule Catalyst.ToolsTest do
     assert text(res) =~ "search output capped"
   end
 
+  test "grep (ripgrep) salvages matches when some paths can't be searched", %{tmp: tmp, ctx: ctx} do
+    File.write!(Path.join(tmp, "readable.txt"), "NEEDLE found\n")
+    locked = Path.join(tmp, "locked")
+    File.mkdir_p!(locked)
+    File.chmod!(locked, 0o000)
+    on_exit(fn -> File.chmod(locked, 0o755) end)
+
+    # rg exits 2 (error) even though it found matches; the permission error
+    # on stderr must become a note, not be dropped along with the matches.
+    res = Ripgrep.execute(%{"pattern" => "NEEDLE"}, ctx)
+    out = text(res)
+
+    assert out =~ "readable.txt:1: NEEDLE found"
+    assert out =~ "some paths could not be searched"
+  end
+
+  test "find (fd) raises instead of returning fd errors as paths", %{ctx: ctx} do
+    # fd exits 1 and prints "[fd error]" lines (merged into stdout) for a
+    # bad search path; with no real results that's an error, not a listing.
+    err =
+      assert_raise RuntimeError, ~r/fd error \(status 1\)/, fn ->
+        Fd.execute(%{"pattern" => "*", "path" => "does_not_exist_xyz"}, ctx)
+      end
+
+    assert err.message =~ "[fd error]"
+  end
+
+  test "find (fd) splits fd error lines from salvageable result paths", _ do
+    # A mixed errors+results run needs multiple search paths, which the tool
+    # never passes — exercise the salvage split directly.
+    out = "lib/a.ex\n[fd error]: Search path 'gone' is not a directory.\nlib/b.ex\n"
+    {errors, results} = Fd.partition_errors(out)
+
+    assert results == ["lib/a.ex", "lib/b.ex"]
+    assert errors == ["[fd error]: Search path 'gone' is not a directory."]
+  end
+
   test "ast_grep searches and rewrites", %{ctx: ctx} do
     Write.execute(
       %{"path" => "lib/g.ex", "content" => "defmodule G do\n  def h, do: IO.puts(\"hi\")\nend\n"},
@@ -215,6 +252,20 @@ defmodule Catalyst.ToolsTest do
     out = text(Bash.execute(%{"command" => "printf 'a\\xffb'"}, ctx))
     assert String.valid?(out)
     assert out =~ "a�b"
+  end
+
+  test "bash caps runaway output and reports it", %{ctx: ctx} do
+    # ~1KB lines; the 4MB cap in Exec.bash kills the loop long before the
+    # 120s default timeout, and Truncate.tail bounds what the model sees.
+    res =
+      Bash.execute(
+        %{"command" => "line=$(printf '%01000d' 0); while true; do echo $line; done"},
+        ctx
+      )
+
+    assert res.details.output_capped
+    assert text(res) =~ "output capped"
+    assert byte_size(text(res)) <= 60 * 1024
   end
 
   test "bash times out with the effective timeout and partial output", %{ctx: ctx} do

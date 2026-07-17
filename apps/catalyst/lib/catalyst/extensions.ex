@@ -24,9 +24,15 @@ defmodule Catalyst.Extensions do
   contributions (tools here, hooks/providers/UI via `ExtensionAPI.purge_owner/1`),
   so reloads are idempotent. A file that fails to **compile** registers nothing —
   compile + classify run before any registry is touched, and the prior version
-  stays active. Once a file compiles, its registration is committed even if a
-  `setup/1` raises mid-way: whatever it registered before raising stays
-  registered (owner-tagged, so the next reload or uninstall purges it cleanly).
+  stays active. Because `Code.compile_file/1` defines modules sequentially, a
+  multi-module file can fail with its first modules already redefined in the VM:
+  the failed load purges any module it newly introduced (not previously loaded
+  and not tracked by any owner); modules that pre-existed are left alone — for a
+  reinstall over an existing file, `Catalyst.Extensions.Installer` re-loads the
+  restored prior source so the VM runs the old definitions again. Once a file
+  compiles, its registration is committed even if a `setup/1` raises mid-way:
+  whatever it registered before raising stays registered (owner-tagged, so the
+  next reload or uninstall purges it cleanly).
 
   Set `CATALYST_SAFE_MODE=1` (or `config :catalyst, :safe_mode, true`) to skip
   loading extensions at boot — only built-ins are seeded, so a bad extension can't
@@ -164,7 +170,6 @@ defmodule Catalyst.Extensions do
     seed_builtins()
     wire_core_kinds()
     ensure_guide()
-    Catalyst.Extensions.Versioning.ensure_repo(dir())
 
     state = %{contrib: %{}, modules: %{}}
 
@@ -308,6 +313,12 @@ defmodule Catalyst.Extensions do
   # ---- loading --------------------------------------------------------------
 
   defp do_load_all(state) do
+    # The extensions repo is ensured on the load path, NOT in init/1: git runs
+    # with a deadline but can still take seconds, and a safe-mode boot (whose
+    # whole point is "extensions can't brick startup") must never wait on it.
+    # Explicit safe-mode load_all (the recovery path) still lands here.
+    Catalyst.Extensions.Versioning.ensure_repo(dir())
+
     paths =
       case File.dir?(dir()) do
         true -> dir() |> Path.join("*.ex") |> Path.wildcard()
@@ -345,14 +356,111 @@ defmodule Catalyst.Extensions do
   defp do_load_file(path, state) do
     owner = ext_id(path)
 
+    # Code.compile_file/1 defines modules SEQUENTIALLY: a file whose first
+    # module compiles but whose second raises fails the load with module 1
+    # already redefined in the VM. Snapshot the file's candidate module names
+    # (from its AST) and which of them are loaded before the attempt, so the
+    # error path below can purge what a partial compile left behind.
+    candidates = candidate_modules(path)
+    preloaded = MapSet.new(Enum.filter(candidates, &:erlang.module_loaded/1))
+
     # Compile + classify FIRST, in their own failure domain: a broken file
     # fails here, before we touch any registry or tracking, so a failed reload
     # neither registers nor drops the prior version.
     case compile_and_classify(path) do
-      {:ok, contribution} -> commit_load(owner, path, contribution, state)
-      {:error, reason} -> {{:error, reason}, state}
+      {:ok, contribution} ->
+        commit_load(owner, path, contribution, state)
+
+      {:error, reason} ->
+        purge_partial_compile(candidates, preloaded, state)
+        {{:error, reason}, state}
     end
   end
+
+  # After a failed compile, drop any module the partial compile left live: a
+  # candidate that is loaded NOW but was not loaded before this attempt and is
+  # not claimed by any owner's tracking. Deliberately conservative — a module
+  # that pre-existed (e.g. the prior version of this same file, or a shadowed
+  # app module) is never purged here, because purging would remove the new AND
+  # old definitions at once; the Installer repairs that case by re-loading the
+  # restored backup source instead.
+  defp purge_partial_compile(candidates, preloaded, state) do
+    tracked = state.modules |> Map.values() |> List.flatten() |> MapSet.new()
+
+    candidates
+    |> Enum.reject(&MapSet.member?(preloaded, &1))
+    |> Enum.reject(&MapSet.member?(tracked, &1))
+    |> Enum.filter(&:erlang.module_loaded/1)
+    |> Enum.each(fn mod ->
+      Logger.warning(
+        "[extensions] purging #{inspect(mod)} left behind by a failed multi-module compile"
+      )
+
+      restore_module(mod)
+    end)
+  end
+
+  # Module names a source file would define, read from its AST without
+  # compiling anything (best effort: an unparseable file defines nothing, so
+  # it yields []). Used only to clean up after a partial compile.
+  defp candidate_modules(path) do
+    with {:ok, source} <- File.read(path),
+         {:ok, ast} <- Code.string_to_quoted(source) do
+      ast |> collect_defmodules([], []) |> Enum.uniq()
+    else
+      _ -> []
+    end
+  rescue
+    # Arbitrary user source flows through here inside the GenServer; a walker
+    # edge case must degrade to "no candidates", never crash the server.
+    _ -> []
+  end
+
+  # Walk the AST collecting defmodule names, nesting prefixes the way the
+  # compiler does (`defmodule B` inside `defmodule A` defines A.B; a name
+  # starting with `Elixir.` is absolute). Dynamic names (interpolation, module
+  # attributes) can't be resolved statically and are skipped — failing to
+  # purge such a module is a leak, purging a wrongly-guessed name would be
+  # far worse.
+  defp collect_defmodules({:defmodule, _, [name | rest]}, prefix, acc) do
+    case static_module_name(name, prefix) do
+      {:ok, mod, child_prefix} ->
+        Enum.reduce(rest, [mod | acc], &collect_defmodules(&1, child_prefix, &2))
+
+      :error ->
+        Enum.reduce(rest, acc, &collect_defmodules(&1, prefix, &2))
+    end
+  end
+
+  defp collect_defmodules({form, _meta, args}, prefix, acc) when is_list(args) do
+    acc = collect_defmodules(form, prefix, acc)
+    Enum.reduce(args, acc, &collect_defmodules(&1, prefix, &2))
+  end
+
+  defp collect_defmodules({a, b}, prefix, acc),
+    do: collect_defmodules(b, prefix, collect_defmodules(a, prefix, acc))
+
+  defp collect_defmodules(list, prefix, acc) when is_list(list),
+    do: Enum.reduce(list, acc, &collect_defmodules(&1, prefix, &2))
+
+  defp collect_defmodules(_other, _prefix, acc), do: acc
+
+  defp static_module_name({:__aliases__, _, segments}, prefix) do
+    cond do
+      segments == [] or not Enum.all?(segments, &is_atom/1) ->
+        :error
+
+      prefix == [] or hd(segments) == :"Elixir" ->
+        {:ok, Module.concat(segments), segments}
+
+      true ->
+        {:ok, Module.concat(prefix ++ segments), prefix ++ segments}
+    end
+  end
+
+  # `defmodule :raw_atom` defines exactly that atom (no Elixir. prefix).
+  defp static_module_name(name, _prefix) when is_atom(name), do: {:ok, name, [name]}
+  defp static_module_name(_name, _prefix), do: :error
 
   defp compile_and_classify(path) do
     modules = path |> Code.compile_file() |> Enum.map(&elem(&1, 0))

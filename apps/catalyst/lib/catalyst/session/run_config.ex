@@ -10,12 +10,14 @@ defmodule Catalyst.Session.RunConfig do
 
   @doc """
   Assemble the loop config for `state`; `server` backs the steering/follow-up
-  callbacks. Returns `{:ok, config}`, or `{:error, reason}` when the session has
-  no resolvable provider — an expected configuration error that must not crash
-  the session server.
+  callbacks and `run_ref` scopes them to this run — the server replies `[]` to a
+  drain carrying a stale ref, so a drain racing an abort can't move queued
+  messages into a run that can no longer deliver them. Returns `{:ok, config}`,
+  or `{:error, reason}` when the session has no resolvable provider — an
+  expected configuration error that must not crash the session server.
   """
-  @spec build(map(), pid()) :: {:ok, map()} | {:error, term()}
-  def build(state, server) do
+  @spec build(map(), pid(), reference()) :: {:ok, map()} | {:error, term()}
+  def build(state, server, run_ref) do
     case resolve_provider(state) do
       {:ok, provider} ->
         {:ok,
@@ -27,8 +29,8 @@ defmodule Catalyst.Session.RunConfig do
            tools: state.tools,
            # Stable session id → Codex prompt_cache_key + request headers.
            opts: Keyword.put_new(state.opts, :session_id, state.id),
-           get_steering: fn -> drain(server, :drain_steering) end,
-           get_follow_up: fn -> drain(server, :drain_follow_up) end
+           get_steering: fn -> drain(server, {:drain_steering, run_ref}) end,
+           get_follow_up: fn -> drain(server, {:drain_follow_up, run_ref}) end
          }}
 
       {:error, _reason} = err ->
@@ -68,7 +70,11 @@ defmodule Catalyst.Session.RunConfig do
   def resolve_provider(_), do: {:error, :no_provider}
 
   defp drain(server, message) do
-    GenServer.call(server, message)
+    # :infinity is deliberate: a finite timeout abandons a call the server still
+    # processes later (draining into a run that can't deliver), while the call
+    # exits promptly if the server dies and a stale-ref drain is a server-side
+    # no-op, so there is nothing to time out on.
+    GenServer.call(server, message, :infinity)
   catch
     :exit, _reason -> []
   end

@@ -1,7 +1,10 @@
 defmodule Catalyst.Tools.RollbackTool do
   @moduledoc """
-  Undo the most recent extension change (git revert) and reload — the recovery
-  path after a bad self-modification. Requires git in the extensions dir.
+  Undo the most recent extension change that hasn't already been rolled back
+  (git revert of the newest non-reverted commit) and reload — the recovery path
+  after a bad self-modification. Repeated calls walk backwards through the
+  change history (LIFO); they never re-apply a reverted change by reverting the
+  revert. Requires git in the extensions dir.
   """
   use Catalyst.Tools.Tool
 
@@ -17,7 +20,10 @@ defmodule Catalyst.Tools.RollbackTool do
   @impl true
   def description,
     do:
-      "Undo the most recent extension change (git revert HEAD) and reload. Use to recover from a bad self-modification."
+      "Undo the most recent extension change that hasn't already been rolled back " <>
+        "(git revert) and reload. Calling it again rolls back the next older change " <>
+        "— it never re-applies a change you already rolled back. Use to recover " <>
+        "from a bad self-modification."
 
   @impl true
   def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
@@ -29,14 +35,18 @@ defmodule Catalyst.Tools.RollbackTool do
         {:ok, %{loaded: loaded, failed: failed}} = Extensions.load_all()
 
         result(
-          "Rolled back the last extension change and reloaded #{length(loaded)} file(s)." <>
-            failures_section(failed),
+          "Rolled back the most recent non-reverted extension change and reloaded " <>
+            "#{length(loaded)} file(s)." <> failures_section(failed),
           %{files: length(loaded), failed: length(failed)}
         )
 
+      {:error, :nothing_to_rollback} ->
+        raise "Rollback failed: every extension change in recent history has already " <>
+                "been rolled back — there is nothing left to revert."
+
       {:error, reason} ->
-        # Includes "nothing to revert" cases (e.g. HEAD is the empty init
-        # commit): git's message is surfaced so the agent can tell them apart.
+        # Includes "nothing to revert" cases (e.g. only the empty init commit
+        # exists): git's message is surfaced so the agent can tell them apart.
         raise "Rollback failed: #{inspect(reason)}"
     end
   end

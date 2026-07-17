@@ -16,6 +16,11 @@ defmodule Catalyst.Application do
       {Task.Supervisor, name: Catalyst.TaskSupervisor},
       # Holds OAuth credentials, refreshes tokens on demand.
       Catalyst.Auth.TokenStore,
+      # Owns the hooks ETS table in a process that does nothing else, so the
+      # registered handlers survive a Catalyst.Hooks crash (the table would
+      # otherwise die with the server and the gates would fail open). Must
+      # start immediately before Catalyst.Hooks.
+      Catalyst.Hooks.TableOwner,
       # Runtime agent-loop hook registry (before/after tool call, etc.).
       Catalyst.Hooks,
       # Runtime LLM provider registry (built-ins + runtime-registered providers).

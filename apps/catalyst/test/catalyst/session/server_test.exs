@@ -40,11 +40,12 @@ defmodule Catalyst.Session.ServerTest do
       {:text, "rewrote it"}
     ]
 
-    {_id, pid} = start(tmp, model, script)
+    {id, pid} = start(tmp, model, script)
     assert :ok = Server.prompt(pid, "rewrite the puts")
 
-    # The loop streams events over PubSub; wait for completion.
-    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+    # The loop streams events over PubSub, tagged with the session id so a
+    # subscriber that switched sessions can drop stale ones; wait for completion.
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5000
 
     snap = Server.state(pid)
     refute snap.running
@@ -70,7 +71,7 @@ defmodule Catalyst.Session.ServerTest do
     assert :ok = Server.prompt(pid, "go")
     assert {:error, :busy} = Server.prompt(pid, "again")
 
-    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
     assert :ok = Server.prompt(pid, "once more")
   end
 
@@ -79,7 +80,7 @@ defmodule Catalyst.Session.ServerTest do
     {id, pid} = start(tmp, model, script)
 
     assert :ok = Server.prompt(pid, "hello")
-    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
 
     Manager.stop(id)
     wait_until(fn -> Manager.whereis(id) == nil end)
@@ -113,7 +114,7 @@ defmodule Catalyst.Session.ServerTest do
     assert :ok = Server.prompt(pid, "long task")
     Server.abort(pid)
 
-    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
     snap = Server.state(pid)
     assert snap.error_message == "Run aborted."
     assert Enum.any?(snap.messages, &match?(%Message.Assistant{stop_reason: :aborted}, &1))
@@ -130,7 +131,7 @@ defmodule Catalyst.Session.ServerTest do
     Server.reset(pid)
 
     # Subscribers waiting on the aborted run are unlocked.
-    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
 
     snap = Server.state(pid)
     assert snap.messages == []
@@ -166,7 +167,7 @@ defmodule Catalyst.Session.ServerTest do
 
     assert :ok = Server.prompt(pid, "long task")
     Server.abort(pid)
-    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
 
     before = Server.state(pid).messages
 
@@ -176,5 +177,50 @@ defmodule Catalyst.Session.ServerTest do
     GenServer.cast(pid, {:agent_event, make_ref(), stale})
 
     assert Server.state(pid).messages == before
+  end
+
+  test "a stale drain is a no-op: queued steering survives for the next run", %{
+    tmp: tmp,
+    model: model
+  } do
+    {_id, pid} = start(tmp, model, [{:text, "reply"}])
+
+    # Replay the drain/abort race: a message is queued with no run active, and
+    # a dead run's buffered drain call (its ref is no longer current) arrives.
+    # It must reply [] without moving the queued message into in_flight — the
+    # next run's AgentEnd clears in_flight, which would silently drop it.
+    Server.steer(pid, "do not lose me")
+    assert GenServer.call(pid, {:drain_steering, make_ref()}) == []
+    assert GenServer.call(pid, {:drain_follow_up, make_ref()}) == []
+
+    # The message is still queued, so the next run drains it into the transcript.
+    assert :ok = Server.prompt(pid, "go")
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
+
+    user_texts =
+      for %Message.User{content: c} <- Server.state(pid).messages, do: Content.text_of(c)
+
+    assert "do not lose me" in user_texts
+  end
+
+  test "steering and follow-ups queued mid-run drain into the transcript", %{
+    tmp: tmp,
+    model: model
+  } do
+    # A slow tool turn leaves the queues time to fill before the next drain.
+    script = [{:tool, "bash", %{"command" => "sleep 1"}}, {:text, "done"}]
+    {_id, pid} = start(tmp, model, script)
+
+    assert :ok = Server.prompt(pid, "go")
+    Server.steer(pid, "change of plan")
+    Server.follow_up(pid, "and after that")
+
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
+
+    snap = Server.state(pid)
+    user_texts = for %Message.User{content: c} <- snap.messages, do: Content.text_of(c)
+
+    assert "change of plan" in user_texts
+    assert "and after that" in user_texts
   end
 end
