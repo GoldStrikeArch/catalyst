@@ -16,6 +16,10 @@ defmodule Catalyst.Application do
       Catalyst.Auth.TokenStore,
       # Live tool registry: built-ins + runtime-loaded extensions.
       Catalyst.Extensions,
+      # Runtime agent-loop hook registry (before/after tool call, etc.).
+      Catalyst.Hooks,
+      # Runtime LLM provider registry (built-ins + runtime-registered providers).
+      Catalyst.LLM.Registry,
       # Registry maps session id -> Session.Server pid.
       {Registry, keys: :unique, name: Catalyst.Session.Registry},
       # Supervises the loop/tool Tasks spawned per run.

@@ -1,9 +1,37 @@
 defmodule Catalyst.Tools.Registry do
   @moduledoc "The set of built-in tools, plus helpers to look them up and serialize them for a provider."
 
-  alias Catalyst.Tools.{Read, Write, Edit, Ls, Bash, Ripgrep, Fd, Sd, AstGrep, DevelopTool}
+  alias Catalyst.Tools.{
+    Read,
+    Write,
+    Edit,
+    Ls,
+    Bash,
+    Ripgrep,
+    Fd,
+    Sd,
+    AstGrep,
+    DevelopTool,
+    InstallExtension,
+    ReloadTool,
+    RollbackTool
+  }
 
-  @default [Read, Ls, Ripgrep, Fd, Bash, Write, Edit, Sd, AstGrep, DevelopTool]
+  @default [
+    Read,
+    Ls,
+    Ripgrep,
+    Fd,
+    Bash,
+    Write,
+    Edit,
+    Sd,
+    AstGrep,
+    DevelopTool,
+    InstallExtension,
+    ReloadTool,
+    RollbackTool
+  ]
 
   @doc "The default tool module list."
   def default_tools, do: @default

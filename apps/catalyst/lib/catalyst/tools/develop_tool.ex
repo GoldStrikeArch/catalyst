@@ -52,14 +52,12 @@ defmodule Catalyst.Tools.DevelopTool do
     File.write!(path, source)
 
     case Extensions.load_file(path) do
-      {:ok, []} ->
+      {:ok, %{tools: []}} ->
         raise "Compiled #{path} but found no tool module. Did you `use Catalyst.Tools.Tool` and implement name/0, parameters/0, execute/2?"
 
-      {:ok, modules} ->
-        tool_names = Enum.map(modules, & &1.name())
-
+      {:ok, %{tools: tool_names}} ->
         result(
-          "Created and loaded #{length(modules)} tool(s): #{Enum.join(tool_names, ", ")}. " <>
+          "Created and loaded #{length(tool_names)} tool(s): #{Enum.join(tool_names, ", ")}. " <>
             "They are available to call now (next turn).",
           %{path: path, tools: tool_names}
         )

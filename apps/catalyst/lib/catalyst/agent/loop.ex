@@ -26,12 +26,15 @@ defmodule Catalyst.Agent.Loop do
   """
 
   alias Catalyst.Agent.{Event, ToolRunner}
-  alias Catalyst.{Content, Message}
+  alias Catalyst.{Content, Hooks, Message}
   alias Catalyst.LLM
   alias Catalyst.Tools.Registry
 
   @doc "Run the loop for the given prompts. Returns `{:ok, new_messages, final_context}`."
   def run(prompts, context, config, emit) do
+    # Every event is also offered to registered observers (Hooks `on/1`), isolated.
+    emit = fn ev -> Hooks.notify(ev); emit.(ev) end
+
     emit.(%Event.AgentStart{})
 
     # User prompts flow through message_end like everything else, so the single
@@ -78,13 +81,20 @@ defmodule Catalyst.Agent.Loop do
         {context, acc}
 
       tool_calls ->
-        {results, terminate?} = ToolRunner.run_batch(tool_calls, turn_config, emit)
+        # Make the assistant message that issued the calls available to before_tool_call hooks.
+        batch_config = Map.put(turn_config, :assistant, assistant)
+        {results, terminate?} = ToolRunner.run_batch(tool_calls, batch_config, emit)
         Enum.each(results, fn r -> emit.(%Event.MessageEnd{message: r}) end)
         context = %{context | messages: context.messages ++ results}
         acc = acc ++ results
         emit.(%Event.TurnEnd{message: assistant, tool_results: results})
 
-        if terminate? do
+        # Hooks may swap the context/model for the next turn, or force a stop.
+        hook_ctx = %{assistant: assistant, tool_results: results, cwd: config.cwd}
+        {context, config} = Hooks.prepare_next_turn(context, config, hook_ctx)
+        stop? = terminate? or Hooks.should_stop?(Map.put(hook_ctx, :context, context))
+
+        if stop? do
           {context, acc}
         else
           inner_loop(context, acc, config, emit)
@@ -96,9 +106,13 @@ defmodule Catalyst.Agent.Loop do
     model = config.model
     convert = config[:convert_to_llm] || (&Function.identity/1)
 
+    # Hooks may rewrite/compact/redact the message list for THIS request only
+    # (the stored context is untouched).
+    messages = Hooks.transform_context(context.messages, %{config: config})
+
     llm_ctx = %LLM.Context{
       system_prompt: context.system_prompt,
-      messages: convert.(context.messages),
+      messages: convert.(messages),
       tools: Registry.to_provider_tools(config.tools)
     }
 

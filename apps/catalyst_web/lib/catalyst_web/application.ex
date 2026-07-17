@@ -15,8 +15,8 @@ defmodule CatalystWeb.Application do
 
     children = [
       CatalystWeb.Telemetry,
-      # Start a worker by calling: CatalystWeb.Worker.start_link(arg)
-      # {CatalystWeb.Worker, arg},
+      # Runtime UI registry: pages, renderers, components, commands.
+      CatalystWeb.UI.Registry,
       # Start to serve requests, typically the last entry
       CatalystWeb.Endpoint
     ]
@@ -24,7 +24,19 @@ defmodule CatalystWeb.Application do
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: CatalystWeb.Supervisor]
-    Supervisor.start_link(children, opts)
+    result = Supervisor.start_link(children, opts)
+    register_web_tools()
+    result
+  end
+
+  # Register the web-side self-modification tools into the core tool registry.
+  # (`:catalyst` boots before `:catalyst_web`, so `Catalyst.Extensions` is up.)
+  defp register_web_tools do
+    Enum.each([CatalystWeb.Tools.RebuildAssets, CatalystWeb.Tools.ReconnectUi], fn tool ->
+      Catalyst.Extensions.register_tool(tool)
+    end)
+  rescue
+    _ -> :ok
   end
 
   # Tell Phoenix to update the endpoint configuration

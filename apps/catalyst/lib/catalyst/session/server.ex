@@ -15,8 +15,8 @@ defmodule Catalyst.Session.Server do
   use GenServer
 
   alias Catalyst.Agent.{Event, Loop}
-  alias Catalyst.{Content, Message}
-  alias Catalyst.Session.{Manager, Store}
+  alias Catalyst.Message
+  alias Catalyst.Session.{Manager, Reducer, RunConfig, Snapshot, Store}
 
   defmodule State do
     @moduledoc false
@@ -114,7 +114,7 @@ defmodule Catalyst.Session.Server do
     {:reply, msgs, %{state | follow_up: q}}
   end
 
-  def handle_call(:state, _from, state), do: {:reply, snapshot(state), state}
+  def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
 
   @impl true
   def handle_cast({:steer, msg}, state),
@@ -134,7 +134,7 @@ defmodule Catalyst.Session.Server do
     do: {:noreply, %{state | messages: [], streaming_message: nil, pending_tool_calls: MapSet.new(), error_message: nil}}
 
   def handle_cast({:agent_event, event}, state) do
-    state = reduce(event, state)
+    state = Reducer.reduce(event, state)
     broadcast(state, event)
     {:noreply, state}
   end
@@ -158,20 +158,8 @@ defmodule Catalyst.Session.Server do
 
   defp start_run(state, prompts) do
     server = self()
-
     context = %{system_prompt: state.system_prompt, messages: state.messages}
-
-    config = %{
-      provider: state.provider,
-      model: state.model,
-      cwd: state.cwd,
-      tools: state.tools,
-      # Stable session id → Codex prompt_cache_key + request headers.
-      opts: Keyword.put_new(state.opts, :session_id, state.id),
-      get_steering: fn -> GenServer.call(server, :drain_steering) end,
-      get_follow_up: fn -> GenServer.call(server, :drain_follow_up) end
-    }
-
+    config = RunConfig.build(state, server)
     emit = fn event -> GenServer.cast(server, {:agent_event, event}) end
 
     task =
@@ -182,43 +170,14 @@ defmodule Catalyst.Session.Server do
     %{state | run: task, error_message: nil}
   end
 
-  defp reduce(%Event.MessageEnd{message: m}, state) do
-    Store.append_message(state.store, m)
-    streaming = if match?(%Message.Assistant{}, m), do: nil, else: state.streaming_message
-    %{state | messages: state.messages ++ [m], streaming_message: streaming}
-  end
-
-  defp reduce(%Event.MessageStart{message: m}, state), do: %{state | streaming_message: m}
-
-  defp reduce(%Event.ToolExecutionStart{call_id: id}, state),
-    do: %{state | pending_tool_calls: MapSet.put(state.pending_tool_calls, id)}
-
-  defp reduce(%Event.ToolExecutionEnd{call_id: id}, state),
-    do: %{state | pending_tool_calls: MapSet.delete(state.pending_tool_calls, id)}
-
-  defp reduce(_event, state), do: state
-
   defp handle_failure(state, reason) do
-    {text, stop} =
-      case reason do
-        :killed -> {"Run aborted.", :aborted}
-        other -> {"Run failed: #{inspect(other)}", :error}
-      end
-
-    msg = %Message.Assistant{
-      content: Content.text(text),
-      model: state.model && state.model.id,
-      stop_reason: stop,
-      error_message: text,
-      timestamp: Message.now()
-    }
-
+    msg = Reducer.failure_message(state, reason)
     Store.append_message(state.store, msg)
 
     state = %{
       state
       | messages: state.messages ++ [msg],
-        error_message: text,
+        error_message: msg.error_message,
         run: nil,
         pending_tool_calls: MapSet.new(),
         streaming_message: nil
@@ -231,21 +190,6 @@ defmodule Catalyst.Session.Server do
 
   defp broadcast(state, event),
     do: Phoenix.PubSub.broadcast(Catalyst.PubSub, topic(state.id), {:agent_event, event})
-
-  defp snapshot(state) do
-    %{
-      id: state.id,
-      cwd: state.cwd,
-      messages: state.messages,
-      streaming_message: state.streaming_message,
-      pending_tool_calls: MapSet.to_list(state.pending_tool_calls),
-      running: state.run != nil,
-      model: state.model,
-      system_prompt: state.system_prompt,
-      store_path: state.store.path,
-      error_message: state.error_message
-    }
-  end
 
   defp drain_queue(q), do: {:queue.to_list(q), :queue.new()}
 

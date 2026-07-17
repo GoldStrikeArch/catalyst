@@ -2,20 +2,38 @@ defmodule Catalyst.Extensions do
   @moduledoc """
   Runtime extension registry — the mechanism behind "self-developing" Catalyst.
 
-  Holds the live set of tool modules in an ETS table: the built-ins are seeded at
-  boot, and extensions (Elixir source files in `extensions_dir`) are compiled and
-  loaded **at runtime** with `Code.compile_file/1`. Because the Elixir compiler
-  is part of an OTP release, this works inside a packaged binary too — the binary
-  stays immutable while new modules are loaded into the running VM from a
-  user-writable directory.
+  Holds the live set of tool modules in an ETS table, and loads extension source
+  files (`*.ex` in `dir/0`) at runtime with `Code.compile_file/1`. Because the
+  Elixir compiler ships in an OTP release, this works inside a packaged binary
+  too — the binary stays immutable while new modules are loaded into the running
+  VM from a user-writable directory.
 
-  The agent can therefore write a new tool and call `load_file/1` to use it with
-  no restart (see `Catalyst.Tools.DevelopTool`). Loaded modules are not persisted
-  in the VM across restarts; the source files are, and are re-loaded on boot.
+  A loaded file can contribute more than tools. Each compiled module is
+  classified:
+
+    * a module exporting `setup/1` (`use Catalyst.Extension`) is run as an
+      **extension** — its `setup/1` registers any mix of tools, loop hooks, event
+      observers, providers, and UI renderers/components/pages via
+      `Catalyst.ExtensionAPI`;
+    * a module shaped like a tool (`name/0` + `parameters/0` + `execute/2`) that
+      is *not* an extension is **auto-registered** as a tool (backward compatible
+      with tool-only extension files).
+
+  Everything a file contributes is tagged with the file's `owner` id (its
+  sanitized basename). Reloading a file first **purges** that owner's prior
+  contributions (tools here, hooks/providers/UI via `ExtensionAPI.purge_owner/1`),
+  so reloads are idempotent. Registration is **committed only after** the file
+  compiles and classifies cleanly, so a broken file never partially registers.
+
+  Set `CATALYST_SAFE_MODE=1` (or `config :catalyst, :safe_mode, true`) to skip
+  loading extensions at boot — only built-ins are seeded, so a bad extension can't
+  brick startup.
   """
 
   use GenServer
   require Logger
+
+  alias Catalyst.{Extension, ExtensionAPI, Hooks}
 
   @table :catalyst_tools
 
@@ -43,14 +61,20 @@ defmodule Catalyst.Extensions do
   @doc "Names of all registered tools."
   def names, do: Enum.map(tools(), & &1.name())
 
-  @doc "Register a tool module (last write wins, so reloading a file updates it)."
-  def register_tool(module), do: GenServer.call(__MODULE__, {:register, module})
+  @doc "Register a tool module (last write wins). `opts[:owner]` tags it for purge-on-reload."
+  def register_tool(module, opts \\ []), do: GenServer.call(__MODULE__, {:register, module, opts})
 
-  @doc "Compile an extension source file and register the tool modules it defines."
+  @doc """
+  Compile an extension source file and apply its contributions (tools + anything
+  its `setup/1` registers). Returns `{:ok, summary}` or `{:error, reason}`.
+  """
   def load_file(path), do: GenServer.call(__MODULE__, {:load_file, path}, 30_000)
 
   @doc "(Re)load all `*.ex` files in the extensions directory."
   def load_all, do: GenServer.call(__MODULE__, :load_all, 60_000)
+
+  @doc "Remove every contribution made by `owner` (tools here + hooks/providers/UI)."
+  def uninstall(owner), do: GenServer.call(__MODULE__, {:uninstall, owner})
 
   @doc "Directory holding extension source files."
   def dir, do: Application.get_env(:catalyst, :extensions_dir) || Path.expand("~/.catalyst/extensions")
@@ -60,43 +84,81 @@ defmodule Catalyst.Extensions do
   def resolve(fun) when is_function(fun, 0), do: fun.()
   def resolve(_), do: tools()
 
+  @doc "Whether extensions are skipped at boot (safe mode)."
+  def safe_mode? do
+    System.get_env("CATALYST_SAFE_MODE") in ~w(1 true) or
+      Application.get_env(:catalyst, :safe_mode, false)
+  end
+
   # ---- callbacks ------------------------------------------------------------
 
   @impl true
   def init(:ok) do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
     seed_builtins()
+    wire_core_kinds()
     ensure_guide()
-    {:ok, %{}, {:continue, :load_all}}
+    Catalyst.Extensions.Versioning.ensure_repo(dir())
+
+    state = %{contrib: %{}}
+
+    if safe_mode?() do
+      Logger.info("[extensions] safe mode — skipping extension load")
+      {:ok, state}
+    else
+      {:ok, state, {:continue, :load_all}}
+    end
   end
 
   @impl true
   def handle_continue(:load_all, state) do
-    do_load_all()
+    {_result, state} = do_load_all(state)
     {:noreply, state}
   end
 
   @impl true
-  def handle_call({:register, module}, _from, state) do
-    {:reply, insert(module), state}
+  def handle_call({:register, module, opts}, _from, state) do
+    {result, state} = do_register(module, opts, state)
+    {:reply, result, state}
   end
 
   def handle_call({:load_file, path}, _from, state) do
-    {:reply, do_load_file(path), state}
+    {result, state} = do_load_file(path, state)
+    {:reply, result, state}
   end
 
   def handle_call(:load_all, _from, state) do
-    {:reply, do_load_all(), state}
+    {result, state} = do_load_all(state)
+    {:reply, result, state}
   end
 
-  # ---- internals ------------------------------------------------------------
+  def handle_call({:uninstall, owner}, _from, state) do
+    {:reply, :ok, purge_owner(owner, state)}
+  end
+
+  # ---- boot helpers ---------------------------------------------------------
 
   defp seed_builtins do
     Enum.each(Catalyst.Tools.Registry.default_tools(), &insert/1)
   end
 
+  # Wire the extension kinds that core can back, and the hooks owner-purger.
+  # Provider (E3) and UI (E5) kinds/purgers are wired by their own subsystems.
+  defp wire_core_kinds do
+    ExtensionAPI.register_kind(:tool, fn api, module -> register_tool(module, owner: api.owner) end)
+
+    ExtensionAPI.register_kind(:hook, fn api, point, fun, opts ->
+      Hooks.register(point, fun, Keyword.put_new(opts, :owner, api.owner))
+    end)
+
+    ExtensionAPI.register_kind(:event, fn api, fun, opts ->
+      Hooks.on(fun, Keyword.put_new(opts, :owner, api.owner))
+    end)
+
+    ExtensionAPI.register_purger(&Hooks.unregister/1)
+  end
+
   # Publish the bundled self-extension guide to a stable, agent-readable path.
-  # Refreshed each boot so it tracks the app version.
   defp ensure_guide do
     src = Application.app_dir(:catalyst, "priv/guide.md")
 
@@ -109,36 +171,91 @@ defmodule Catalyst.Extensions do
     _ -> :ok
   end
 
-  defp do_load_all do
+  # ---- loading --------------------------------------------------------------
+
+  defp do_load_all(state) do
     dir = dir()
 
     if File.dir?(dir) do
-      dir
-      |> Path.join("*.ex")
-      |> Path.wildcard()
-      |> Enum.flat_map(fn path ->
-        case do_load_file(path) do
-          {:ok, mods} ->
-            mods
+      {summaries, state} =
+        dir
+        |> Path.join("*.ex")
+        |> Path.wildcard()
+        |> Enum.reduce({[], state}, fn path, {acc, st} ->
+          case do_load_file(path, st) do
+            {{:ok, summary}, st} ->
+              {[summary | acc], st}
 
-          {:error, reason} ->
-            Logger.warning("[extensions] failed to load #{path}: #{inspect(reason)}")
-            []
-        end
-      end)
-      |> then(&{:ok, &1})
+            {{:error, reason}, st} ->
+              Logger.warning("[extensions] failed to load #{path}: #{inspect(reason)}")
+              {acc, st}
+          end
+        end)
+
+      {{:ok, Enum.reverse(summaries)}, state}
     else
-      {:ok, []}
+      {{:ok, []}, state}
     end
   end
 
-  defp do_load_file(path) do
-    compiled = Code.compile_file(path)
-    tool_modules = compiled |> Enum.map(&elem(&1, 0)) |> Enum.filter(&tool_module?/1)
-    Enum.each(tool_modules, &insert/1)
-    {:ok, tool_modules}
+  defp do_load_file(path, state) do
+    owner = ext_id(path)
+
+    # Compile + classify FIRST: a broken file fails here, before we touch any
+    # registry, so a failed reload neither registers nor drops the prior version.
+    modules = path |> Code.compile_file() |> Enum.map(&elem(&1, 0))
+    {ext_mods, tool_mods} = classify(modules)
+
+    # Replace this owner's prior contributions, then commit the new ones.
+    state = purge_owner(owner, state)
+    state = Enum.reduce(tool_mods, state, fn mod, st -> register_owned(mod, owner, st) end)
+    api = ExtensionAPI.new(owner, path)
+
+    Enum.each(ext_mods, fn mod ->
+      try do
+        mod.setup(api)
+      rescue
+        e -> Logger.warning("[extensions] #{owner}: #{inspect(mod)}.setup/1 raised: #{Exception.message(e)}")
+      end
+    end)
+
+    summary = %{owner: owner, tools: Enum.map(tool_mods, & &1.name()), extensions: ext_mods}
+    {{:ok, summary}, state}
   rescue
-    e -> {:error, Exception.message(e)}
+    e -> {{:error, Exception.message(e)}, state}
+  end
+
+  # Extensions take precedence: a module that is both is treated as an extension.
+  defp classify(modules) do
+    Enum.reduce(modules, {[], []}, fn mod, {exts, tools} ->
+      cond do
+        Extension.extension_module?(mod) -> {[mod | exts], tools}
+        tool_module?(mod) -> {exts, [mod | tools]}
+        true -> {exts, tools}
+      end
+    end)
+    |> then(fn {exts, tools} -> {Enum.reverse(exts), Enum.reverse(tools)} end)
+  end
+
+  # ---- registration + owner tracking ----------------------------------------
+
+  defp do_register(module, opts, state) do
+    case insert(module) do
+      {:ok, _} = ok -> {ok, track(module, opts[:owner], state)}
+      err -> {err, state}
+    end
+  end
+
+  defp register_owned(module, owner, state) do
+    insert(module)
+    track(module, owner, state)
+  end
+
+  defp track(_module, nil, state), do: state
+
+  defp track(module, owner, state) do
+    names = Map.get(state.contrib, owner, MapSet.new())
+    put_in(state.contrib[owner], MapSet.put(names, module.name()))
   end
 
   defp insert(module) do
@@ -148,6 +265,33 @@ defmodule Catalyst.Extensions do
     else
       {:error, {:not_a_tool, module}}
     end
+  end
+
+  # Remove an owner's tools from the table (restoring a built-in if one was
+  # shadowed), drop its hooks/providers/UI via purgers, and clear its tracking.
+  defp purge_owner(owner, state) do
+    names = Map.get(state.contrib, owner, MapSet.new())
+    builtins = builtins_index()
+
+    Enum.each(names, fn name ->
+      :ets.delete(@table, name)
+
+      case Map.get(builtins, name) do
+        nil -> :ok
+        mod -> :ets.insert(@table, {name, mod})
+      end
+    end)
+
+    ExtensionAPI.purge_owner(owner)
+    %{state | contrib: Map.delete(state.contrib, owner)}
+  end
+
+  defp builtins_index do
+    Map.new(Catalyst.Tools.Registry.default_tools(), &{&1.name(), &1})
+  end
+
+  defp ext_id(path) do
+    path |> Path.basename(".ex") |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
   end
 
   # Duck-typed: a tool exports name/0, parameters/0 and execute/2.

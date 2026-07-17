@@ -1,15 +1,21 @@
-defmodule CatalystWeb.ChatLive do
+defmodule CatalystWeb.ShellLive do
   @moduledoc """
-  The chat UI. Owns a `Catalyst.Session.Server` (started on connect), subscribes
-  to its `"session:<id>"` PubSub topic, and renders the conversation live:
-  streaming assistant tokens, thinking blocks, tool-call cards, and tool results.
-  Offline by default via the Demo provider; switch to Codex once logged in.
+  The single LiveView for the whole app, mounted at `/` and `/:page`. It owns the
+  `Catalyst.Session.Server` (started on connect), subscribes to its
+  `"session:<id>"` topic, and renders the shell chrome (title, provider/login,
+  page nav) plus the **active page** resolved from `CatalystWeb.UI.Registry`.
+
+  The default page is `"chat"` (`CatalystWeb.Pages.ChatPage`); extensions can
+  register additional pages (e.g. `/settings`) at runtime with no router change.
+  All page content is rendered through the registry, and conversation messages
+  through `CatalystWeb.UI.MessageRenderer`, so the UI is runtime-extensible.
   """
   use CatalystWeb, :live_view
 
-  alias Catalyst.{Content, Message}
+  alias Catalyst.Message
   alias Catalyst.Agent.Event
   alias Catalyst.Session.{Manager, Server}
+  alias CatalystWeb.{Assets, UI}
 
   @system_prompt """
   You are Catalyst, a concise coding agent running on the user's machine.
@@ -31,6 +37,7 @@ defmodule CatalystWeb.ChatLive do
   def mount(_params, _session, socket) do
     socket =
       assign(socket,
+        page: "chat",
         messages: [],
         streaming: nil,
         running: false,
@@ -47,11 +54,16 @@ defmodule CatalystWeb.ChatLive do
       )
 
     if connected?(socket) do
+      Phoenix.PubSub.subscribe(Catalyst.PubSub, Assets.topic())
       {:ok, start_session(socket, :demo)}
     else
       {:ok, socket}
     end
   end
+
+  @impl true
+  def handle_params(params, _uri, socket),
+    do: {:noreply, assign(socket, page: Map.get(params, "page", "chat"))}
 
   @impl true
   def terminate(_reason, socket) do
@@ -112,10 +124,13 @@ defmodule CatalystWeb.ChatLive do
     {:noreply, assign(socket, logged_in: false) |> put_flash(:info, "Signed out.")}
   end
 
-  # ---- agent events ---------------------------------------------------------
+  # ---- info -----------------------------------------------------------------
 
   @impl true
   def handle_info({:agent_event, event}, socket), do: {:noreply, apply_event(event, socket)}
+
+  # An asset rebuild happened — full reload so the new app.js/app.css are fetched.
+  def handle_info(:reload_assets, socket), do: {:noreply, redirect(socket, to: "/")}
 
   # Login task finished (matches only when the ref is our pending login task).
   def handle_info({ref, result}, %{assigns: %{login_ref: ref}} = socket) do
@@ -231,8 +246,19 @@ defmodule CatalystWeb.ChatLive do
           <span class="text-lg font-bold">Catalyst</span>
           <span class="badge badge-sm badge-ghost">{@model_label}</span>
           <span :if={@running} class="loading loading-dots loading-xs text-primary"></span>
+
+          <nav :if={length(UI.Registry.list_pages()) > 1} class="flex items-center gap-1 ml-3">
+            <.link
+              :for={p <- UI.Registry.list_pages()}
+              patch={~p"/#{p.path}"}
+              class={["btn btn-xs btn-ghost", @page == p.path && "btn-active"]}
+            >
+              {p.label}
+            </.link>
+          </nav>
         </div>
         <div class="flex-none flex items-center gap-1">
+          {render_slot_components(:header_extra, assigns)}
           <button
             class={["btn btn-xs", @provider == :demo && "btn-primary"]}
             phx-click="set_provider"
@@ -251,11 +277,7 @@ defmodule CatalystWeb.ChatLive do
             </button>
             <button class="btn btn-xs btn-ghost" phx-click="logout" title="Sign out of ChatGPT">⏏</button>
           <% else %>
-            <button
-              :if={@login_state != :pending}
-              class="btn btn-xs btn-secondary"
-              phx-click="login"
-            >
+            <button :if={@login_state != :pending} class="btn btn-xs btn-secondary" phx-click="login">
               Sign in to ChatGPT
             </button>
             <span :if={@login_state == :pending} class="text-xs flex items-center gap-1">
@@ -267,118 +289,23 @@ defmodule CatalystWeb.ChatLive do
         </div>
       </header>
 
-      <div id="messages" phx-hook="ScrollBottom" class="flex-1 overflow-y-auto px-4 py-6 space-y-2">
-        <div :if={@messages == [] and is_nil(@streaming)} class="text-center text-base-content/50 mt-20">
-          <p class="text-sm">Ask Catalyst to inspect this project.</p>
-          <p class="text-xs mt-1">cwd: {@cwd}</p>
-        </div>
-
-        <.message :for={msg <- @messages} msg={msg} />
-
-        <div :if={@streaming} class="chat chat-start">
-          <div class="chat-bubble chat-bubble-neutral whitespace-pre-wrap">
-            <span :if={@streaming.thinking != ""} class="block text-xs italic opacity-60 mb-1">{@streaming.thinking}</span>{@streaming.text}<span class="animate-pulse">▌</span>
-          </div>
-        </div>
-
-        <div :for={{_id, t} <- @tools} class="chat chat-start">
-          <div class="chat-bubble chat-bubble-info text-sm flex items-center gap-2">
-            <span class="loading loading-spinner loading-xs"></span> running <code>{t.name}</code>…
-          </div>
-        </div>
-      </div>
-
-      <form phx-submit="send" phx-change="typing" class="bg-base-100 border-t border-base-300 p-3 flex gap-2">
-        <input
-          type="text"
-          name="message"
-          value={@input}
-          autocomplete="off"
-          placeholder="Ask Catalyst…  (e.g. “list the files” or “search defmodule”)"
-          class="input input-bordered flex-1"
-        />
-        <button :if={!@running} type="submit" class="btn btn-primary">Send</button>
-        <button :if={@running} type="button" phx-click="abort" class="btn btn-error">Stop</button>
-      </form>
+      <%= render_active_page(assigns) %>
     </div>
     """
   end
 
-  # ---- message components ---------------------------------------------------
+  # Render the active page from the registry (falling back to chat).
+  defp render_active_page(assigns) do
+    {mod, fun} = UI.Registry.fetch_page(assigns.page) || {CatalystWeb.Pages.ChatPage, :render}
+    apply(mod, fun, [assigns])
+  end
 
-  defp message(%{msg: %Message.User{}} = assigns) do
+  # Render every component registered for a named slot.
+  defp render_slot_components(slot, assigns) do
+    assigns = assign(assigns, :__slot_funs__, UI.Registry.components(slot))
+
     ~H"""
-    <div class="chat chat-end">
-      <div class="chat-bubble chat-bubble-primary whitespace-pre-wrap">{Content.text_of(@msg.content)}</div>
-    </div>
+    <%= for fun <- @__slot_funs__ do %>{fun.(assigns)}<% end %>
     """
   end
-
-  defp message(%{msg: %Message.Assistant{}} = assigns) do
-    ~H"""
-    <div :if={@msg.content != []} class="chat chat-start">
-      <div class="chat-bubble chat-bubble-neutral whitespace-pre-wrap">
-        <.block :for={b <- @msg.content} block={b} />
-      </div>
-    </div>
-    """
-  end
-
-  defp message(%{msg: %Message.ToolResult{}} = assigns) do
-    ~H"""
-    <div class="px-2">
-      <div class={[
-        "rounded-lg border text-xs font-mono overflow-hidden",
-        @msg.is_error && "border-error/50 bg-error/10",
-        !@msg.is_error && "border-base-300 bg-base-100"
-      ]}>
-        <div class="px-3 py-1 border-b border-base-300/50 font-semibold flex items-center gap-2">
-          <span>{@msg.tool_name}</span>
-          <span :if={@msg.is_error} class="badge badge-error badge-xs">error</span>
-        </div>
-        <pre class="px-3 py-2 whitespace-pre-wrap max-h-60 overflow-y-auto">{tool_output(@msg)}</pre>
-      </div>
-    </div>
-    """
-  end
-
-  defp block(%{block: %Content.Text{}} = assigns) do
-    ~H"{@block.text}"
-  end
-
-  defp block(%{block: %Content.Thinking{}} = assigns) do
-    ~H"""
-    <details class="text-xs italic opacity-60 my-1">
-      <summary class="cursor-pointer">thinking</summary>
-      <div class="whitespace-pre-wrap mt-1">{@block.thinking}</div>
-    </details>
-    """
-  end
-
-  defp block(%{block: %Content.ToolCall{}} = assigns) do
-    ~H"""
-    <div class="text-xs opacity-70 my-1">
-      <span class="badge badge-xs badge-ghost">tool</span>
-      <code>{@block.name}({short_args(@block.arguments)})</code>
-    </div>
-    """
-  end
-
-  defp block(assigns), do: ~H""
-
-  defp tool_output(%Message.ToolResult{content: content}) do
-    content
-    |> Content.text_of()
-    |> String.split("\n")
-    |> Enum.take(40)
-    |> Enum.join("\n")
-  end
-
-  defp short_args(args) when is_map(args) and map_size(args) == 0, do: ""
-
-  defp short_args(args) when is_map(args) do
-    args |> Jason.encode!() |> String.slice(0, 80)
-  end
-
-  defp short_args(_), do: ""
 end

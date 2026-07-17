@@ -40,7 +40,7 @@ defmodule Catalyst.Umbrella.MixProject do
           runtime_tools: :permanent,
           ssl: :permanent
         ],
-        steps: [:assemble, &Desktop.Deployment.generate_installer/1]
+        steps: [:assemble, &bundle_assets/1, &Desktop.Deployment.generate_installer/1]
       ],
       # Headless self-contained binary of Catalyst's core (no wx) via Burrito.
       # Build with: MIX_ENV=prod mix release catalyst_cli
@@ -60,6 +60,56 @@ defmodule Catalyst.Umbrella.MixProject do
     [
       preferred_envs: [precommit: :test]
     ]
+  end
+
+  # Release step (desktop): bundle a self-contained asset workspace so the packaged
+  # app can rebuild CSS/JS at runtime (CatalystWeb.Assets / the rebuild_assets tool).
+  # See the prod block in config/runtime.exs for the paths these are wired to.
+  defp bundle_assets(release) do
+    webapp = release.path |> Path.join("lib/catalyst_web-*") |> Path.wildcard() |> List.first()
+
+    if webapp do
+      ws = Path.join(webapp, "priv/asset_build")
+      deps = Path.join(webapp, "deps")
+      File.mkdir_p!(Path.join(ws, "bin"))
+      File.mkdir_p!(Path.join(ws, "lib"))
+      File.mkdir_p!(deps)
+
+      # Asset source (css/js/vendor) + lib source (for tailwind's @source scanning).
+      File.cp_r!("apps/catalyst_web/assets", Path.join(ws, "assets"))
+      File.cp_r!("apps/catalyst_web/lib/catalyst_web", Path.join(ws, "lib/catalyst_web"))
+
+      # JS deps esbuild resolves via NODE_PATH, heroicons (its tailwind plugin reads
+      # SVGs via a path relative to vendor/), and the generated colocated hooks.
+      for d <- ~w(phoenix phoenix_html phoenix_live_view heroicons) do
+        File.cp_r!("deps/#{d}", Path.join(deps, d))
+      end
+
+      colocated = "_build/#{Mix.env()}/phoenix-colocated"
+      if File.dir?(colocated), do: File.cp_r!(colocated, Path.join(deps, "phoenix-colocated"))
+
+      # esbuild + tailwind standalone binaries.
+      cp_bin!(Path.wildcard("_build/esbuild-*") |> List.first(), Path.join(ws, "bin/esbuild"))
+      cp_bin!(Path.wildcard("_build/tailwind-*") |> List.first(), Path.join(ws, "bin/tailwind"))
+
+      # Also scan the user's runtime extensions dir so Tailwind classes used by
+      # runtime-created UI components get compiled (same machine for a local app).
+      ext_dir = Path.expand("~/.catalyst/extensions")
+      File.write!(Path.join(ws, "assets/css/app.css"), ~s/\n@source "#{ext_dir}";\n/, [:append])
+
+      IO.puts("bundle_assets: workspace at #{ws}")
+    else
+      IO.warn("bundle_assets: catalyst_web app dir not found under #{release.path}")
+    end
+
+    release
+  end
+
+  defp cp_bin!(nil, _dest), do: :ok
+
+  defp cp_bin!(src, dest) do
+    File.cp!(src, dest)
+    File.chmod!(dest, 0o755)
   end
 
   # Dependencies can be Hex packages:

@@ -4,7 +4,7 @@ defmodule Catalyst.ExtensionsTest do
 
   import ExUnit.CaptureLog
 
-  alias Catalyst.{Content, Message, Model}
+  alias Catalyst.{Content, Hooks, Message, Model}
   alias Catalyst.Agent.Loop
   alias Catalyst.Extensions
   alias Catalyst.Tools.DevelopTool
@@ -87,6 +87,77 @@ defmodule Catalyst.ExtensionsTest do
     assert shout_result, "expected the self-created tool to have been called"
     assert Content.text_of(shout_result.content) == "IT WORKS"
     assert Content.text_of(List.last(messages).content) == "self-extended!"
+  end
+
+  @multikind_source ~S'''
+  defmodule Catalyst.Ext.MultiKindTool do
+    use Catalyst.Tools.Tool
+    @impl true
+    def name, do: "mk_tool"
+    @impl true
+    def description, do: "multi-kind test tool"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+    @impl true
+    def execute(_args, _ctx), do: result("ok")
+  end
+
+  defmodule Catalyst.Ext.MultiKind do
+    use Catalyst.Extension
+    @impl true
+    def setup(api) do
+      Catalyst.ExtensionAPI.register_hook(api, :before_tool_call, &Catalyst.Ext.MultiKind.gate/1)
+      :ok
+    end
+    def gate(_ctx), do: :cont
+  end
+  '''
+
+  test "an extension's setup/1 registers both a tool and a loop hook" do
+    on_exit(fn -> Extensions.uninstall("multikind") end)
+    path = write_ext("multikind", @multikind_source)
+
+    assert {:ok, summary} = Extensions.load_file(path)
+    assert "mk_tool" in summary.tools
+
+    assert Extensions.fetch("mk_tool") == Catalyst.Ext.MultiKindTool
+    assert length(owner_hooks("multikind")) == 1
+  end
+
+  test "reloading an extension purges its prior hooks (no duplicates)" do
+    on_exit(fn -> Extensions.uninstall("multikind") end)
+    path = write_ext("multikind", @multikind_source)
+
+    Extensions.load_file(path)
+    Extensions.load_file(path)
+
+    assert length(owner_hooks("multikind")) == 1
+  end
+
+  test "a broken extension file registers nothing and returns an error" do
+    source = ~S'''
+    defmodule Catalyst.Ext.BrokenTool do
+      use Catalyst.Tools.Tool
+      @impl true
+      def name, do: "broken_tool"
+      this is not valid @@@
+    end
+    '''
+
+    path = write_ext("brokenext", source)
+
+    assert {:error, _reason} = Extensions.load_file(path)
+    assert Extensions.fetch("broken_tool") == nil
+  end
+
+  defp write_ext(name, source) do
+    path = Path.join(Extensions.dir(), name <> ".ex")
+    File.write!(path, source)
+    path
+  end
+
+  defp owner_hooks(owner) do
+    Hooks.handlers(:before_tool_call) |> Enum.filter(&(&1.owner == owner))
   end
 
   defp shout_run_source do

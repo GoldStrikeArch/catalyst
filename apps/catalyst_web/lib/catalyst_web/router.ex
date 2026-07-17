@@ -17,7 +17,10 @@ defmodule CatalystWeb.Router do
   scope "/", CatalystWeb do
     pipe_through :browser
 
-    live "/", ChatLive, :index
+    # One LiveView for everything; the catch-all resolves runtime-registered
+    # pages by path (e.g. /settings) with no router recompile per page.
+    live "/", ShellLive, :index
+    live "/:page", ShellLive, :page
   end
 
   # Other scopes may use custom stacks.

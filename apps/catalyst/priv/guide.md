@@ -230,8 +230,16 @@ You don't have to go through the agent. To add a tool by hand:
   ```bash
   _build/prod/Catalyst.app/Contents/MacOS/run
   ```
-- The `develop_tool` path works identically in the `.app` — the compiler is bundled in the
-  release, so compile-on-the-fly works with no external toolchain.
+- The `develop_tool` / `install_extension` paths work identically in the `.app` — the Elixir
+  compiler is bundled in the release, so tools, providers, loop hooks, and UI pages/renderers
+  load at runtime with **no external toolchain**.
+- **Asset rebuilds work in the `.app` too.** The esbuild + tailwind toolchain *and* the asset
+  source are bundled, so `rebuild_assets` regenerates CSS/JS at runtime. Tailwind also scans
+  `~/.catalyst/extensions`, so a Tailwind class used by a component you create at runtime gets
+  compiled — call `rebuild_assets` after adding it. Caveat: this writes into the app bundle's
+  `priv/static`, so it only works when the `.app` is in a **user-writable** location (e.g.
+  `_build/prod/Catalyst.app`); a copy installed under `/Applications` is root-owned and not
+  writable, so a runtime rebuild there will fail (`{:error, …}`).
 
 ---
 
@@ -243,3 +251,44 @@ You don't have to go through the agent. To add a tool by hand:
 4. `execute/2` resolves paths via `ctx.cwd`, returns `result(...)`, and `raise`s on failure.
 5. Output bounded; `execution_mode :sequential` if it writes files.
 6. After creating it, tell the user the new tool's name and what it does — then use it.
+
+---
+
+## Beyond tools: providers, loop hooks, and the UI
+
+`develop_tool` adds a tool. To add *other* kinds of capability at runtime, use the
+**`install_extension`** tool with a file that defines a module `use Catalyst.Extension`
+and a `setup(api)` callback. Inside `setup/1`, register any mix of:
+
+- **Tools** — `Catalyst.ExtensionAPI.register_tool(api, MyTool)` (or just define a
+  `use Catalyst.Tools.Tool` module in the same file; it is auto-registered).
+- **LLM providers** —
+  `register_provider(api, "my-api", %Catalyst.LLM.ProviderConfig{module: MyProvider, name: "My"})`,
+  where `MyProvider` implements `Catalyst.LLM.Provider` (`stream/4`). Select it by
+  starting a session whose model `api` is `"my-api"`. (Refactoring an *existing*
+  provider needs no registration — just rewrite its module; the next call uses it.)
+- **Agent-loop hooks** — `register_hook(api, point, fun)` for:
+  - `:before_tool_call` — `fn ctx -> {:block, reason} | :cont end` (gate/deny a call)
+  - `:after_tool_call` — `fn {content, details, is_error, terminate}, ctx -> {:ok, tuple} end`
+  - `:transform_context` — `fn messages, ctx -> {:ok, messages} end` (edit the LLM request)
+  - `:prepare_next_turn` — `fn {context, config}, ctx -> {:ok, {context, config}} end`
+  - `:should_stop_after_turn` — `fn ctx -> true | :cont end`
+  Observe every event with `Catalyst.ExtensionAPI.on(api, fn event -> ... end)`.
+- **UI** — `register_page(api, "settings", {MyPage, :render})` adds a page at `/settings`;
+  `register_renderer(api, :message, match_fun, render_fun)` overrides how a message or
+  tool result is shown; `register_component(api, :header_extra, fun)` adds a header/
+  sidebar/footer widget. Render functions are `Phoenix.Component`s.
+
+Everything you register is tagged with the file's name (its *owner*); reinstalling the
+same file purges its old contributions first, so reloads never duplicate. Installs are
+git-committed: **`rollback_extension`** reverts the last change, **`reload_extensions`**
+reloads from disk, and booting with `CATALYST_SAFE_MODE=1` loads only built-ins if an
+extension misbehaves.
+
+### Applying UI changes
+| Change | How to apply |
+|---|---|
+| New page / modal / panel / message renderer | immediate (registry) — just navigate to it |
+| Markup/layout change to a page/component module | hot-swap the module, then `reload_ui` |
+| New/changed CSS (Tailwind) or JS hook | `rebuild_assets` (rebuilds, then reloads the window) |
+| New compiled dep / NIF / native (wx) change | needs an app rebuild + restart |

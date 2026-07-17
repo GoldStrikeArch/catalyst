@@ -9,7 +9,7 @@ defmodule Catalyst.Agent.ToolRunner do
   """
 
   alias Catalyst.Agent.Event
-  alias Catalyst.{Content, Message}
+  alias Catalyst.{Content, Hooks, Message}
   alias Catalyst.Tools.Registry
 
   @type outcome :: %{message: Message.ToolResult.t(), terminate: boolean()}
@@ -52,15 +52,26 @@ defmodule Catalyst.Agent.ToolRunner do
     %{id: id, name: name, arguments: args} = tool_call
     emit.(%Event.ToolExecutionStart{call_id: id, name: name, args: args})
 
-    {content, details, is_error, terminate} =
+    hook_ctx = %{name: name, args: args, call_id: id, cwd: config.cwd, assistant: Map.get(config, :assistant)}
+
+    raw =
       case Registry.fetch(config.tools, name) do
         nil ->
           {Content.text("unknown tool: #{name}"), %{}, true, false}
 
         module ->
-          ctx = %{cwd: config.cwd, call_id: id, report: reporter(tool_call, emit)}
-          execute_tool(module, args, ctx)
+          case Hooks.before_tool_call(hook_ctx) do
+            {:block, reason} ->
+              {Content.text(to_string(reason)), %{blocked: true}, true, false}
+
+            _ ->
+              ctx = %{cwd: config.cwd, call_id: id, report: reporter(tool_call, emit)}
+              execute_tool(module, args, ctx)
+          end
       end
+
+    # Hooks may override the result (content/details/is_error/terminate).
+    {content, details, is_error, terminate} = Hooks.after_tool_call(raw, hook_ctx)
 
     emit.(%Event.ToolExecutionEnd{
       call_id: id,
