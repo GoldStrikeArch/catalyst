@@ -52,7 +52,7 @@ defmodule Catalyst.Extensions do
   require Logger
 
   alias Catalyst.{Extension, ExtensionAPI, Hooks}
-  alias Catalyst.Extensions.{BootGuard, Processes}
+  alias Catalyst.Extensions.{BootGuard, Processes, Versioning}
 
   @table :catalyst_tools
 
@@ -169,6 +169,109 @@ defmodule Catalyst.Extensions do
   @spec uninstall(String.t()) :: :ok
   def uninstall(owner), do: GenServer.call(__MODULE__, {:uninstall, owner})
 
+  @typedoc "One live owner's footprint: source file (nil when registered without a file), tool names, modules its file defined."
+  @type loaded_info :: %{
+          owner: String.t(),
+          path: Path.t() | nil,
+          tools: [String.t()],
+          modules: [module()]
+        }
+
+  @doc """
+  Snapshot of every live extension owner — what each registered and which
+  modules its file defined. The introspection behind the Extensions panel;
+  built-in tools are not listed (they have no owner).
+  """
+  @spec list_loaded() :: [loaded_info()]
+  def list_loaded do
+    files = Map.new(extension_files(), &{ext_id(&1), &1})
+
+    __MODULE__
+    |> GenServer.call(:snapshot)
+    |> Enum.map(fn {owner, info} -> Map.put(info, :path, Map.get(files, owner)) end)
+    |> Enum.sort_by(& &1.owner)
+  end
+
+  @doc "Extensions present on disk but disabled (`<file>.ex.disabled`), as `%{owner, path}`."
+  @spec list_disabled() :: [%{owner: String.t(), path: Path.t()}]
+  def list_disabled do
+    dir()
+    |> disabled_files()
+    |> Enum.map(&%{owner: disabled_owner(&1), path: &1})
+    |> Enum.sort_by(& &1.owner)
+  end
+
+  @doc "The source file backing `owner`, enabled or disabled. `:error` for file-less owners."
+  @spec source_file(String.t()) :: {:ok, Path.t()} | :error
+  def source_file(owner) do
+    case file_for(owner) || disabled_file_for(owner) do
+      nil -> :error
+      path -> {:ok, path}
+    end
+  end
+
+  @doc "Reload one extension from its source file (purge prior contributions + recompile)."
+  @spec reload(String.t()) :: {:ok, summary()} | {:error, term()}
+  def reload(owner) do
+    serialized_load(fn ->
+      case file_for(owner) do
+        nil -> {:error, :no_file}
+        path -> do_load_file(path)
+      end
+    end)
+  end
+
+  @doc """
+  Disable an extension without deleting it: purge its contributions and rename
+  its source to `<file>.ex.disabled` so neither `load_all/0` nor the next boot
+  picks it up. Reversed by `enable/1`. The rename is committed to the
+  extensions repo so rollback history stays coherent.
+  """
+  @spec disable(String.t()) :: {:ok, Path.t()} | {:error, term()}
+  def disable(owner) do
+    serialized_load(fn ->
+      case file_for(owner) do
+        nil ->
+          {:error, :no_file}
+
+        path ->
+          disabled = path <> ".disabled"
+
+          # Rename first (under the load lock) so a concurrent load can't
+          # recompile the file between the purge and the rename.
+          with :ok <- File.rename(path, disabled) do
+            :ok = GenServer.call(__MODULE__, {:uninstall, owner})
+            _ = Versioning.commit(dir(), "disable #{owner}")
+            {:ok, disabled}
+          end
+      end
+    end)
+  end
+
+  @doc """
+  Re-enable a disabled extension: rename `<file>.ex.disabled` back and load it.
+  A file that fails to compile stays enabled (and keeps failing visibly) —
+  the load error is returned so the caller can surface it.
+  """
+  @spec enable(String.t()) :: {:ok, summary()} | {:error, term()}
+  def enable(owner) do
+    serialized_load(fn ->
+      case disabled_file_for(owner) do
+        nil ->
+          {:error, :no_file}
+
+        disabled ->
+          path = String.replace_suffix(disabled, ".disabled", "")
+
+          with :ok <- File.rename(disabled, path) do
+            result = do_load_file(path)
+            _ = Versioning.commit(dir(), "enable #{owner}")
+            result
+          end
+      end
+    end)
+  end
+
   @doc "Directory holding extension source files."
   @spec dir() :: Path.t()
   def dir,
@@ -223,6 +326,7 @@ defmodule Catalyst.Extensions do
 
   def format_error({:compile, reason}), do: "compile failed: " <> format_error(reason)
   def format_error({:register, reason}), do: "registration failed: " <> format_error(reason)
+  def format_error(:no_file), do: "no extension source file found for that owner"
   def format_error(:timeout), do: "timed out"
   def format_error({:exit, reason}), do: "exited: #{inspect(reason)}"
 
@@ -345,6 +449,24 @@ defmodule Catalyst.Extensions do
     {:reply, :ok, purge_owner(owner, state)}
   end
 
+  def handle_call(:snapshot, _from, state) do
+    owners =
+      state.contrib
+      |> Map.keys()
+      |> MapSet.new()
+      |> MapSet.union(MapSet.new(Map.keys(state.modules)))
+
+    snapshot =
+      Enum.map(owners, fn owner ->
+        tools =
+          state.contrib |> Map.get(owner, MapSet.new()) |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+
+        {owner, %{owner: owner, tools: tools, modules: Map.get(state.modules, owner, [])}}
+      end)
+
+    {:reply, snapshot, state}
+  end
+
   # ---- boot helpers ---------------------------------------------------------
 
   defp seed_builtins do
@@ -426,7 +548,7 @@ defmodule Catalyst.Extensions do
     # with a deadline but can still take seconds, and a safe-mode boot (whose
     # whole point is "extensions can't brick startup") must never wait on it.
     # Explicit safe-mode load_all (the recovery path) still lands here.
-    Catalyst.Extensions.Versioning.ensure_repo(dir())
+    Versioning.ensure_repo(dir())
 
     paths = extension_files()
 
@@ -899,8 +1021,22 @@ defmodule Catalyst.Extensions do
     Map.new(Catalyst.Tools.Registry.default_tools(), &{&1.name(), &1})
   end
 
-  defp ext_id(path) do
-    path |> Path.basename(".ex") |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
+  defp ext_id(path), do: path |> Path.basename(".ex") |> sanitize_owner()
+
+  defp disabled_owner(path), do: path |> Path.basename(".ex.disabled") |> sanitize_owner()
+
+  defp sanitize_owner(base), do: String.replace(base, ~r/[^a-zA-Z0-9_]/, "_")
+
+  defp file_for(owner), do: Enum.find(extension_files(), &(ext_id(&1) == owner))
+
+  defp disabled_file_for(owner),
+    do: dir() |> disabled_files() |> Enum.find(&(disabled_owner(&1) == owner))
+
+  defp disabled_files(dir) do
+    case File.dir?(dir) do
+      true -> dir |> Path.join("*.ex.disabled") |> Path.wildcard()
+      false -> []
+    end
   end
 
   # Duck-typed: a tool exports name/0, parameters/0 and execute/2.

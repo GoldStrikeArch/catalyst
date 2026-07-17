@@ -485,6 +485,60 @@ defmodule Catalyst.ExtensionsTest do
     assert Extensions.fetch("broken_tool") == :error
   end
 
+  @toggle_source ~S'''
+  defmodule Catalyst.Ext.ToggleTool do
+    use Catalyst.Tools.Tool
+    @impl true
+    def name, do: "toggle_tool"
+    @impl true
+    def description, do: "disable/enable round-trip test tool"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+    @impl true
+    def execute(_args, _ctx), do: result("ok")
+  end
+  '''
+
+  test "list_loaded reports each owner's tools, modules, and source file" do
+    on_exit(fn -> Extensions.uninstall("toggle") end)
+    path = write_ext("toggle", @toggle_source)
+    assert {:ok, _summary} = Extensions.load_file(path)
+
+    assert [entry] = Enum.filter(Extensions.list_loaded(), &(&1.owner == "toggle"))
+    assert entry.path == path
+    assert entry.tools == ["toggle_tool"]
+    assert Catalyst.Ext.ToggleTool in entry.modules
+  end
+
+  test "disable purges + renames the file; load_all keeps it off; enable restores it" do
+    on_exit(fn -> Extensions.uninstall("toggle") end)
+    path = write_ext("toggle", @toggle_source)
+    assert {:ok, _summary} = Extensions.load_file(path)
+    assert {:ok, _mod} = Extensions.fetch("toggle_tool")
+
+    assert {:ok, disabled} = Extensions.disable("toggle")
+    assert disabled == path <> ".disabled"
+    assert File.exists?(disabled)
+    refute File.exists?(path)
+    assert Extensions.fetch("toggle_tool") == :error
+    refute Enum.any?(Extensions.list_loaded(), &(&1.owner == "toggle"))
+    assert [%{owner: "toggle"}] = Extensions.list_disabled()
+
+    # A full reload (≈ next boot) must not resurrect a disabled extension.
+    {:ok, _} = Extensions.load_all()
+    assert Extensions.fetch("toggle_tool") == :error
+
+    assert {:ok, summary} = Extensions.enable("toggle")
+    assert summary.tools == ["toggle_tool"]
+    assert {:ok, _mod} = Extensions.fetch("toggle_tool")
+    assert Extensions.list_disabled() == []
+  end
+
+  test "disable/enable for an owner with no source file return :no_file" do
+    assert {:error, :no_file} = Extensions.disable("no_such_owner")
+    assert {:error, :no_file} = Extensions.enable("no_such_owner")
+  end
+
   defp write_ext(name, source) do
     path = Path.join(Extensions.dir(), name <> ".ex")
     File.write!(path, source)

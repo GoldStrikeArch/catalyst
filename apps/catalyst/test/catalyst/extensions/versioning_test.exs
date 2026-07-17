@@ -64,6 +64,60 @@ defmodule Catalyst.Extensions.VersioningTest do
   end
 
   @tag :git
+  test "rollback_file reverts only that file's newest change, LIFO per file" do
+    if Versioning.available?() do
+      dir = tmp_repo!("perfile")
+      a = Path.join(dir, "a.ex")
+      b = Path.join(dir, "b.ex")
+
+      File.write!(a, "a v1")
+      assert :ok = Versioning.commit(dir, "install a")
+      File.write!(b, "b v1")
+      assert :ok = Versioning.commit(dir, "install b")
+      File.write!(a, "a v2")
+      assert :ok = Versioning.commit(dir, "update a")
+
+      # Scoped to a: undoes "update a" even though "install b"… is older than
+      # it; b is untouched throughout.
+      assert :ok = Versioning.rollback_file(dir, a)
+      assert File.read!(a) == "a v1"
+      assert File.read!(b) == "b v1"
+
+      # Next scoped rollback walks to "install a" (deleting the file)…
+      assert :ok = Versioning.rollback_file(dir, a)
+      refute File.exists?(a)
+      assert File.read!(b) == "b v1"
+
+      # …and then a's history is exhausted while b's is still revertable.
+      assert {:error, :nothing_to_rollback} = Versioning.rollback_file(dir, a)
+      assert :ok = Versioning.rollback_file(dir, b)
+      refute File.exists?(b)
+    end
+  end
+
+  @tag :git
+  test "rollback_file covers a disabled extension's pre-disable history" do
+    if Versioning.available?() do
+      dir = tmp_repo!("disabledfile")
+      path = Path.join(dir, "x.ex")
+
+      File.write!(path, "v1")
+      assert :ok = Versioning.commit(dir, "install x")
+      File.rename!(path, path <> ".disabled")
+      assert :ok = Versioning.commit(dir, "disable x")
+
+      # Passing the .disabled path must still see (and undo) the rename.
+      assert :ok = Versioning.rollback_file(dir, path <> ".disabled")
+      assert File.exists?(path)
+      refute File.exists?(path <> ".disabled")
+
+      # And keep walking into the original install.
+      assert :ok = Versioning.rollback_file(dir, path)
+      refute File.exists?(path)
+    end
+  end
+
+  @tag :git
   test "commit succeeds even with commit.gpgsign forced on in the repo-local config" do
     if Versioning.available?() do
       dir = tmp_repo!("gpgsign")

@@ -77,8 +77,9 @@ Inside the bundle — resolve at runtime, don't hardcode:
 - **Restructure a page/layout (a LiveView/component's markup or behavior)** → you can't edit the
   compiled module's file; register a replacement page/renderer via `install_extension`, or
   hot-swap the module by loading new code, then call **`reload_ui`**.
-- **Recover** → `rollback_extension` (git revert + reload), `reload_extensions`, or restart with
-  `CATALYST_SAFE_MODE=1` (built-ins only).
+- **Recover** → `rollback_extension` (git revert + reload; pass `name` to scope it to one
+  extension), `reload_extensions`, the **Extensions panel** at `/extensions` (per-extension
+  reload / roll back / disable buttons), or restart with `CATALYST_SAFE_MODE=1` (built-ins only).
 
 ### Worked example: make the app background white
 
@@ -378,11 +379,17 @@ Everything you register is tagged with the file's name (its *owner*); reinstalli
 same file purges its old contributions first, so reloads never duplicate — including
 **module definitions**: modules your file compiled are removed from the VM on purge, and
 a module that shadowed one shipping with the app is restored from its original beam.
-Installs are git-committed: **`rollback_extension`** reverts the last change,
-**`reload_extensions`** reloads from disk. Safe mode loads only built-ins: set
+Installs are git-committed: **`rollback_extension`** reverts the last change (pass
+`name` to undo one extension's most recent change instead), **`reload_extensions`**
+reloads from disk. The **Extensions panel** (`/extensions`, the "Extensions" link in the
+header) lists everything that is loaded/registered — extensions, tools, providers,
+hooks, pages, renderers, components, commands — with per-extension **reload / roll
+back / disable** buttons; *disable* renames the file to `.ex.disabled` (purged now,
+skipped at boot) until re-enabled. Safe mode loads only built-ins: set
 `CATALYST_SAFE_MODE=1` manually, or it engages **automatically** when the previous boot
 crashed while extensions were active (a boot-marker file detects it; a successful
-`reload_extensions` clears it, and the UI shows a banner while it is active).
+`reload_extensions` — or the panel's "Load extensions now" button — clears it, and the
+UI shows a banner while it is active).
 
 ### The system prompt and the agent loop are data too
 

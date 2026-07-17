@@ -76,6 +76,17 @@ defmodule CatalystWeb.UI.Registry do
     ArgumentError -> nil
   end
 
+  @doc "All registered renderers (`%{kind, owner, seq}`), newest first. Introspection only."
+  @spec list_renderers() :: [map()]
+  def list_renderers do
+    @table
+    |> :ets.match_object({{:renderer, :_}, :_})
+    |> Enum.map(fn {{:renderer, kind}, e} -> %{kind: kind, owner: e.owner, seq: e.seq} end)
+    |> Enum.sort_by(& &1.seq, :desc)
+  rescue
+    ArgumentError -> []
+  end
+
   ## components
 
   @doc "Register a slot component (`fun.(assigns) -> rendered`)."
@@ -91,6 +102,17 @@ defmodule CatalystWeb.UI.Registry do
     |> Enum.map(&elem(&1, 1))
     |> Enum.sort_by(& &1.seq, :desc)
     |> Enum.map(& &1.fun)
+  rescue
+    ArgumentError -> []
+  end
+
+  @doc "All registered slot components (`%{slot, owner, seq}`), newest first. Introspection only."
+  @spec list_components() :: [map()]
+  def list_components do
+    @table
+    |> :ets.match_object({{:component, :_}, :_})
+    |> Enum.map(fn {{:component, slot}, e} -> %{slot: slot, owner: e.owner, seq: e.seq} end)
+    |> Enum.sort_by(& &1.seq, :desc)
   rescue
     ArgumentError -> []
   end
@@ -186,16 +208,15 @@ defmodule CatalystWeb.UI.Registry do
   defp bump(state), do: %{state | seq: state.seq + 1}
 
   defp seed_builtin_pages do
-    entry = %{
-      path: "chat",
-      mod: CatalystWeb.Pages.ChatPage,
-      fun: :render,
-      label: "Chat",
-      owner: nil,
-      seq: 0
-    }
+    builtins = [
+      %{path: "chat", mod: CatalystWeb.Pages.ChatPage, label: "Chat"},
+      %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"}
+    ]
 
-    :ets.insert(@table, {{:page, "chat"}, entry})
+    Enum.each(builtins, fn page ->
+      entry = Map.merge(page, %{fun: :render, owner: nil, seq: 0})
+      :ets.insert(@table, {{:page, page.path}, entry})
+    end)
   end
 
   defp wire do

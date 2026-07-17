@@ -17,6 +17,8 @@ defmodule CatalystWeb.ShellLive do
 
   alias Catalyst.Message
   alias Catalyst.Agent.Event
+  alias Catalyst.Extensions
+  alias Catalyst.Extensions.Versioning
   alias Catalyst.Session.{Manager, Server}
   alias CatalystWeb.{Assets, UI}
 
@@ -39,6 +41,10 @@ defmodule CatalystWeb.ShellLive do
         login_state: :idle,
         login_ref: nil,
         boot_status: Catalyst.Extensions.boot_status(),
+        # Extensions panel: data snapshot (built on navigation/action, see
+        # maybe_refresh_panel) and the in-flight panel action task, if any.
+        ext_panel: nil,
+        ext_action: nil,
         provider: :demo,
         model_label: "Demo (offline)",
         session_id: nil,
@@ -67,8 +73,40 @@ defmodule CatalystWeb.ShellLive do
   end
 
   @impl true
-  def handle_params(params, _uri, socket),
-    do: {:noreply, assign(socket, page: Map.get(params, "page", "chat"))}
+  def handle_params(params, _uri, socket) do
+    page = Map.get(params, "page", "chat")
+    {:noreply, socket |> change_page(page) |> maybe_refresh_panel()}
+  end
+
+  # Patching back to chat re-renders the message-stream container empty:
+  # stream items live only in the DOM, and the other page replaced that DOM.
+  # Replay the transcript from the session snapshot (same dedup window as a
+  # reattach, so an event broadcast mid-replay isn't doubled).
+  defp change_page(%{assigns: %{page: old, session_pid: pid}} = socket, "chat")
+       when old != "chat" and is_pid(pid) do
+    socket = assign(socket, page: "chat")
+
+    try do
+      replay_transcript(socket, pid)
+    catch
+      # The session died between events — the :DOWN handler reattaches.
+      :exit, _reason -> socket
+    end
+  end
+
+  defp change_page(socket, page), do: assign(socket, page: page)
+
+  # The extensions panel renders a data snapshot, not live registry reads:
+  # rebuild it when navigating to the page, after a panel action, and when a
+  # run ends (the agent may have installed/removed extensions mid-run).
+  defp maybe_refresh_panel(%{assigns: %{page: "extensions"}} = socket) do
+    assign(socket,
+      ext_panel: CatalystWeb.Pages.ExtensionsPage.panel_data(),
+      boot_status: Catalyst.Extensions.boot_status()
+    )
+  end
+
+  defp maybe_refresh_panel(socket), do: socket
 
   # No terminate/2 session cleanup: the session outlives the LiveView so a
   # reconnect, page refresh, or self-triggered reload (reload_ui/rebuild_assets)
@@ -166,6 +204,35 @@ defmodule CatalystWeb.ShellLive do
     {:noreply, assign(socket, logged_in: false) |> put_flash(:info, "Signed out.")}
   end
 
+  # ---- extensions panel actions ----------------------------------------------
+
+  # One panel action at a time: compiles/git can take seconds, and the buttons
+  # are disabled while @ext_action is set — this clause catches stragglers.
+  def handle_event("ext_" <> _action, _params, %{assigns: %{ext_action: %{}}} = socket),
+    do: {:noreply, socket}
+
+  def handle_event("ext_reload_all", _params, socket),
+    do: {:noreply, run_ext_action(socket, "reloading all extensions", &reload_all_extensions/0)}
+
+  def handle_event("ext_rollback_last", _params, socket),
+    do: {:noreply, run_ext_action(socket, "rolling back", fn -> rollback_extension(nil) end)}
+
+  def handle_event("ext_reload", %{"owner" => owner}, socket),
+    do:
+      {:noreply, run_ext_action(socket, "reloading #{owner}", fn -> reload_extension(owner) end)}
+
+  def handle_event("ext_rollback", %{"owner" => owner}, socket),
+    do:
+      {:noreply,
+       run_ext_action(socket, "rolling back #{owner}", fn -> rollback_extension(owner) end)}
+
+  def handle_event("ext_disable", %{"owner" => owner}, socket),
+    do:
+      {:noreply, run_ext_action(socket, "disabling #{owner}", fn -> disable_extension(owner) end)}
+
+  def handle_event("ext_enable", %{"owner" => owner}, socket),
+    do: {:noreply, run_ext_action(socket, "enabling #{owner}", fn -> enable_extension(owner) end)}
+
   # ---- info -----------------------------------------------------------------
 
   # Agent events arrive tagged with the broadcasting session's id (see
@@ -213,6 +280,29 @@ defmodule CatalystWeb.ShellLive do
      socket
      |> assign(login_state: {:error, inspect(reason)}, login_ref: nil)
      |> put_flash(:error, "Sign-in crashed.")}
+  end
+
+  # Extensions-panel action finished — flash the outcome and rebuild the panel
+  # snapshot (and the boot-status banner: a successful reload clears safe mode).
+  def handle_info({ref, result}, %{assigns: %{ext_action: %{ref: ref}}} = socket) do
+    Process.demonitor(ref, [:flush])
+    socket = socket |> assign(ext_action: nil) |> maybe_refresh_panel()
+
+    case result do
+      {:ok, message} -> {:noreply, put_flash(socket, :info, message)}
+      {:error, message} -> {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{assigns: %{ext_action: %{ref: ref}}} = socket
+      ) do
+    {:noreply,
+     socket
+     |> assign(ext_action: nil)
+     |> maybe_refresh_panel()
+     |> put_flash(:error, "Extension action crashed: #{inspect(reason)}")}
   end
 
   # The session this view is attached to died or was replaced (e.g. another
@@ -304,9 +394,10 @@ defmodule CatalystWeb.ShellLive do
     do: assign(socket, running: true)
 
   # Also clear tool spinners: an aborted/failed run never emits
-  # ToolExecutionEnd for its pending calls.
+  # ToolExecutionEnd for its pending calls. The run may have installed or
+  # removed extensions, so a visible panel snapshot is rebuilt too.
   defp apply_event(%Event.AgentEnd{}, socket),
-    do: assign(socket, running: false, streaming: nil, tools: %{})
+    do: socket |> assign(running: false, streaming: nil, tools: %{}) |> maybe_refresh_panel()
 
   defp apply_event(_event, socket), do: socket
 
@@ -324,6 +415,118 @@ defmodule CatalystWeb.ShellLive do
       {_skipped, [^hash | rest]} -> {:duplicate, rest}
       _ -> :new
     end
+  end
+
+  # ---- extensions panel actions (run inside a supervised task) ---------------
+
+  # Panel actions compile code and shell out to git — seconds, not millis. Run
+  # them off the LiveView (like login); the result lands in handle_info and the
+  # buttons stay disabled via @ext_action meanwhile.
+  defp run_ext_action(socket, label, fun) do
+    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fun)
+    assign(socket, ext_action: %{ref: task.ref, label: label})
+  end
+
+  defp reload_all_extensions do
+    {:ok, %{loaded: loaded, failed: failed}} = Extensions.load_all()
+
+    case failed do
+      [] ->
+        {:ok, "Reloaded #{length(loaded)} extension file(s)."}
+
+      failed ->
+        {:error,
+         "Reloaded #{length(loaded)} file(s); #{length(failed)} failed — " <>
+           failure_lines(failed)}
+    end
+  end
+
+  defp reload_extension(owner) do
+    case Extensions.reload(owner) do
+      {:ok, summary} ->
+        {:ok, "Reloaded #{owner}" <> summary_suffix(summary)}
+
+      {:error, reason} ->
+        {:error, "Reload of #{owner} failed: " <> Extensions.format_error(reason)}
+    end
+  end
+
+  defp disable_extension(owner) do
+    case Extensions.disable(owner) do
+      {:ok, _path} ->
+        {:ok, "Disabled #{owner} — its file is kept (.ex.disabled) and skipped at boot."}
+
+      {:error, reason} ->
+        {:error, "Disable of #{owner} failed: " <> Extensions.format_error(reason)}
+    end
+  end
+
+  defp enable_extension(owner) do
+    case Extensions.enable(owner) do
+      {:ok, summary} ->
+        {:ok, "Enabled #{owner}" <> summary_suffix(summary)}
+
+      {:error, reason} ->
+        {:error, "Enable of #{owner} failed: " <> Extensions.format_error(reason)}
+    end
+  end
+
+  # nil = global: undo the newest non-reverted change across all extensions.
+  defp rollback_extension(nil) do
+    Extensions.dir()
+    |> Versioning.rollback()
+    |> rollback_result("the most recent extension change")
+  end
+
+  defp rollback_extension(owner) do
+    case Extensions.source_file(owner) do
+      {:ok, path} ->
+        Extensions.dir()
+        |> Versioning.rollback_file(path)
+        |> rollback_result("#{owner}'s most recent change")
+
+      :error ->
+        {:error, "Rollback failed: no source file found for #{owner}."}
+    end
+  end
+
+  defp rollback_result(:ok, what) do
+    {:ok, %{loaded: loaded, failed: failed}} = Extensions.load_all()
+
+    case failed do
+      [] ->
+        {:ok, "Rolled back #{what} and reloaded #{length(loaded)} file(s)."}
+
+      failed ->
+        {:error,
+         "Rolled back #{what}, but #{length(failed)} file(s) failed to load — " <>
+           failure_lines(failed)}
+    end
+  end
+
+  defp rollback_result({:error, :nothing_to_rollback}, what),
+    do: {:error, "Nothing to roll back for #{what} — recent changes were all reverted already."}
+
+  defp rollback_result({:error, reason}, what),
+    do: {:error, "Rollback of #{what} failed: #{inspect(reason)}"}
+
+  defp summary_suffix(summary) do
+    tools =
+      case summary.tools do
+        [] -> "."
+        tools -> " — tools: #{Enum.join(tools, ", ")}."
+      end
+
+    case summary[:warning] do
+      nil -> tools
+      warning -> tools <> " Warning: #{warning}"
+    end
+  end
+
+  defp failure_lines(failed) do
+    Enum.map_join(failed, "; ", fn {path, reason} ->
+      "#{Path.basename(path)}: #{Extensions.format_error(reason)}"
+    end)
   end
 
   # ---- session lifecycle ----------------------------------------------------
@@ -399,8 +602,25 @@ defmodule CatalystWeb.ShellLive do
   # session's messages into the replay window.
   defp reattach_session(socket, id, pid, provider) do
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-    snapshot = Server.state(pid)
     {_mod, _model, label} = provider_config(provider)
+
+    socket
+    |> monitor_session(pid)
+    |> assign(session_id: id, session_pid: pid, provider: provider, model_label: label)
+    |> replay_transcript(pid)
+  catch
+    # The server died between whereis and the state call — start fresh.
+    kind, _reason when kind in [:exit, :error] ->
+      Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
+      start_session(socket, fallback_provider(socket, provider))
+  end
+
+  # Rebuild the message stream (and run-tracking assigns) from the session's
+  # snapshot — used on reattach and when patching back to the chat page (whose
+  # stream items live only in DOM the other page replaced). Callers handle a
+  # dead pid (`Server.state/1` exits).
+  defp replay_transcript(socket, pid) do
+    snapshot = Server.state(pid)
 
     {socket, seq} =
       Enum.reduce(snapshot.messages, {stream(socket, :messages, [], reset: true), 0}, fn
@@ -408,12 +628,7 @@ defmodule CatalystWeb.ShellLive do
       end)
 
     socket
-    |> monitor_session(pid)
     |> assign(
-      session_id: id,
-      session_pid: pid,
-      provider: provider,
-      model_label: label,
       cwd: snapshot.cwd,
       running: snapshot.running,
       streaming: nil,
@@ -423,11 +638,6 @@ defmodule CatalystWeb.ShellLive do
       replayed_tail: snapshot.messages |> Enum.take(-10) |> Enum.map(&:erlang.phash2/1)
     )
     |> seed_streaming(snapshot.streaming_message)
-  catch
-    # The server died between whereis and the state call — start fresh.
-    kind, _reason when kind in [:exit, :error] ->
-      Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
-      start_session(socket, fallback_provider(socket, provider))
   end
 
   # Rebuild only the in-flight placeholder. The session still accumulates the
@@ -642,8 +852,9 @@ defmodule CatalystWeb.ShellLive do
           :if={@boot_status != :ok}
           class="border-b border-amber-300/60 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200"
         >
-          ⚠ Extensions were not loaded — {boot_status_reason(@boot_status)}. Fix the files in
-          ~/.catalyst/extensions (or remove the offender), then ask the agent to run <code class="font-mono">reload_extensions</code>.
+          ⚠ Extensions were not loaded — {boot_status_reason(@boot_status)}. Recover from the
+          <.link patch={~p"/extensions"} class="font-semibold underline">Extensions panel</.link>
+          (disable or roll back the offender, then load again), or ask the agent to run <code class="font-mono">reload_extensions</code>.
         </div>
 
         {render_active_page(assigns)}
@@ -688,11 +899,11 @@ defmodule CatalystWeb.ShellLive do
         :error -> {CatalystWeb.Pages.ChatPage, :render}
       end
 
-    # The registry's only seeded builtin page is ChatPage (owner: nil), but
-    # fetch_page/1 doesn't expose the owner tag — so trust exactly the app's
-    # own ChatPage module. That's reliable: extension code can register any
-    # path, but it can never BE the compiled CatalystWeb.Pages.ChatPage.
-    if mod == CatalystWeb.Pages.ChatPage do
+    # The registry's seeded builtin pages are ChatPage and ExtensionsPage
+    # (owner: nil), but fetch_page/1 doesn't expose the owner tag — so trust
+    # exactly the app's own compiled page modules. That's reliable: extension
+    # code can register any path, but it can never BE these compiled modules.
+    if mod in [CatalystWeb.Pages.ChatPage, CatalystWeb.Pages.ExtensionsPage] do
       apply(mod, fun, [assigns])
     else
       try do

@@ -123,10 +123,45 @@ defmodule Catalyst.Extensions.Versioning do
     end
   end
 
+  @doc """
+  Like `rollback/1`, but scoped to one extension: undo the most recent
+  not-yet-reverted commit that touched `file` (or its `.disabled` variant, so
+  disable/enable renames stay in scope). Other extensions' changes are left
+  alone. Best effort: a commit that spanned several files (e.g. a `git add -A`
+  install picking up unrelated edits) is reverted whole.
+  """
+  @spec rollback_file(Path.t(), Path.t()) :: :ok | {:error, term()}
+  def rollback_file(dir, file) do
+    case repo?(dir) do
+      false ->
+        {:error, :no_git}
+
+      true ->
+        # Normalize to the enabled name so a currently-disabled extension's
+        # pre-disable history is still in scope.
+        rel =
+          file
+          |> Path.expand()
+          |> Path.relative_to(Path.expand(dir))
+          |> String.replace_suffix(".disabled", "")
+
+        with {:ok, commits} <- recent_commits(dir, [rel, rel <> ".disabled"]),
+             {:ok, hash} <- rollback_target(commits) do
+          do_revert(dir, hash)
+        end
+    end
+  end
+
   # ---- rollback internals ----------------------------------------------------
 
-  defp recent_commits(dir) do
-    case git(dir, ["log", "--format=%H%x09%s", "-n", Integer.to_string(@log_window)]) do
+  defp recent_commits(dir, paths \\ []) do
+    pathspec =
+      case paths do
+        [] -> []
+        paths -> ["--" | paths]
+      end
+
+    case git(dir, ["log", "--format=%H%x09%s", "-n", Integer.to_string(@log_window)] ++ pathspec) do
       {out, 0} ->
         commits =
           out
