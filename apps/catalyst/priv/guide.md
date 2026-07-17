@@ -1,8 +1,10 @@
 # Catalyst — Self-Extension Guide (adding features at runtime)
 
-This guide is written **for the Catalyst agent** (and humans). It explains how to add
-a new capability — a new *tool* — to Catalyst **while it is running**, including inside the
-packaged, standalone macOS app, **without recompiling or restarting the binary**.
+This guide is written **for the Catalyst agent** (and humans). It explains how to add or change
+capabilities at runtime — **tools, LLM providers, agent-loop hooks, and the UI** — **while the app
+is running**, including inside the packaged, standalone macOS app, **without recompiling or
+restarting it**. Start with "Where you are: the live bundled app" for the environment map and the
+decision guide; everything in this guide is relative to that running app.
 
 ## Why this works (the short version)
 
@@ -25,6 +27,95 @@ starts using it on the next turn.
 > asked for. Prefer the existing built-in tools (`read`, `write`, `edit`, `bash`, `grep`,
 > `find`, `replace`, `ast_grep`) when they already do the job — only `develop_tool` when you
 > need a capability that doesn't exist yet.
+
+---
+
+## Where you are: the live bundled app
+
+If you are reading this at `~/.catalyst/guide.md`, **you are running inside the packaged
+standalone app** (`Catalyst.app`, an OTP release) — not a dev checkout. Two facts shape
+everything below:
+
+1. **Your own code is already compiled into the running VM.** Editing the app's source files
+   inside the bundle does **nothing** — the `.beam` is already loaded. To change behavior you
+   **load new code** (`develop_tool` / `install_extension`) or use the **runtime registries**
+   (tools, providers, loop hooks, UI). You extend yourself by adding code to the live VM, not by
+   editing the shipped app.
+2. **Never hardcode bundle paths.** Resolve locations at runtime from inside your tools/
+   extensions with `Application.app_dir/2` and `:code.priv_dir/1` — they work identically in dev
+   and in the `.app`.
+
+### Where things live
+
+Outside the bundle — stable, user-writable, your durable workspace:
+
+| What | Path |
+|---|---|
+| Extensions you create (loaded on boot, survive restarts) | `~/.catalyst/extensions/*.ex` |
+| This guide | `~/.catalyst/guide.md` |
+| Per-session debug log (+ `latest.log`) | `~/.catalyst/debug/<session_id>.log` |
+| Auth / session transcripts | `~/.catalyst/auth.json`, `~/.catalyst/sessions/` |
+
+Inside the bundle — resolve at runtime, don't hardcode:
+
+| What | Resolve with |
+|---|---|
+| Served assets (what the window loads) | `Application.app_dir(:catalyst_web, "priv/static/assets/css/app.css")` (and `js/app.js`) |
+| **Editable** CSS/JS source (rebuild from here) | `Application.app_dir(:catalyst_web, "priv/asset_build/assets/")` → `css/app.css`, `js/app.js`, `vendor/` |
+| Bundled fast-tool binaries | `Application.app_dir(:catalyst, "priv/bin/")` (`rg`,`fd`,`sd`,`ast-grep`) — used automatically by `grep`/`find`/`replace`/`ast_grep`; you rarely need the path |
+
+### How to change the running app
+
+- **Add a tool** → `develop_tool` (writes `~/.catalyst/extensions/<name>.ex`, callable next turn).
+- **Add a provider / loop hook / UI page / renderer / component** → `install_extension` with a
+  module that `use Catalyst.Extension` and registers them in `setup/1` (see "Beyond tools"
+  below). Live immediately, no rebuild.
+- **Change CSS / styling (incl. new Tailwind classes), or a JS hook** → edit the **runtime asset
+  source** under `Application.app_dir(:catalyst_web, "priv/asset_build/assets/...")`, then call the
+  **`rebuild_assets`** tool; the window reloads. (Tailwind also scans `~/.catalyst/extensions`, so
+  classes in components you create are compiled.)
+- **Restructure a page/layout (a LiveView/component's markup or behavior)** → you can't edit the
+  compiled module's file; register a replacement page/renderer via `install_extension`, or
+  hot-swap the module by loading new code, then call **`reload_ui`**.
+- **Recover** → `rollback_extension` (git revert + reload), `reload_extensions`, or restart with
+  `CATALYST_SAFE_MODE=1` (built-ins only).
+
+### Worked example: make the app background white
+
+The canonical runtime UI change — edits the bundled CSS source via `app_dir` (no hardcoded path)
+and rebuilds. Call `install_extension` with name `white_background` and this source:
+
+```elixir
+defmodule Catalyst.Ext.WhiteBackground do
+  use Catalyst.Extension
+
+  @impl true
+  def setup(_api) do
+    css = Application.app_dir(:catalyst_web, "priv/asset_build/assets/css/app.css")
+    File.write!(css, "\nbody { background: #ffffff; color: #111827; }\n", [:append])
+    CatalystWeb.Assets.rebuild()
+    :ok
+  end
+end
+```
+
+After it loads, the window reloads white. (`CatalystWeb.Assets.rebuild/0` runs tailwind+esbuild
+from the bundled toolchain and reloads connected windows; the `rebuild_assets` tool wraps it.)
+
+### Constraints in the bundled app (read before acting)
+
+- **Writable assets:** `rebuild_assets` writes into the bundle's `priv/static`. Works when the
+  `.app` runs from a **user-writable** location (e.g. `…/_build/prod/Catalyst.app`); if copied to
+  `/Applications` (root-owned) it fails — tell the user.
+- **Working directory:** defaults to the user's **home**, not their project. Don't assume the cwd
+  is any repo. The user repoints the session by typing **`/cd <path>`** in the chat. Resolve user
+  paths with `Catalyst.Tools.Paths.resolve(path, ctx.cwd)`.
+- **macOS privacy (TCC):** the `.app` cannot read `~/Desktop`, `~/Documents`, or `~/Downloads`
+  without Full Disk Access — those return `:eperm` ("not owner" / "Operation not permitted"). If a
+  read/bash on such a path fails that way it's not your bug: tell the user to grant Full Disk
+  Access or move the project elsewhere.
+- **Diagnose with `read_log`:** every step (loop, tool calls, LLM request/response, errors) is in
+  `~/.catalyst/debug/latest.log`; call `read_log` when something fails.
 
 ---
 
@@ -218,28 +309,17 @@ You don't have to go through the agent. To add a tool by hand:
 
 ---
 
-## In the packaged macOS app specifically
+## Running the bundled app from a terminal (humans)
 
-- Extensions live in **`~/.catalyst/extensions/`** (same as dev — the app and dev share
-  `~/.catalyst`). A tool you create in dev is available in the `.app`, and vice versa.
-- The **working directory** of the packaged app may be `/` or your home — always resolve
-  paths with `Catalyst.Tools.Paths.resolve(path, ctx.cwd)` and have the user point the session
-  at the right directory.
-- To **see logs / errors** from the packaged app while developing an extension, run its
-  launcher in a terminal instead of double-clicking:
-  ```bash
-  _build/prod/Catalyst.app/Contents/MacOS/run
-  ```
-- The `develop_tool` / `install_extension` paths work identically in the `.app` — the Elixir
-  compiler is bundled in the release, so tools, providers, loop hooks, and UI pages/renderers
-  load at runtime with **no external toolchain**.
-- **Asset rebuilds work in the `.app` too.** The esbuild + tailwind toolchain *and* the asset
-  source are bundled, so `rebuild_assets` regenerates CSS/JS at runtime. Tailwind also scans
-  `~/.catalyst/extensions`, so a Tailwind class used by a component you create at runtime gets
-  compiled — call `rebuild_assets` after adding it. Caveat: this writes into the app bundle's
-  `priv/static`, so it only works when the `.app` is in a **user-writable** location (e.g.
-  `_build/prod/Catalyst.app`); a copy installed under `/Applications` is root-owned and not
-  writable, so a runtime rebuild there will fail (`{:error, …}`).
+The bundle map and runtime rules are in **"Where you are: the live bundled app"** above. The one
+extra tip for humans: to watch the app's stdout/logs while it runs, launch it from a terminal
+instead of double-clicking —
+
+```bash
+_build/prod/Catalyst.app/Contents/MacOS/run
+```
+
+(The agent itself should use `read_log` / `~/.catalyst/debug/latest.log`, which works regardless.)
 
 ---
 

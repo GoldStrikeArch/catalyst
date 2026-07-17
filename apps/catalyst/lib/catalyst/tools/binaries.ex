@@ -57,17 +57,28 @@ defmodule Catalyst.Tools.Binaries do
     end
   end
 
+  # Resolution order: ~/.catalyst/bin, the bundled priv/bin (shipped in the .app),
+  # $PATH, then common Homebrew locations (a GUI .app inherits a minimal PATH that
+  # usually excludes /opt/homebrew/bin and /usr/local/bin).
   defp discover(exe) do
-    local = Path.join(bin_dir(), exe)
+    bundled = [bin_dir(), bundled_dir()] |> Enum.map(&Path.join(&1, exe)) |> Enum.find(&File.exists?/1)
 
-    cond do
-      File.exists?(local) -> local
-      true -> System.find_executable(exe)
-    end
+    bundled || System.find_executable(exe) ||
+      ["/opt/homebrew/bin", "/usr/local/bin"]
+      |> Enum.map(&Path.join(&1, exe))
+      |> Enum.find(&File.exists?/1)
   end
 
   @doc "Directory for on-demand downloaded binaries."
   def bin_dir, do: Path.expand("~/.catalyst/bin")
+
+  @doc "Fast-tool binaries bundled into the release (`priv/bin`), if present."
+  def bundled_dir do
+    case :code.priv_dir(:catalyst) do
+      {:error, _} -> ""
+      dir -> Path.join(to_string(dir), "bin")
+    end
+  end
 
   defp install_hint(tool, spec) do
     "fast-tool #{inspect(tool)} (#{spec.exe}) not found on PATH or in #{bin_dir()}. " <>

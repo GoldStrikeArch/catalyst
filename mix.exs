@@ -102,7 +102,29 @@ defmodule Catalyst.Umbrella.MixProject do
       IO.warn("bundle_assets: catalyst_web app dir not found under #{release.path}")
     end
 
+    bundle_fast_tools(release)
     release
+  end
+
+  # Bundle the fast-tool binaries (rg/fd/sd/ast-grep) into the core app's priv/bin
+  # so grep/find/replace/ast_grep work in the packaged app (a GUI .app has a minimal
+  # PATH). Resolved from the build host; skipped if not installed.
+  defp bundle_fast_tools(release) do
+    coreapp = release.path |> Path.join("lib/catalyst-*") |> Path.wildcard() |> List.first()
+
+    if coreapp do
+      bindir = Path.join(coreapp, "priv/bin")
+      File.mkdir_p!(bindir)
+
+      for exe <- ~w(rg fd sd ast-grep) do
+        case System.find_executable(exe) do
+          nil -> IO.puts("bundle_fast_tools: #{exe} not on PATH, skipping")
+          src -> cp_bin!(src, Path.join(bindir, exe))
+        end
+      end
+    end
+
+    :ok
   end
 
   defp cp_bin!(nil, _dest), do: :ok

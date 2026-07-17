@@ -54,7 +54,7 @@ defmodule CatalystWeb.ShellLive do
         model_label: "Demo (offline)",
         session_id: nil,
         session_pid: nil,
-        cwd: File.cwd!()
+        cwd: default_cwd()
       )
 
     if connected?(socket) do
@@ -84,11 +84,17 @@ defmodule CatalystWeb.ShellLive do
   def handle_event("send", %{"message" => text}, socket) do
     text = String.trim(text)
 
-    if text == "" or socket.assigns.running do
-      {:noreply, socket}
-    else
-      Server.prompt(socket.assigns.session_pid, text)
-      {:noreply, assign(socket, input: "", running: true)}
+    cond do
+      text == "" or socket.assigns.running ->
+        {:noreply, socket}
+
+      # `/cd <path>` points the session at a different working directory.
+      String.starts_with?(text, "/cd ") ->
+        {:noreply, set_cwd(socket, text |> String.replace_prefix("/cd ", "") |> String.trim())}
+
+      true ->
+        Server.prompt(socket.assigns.session_pid, text)
+        {:noreply, assign(socket, input: "", running: true)}
     end
   end
 
@@ -99,6 +105,7 @@ defmodule CatalystWeb.ShellLive do
 
   def handle_event("new_session", _params, socket),
     do: {:noreply, start_session(socket, socket.assigns.provider)}
+
 
   def handle_event("set_provider", %{"provider" => "codex"}, socket) do
     if socket.assigns.logged_in do
@@ -238,6 +245,27 @@ defmodule CatalystWeb.ShellLive do
   defp provider_config(_demo),
     do: {Catalyst.LLM.Demo, Catalyst.LLM.Demo.model(), "Demo (offline)"}
 
+  # In a packaged release the launch dir is inside the .app bundle (the erts dir),
+  # which is useless to work in — default to the user's home instead. In dev, the
+  # umbrella root (File.cwd!()) is correct. The user can change it (set_cwd).
+  defp default_cwd do
+    case System.get_env("RELEASE_NAME") do
+      nil -> File.cwd!()
+      _ -> System.user_home!()
+    end
+  end
+
+  # Point the session at a different working directory and restart it there.
+  defp set_cwd(socket, path) do
+    expanded = Path.expand(path)
+
+    if File.dir?(expanded) do
+      socket |> assign(cwd: expanded, input: "") |> start_session(socket.assigns.provider)
+    else
+      put_flash(socket, :error, "Not a directory: #{expanded}")
+    end
+  end
+
   # ---- render ---------------------------------------------------------------
 
   @impl true
@@ -260,6 +288,10 @@ defmodule CatalystWeb.ShellLive do
               {p.label}
             </.link>
           </nav>
+
+          <span class="text-xs text-base-content/50 font-mono ml-2 truncate max-w-xs" title="Working directory — change with /cd <path>">
+            {@cwd}
+          </span>
         </div>
         <div class="flex-none flex items-center gap-1">
           {render_slot_components(:header_extra, assigns)}
