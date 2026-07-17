@@ -32,16 +32,10 @@ defmodule Catalyst.Extension do
   """
 
   @callback setup(api :: Catalyst.ExtensionAPI.t()) :: :ok | {:error, term()}
-  @callback metadata() :: map()
-
-  @optional_callbacks metadata: 0
 
   defmacro __using__(_opts) do
     quote do
       @behaviour Catalyst.Extension
-
-      def metadata, do: %{}
-      defoverridable metadata: 0
     end
   end
 

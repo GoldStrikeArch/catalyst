@@ -43,7 +43,16 @@ defmodule Catalyst.Tools.Bash do
         # cap — tell the model, the way a timeout is reported.
         capped? = Map.get(res, :truncated, false)
         {text, info} = Truncate.tail(out)
-        text = text |> Truncate.notice(info, :tail) |> append_capped_notice(capped?)
+
+        text =
+          text
+          |> Truncate.notice(info, :tail)
+          |> Exec.append_capped_notice(
+            capped?,
+            Exec.bash_max_output_bytes(),
+            "command killed before completion"
+          )
+
         body = if status == 0, do: text, else: text <> "\n[exit status: #{status}]"
         result(body, %{exit_status: status, output_capped: capped?, truncation: info})
 
@@ -57,14 +66,6 @@ defmodule Catalyst.Tools.Bash do
         raise "bash failed: #{inspect(reason)}"
     end
   end
-
-  defp append_capped_notice(text, false), do: text
-
-  defp append_capped_notice(text, true),
-    do:
-      text <>
-        "\n[output capped at #{div(Exec.bash_max_output_bytes(), 1024 * 1024)}MB; " <>
-        "command killed before completion]"
 
   defp timeout_seconds(s) when is_integer(s) and s > 0, do: s
   defp timeout_seconds(s) when is_float(s) and s > 0, do: round(s)

@@ -61,12 +61,66 @@ defmodule Catalyst.Session.Reducer do
   defp drop_in_flight([{_kind, m} | rest], m), do: rest
   defp drop_in_flight([entry | rest], m), do: [entry | drop_in_flight(rest, m)]
 
+  @doc """
+  Synthesized error ToolResults for tool calls orphaned by a run failure/abort.
+
+  An abort/crash can land after the assistant message carrying tool calls was
+  folded and persisted but before its results were. Providers reject a replayed
+  transcript that has a tool call with no output, so every subsequent request
+  for the session would fail — these results keep the transcript replayable.
+  """
+  def aborted_tool_results(state, reason) do
+    text =
+      case reason do
+        :killed ->
+          "Tool execution aborted."
+
+        :interrupted ->
+          "Tool execution interrupted: the session stopped before the tool finished."
+
+        _other ->
+          "Tool execution failed: the run crashed before the tool finished."
+      end
+
+    state.messages
+    |> orphaned_tool_calls()
+    |> Enum.map(fn %Content.ToolCall{id: id, name: name} ->
+      %Message.ToolResult{
+        tool_call_id: id,
+        tool_name: name,
+        content: Content.text(text),
+        is_error: true,
+        timestamp: Message.now()
+      }
+    end)
+  end
+
+  # Tool calls of the most recent assistant message that have no ToolResult.
+  # `messages` is newest-first; results always directly follow their assistant
+  # message, so anything other than a ToolResult before the first Assistant
+  # means the last tool batch (if any) completed.
+  defp orphaned_tool_calls(messages), do: collect_orphans(messages, %{})
+
+  defp collect_orphans([%Message.ToolResult{tool_call_id: id} | rest], seen),
+    do: collect_orphans(rest, Map.put(seen, id, true))
+
+  defp collect_orphans([%Message.Assistant{} = a | _rest], seen),
+    do: Enum.reject(Message.tool_calls(a), &Map.has_key?(seen, &1.id))
+
+  defp collect_orphans(_other, _seen), do: []
+
   @doc "Build the synthesized assistant message for a run failure/abort."
   def failure_message(state, reason) do
     {text, stop} =
       case reason do
-        :killed -> {"Run aborted.", :aborted}
-        other -> {"Run failed: #{inspect(other)}", :error}
+        :killed ->
+          {"Run aborted.", :aborted}
+
+        other ->
+          # Bounded inspect: a crash reason can embed large terms (e.g. the full
+          # message history in a clause error), and this text is persisted and
+          # replayed to the LLM in every subsequent request.
+          {"Run failed: #{inspect(other, limit: 50, printable_limit: 2_000)}", :error}
       end
 
     %Message.Assistant{

@@ -74,6 +74,72 @@ defmodule Catalyst.Extensions.ProcessesTest do
     end
   end
 
+  defmodule Stubborn do
+    @moduledoc false
+    # Simulates a wedged extension process: traps exits and ignores ALL
+    # messages, so only an untrappable direct kill can take it down. A raw
+    # receive loop, deliberately not a GenServer — gen_server intercepts a
+    # parent supervisor's EXIT and complies with the shutdown.
+    def start_link(test_pid) do
+      pid =
+        spawn_link(fn ->
+          Process.flag(:trap_exit, true)
+          send(test_pid, {:stubborn, self()})
+          loop()
+        end)
+
+      {:ok, pid}
+    end
+
+    defp loop do
+      receive do
+        _ -> loop()
+      end
+    end
+  end
+
+  test "stop_owner stays bounded and kills a tree that ignores graceful shutdown" do
+    owner = "stubborn_#{System.unique_integer([:positive])}"
+
+    prev = Application.get_env(:catalyst, :extension_stop_timeout)
+    Application.put_env(:catalyst, :extension_stop_timeout, 50)
+
+    on_exit(fn ->
+      case prev do
+        nil -> Application.delete_env(:catalyst, :extension_stop_timeout)
+        ms -> Application.put_env(:catalyst, :extension_stop_timeout, ms)
+      end
+    end)
+
+    {:ok, child} =
+      Processes.start_child(owner, %{
+        id: :stubborn,
+        start: {Stubborn, :start_link, [self()]},
+        shutdown: :infinity
+      })
+
+    assert_receive {:stubborn, ^child}
+    ref = Process.monitor(child)
+
+    # A graceful terminate would wait on shutdown: :infinity forever, wedging
+    # the Catalyst.Extensions GenServer whose purge path calls this — it must
+    # return bounded and the child must actually die (the snapshot-then-kill
+    # path uses an untrappable direct exit).
+    assert :ok = Processes.stop_owner(owner)
+    assert_receive {:DOWN, ^ref, :process, ^child, :killed}, 2_000
+
+    # The owner slot is reusable after the forced teardown.
+    assert {:ok, pid2} =
+             Processes.start_child(owner, %{
+               id: :probe,
+               start: {Agent, :start_link, [fn -> :alive end]},
+               restart: :temporary
+             })
+
+    assert Process.alive?(pid2)
+    Processes.stop_owner(owner)
+  end
+
   @proc_ext_source ~S'''
   defmodule Catalyst.Ext.ProcOwner do
     use Catalyst.Extension

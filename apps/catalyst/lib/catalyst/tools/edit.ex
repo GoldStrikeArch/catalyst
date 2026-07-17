@@ -6,7 +6,7 @@ defmodule Catalyst.Tools.Edit do
   for structural edits use the `ast_grep` tool.)
   """
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.{Diff, Paths, Truncate}
+  alias Catalyst.Tools.{AtomicWrite, Diff, Paths, Truncate}
 
   @impl true
   def execution_mode, do: :sequential
@@ -56,7 +56,7 @@ defmodule Catalyst.Tools.Edit do
     edits = normalize_edits(args)
 
     updated = apply_edits(original, edits)
-    File.write!(abs, updated)
+    AtomicWrite.write!(abs, updated)
 
     # The diff goes in the content too (not just details), so the model gets a
     # self-verification signal without re-reading the file. Scrub + cap it:

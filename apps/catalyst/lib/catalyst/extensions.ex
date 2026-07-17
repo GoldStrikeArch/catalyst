@@ -105,6 +105,21 @@ defmodule Catalyst.Extensions do
   def register_tool(module, opts \\ []), do: GenServer.call(__MODULE__, {:register, module, opts})
 
   @doc """
+  Register `mod.fun/0` to be re-run on every (re)start of this server.
+
+  Boot-time registrations from OTHER apps (e.g. the web app's rebuild_assets
+  tool) live in this server's table, but a supervisor restart of this server
+  only re-seeds built-ins and extension files — the other app's `start/2`
+  doesn't run again, so its tools would silently vanish. Reseeders live in
+  `:persistent_term` (like `ExtensionAPI` kinds/purgers) and are MFA-keyed, so
+  they survive restarts and hot-reload replaces rather than accumulates.
+  """
+  @spec register_reseeder(module(), atom()) :: :ok
+  def register_reseeder(mod, fun) when is_atom(mod) and is_atom(fun) do
+    :persistent_term.put({__MODULE__, :reseeders}, Map.put(reseeders(), {mod, fun}, true))
+  end
+
+  @doc """
   Compile an extension source file and apply its contributions (tools + anything
   its `setup/1` registers). Returns `{:ok, summary}` or `{:error, reason}`.
   """
@@ -176,6 +191,29 @@ defmodule Catalyst.Extensions do
   @spec boot_status() :: :ok | {:safe_mode, :env | :crash_detected}
   def boot_status, do: :persistent_term.get({__MODULE__, :boot_status}, :ok)
 
+  @doc """
+  Human-readable rendering of the tagged error reasons returned by
+  `load_file/1`, `load_all/0`, `register_tool/2`, and `Installer.install/3`.
+  Tools format at this boundary; the tagged tuples stay matchable for callers.
+  """
+  @spec format_error(term()) :: String.t()
+  def format_error(:self_mod_disabled) do
+    "self-modification is disabled on this machine " <>
+      "(CATALYST_DISABLE_SELF_MOD / config :catalyst, :allow_self_modification)"
+  end
+
+  def format_error({:compile, reason}), do: "compile failed: " <> format_error(reason)
+  def format_error({:register, reason}), do: "registration failed: " <> format_error(reason)
+  def format_error(:timeout), do: "timed out"
+  def format_error({:exit, reason}), do: "exited: #{inspect(reason)}"
+
+  def format_error({:not_a_tool, module}),
+    do: "#{inspect(module)} is not a tool (needs name/0, parameters/0, execute/2)"
+
+  def format_error({:bad_tool_name, reason}), do: "tool name/0 failed: #{inspect(reason)}"
+  def format_error(reason) when is_binary(reason), do: reason
+  def format_error(reason), do: inspect(reason)
+
   # ---- callbacks ------------------------------------------------------------
 
   @impl true
@@ -184,6 +222,10 @@ defmodule Catalyst.Extensions do
     seed_builtins()
     wire_core_kinds()
     ensure_guide()
+    # In a task: reseeders call register_tool/2, a call back into this server,
+    # which would deadlock from init. Runs in safe mode too — reseeded tools
+    # are app wiring, not extension code.
+    run_reseeders()
 
     state = %{contrib: %{}, modules: %{}}
 
@@ -297,6 +339,25 @@ defmodule Catalyst.Extensions do
 
     ExtensionAPI.register_purger(&Hooks.unregister/1)
     ExtensionAPI.register_purger(&Processes.stop_owner/1)
+  end
+
+  defp reseeders, do: :persistent_term.get({__MODULE__, :reseeders}, %{})
+
+  defp run_reseeders do
+    Task.Supervisor.start_child(Catalyst.TaskSupervisor, fn ->
+      Enum.each(Map.keys(reseeders()), fn {mod, fun} ->
+        try do
+          apply(mod, fun, [])
+        catch
+          kind, reason ->
+            Logger.warning(
+              "[extensions] reseeder #{inspect(mod)}.#{fun}/0 #{kind}: #{inspect(reason)}"
+            )
+        end
+      end)
+    end)
+
+    :ok
   end
 
   # Publish the bundled self-extension guide to a stable, agent-readable path.
@@ -482,9 +543,9 @@ defmodule Catalyst.Extensions do
        tool_names: Enum.map(tool_mods, & &1.name())
      }}
   rescue
-    e -> {:error, Exception.message(e)}
+    e -> {:error, {:compile, Exception.message(e)}}
   catch
-    kind, reason -> {:error, {kind, reason}}
+    kind, reason -> {:error, {:compile, {kind, reason}}}
   end
 
   defp compile_and_classify_async(path) do
@@ -541,9 +602,11 @@ defmodule Catalyst.Extensions do
     conflicts = module_conflicts(owner, modules, state)
     log_conflicts(owner, conflicts)
 
+    pairs = Enum.zip(tool_names, tool_mods)
+
     committed = %{
       state
-      | contrib: Map.put(state.contrib, owner, MapSet.new(tool_names)),
+      | contrib: Map.put(state.contrib, owner, MapSet.new(pairs)),
         modules: Map.put(state.modules, owner, modules)
     }
 
@@ -551,12 +614,12 @@ defmodule Catalyst.Extensions do
       # Modules the new file still defines were just redefined by the compile
       # above and must survive the purge; ones it dropped are restored/removed.
       purge_owner_effects(owner, state, keep_modules: modules)
-      Enum.each(tool_mods, &insert/1)
+      Enum.each(pairs, fn {name, mod} -> :ets.insert(@table, {name, mod}) end)
       {{:ok, build_summary(owner, tool_names, ext_mods, conflicts)}, committed}
     rescue
-      e -> {{:error, Exception.message(e)}, committed}
+      e -> {{:error, {:register, Exception.message(e)}}, committed}
     catch
-      kind, reason -> {{:error, {kind, reason}}, committed}
+      kind, reason -> {{:error, {:register, {kind, reason}}}, committed}
     end
   end
 
@@ -651,17 +714,41 @@ defmodule Catalyst.Extensions do
   # ---- registration + owner tracking ----------------------------------------
 
   defp do_register(module, opts, state) do
-    case insert(module) do
-      {:ok, _} = ok -> {ok, track(module, opts[:owner], state)}
-      err -> {err, state}
+    case safe_tool_name(module) do
+      {:ok, name} ->
+        :ets.insert(@table, {name, module})
+        {{:ok, module}, track(name, module, opts[:owner], state)}
+
+      {:error, _reason} = err ->
+        {err, state}
     end
   end
 
-  defp track(_module, nil, state), do: state
+  defp track(_name, _module, nil, state), do: state
 
-  defp track(module, owner, state) do
-    names = Map.get(state.contrib, owner, MapSet.new())
-    put_in(state.contrib[owner], MapSet.put(names, module.name()))
+  defp track(name, module, owner, state) do
+    pairs = Map.get(state.contrib, owner, MapSet.new())
+    put_in(state.contrib[owner], MapSet.put(pairs, {name, module}))
+  end
+
+  # `name/0` is extension-authored code reached inside this GenServer; a raise
+  # would crash the registry and destroy the tools table with it, so resolve it
+  # defensively and reject instead.
+  defp safe_tool_name(module) do
+    if tool_module?(module) do
+      try do
+        case module.name() do
+          name when is_binary(name) -> {:ok, name}
+          other -> {:error, {:bad_tool_name, other}}
+        end
+      rescue
+        e -> {:error, {:bad_tool_name, Exception.message(e)}}
+      catch
+        kind, reason -> {:error, {:bad_tool_name, {kind, reason}}}
+      end
+    else
+      {:error, {:not_a_tool, module}}
+    end
   end
 
   defp insert(module) do
@@ -696,15 +783,18 @@ defmodule Catalyst.Extensions do
     |> Enum.reject(&MapSet.member?(keep, &1))
     |> Enum.each(&restore_module/1)
 
-    names = Map.get(state.contrib, owner, MapSet.new())
+    pairs = Map.get(state.contrib, owner, MapSet.new())
     builtins = builtins_index()
 
-    Enum.each(names, fn name ->
-      :ets.delete(@table, name)
+    Enum.each(pairs, fn {name, mod} ->
+      # Delete only if the live row is still THIS owner's registration —
+      # registration is last-write-wins by name, so another owner may have
+      # overwritten it since, and purging this owner must not clobber theirs.
+      :ets.delete_object(@table, {name, mod})
 
-      case Map.get(builtins, name) do
-        nil -> :ok
-        mod -> :ets.insert(@table, {name, mod})
+      case {:ets.member(@table, name), Map.get(builtins, name)} do
+        {false, builtin} when builtin != nil -> :ets.insert(@table, {name, builtin})
+        _ -> :ok
       end
     end)
 

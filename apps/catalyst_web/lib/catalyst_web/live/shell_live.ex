@@ -34,7 +34,6 @@ defmodule CatalystWeb.ShellLive do
         streaming: nil,
         running: false,
         tools: %{},
-        input: "",
         chat_form: chat_form(""),
         logged_in: Catalyst.Auth.logged_in?(),
         login_state: :idle,
@@ -88,6 +87,10 @@ defmodule CatalystWeb.ShellLive do
     cond do
       text == "" or socket.assigns.running ->
         {:noreply, socket}
+
+      # Sessionless shell (start_session failed at mount) — no pid to prompt.
+      is_nil(socket.assigns.session_pid) ->
+        {:noreply, put_flash(socket, :error, "No active session — click New to start one.")}
 
       # A bare `/cd` is a mistyped command, not a prompt for the model.
       text == "/cd" ->
@@ -243,7 +246,7 @@ defmodule CatalystWeb.ShellLive do
 
   defp chat_form(input), do: to_form(%{"message" => input})
 
-  defp assign_input(socket, text), do: assign(socket, input: text, chat_form: chat_form(text))
+  defp assign_input(socket, text), do: assign(socket, chat_form: chat_form(text))
 
   defp apply_event(%Event.MessageStart{message: %Message.Assistant{}}, socket),
     do: assign(socket, streaming: true)
@@ -294,6 +297,12 @@ defmodule CatalystWeb.ShellLive do
   defp apply_event(%Event.ToolExecutionEnd{call_id: id}, socket),
     do: assign(socket, tools: Map.delete(socket.assigns.tools, id))
 
+  # Runs can start outside this LiveView (a second window, the CLI, a tool
+  # calling Server.continue) — mirror the AgentEnd handling so the running
+  # flag, spinner, and Stop button track those runs too.
+  defp apply_event(%Event.AgentStart{}, socket),
+    do: assign(socket, running: true)
+
   # Also clear tool spinners: an aborted/failed run never emits
   # ToolExecutionEnd for its pending calls.
   defp apply_event(%Event.AgentEnd{}, socket),
@@ -334,13 +343,51 @@ defmodule CatalystWeb.ShellLive do
   end
 
   defp attach_or_start(socket) do
-    with %{id: id, provider: provider} <- remembered_session(),
-         pid when is_pid(pid) <- Manager.whereis(id) do
-      reattach_session(socket, id, pid, provider)
-    else
-      _ -> start_session(socket, :demo)
+    case remembered_session() do
+      %{id: id, provider: provider} ->
+        case await_session(id) do
+          pid when is_pid(pid) ->
+            reattach_session(socket, id, pid, provider)
+
+          nil ->
+            # Stop the abandoned id: a crashed session's supervisor restart
+            # could still re-register it after we've moved on, and nothing
+            # would ever attach to (or stop) it again.
+            Manager.stop(id)
+            start_session(socket, fallback_provider(socket, provider))
+        end
+
+      _none ->
+        start_session(socket, :demo)
     end
   end
+
+  # A crashed session is restarted by its supervisor under the same id, but the
+  # :DOWN handler usually runs before the restart re-registers — poll briefly so
+  # recovery reattaches to the restarted session (same transcript) instead of
+  # abandoning it and silently starting over.
+  defp await_session(id, retries \\ 5)
+  defp await_session(id, 0), do: Manager.whereis(id)
+
+  defp await_session(id, retries) do
+    case Manager.whereis(id) do
+      nil ->
+        Process.sleep(20)
+        await_session(id, retries - 1)
+
+      pid ->
+        pid
+    end
+  end
+
+  # When recovery can't reattach, keep the user's provider choice — silently
+  # downgrading Codex to the offline demo would be confusing. Codex without a
+  # login can't run, so only then fall back to demo.
+  defp fallback_provider(socket, :codex),
+    do: if(socket.assigns.logged_in, do: :codex, else: :demo)
+
+  defp fallback_provider(_socket, provider) when is_atom(provider), do: provider
+  defp fallback_provider(_socket, _unknown), do: :demo
 
   # Rebuild the UI from the live server's snapshot: replay the transcript into
   # the stream and pick up an in-flight run (its events keep arriving via PubSub).
@@ -380,7 +427,7 @@ defmodule CatalystWeb.ShellLive do
     # The server died between whereis and the state call — start fresh.
     kind, _reason when kind in [:exit, :error] ->
       Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
-      start_session(socket, :demo)
+      start_session(socket, fallback_provider(socket, provider))
   end
 
   # Rebuild only the in-flight placeholder. The session still accumulates the
@@ -400,33 +447,51 @@ defmodule CatalystWeb.ShellLive do
 
     {provider_mod, model, label} = provider_config(provider)
 
-    {:ok, %{id: id, pid: pid}} =
-      Manager.start_session(
-        cwd: socket.assigns.cwd,
-        provider: provider_mod,
-        model: model
-      )
+    case Manager.start_session(
+           cwd: socket.assigns.cwd,
+           provider: provider_mod,
+           model: model
+         ) do
+      {:ok, %{id: id, pid: pid}} ->
+        Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+        remember_session(id, provider)
 
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-    remember_session(id, provider)
+        socket
+        |> monitor_session(pid)
+        |> assign(
+          session_id: id,
+          session_pid: pid,
+          provider: provider,
+          model_label: label,
+          streaming: nil,
+          running: false,
+          tools: %{},
+          message_seq: 0,
+          message_count: 0,
+          replayed_tail: [],
+          chat_form: chat_form("")
+        )
+        |> stream(:messages, [], reset: true)
 
-    socket
-    |> monitor_session(pid)
-    |> assign(
-      session_id: id,
-      session_pid: pid,
-      provider: provider,
-      model_label: label,
-      streaming: nil,
-      running: false,
-      tools: %{},
-      message_seq: 0,
-      message_count: 0,
-      replayed_tail: [],
-      input: "",
-      chat_form: chat_form("")
-    )
-    |> stream(:messages, [], reset: true)
+      # Session init does filesystem work (store dir, transcript load), so it
+      # can fail. This runs from mount via attach_or_start — crashing here
+      # would crash-loop the LiveView on every rejoin with no UI at all, so
+      # degrade to a sessionless shell and explain.
+      {:error, reason} ->
+        Logger.error("[shell] could not start a session: #{inspect(reason)}")
+        if ref = socket.assigns.session_ref, do: Process.demonitor(ref, [:flush])
+
+        socket
+        |> assign(
+          session_id: nil,
+          session_pid: nil,
+          session_ref: nil,
+          running: false,
+          streaming: nil,
+          tools: %{}
+        )
+        |> put_flash(:error, "Could not start a session: #{inspect(reason)}")
+    end
   end
 
   # One monitor per attached session: the :DOWN handler reattaches gracefully

@@ -39,12 +39,11 @@ defmodule Catalyst.SystemPrompt do
   """
 
   @doc "Resolve the effective system prompt (override file, else default)."
+  @spec get() :: String.t()
   def get do
-    with {:ok, text} <- File.read(path()),
-         false <- String.trim(text) == "" do
-      text
-    else
-      _ -> default()
+    case File.read(path()) do
+      {:ok, text} -> if String.trim(text) == "", do: default(), else: text
+      {:error, _} -> default()
     end
   end
 

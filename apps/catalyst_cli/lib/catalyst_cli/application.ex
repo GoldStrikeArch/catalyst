@@ -36,12 +36,14 @@ defmodule CatalystCli.Application do
     System.halt(code)
   end
 
-  # Burrito passes CLI args through its own helper; fall back to System.argv/0.
+  # Burrito's Zig wrapper passes user args as plain arguments — System.argv/0
+  # is always [] inside a release, so the wrapped binary would never see its
+  # arguments. Outside a wrapped binary plain arguments carry OTP runtime
+  # flags, so only consult them when the wrapper marker env is present.
+  # (Inlined from Burrito.Util.Args, which is not part of this release.)
   defp argv do
-    module = Burrito.Util.Args
-
-    if Code.ensure_loaded?(module) and function_exported?(module, :argv, 0) do
-      apply(module, :argv, [])
+    if System.get_env("__BURRITO_BIN_PATH") do
+      :init.get_plain_arguments() |> Enum.map(&to_string/1)
     else
       System.argv()
     end

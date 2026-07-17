@@ -60,6 +60,34 @@ defmodule Catalyst.HooksTest do
     end)
   end
 
+  test "a hanging handler is killed at the deadline and skipped", %{owner: owner} do
+    # The moduledoc promises a misbehaving hook "can never take down or wedge a
+    # run" — a handler that merely blocks must be killed, not waited on forever.
+    prev = Application.get_env(:catalyst, :hook_handler_timeout)
+    Application.put_env(:catalyst, :hook_handler_timeout, 50)
+
+    on_exit(fn ->
+      case prev do
+        nil -> Application.delete_env(:catalyst, :hook_handler_timeout)
+        ms -> Application.put_env(:catalyst, :hook_handler_timeout, ms)
+      end
+    end)
+
+    Hooks.register(:test_filter, fn _v, _ctx -> Process.sleep(:infinity) end,
+      owner: owner,
+      priority: 10
+    )
+
+    Hooks.register(:test_filter, fn v, _ctx -> {:ok, v <> "ok"} end, owner: owner, priority: 20)
+
+    log =
+      capture_log(fn ->
+        assert Hooks.run_filter(:test_filter, "", %{}) == "ok"
+      end)
+
+    assert log =~ "timed out"
+  end
+
   test "a malformed {:ok, value} is shape-checked, logged, and skipped", %{owner: owner} do
     # The wrapper contracts promise a hook "can never take down a run": a hook
     # returning the wrong shape must not poison the fold (the loop destructures

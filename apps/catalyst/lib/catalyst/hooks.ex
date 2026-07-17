@@ -27,8 +27,9 @@ defmodule Catalyst.Hooks do
   re-register — `before_tool_call` gates would silently fail open). The hot path
   (`run_filter/3`, `run_decision/2`, `notify/1`) reads ETS directly and never
   calls the GenServer, so it works even if this process is down (an absent table
-  just yields no handlers). **Every handler runs inside a try/rescue/catch: a
-  crashing or misbehaving hook is logged and skipped — it can never take down a
+  just yields no handlers). **Every handler runs in its own supervised task
+  under a deadline (`:hook_handler_timeout`, default 10s): a crashing, throwing,
+  or hanging hook is logged and skipped — it can never take down or wedge a
   run.**
   """
 
@@ -36,6 +37,7 @@ defmodule Catalyst.Hooks do
   require Logger
 
   @table :catalyst_hooks
+  @handler_timeout_ms 10_000
   @points [
     :transform_context,
     :before_tool_call,
@@ -199,15 +201,41 @@ defmodule Catalyst.Hooks do
 
   # ---- internals ------------------------------------------------------------
 
+  # Run an extension-authored handler isolated AND bounded. A try/rescue alone
+  # cannot honor the moduledoc's promise: a handler that merely blocks (infinite
+  # loop, receive that never matches) would hang the agent loop at this hook
+  # point — and a hanging :before_tool_call also blocks the rollback/reload
+  # tools that could remove it. Handlers were already the only extension-code
+  # path without a deadline (compile and setup have one). The task copies the
+  # closed-over value/ctx; that cost is only paid when handlers are registered.
   defp safe(entry, thunk) do
-    {:hook_ok, thunk.()}
-  rescue
-    e ->
-      Logger.warning("[hooks] #{entry.point}/#{entry.id} raised: #{Exception.message(e)}")
-      :hook_skip
-  catch
-    kind, reason ->
-      Logger.warning("[hooks] #{entry.point}/#{entry.id} #{kind}: #{inspect(reason)}")
-      :hook_skip
+    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, thunk)
+
+    case Task.yield(task, handler_timeout()) || Task.shutdown(task, :brutal_kill) do
+      {:ok, value} ->
+        {:hook_ok, value}
+
+      {:exit, {exception, _stack}} when is_exception(exception) ->
+        Logger.warning(
+          "[hooks] #{entry.point}/#{entry.id} raised: #{Exception.message(exception)}"
+        )
+
+        :hook_skip
+
+      {:exit, reason} ->
+        Logger.warning("[hooks] #{entry.point}/#{entry.id} exited: #{inspect(reason)}")
+        :hook_skip
+
+      nil ->
+        Logger.warning(
+          "[hooks] #{entry.point}/#{entry.id} timed out after #{handler_timeout()}ms — " <>
+            "killed and skipped"
+        )
+
+        :hook_skip
+    end
   end
+
+  defp handler_timeout,
+    do: Application.get_env(:catalyst, :hook_handler_timeout, @handler_timeout_ms)
 end

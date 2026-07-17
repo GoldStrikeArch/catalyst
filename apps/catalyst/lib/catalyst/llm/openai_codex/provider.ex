@@ -17,7 +17,8 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
   alias Catalyst.LLM.OpenAICodex.{Headers, Request, StreamParser}
 
   @default_base "https://chatgpt.com/backend-api"
-  @auth_provider "openai-codex"
+  # TokenStore key for the ChatGPT OAuth credentials (single source).
+  @auth_provider Catalyst.Auth.OpenAIOAuth.provider_id()
   @receive_timeout 600_000
 
   @impl true

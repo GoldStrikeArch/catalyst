@@ -46,9 +46,8 @@ defmodule Catalyst.Tools.ReloadTool do
     do: "\n#{length(failed)} file(s) FAILED to load:\n" <> format_failures(failed)
 
   defp format_failures(failed) do
-    Enum.map_join(failed, "\n", fn {path, reason} -> "  - #{path}: #{format_reason(reason)}" end)
+    Enum.map_join(failed, "\n", fn {path, reason} ->
+      "  - #{path}: #{Extensions.format_error(reason)}"
+    end)
   end
-
-  defp format_reason(reason) when is_binary(reason), do: reason
-  defp format_reason(reason), do: inspect(reason)
 end

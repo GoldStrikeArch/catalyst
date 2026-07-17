@@ -11,6 +11,7 @@ defmodule CatalystCli.MixProject do
       lockfile: "../../mix.lock",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
+      aliases: aliases(),
       deps: deps()
     ]
   end
@@ -26,5 +27,11 @@ defmodule CatalystCli.MixProject do
     [
       {:catalyst, in_umbrella: true}
     ]
+  end
+
+  # The umbrella root's `setup` alias runs `mix setup` in every child app, so
+  # each app must define one (mix cmd aborts the whole run on a missing task).
+  defp aliases do
+    [setup: ["deps.get"]]
   end
 end

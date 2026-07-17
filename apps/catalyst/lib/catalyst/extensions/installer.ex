@@ -36,9 +36,8 @@ defmodule Catalyst.Extensions.Installer do
         do_install(name, source, commit_prefix)
 
       false ->
-        {:error,
-         "self-modification is disabled on this machine " <>
-           "(CATALYST_DISABLE_SELF_MOD / config :catalyst, :allow_self_modification)"}
+        # Matchable; render with Catalyst.Extensions.format_error/1.
+        {:error, :self_mod_disabled}
     end
   end
 

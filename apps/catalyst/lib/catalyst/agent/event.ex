@@ -23,7 +23,7 @@ defmodule Catalyst.Agent.Event do
   defmodule TurnStart, do: defstruct([])
   defmodule TurnEnd, do: defstruct([:message, :tool_results])
   defmodule MessageStart, do: defstruct([:message])
-  defmodule MessageUpdate, do: defstruct([:message, :llm_event])
+  defmodule MessageUpdate, do: defstruct([:llm_event])
   defmodule MessageEnd, do: defstruct([:message])
   defmodule ToolExecutionStart, do: defstruct([:call_id, :name, :args])
   defmodule ToolExecutionUpdate, do: defstruct([:call_id, :name, :args, :partial])

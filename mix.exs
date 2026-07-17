@@ -267,7 +267,13 @@ defmodule Catalyst.Umbrella.MixProject do
       # Packaging the headless core into a self-contained binary.
       {:burrito, "~> 1.5"},
       # Packaging the wx GUI into a macOS .app/.dmg (bundles wxWidgets dylibs).
-      {:desktop_deployment, github: "elixir-desktop/deployment", runtime: false},
+      # Pinned: the release steps depend on its internals (Package.MacOS build
+      # layout, the `run` launcher script) — an unpinned deps.update could
+      # silently break the installer.
+      {:desktop_deployment,
+       github: "elixir-desktop/deployment",
+       ref: "73fed3e6a5096724cb6af11ff9a5b5c79a2c7186",
+       runtime: false},
       # Static analysis via `mix dialyzer`.
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

@@ -57,66 +57,60 @@ defmodule Catalyst.Tools.Ripgrep do
       ["--json", "--line-number", "--color=never", "--hidden", "--glob", "!.git/"] ++
         flags(args) ++ ["--", pattern, target]
 
-    case Exec.collect(rg, rg_args, cwd: ctx.cwd, max_output_bytes: @max_output_bytes) do
-      # rg: 0 = matches, 1 = no matches (both fine). 2 = an error occurred —
-      # but rg exits 2 even when it also found matches (e.g. one unreadable
-      # path among many). The stderr noise merged into stdout fails
-      # Jason.decode and is dropped by decode_entry, so salvage whatever
-      # parses with a note, and only raise when nothing parsed at all.
-      {:ok, %{out: out, status: status} = res} when status in [0, 1, 2] ->
-        capped? = Map.get(res, :truncated, false)
-        entries = parse_entries(out)
+    # rg: 0 = matches, 1 = no matches (both fine). 2 = an error occurred —
+    # but rg exits 2 even when it also found matches (e.g. one unreadable
+    # path among many). The stderr noise merged into stdout fails
+    # Jason.decode and is dropped by decode_entry, so salvage whatever
+    # parses with a note, and only raise when nothing parsed at all.
+    %{out: out, status: status} =
+      res =
+      Exec.collect!("ripgrep", rg, rg_args,
+        cwd: ctx.cwd,
+        max_output_bytes: @max_output_bytes,
+        ok_statuses: [0, 1, 2]
+      )
 
-        if status == 2 and entries == [] do
-          raise "ripgrep error (status 2): #{String.slice(out, 0, 200)}"
-        end
+    capped? = Map.get(res, :truncated, false)
+    entries = parse_entries(out)
 
-        total_matches = Enum.count(entries, &match?({:match, _}, &1))
-        limited? = total_matches > limit
-        shown = take_matches(entries, limit)
-
-        text =
-          case shown do
-            [] -> "No matches."
-            _ -> Enum.join(shown, "\n")
-          end
-
-        {text, info} =
-          Truncate.listing(text,
-            limited?: limited?,
-            limit: limit,
-            total: known_total(total_matches, capped?),
-            noun: "matches"
-          )
-
-        text = text |> append_capped_notice(capped?) |> append_error_note(status == 2, out)
-
-        result(text, %{
-          match_count: min(total_matches, limit),
-          match_limit_reached: limited?,
-          output_capped: capped?,
-          truncation: info
-        })
-
-      {:ok, %{out: out, status: status}} ->
-        raise "ripgrep error (status #{status}): #{String.slice(out, 0, 200)}"
-
-      {:error, reason} ->
-        raise "ripgrep failed: #{inspect(reason)}"
+    if status == 2 and entries == [] do
+      raise "ripgrep error (status 2): #{String.slice(out, 0, 200)}"
     end
+
+    total_matches = Enum.count(entries, &match?({:match, _}, &1))
+    limited? = total_matches > limit
+    shown = take_matches(entries, limit)
+
+    text =
+      case shown do
+        [] -> "No matches."
+        _ -> Enum.join(shown, "\n")
+      end
+
+    {text, info} =
+      Truncate.listing(text,
+        limited?: limited?,
+        limit: limit,
+        total: known_total(total_matches, capped?),
+        noun: "matches"
+      )
+
+    text =
+      text
+      |> Exec.append_capped_notice(capped?, @max_output_bytes, "narrow the pattern or path")
+      |> append_error_note(status == 2, out)
+
+    result(text, %{
+      match_count: min(total_matches, limit),
+      match_limit_reached: limited?,
+      output_capped: capped?,
+      truncation: info
+    })
   end
 
   # When the child's output was capped, total_matches is only a lower bound.
   defp known_total(total, false = _capped?), do: total
   defp known_total(_total, true = _capped?), do: :unknown
-
-  defp append_capped_notice(text, false), do: text
-
-  defp append_capped_notice(text, true),
-    do:
-      text <>
-        "\n... [search output capped at #{div(@max_output_bytes, 1024 * 1024)}MB; " <>
-        "narrow the pattern or path]"
 
   # Status 2 with salvaged matches: tell the model the result set may be
   # incomplete. The sample is the first stderr line (non-JSON in rg's

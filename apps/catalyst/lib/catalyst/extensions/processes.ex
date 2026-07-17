@@ -22,6 +22,10 @@ defmodule Catalyst.Extensions.Processes do
   @stale_retry_ms 5
   @stale_retries 10
 
+  # Graceful-shutdown window for an owner's process tree on purge; past it the
+  # tree is killed outright (see stop_sup/1).
+  @stop_timeout_ms 5_000
+
   @doc "Start `child_spec` under `owner`'s supervisor (created on first use)."
   @spec start_child(String.t(), Supervisor.child_spec() | {module(), term()} | module()) ::
           DynamicSupervisor.on_start_child() | {:error, term()}
@@ -55,13 +59,45 @@ defmodule Catalyst.Extensions.Processes do
   end
 
   @doc "Terminate `owner`'s supervisor and every process under it (purge path)."
-  @spec stop_owner(String.t()) :: :ok | {:error, :not_found}
+  @spec stop_owner(String.t()) :: :ok
   def stop_owner(owner) do
     case Registry.lookup(@registry, owner) do
-      [{pid, _}] -> DynamicSupervisor.terminate_child(@top, pid)
+      [{pid, _}] -> stop_sup(pid)
       [] -> :ok
     end
   end
+
+  # Bounded teardown. Plain terminate_child waits on the children's shutdown
+  # specs — extension-authored, so possibly :infinity or exit-trapping — and the
+  # purge path runs inside the Catalyst.Extensions GenServer: an unbounded wait
+  # there wedges the whole registry (every register/load/uninstall call times
+  # out until app restart). Give graceful shutdown a deadline, then kill.
+  #
+  # Children are snapshotted BEFORE the terminate begins (a sup mid-shutdown
+  # stops answering which_children) and killed directly on the timeout path:
+  # exit(pid, :kill) is untrappable, unlike the :killed propagated by killing
+  # the sup, which a trap_exit child could ignore and survive as an orphan.
+  defp stop_sup(pid) do
+    kids = children(pid)
+
+    task =
+      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
+        DynamicSupervisor.terminate_child(@top, pid)
+      end)
+
+    case Task.yield(task, stop_timeout()) || Task.shutdown(task, :brutal_kill) do
+      {:ok, _result} ->
+        :ok
+
+      _timeout_or_crash ->
+        Process.exit(pid, :kill)
+        Enum.each(kids, &Process.exit(&1, :kill))
+        :ok
+    end
+  end
+
+  defp stop_timeout,
+    do: Application.get_env(:catalyst, :extension_stop_timeout, @stop_timeout_ms)
 
   @doc "Pids of the processes currently running for `owner`."
   @spec list(String.t()) :: [pid()]

@@ -7,7 +7,8 @@ defmodule Catalyst.Auth do
   require Logger
   alias Catalyst.Auth.{CallbackServer, OpenAIOAuth, PKCE, TokenStore}
 
-  @provider "openai-codex"
+  # TokenStore key for the Codex credentials (single source).
+  @provider Catalyst.Auth.OpenAIOAuth.provider_id()
 
   @doc "Whether we have Codex credentials."
   def logged_in?, do: TokenStore.logged_in?(@provider)

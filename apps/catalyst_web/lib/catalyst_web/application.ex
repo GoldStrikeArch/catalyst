@@ -27,13 +27,19 @@ defmodule CatalystWeb.Application do
     opts = [strategy: :one_for_one, name: CatalystWeb.Supervisor]
     result = Supervisor.start_link(children, opts)
     register_web_tools()
+    # Re-registered on every Catalyst.Extensions restart: a registry-chain
+    # restart re-seeds only built-ins and extension files, and this app's
+    # start/2 won't run again to put the web tools back.
+    Catalyst.Extensions.register_reseeder(__MODULE__, :register_web_tools)
     reload_extensions()
     result
   end
 
+  @doc false
   # Register the web-side self-modification tools into the core tool registry.
   # (`:catalyst` boots before `:catalyst_web`, so `Catalyst.Extensions` is up.)
-  defp register_web_tools do
+  # Public: re-run as an Extensions reseeder after a registry restart.
+  def register_web_tools do
     Enum.each([CatalystWeb.Tools.RebuildAssets, CatalystWeb.Tools.ReconnectUi], fn tool ->
       case Catalyst.Extensions.register_tool(tool) do
         {:ok, _} -> :ok

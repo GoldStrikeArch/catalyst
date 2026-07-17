@@ -32,10 +32,6 @@ defmodule Catalyst.ExtensionAPI do
     :persistent_term.put({__MODULE__, :kind, kind}, handler)
   end
 
-  @doc "Whether a kind has a wired handler."
-  @spec kind_available?(atom()) :: boolean()
-  def kind_available?(kind), do: :persistent_term.get({__MODULE__, :kind, kind}, nil) != nil
-
   @doc """
   Register an owner-purge function. Before a file is (re)loaded, every purger is
   called with the extension's owner id so its registries can drop that owner's

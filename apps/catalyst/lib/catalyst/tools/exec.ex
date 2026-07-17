@@ -49,6 +49,39 @@ defmodule Catalyst.Tools.Exec do
   end
 
   @doc """
+  `collect/3` for the exec-style tools: returns the result map when the exit
+  status is in `opts[:ok_statuses]` (default `[0]`), and raises the uniform
+  tool-facing error otherwise. `label` names the tool in the message.
+  """
+  @spec collect!(String.t(), String.t(), [String.t()], keyword()) :: map()
+  def collect!(label, path, args, opts \\ []) do
+    {ok_statuses, opts} = Keyword.pop(opts, :ok_statuses, [0])
+
+    case collect(path, args, opts) do
+      {:ok, %{out: out, status: status} = res} ->
+        if status in ok_statuses do
+          res
+        else
+          raise "#{label} error (status #{status}): #{String.slice(out, 0, 200)}"
+        end
+
+      {:error, reason} ->
+        raise "#{label} failed: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Append the shared "output capped" notice when `capped?` — for tools whose
+  child was killed at `:max_output_bytes` (the result map's `:truncated` key).
+  """
+  @spec append_capped_notice(String.t(), boolean(), pos_integer(), String.t()) :: String.t()
+  def append_capped_notice(text, false = _capped?, _max_bytes, _hint), do: text
+
+  def append_capped_notice(text, true = _capped?, max_bytes, hint) do
+    text <> "\n... [output capped at #{div(max_bytes, 1024 * 1024)}MB; #{hint}]"
+  end
+
+  @doc """
   Run a shell command. Options: `:cwd`, `:timeout` (ms, default 120_000),
   `:env`, `:max_output_bytes` (default `bash_max_output_bytes/0`).
   Returns `{:ok, %{out, status}}` — with `truncated: true` when the output

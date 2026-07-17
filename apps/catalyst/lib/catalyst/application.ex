@@ -16,10 +16,38 @@ defmodule Catalyst.Application do
       {Task.Supervisor, name: Catalyst.TaskSupervisor},
       # Holds OAuth credentials, refreshes tokens on demand.
       Catalyst.Auth.TokenStore,
+      # The extension runtime registries, grouped under :rest_for_one because
+      # they have hard inter-child dependencies (see extension_runtime/0).
+      # Under the previous flat :one_for_one those held only at first boot: a
+      # TableOwner crash restarted it with a fresh empty ETS table while Hooks
+      # kept running — every registered handler silently lost and the
+      # before_tool_call gates failing open — and a Hooks/LLM.Registry restart
+      # lost extension registrations with nothing re-registering them.
+      %{
+        id: Catalyst.ExtensionRuntimeSupervisor,
+        type: :supervisor,
+        start: {Supervisor, :start_link, [extension_runtime(), [strategy: :rest_for_one]]}
+      },
+      # Registry maps session id -> Session.Server pid.
+      {Registry, keys: :unique, name: Catalyst.Session.Registry},
+      # Supervises one Session.Server per session. Outside the runtime group:
+      # sessions resolve tools/hooks/providers from the live registries per
+      # turn, so they ride out a registry-chain restart without being killed.
+      {DynamicSupervisor, name: Catalyst.Session.DynamicSupervisor, strategy: :one_for_one}
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one, name: Catalyst.Supervisor)
+  end
+
+  # Order is load-bearing (:rest_for_one): each child depends on the ones
+  # before it, and a crashed child restarts everything after it — ending with
+  # Catalyst.Extensions, whose load_all re-registers extension contributions
+  # into the freshly restarted registries.
+  defp extension_runtime do
+    [
       # Owns the hooks ETS table in a process that does nothing else, so the
       # registered handlers survive a Catalyst.Hooks crash (the table would
-      # otherwise die with the server and the gates would fail open). Must
-      # start immediately before Catalyst.Hooks.
+      # otherwise die with the server and the gates would fail open).
       Catalyst.Hooks.TableOwner,
       # Runtime agent-loop hook registry (before/after tool call, etc.).
       Catalyst.Hooks,
@@ -30,16 +58,10 @@ defmodule Catalyst.Application do
       # an extension can terminate its whole process subtree.
       {Registry, keys: :unique, name: Catalyst.Extensions.ProcessRegistry},
       {DynamicSupervisor, name: Catalyst.Extensions.ProcessSupervisor, strategy: :one_for_one},
-      # Live tool registry: built-ins + runtime-loaded extensions. Started after
-      # Hooks/LLM.Registry/ProcessSupervisor: its boot load_all runs extension
-      # setup/1 functions that register into those registries.
-      Catalyst.Extensions,
-      # Registry maps session id -> Session.Server pid.
-      {Registry, keys: :unique, name: Catalyst.Session.Registry},
-      # Supervises one Session.Server per session.
-      {DynamicSupervisor, name: Catalyst.Session.DynamicSupervisor, strategy: :one_for_one}
+      # Live tool registry: built-ins + runtime-loaded extensions. Last: its
+      # boot load_all runs extension setup/1 functions that register into all
+      # of the above.
+      Catalyst.Extensions
     ]
-
-    Supervisor.start_link(children, strategy: :one_for_one, name: Catalyst.Supervisor)
   end
 end

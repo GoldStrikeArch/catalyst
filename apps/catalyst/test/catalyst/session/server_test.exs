@@ -120,6 +120,87 @@ defmodule Catalyst.Session.ServerTest do
     assert Enum.any?(snap.messages, &match?(%Message.Assistant{stop_reason: :aborted}, &1))
   end
 
+  test "abort mid-tool synthesizes results for orphaned tool calls", %{tmp: tmp, model: model} do
+    script = [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}]
+    {_id, pid} = start(tmp, model, script)
+
+    assert :ok = Server.prompt(pid, "long task")
+    # The assistant message carrying the tool call is folded (and persisted)
+    # before the tool starts — abort after that, mid-tool.
+    assert_receive {:agent_event, _, %Event.ToolExecutionStart{}}, 5000
+    Server.abort(pid)
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
+
+    snap = Server.state(pid)
+
+    call_ids =
+      for %Message.Assistant{} = a <- snap.messages,
+          %Content.ToolCall{id: id} <- Message.tool_calls(a),
+          do: id
+
+    assert call_ids != []
+
+    # Every persisted tool call has a result — a transcript with a call but no
+    # output is rejected by providers on every subsequent request, so an abort
+    # without synthesis would brick the session.
+    result_ids = for %Message.ToolResult{tool_call_id: id} <- snap.messages, do: id
+    assert Enum.all?(call_ids, &(&1 in result_ids))
+    assert Enum.any?(snap.messages, &match?(%Message.ToolResult{is_error: true}, &1))
+
+    # And the synthesized results are persisted, so a resume stays replayable.
+    reloaded_ids =
+      for %Message.ToolResult{tool_call_id: id} <- Store.load(snap.store_path), do: id
+
+    assert Enum.all?(call_ids, &(&1 in reloaded_ids))
+  end
+
+  test "a session stopped mid-tool repairs dangling tool calls on resume", %{
+    tmp: tmp,
+    model: model
+  } do
+    script = [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}]
+    {id, pid} = start(tmp, model, script)
+
+    assert :ok = Server.prompt(pid, "long task")
+    # The assistant message carrying the tool call is persisted before the tool
+    # starts — stopping the session here leaves it dangling in the JSONL, with
+    # no abort/DOWN path to synthesize results (same shape as a hard VM crash).
+    assert_receive {:agent_event, _, %Event.ToolExecutionStart{}}, 5000
+
+    Manager.stop(id)
+    wait_until(fn -> Manager.whereis(id) == nil end)
+
+    {:ok, %{pid: pid2}} =
+      Manager.start_session(
+        id: id,
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        opts: [script: [{:text, "resumed"}]]
+      )
+
+    snap = Server.state(pid2)
+
+    call_ids =
+      for %Message.Assistant{} = a <- snap.messages,
+          %Content.ToolCall{id: cid} <- Message.tool_calls(a),
+          do: cid
+
+    assert call_ids != []
+
+    # Load-time repair: every persisted tool call has a synthesized error
+    # result, so the resumed transcript stays replayable.
+    result_ids = for %Message.ToolResult{tool_call_id: cid} <- snap.messages, do: cid
+    assert Enum.all?(call_ids, &(&1 in result_ids))
+    assert Enum.any?(snap.messages, &match?(%Message.ToolResult{is_error: true}, &1))
+
+    # The repair is persisted too — the NEXT restart must not need it again.
+    reloaded_ids =
+      for %Message.ToolResult{tool_call_id: cid} <- Store.load(snap.store_path), do: cid
+
+    assert Enum.all?(call_ids, &(&1 in reloaded_ids))
+  end
+
   test "reset clears the transcript, aborts the run, and survives a restart", %{
     tmp: tmp,
     model: model

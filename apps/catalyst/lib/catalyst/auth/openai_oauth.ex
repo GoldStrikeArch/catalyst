@@ -7,6 +7,7 @@ defmodule Catalyst.Auth.OpenAIOAuth do
 
   alias Catalyst.Auth.JWT
 
+  @provider_id "openai-codex"
   @client_id "app_EMoamEEZ73f0CkXaXp7hrann"
   @auth_base "https://auth.openai.com"
   @authorize_url @auth_base <> "/oauth/authorize"
@@ -18,13 +19,9 @@ defmodule Catalyst.Auth.OpenAIOAuth do
   @typedoc "Stored credentials: access/refresh tokens, expiry (ms), account id."
   @type credentials :: %{required(String.t()) => String.t() | integer() | nil}
 
-  @doc "The Codex CLI OAuth client id."
-  @spec client_id() :: String.t()
-  def client_id, do: @client_id
-
-  @doc "The fixed localhost redirect URI registered for the Codex client."
-  @spec redirect_uri() :: String.t()
-  def redirect_uri, do: @redirect_uri
+  @doc "Provider identity for this flow — the `Catalyst.Auth.TokenStore` key."
+  @spec provider_id() :: String.t()
+  def provider_id, do: @provider_id
 
   @doc "The localhost port the redirect URI points at."
   @spec callback_port() :: :inet.port_number()

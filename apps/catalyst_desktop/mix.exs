@@ -12,6 +12,7 @@ defmodule CatalystDesktop.MixProject do
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      aliases: aliases(),
       deps: deps()
     ]
   end
@@ -34,5 +35,11 @@ defmodule CatalystDesktop.MixProject do
       {:catalyst_web, in_umbrella: true},
       {:desktop, "~> 1.5"}
     ]
+  end
+
+  # The umbrella root's `setup` alias runs `mix setup` in every child app, so
+  # each app must define one (mix cmd aborts the whole run on a missing task).
+  defp aliases do
+    [setup: ["deps.get"]]
   end
 end

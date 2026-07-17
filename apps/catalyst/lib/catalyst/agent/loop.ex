@@ -31,6 +31,7 @@ defmodule Catalyst.Agent.Loop do
   alias Catalyst.Tools.Registry
 
   @doc "Run the loop for the given prompts. Returns `{:ok, new_messages, final_context}`."
+  @spec run([Message.t()], map(), map(), (Event.t() -> any())) :: {:ok, [Message.t()], map()}
   def run(prompts, context, config, emit) do
     # Every event is also offered to registered observers (Hooks `on/1`), isolated.
     emit = fn ev ->
@@ -175,7 +176,7 @@ defmodule Catalyst.Agent.Loop do
   end
 
   defp stream_provider(model, llm_ctx, config, emit) do
-    sink = fn ev -> emit.(%Event.MessageUpdate{message: nil, llm_event: ev}) end
+    sink = fn ev -> emit.(%Event.MessageUpdate{llm_event: ev}) end
 
     config.provider.stream(model, llm_ctx, config[:opts] || [], sink)
   end

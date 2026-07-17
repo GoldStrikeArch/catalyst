@@ -9,6 +9,7 @@ defmodule Catalyst.Auth.TokenStore do
   """
 
   use GenServer
+  require Logger
 
   alias Catalyst.Auth.OpenAIOAuth
 
@@ -25,7 +26,7 @@ defmodule Catalyst.Auth.TokenStore do
 
   @doc "A fresh `{:ok, %{access, account_id}}` for a provider, refreshing if needed."
   @spec get_access_token(String.t()) :: {:ok, token()} | {:error, term()}
-  def get_access_token(provider \\ "openai-codex"),
+  def get_access_token(provider \\ OpenAIOAuth.provider_id()),
     do: GenServer.call(__MODULE__, {:get, provider}, 60_000)
 
   @doc """
@@ -39,7 +40,7 @@ defmodule Catalyst.Auth.TokenStore do
 
   @doc "Whether a provider has stored credentials."
   @spec logged_in?(String.t()) :: boolean()
-  def logged_in?(provider \\ "openai-codex"),
+  def logged_in?(provider \\ OpenAIOAuth.provider_id()),
     do: GenServer.call(__MODULE__, {:logged_in?, provider})
 
   @doc "Forget a provider's credentials and persist."
@@ -58,6 +59,22 @@ defmodule Catalyst.Auth.TokenStore do
 
   @impl true
   def init(:ok), do: {:ok, %{creds: load(), refreshing: %{}}}
+
+  # If this server ever crashes, OTP's crash report logs the state and the last
+  # message — both can carry access/refresh tokens. Redact them.
+  @impl true
+  def format_status(status) do
+    Map.new(status, fn
+      {:state, %{creds: creds} = state} ->
+        {:state, %{state | creds: Map.new(creds, fn {provider, _} -> {provider, :redacted} end)}}
+
+      {:message, {:put, provider, creds}} when is_map(creds) ->
+        {:message, {:put, provider, :redacted}}
+
+      other ->
+        other
+    end)
+  end
 
   @impl true
   def handle_call({:get, provider}, from, state) do
@@ -240,20 +257,35 @@ defmodule Catalyst.Auth.TokenStore do
     end
   end
 
+  # Never raises: a disk error here (full disk, read-only home) inside a
+  # handle_call would crash the server — and the resulting crash report would
+  # carry token material (see format_status/1, which only mitigates). The creds
+  # stay usable in memory; losing persistence costs a re-login after restart.
   defp persist(creds) do
     path = auth_path()
     dir = Path.dirname(path)
-    File.mkdir_p!(dir)
-    _ = File.chmod(dir, 0o700)
-
-    # Restrict the temp file BEFORE writing token material into it, then
-    # atomically swap it in (rename preserves the mode).
     tmp = path <> ".tmp"
-    File.touch!(tmp)
-    File.chmod!(tmp, 0o600)
-    File.write!(tmp, Jason.encode!(creds))
-    File.rename!(tmp, path)
-    :ok
+
+    result =
+      with {:ok, json} <- Jason.encode(creds),
+           :ok <- File.mkdir_p(dir),
+           _ = File.chmod(dir, 0o700),
+           # Restrict the temp file BEFORE writing token material into it, then
+           # atomically swap it in (rename preserves the mode).
+           :ok <- File.touch(tmp),
+           :ok <- File.chmod(tmp, 0o600),
+           :ok <- File.write(tmp, json) do
+        File.rename(tmp, path)
+      end
+
+    with {:error, reason} <- result do
+      Logger.warning(
+        "[auth] could not persist credentials to #{path}: #{inspect(reason)} — " <>
+          "tokens stay in memory; you will need to sign in again after a restart"
+      )
+
+      {:error, reason}
+    end
   end
 
   defp auth_path do

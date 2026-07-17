@@ -290,8 +290,17 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   # ---- helpers --------------------------------------------------------------
 
+  # The transcript shows a preview of tool output, not the full result.
+  @tool_output_preview_lines 40
+
   defp tool_output(%Message.ToolResult{content: content}) do
-    content |> Content.text_of() |> String.split("\n") |> Enum.take(40) |> Enum.join("\n")
+    lines = content |> Content.text_of() |> String.split("\n")
+    preview = lines |> Enum.take(@tool_output_preview_lines) |> Enum.join("\n")
+
+    case length(lines) - @tool_output_preview_lines do
+      hidden when hidden > 0 -> preview <> "\n… (#{hidden} more lines)"
+      _ -> preview
+    end
   end
 
   defp short_args(args) when is_map(args) and map_size(args) == 0, do: ""

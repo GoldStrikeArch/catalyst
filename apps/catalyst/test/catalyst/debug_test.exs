@@ -36,7 +36,7 @@ defmodule Catalyst.DebugTest do
   end
 
   test "streaming deltas are not logged", %{sid: sid} do
-    Debug.log_event(sid, %Event.MessageUpdate{message: nil, llm_event: nil})
+    Debug.log_event(sid, %Event.MessageUpdate{llm_event: nil})
     refute File.exists?(Debug.path(sid))
   end
 

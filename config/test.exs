@@ -2,15 +2,20 @@ import Config
 
 # Keep auth credentials and session logs out of the real ~/.catalyst during
 # tests. Set before the :catalyst app starts so TokenStore reads this path.
+# Keyed by OS pid so two concurrent `mix test` runs (a second worktree, a
+# shared CI runner) can't share auth/session/extension state or delete each
+# other's extension dirs mid-run.
+test_tmp = Path.join(System.tmp_dir!(), "catalyst_test_#{System.pid()}")
+
 config :catalyst,
-  auth_path: Path.join(System.tmp_dir!(), "catalyst_test_auth.json"),
-  sessions_root: Path.join(System.tmp_dir!(), "catalyst_test_sessions"),
-  extensions_dir: Path.join(System.tmp_dir!(), "catalyst_test_extensions"),
+  auth_path: Path.join(test_tmp, "auth.json"),
+  sessions_root: Path.join(test_tmp, "sessions"),
+  extensions_dir: Path.join(test_tmp, "extensions"),
   # Keep the boot marker + system-prompt override out of ~/.catalyst too (a
   # stale "booting" marker in a shared location would flip test boots into
   # safe mode); short stabilization so boot marks itself ok quickly.
-  boot_marker_path: Path.join(System.tmp_dir!(), "catalyst_test_boot_marker"),
-  system_prompt_path: Path.join(System.tmp_dir!(), "catalyst_test_system_prompt.md"),
+  boot_marker_path: Path.join(test_tmp, "boot_marker"),
+  system_prompt_path: Path.join(test_tmp, "system_prompt.md"),
   boot_stable_ms: 50
 
 # We don't run a server during test. If one is required,

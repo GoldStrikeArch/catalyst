@@ -71,10 +71,13 @@ defmodule CatalystWeb.MixProject do
       setup: ["deps.get", "assets.setup", "assets.build"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind catalyst_web", "esbuild catalyst_web"],
+      # No phx.digest: the desktop app serves plain app.js/app.css so the
+      # runtime asset rebuild can overwrite the served files in place. Digested
+      # copies and .gz siblings would shadow the rebuilt files (Plug.Static
+      # prefers *.gz when gzip is on) and silently break self-modification.
       "assets.deploy": [
         "tailwind catalyst_web --minify",
-        "esbuild catalyst_web --minify",
-        "phx.digest"
+        "esbuild catalyst_web --minify"
       ]
     ]
   end

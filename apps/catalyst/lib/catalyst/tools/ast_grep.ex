@@ -7,6 +7,11 @@ defmodule Catalyst.Tools.AstGrep do
   use Catalyst.Tools.Tool
   alias Catalyst.Tools.{Binaries, Exec, Paths, Truncate}
 
+  # ast-grep has no match limit or output cap of its own; bound the child's
+  # stdout so a broad pattern over a big tree can't be accumulated unboundedly
+  # (same rationale and size as ripgrep's cap).
+  @max_output_bytes 8 * 1024 * 1024
+
   @impl true
   # Can mutate (rewrite mode), so serialize relative to other file-touching tools.
   def execution_mode, do: :sequential
@@ -61,39 +66,47 @@ defmodule Catalyst.Tools.AstGrep do
   defp search(ag, pattern, lang, target, ctx) do
     ag_args = ["run", "--pattern", pattern, "--lang", lang, "--json=stream", target]
 
-    case Exec.collect(ag, ag_args, cwd: ctx.cwd) do
-      {:ok, %{out: out, status: status}} when status in [0, 1] ->
-        matches = parse_matches(out)
-        text = if matches == [], do: "No matches.", else: Enum.join(matches, "\n")
-        {body, info} = Truncate.head(text)
+    res =
+      Exec.collect!("ast-grep", ag, ag_args,
+        cwd: ctx.cwd,
+        max_output_bytes: @max_output_bytes,
+        ok_statuses: [0, 1]
+      )
 
-        result(Truncate.notice(body, info, :head), %{
-          match_count: length(matches),
-          truncation: info
-        })
+    capped? = Map.get(res, :truncated, false)
+    matches = parse_matches(res.out)
+    text = if matches == [], do: "No matches.", else: Enum.join(matches, "\n")
+    {body, info} = Truncate.head(text)
 
-      {:ok, %{out: out, status: status}} ->
-        raise "ast-grep error (status #{status}): #{String.slice(out, 0, 300)}"
+    body =
+      body
+      |> Truncate.notice(info, :head)
+      |> Exec.append_capped_notice(capped?, @max_output_bytes, "narrow the pattern or path")
 
-      {:error, reason} ->
-        raise "ast-grep failed: #{inspect(reason)}"
-    end
+    result(body, %{
+      match_count: length(matches),
+      output_capped: capped?,
+      truncation: info
+    })
   end
 
   defp rewrite(ag, pattern, lang, rewrite, target, ctx) do
     ag_args =
       ["run", "--pattern", pattern, "--rewrite", rewrite, "--lang", lang, "--update-all", target]
 
-    case Exec.collect(ag, ag_args, cwd: ctx.cwd) do
-      {:ok, %{out: out, status: 0}} ->
+    # `--update-all` exits 1 with NO output when the pattern matched nothing —
+    # the same "no matches" case search reports, not an error. Status 1 WITH
+    # output is a real failure.
+    case Exec.collect!("ast-grep rewrite", ag, ag_args, cwd: ctx.cwd, ok_statuses: [0, 1]) do
+      %{status: 0, out: out} ->
         summary = out |> String.trim() |> default_if_blank("Rewrite applied.")
         result(summary, %{rewrote: true})
 
-      {:ok, %{out: out, status: status}} ->
-        raise "ast-grep rewrite error (status #{status}): #{String.slice(out, 0, 300)}"
-
-      {:error, reason} ->
-        raise "ast-grep failed: #{inspect(reason)}"
+      %{status: 1, out: out} ->
+        case String.trim(out) do
+          "" -> result("No matches; nothing rewritten.", %{rewrote: false})
+          err -> raise "ast-grep rewrite error (status 1): #{String.slice(err, 0, 200)}"
+        end
     end
   end
 

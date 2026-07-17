@@ -52,10 +52,10 @@ defmodule Catalyst.Tools.Fd do
         target
       ]
 
-    case Exec.collect(fd, fd_args, cwd: ctx.cwd) do
+    case Exec.collect!("fd", fd, fd_args, cwd: ctx.cwd, ok_statuses: [0, 1]) do
       # fd exits 0 on a clean run (even with zero matches) — unlike rg,
       # where 1 means "no matches".
-      {:ok, %{out: out, status: 0}} ->
+      %{out: out, status: 0} ->
         respond(String.split(out, "\n", trim: true), limit, nil)
 
       # fd exits 1 when ANY error occurred (missing/unreadable search path),
@@ -63,7 +63,7 @@ defmodule Catalyst.Tools.Fd do
       # lines merged into stdout by Exec.collect's :stderr_to_stdout — drop
       # them so they aren't returned to the model as file paths, salvage the
       # real paths with a note, and only raise when nothing was found at all.
-      {:ok, %{out: out, status: 1}} ->
+      %{out: out, status: 1} ->
         {error_lines, results} = partition_errors(out)
 
         case results do
@@ -73,12 +73,6 @@ defmodule Catalyst.Tools.Fd do
           _ ->
             respond(results, limit, error_note(error_lines))
         end
-
-      {:ok, %{out: out, status: status}} ->
-        raise "fd error (status #{status}): #{String.slice(out, 0, 200)}"
-
-      {:error, reason} ->
-        raise "fd failed: #{inspect(reason)}"
     end
   end
 

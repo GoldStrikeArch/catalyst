@@ -63,13 +63,7 @@ defmodule Catalyst.Tools.DevelopTool do
         )
 
       {:error, reason} ->
-        raise "Failed to compile the new tool: #{format_reason(reason)}"
+        raise "Failed to create the new tool: #{Catalyst.Extensions.format_error(reason)}"
     end
   end
-
-  # Installer reasons may be strings (compile errors) or tuples (e.g.
-  # {:not_a_tool, Mod}, {kind, reason}); interpolating a tuple raises
-  # Protocol.UndefinedError and masks the real error.
-  defp format_reason(reason) when is_binary(reason), do: reason
-  defp format_reason(reason), do: inspect(reason)
 end

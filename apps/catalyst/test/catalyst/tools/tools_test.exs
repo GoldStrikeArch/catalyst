@@ -144,7 +144,7 @@ defmodule Catalyst.ToolsTest do
     res = Ripgrep.execute(%{"pattern" => "NEEDLE", "path" => "huge.txt"}, ctx)
 
     assert res.details.output_capped
-    assert text(res) =~ "search output capped"
+    assert text(res) =~ "output capped"
   end
 
   test "grep (ripgrep) salvages matches when some paths can't be searched", %{tmp: tmp, ctx: ctx} do

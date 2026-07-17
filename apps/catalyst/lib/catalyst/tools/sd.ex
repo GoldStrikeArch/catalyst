@@ -43,16 +43,8 @@ defmodule Catalyst.Tools.Sd do
     sd_args = flags ++ ["--", pattern, replacement, abs]
     original = File.read(abs)
 
-    case Exec.collect(sd, sd_args, cwd: ctx.cwd) do
-      {:ok, %{status: 0}} ->
-        describe(original, abs, pattern)
-
-      {:ok, %{out: out, status: status}} ->
-        raise "sd error (status #{status}): #{String.slice(out, 0, 200)}"
-
-      {:error, reason} ->
-        raise "sd failed: #{inspect(reason)}"
-    end
+    %{status: 0} = Exec.collect!("sd", sd, sd_args, cwd: ctx.cwd)
+    describe(original, abs, pattern)
   end
 
   # sd exits 0 even when the pattern matched nothing; for a file we could read

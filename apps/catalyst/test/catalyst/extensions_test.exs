@@ -283,7 +283,7 @@ defmodule Catalyst.ExtensionsTest do
     capture_log(fn ->
       assert {:ok, %{loaded: loaded, failed: [{^broken_path, reason}]}} = Extensions.load_all()
       assert Enum.any?(loaded, &(&1.owner == "goodfile"))
-      assert reason =~ "badfile.ex"
+      assert Extensions.format_error(reason) =~ "badfile.ex"
     end)
   end
 
@@ -438,7 +438,7 @@ defmodule Catalyst.ExtensionsTest do
 
     capture_log(fn ->
       assert {:error, reason} = Extensions.load_file(path)
-      assert reason =~ "boom"
+      assert Extensions.format_error(reason) =~ "boom"
     end)
 
     # Code.compile_file/1 defined PartialFirst before PartialBoom raised — the

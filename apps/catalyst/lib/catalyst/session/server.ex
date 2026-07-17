@@ -58,12 +58,17 @@ defmodule Catalyst.Session.Server do
 
   # ---- public API -----------------------------------------------------------
 
+  @typedoc "User input accepted by `prompt/2`, `steer/2`, and `follow_up/2`."
+  @type input :: Message.User.t() | String.t() | [Catalyst.Content.t()]
+
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     id = Keyword.fetch!(opts, :id)
     GenServer.start_link(__MODULE__, opts, name: Manager.via(id))
   end
 
   @doc "PubSub topic for a session id."
+  @spec topic(String.t()) :: String.t()
   def topic(id), do: "session:" <> id
 
   @doc """
@@ -71,27 +76,34 @@ defmodule Catalyst.Session.Server do
   `{:error, :no_provider | {:unknown_api, api}}` when the session has no
   resolvable provider.
   """
+  @spec prompt(GenServer.server(), input()) :: :ok | {:error, term()}
   def prompt(server, input), do: GenServer.call(server, {:prompt, normalize(input)})
 
   @doc "Continue running (no new prompt) — e.g. after steering/follow-up. Same returns as `prompt/2`."
+  @spec continue(GenServer.server()) :: :ok | {:error, term()}
   def continue(server), do: GenServer.call(server, :continue)
 
   @doc "Inject a message mid-run, applied before the next LLM call."
+  @spec steer(GenServer.server(), input()) :: :ok
   def steer(server, input), do: GenServer.cast(server, {:steer, normalize(input)})
 
   @doc "Queue a message to run after the agent reaches a natural stop."
+  @spec follow_up(GenServer.server(), input()) :: :ok
   def follow_up(server, input), do: GenServer.cast(server, {:follow_up, normalize(input)})
 
   @doc "Abort the active run."
+  @spec abort(GenServer.server()) :: :ok
   def abort(server), do: GenServer.cast(server, :abort)
 
-  @doc "Snapshot of the current session state."
+  @doc "Snapshot of the current session state (see `Catalyst.Session.Snapshot.of/1`)."
+  @spec state(GenServer.server()) :: map()
   def state(server), do: GenServer.call(server, :state)
 
   @doc """
   Clear the transcript and abort any active run. A reset marker is appended to
   the session file, so a crash-restarted (or resumed) session stays cleared.
   """
+  @spec reset(GenServer.server()) :: :ok
   def reset(server), do: GenServer.cast(server, :reset)
 
   # ---- callbacks ------------------------------------------------------------
@@ -119,6 +131,13 @@ defmodule Catalyst.Session.Server do
       # known id) doesn't lose the conversation. Stored newest-first.
       messages: store.path |> Store.load() |> Enum.reverse()
     }
+
+    # The previous incarnation may have died mid-run (graceful stop, VM crash)
+    # after persisting an assistant message whose tool calls never got results.
+    # handle_failure/2 only covers failures within one process lifetime, so
+    # repair at load time — a dangling tool call is rejected by the provider on
+    # every subsequent request, bricking the session.
+    state = repair_transcript(state)
 
     Catalyst.Debug.mark_latest(id)
     {:ok, state}
@@ -305,6 +324,20 @@ defmodule Catalyst.Session.Server do
   defp persist(state, %Event.MessageEnd{message: m}), do: Store.append_message(state.store, m)
   defp persist(_state, _event), do: :ok
 
+  # Synthesize and persist error ToolResults for tool calls left dangling by a
+  # previous incarnation. No broadcast: this runs in init, before any
+  # subscriber can have folded an inconsistent view.
+  defp repair_transcript(state) do
+    case Reducer.aborted_tool_results(state, :interrupted) do
+      [] ->
+        state
+
+      results ->
+        Enum.each(results, &Store.append_message(state.store, &1))
+        %{state | messages: Enum.reverse(results, state.messages)}
+    end
+  end
+
   defp track_agent_end(state, %Event.AgentEnd{}), do: %{state | agent_ended: true}
   defp track_agent_end(state, _event), do: state
 
@@ -314,6 +347,23 @@ defmodule Catalyst.Session.Server do
       "error",
       "run failed: " <> Catalyst.Debug.truncate(reason, 8_000)
     )
+
+    # Complete orphaned tool calls first: the assistant message carrying them
+    # was already persisted, and a transcript with a tool call but no result is
+    # rejected by the provider on every subsequent request.
+    state =
+      case Reducer.aborted_tool_results(state, reason) do
+        [] ->
+          state
+
+        results ->
+          Enum.each(results, fn r ->
+            Store.append_message(state.store, r)
+            broadcast(state, %Event.MessageEnd{message: r})
+          end)
+
+          %{state | messages: Enum.reverse(results, state.messages)}
+      end
 
     msg = Reducer.failure_message(state, reason)
     Store.append_message(state.store, msg)

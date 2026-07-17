@@ -1,7 +1,7 @@
 defmodule Catalyst.Tools.Write do
   @moduledoc "Create or overwrite a file, creating parent directories."
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.Paths
+  alias Catalyst.Tools.{AtomicWrite, Paths}
 
   @impl true
   def execution_mode, do: :sequential
@@ -32,7 +32,7 @@ defmodule Catalyst.Tools.Write do
   def execute(%{"path" => path, "content" => content}, ctx) do
     abs = Paths.resolve(path, ctx.cwd)
     File.mkdir_p!(Path.dirname(abs))
-    File.write!(abs, content)
+    AtomicWrite.write!(abs, content)
     result("Wrote #{byte_size(content)} bytes to #{abs}", %{path: abs, bytes: byte_size(content)})
   end
 end
