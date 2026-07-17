@@ -66,6 +66,7 @@ defmodule Catalyst.Extensions do
   def init(:ok) do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
     seed_builtins()
+    ensure_guide()
     {:ok, %{}, {:continue, :load_all}}
   end
 
@@ -92,6 +93,20 @@ defmodule Catalyst.Extensions do
 
   defp seed_builtins do
     Enum.each(Catalyst.Tools.Registry.default_tools(), &insert/1)
+  end
+
+  # Publish the bundled self-extension guide to a stable, agent-readable path.
+  # Refreshed each boot so it tracks the app version.
+  defp ensure_guide do
+    src = Application.app_dir(:catalyst, "priv/guide.md")
+
+    if File.exists?(src) do
+      dest = Path.join(Path.dirname(dir()), "guide.md")
+      File.mkdir_p!(Path.dirname(dest))
+      File.cp!(src, dest)
+    end
+  rescue
+    _ -> :ok
   end
 
   defp do_load_all do

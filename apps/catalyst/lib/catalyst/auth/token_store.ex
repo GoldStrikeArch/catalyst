@@ -28,6 +28,9 @@ defmodule Catalyst.Auth.TokenStore do
   def logged_in?(provider \\ "openai-codex"),
     do: GenServer.call(__MODULE__, {:logged_in?, provider})
 
+  @doc "Forget a provider's credentials and persist."
+  def delete(provider), do: GenServer.call(__MODULE__, {:delete, provider})
+
   # ---- callbacks ------------------------------------------------------------
 
   @impl true
@@ -56,6 +59,12 @@ defmodule Catalyst.Auth.TokenStore do
 
   def handle_call({:logged_in?, provider}, _from, state),
     do: {:reply, Map.has_key?(state, provider), state}
+
+  def handle_call({:delete, provider}, _from, state) do
+    state = Map.delete(state, provider)
+    persist(state)
+    {:reply, :ok, state}
+  end
 
   # ---- internals ------------------------------------------------------------
 

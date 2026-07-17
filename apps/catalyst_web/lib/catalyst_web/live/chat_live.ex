@@ -16,6 +16,15 @@ defmodule CatalystWeb.ChatLive do
   You can read files, run shell commands, search with ripgrep, find files with fd,
   edit files, replace text with sd, and make structural edits with ast-grep.
   Prefer using tools to inspect the repository before answering. Keep replies short.
+
+  Self-extension: if you need a capability no built-in tool provides, you can write a
+  new tool for yourself by calling `develop_tool` with an Elixir module that
+  `use Catalyst.Tools.Tool` and implements name/0, description/0, parameters/0 (a JSON
+  Schema object) and execute/2. In execute(args, ctx): resolve paths with
+  Catalyst.Tools.Paths.resolve(path, ctx.cwd), return result("text", %{}), and raise on
+  failure. Namespace modules under Catalyst.Ext.*. The new tool is loaded immediately and
+  callable on your next turn. Only do this when an existing tool can't do the job. For the
+  full contract, helpers and examples, read the guide at ~/.catalyst/guide.md.
   """
 
   @impl true
@@ -28,6 +37,8 @@ defmodule CatalystWeb.ChatLive do
         tools: %{},
         input: "",
         logged_in: Catalyst.Auth.logged_in?(),
+        login_state: :idle,
+        login_ref: nil,
         provider: :demo,
         model_label: "Demo (offline)",
         session_id: nil,
@@ -84,10 +95,62 @@ defmodule CatalystWeb.ChatLive do
   def handle_event("set_provider", %{"provider" => _demo}, socket),
     do: {:noreply, start_session(socket, :demo)}
 
+  # Run the ChatGPT OAuth flow in a supervised Task so the LiveView doesn't block
+  # while the user completes login in their browser. Result arrives via handle_info.
+  def handle_event("login", _params, %{assigns: %{login_state: :pending}} = socket),
+    do: {:noreply, socket}
+
+  def handle_event("login", _params, socket) do
+    fun = login_fun()
+    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fun)
+    {:noreply, assign(socket, login_state: :pending, login_ref: task.ref)}
+  end
+
+  def handle_event("logout", _params, socket) do
+    Catalyst.Auth.logout()
+    socket = if socket.assigns.provider == :codex, do: start_session(socket, :demo), else: socket
+    {:noreply, assign(socket, logged_in: false) |> put_flash(:info, "Signed out.")}
+  end
+
   # ---- agent events ---------------------------------------------------------
 
   @impl true
   def handle_info({:agent_event, event}, socket), do: {:noreply, apply_event(event, socket)}
+
+  # Login task finished (matches only when the ref is our pending login task).
+  def handle_info({ref, result}, %{assigns: %{login_ref: ref}} = socket) do
+    Process.demonitor(ref, [:flush])
+
+    case result do
+      {:ok, _account_id} ->
+        socket
+        |> assign(logged_in: true, login_state: :idle, login_ref: nil)
+        |> put_flash(:info, "Signed in to ChatGPT.")
+        |> start_session(:codex)
+        |> then(&{:noreply, &1})
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(login_state: {:error, format_error(reason)}, login_ref: nil)
+         |> put_flash(:error, "Sign-in failed: #{format_error(reason)}")}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{assigns: %{login_ref: ref}} = socket) do
+    {:noreply,
+     socket
+     |> assign(login_state: {:error, inspect(reason)}, login_ref: nil)
+     |> put_flash(:error, "Sign-in crashed.")}
+  end
+
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # Overridable so tests can stub the OAuth flow.
+  defp login_fun, do: Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)
+
+  defp format_error(reason) when is_binary(reason), do: reason
+  defp format_error(reason), do: inspect(reason)
 
   defp apply_event(%Event.MessageStart{message: %Message.Assistant{}}, socket),
     do: assign(socket, streaming: %{text: "", thinking: ""})
@@ -177,14 +240,29 @@ defmodule CatalystWeb.ChatLive do
           >
             Demo
           </button>
-          <button
-            class={["btn btn-xs", @provider == :codex && "btn-primary", !@logged_in && "btn-disabled"]}
-            phx-click="set_provider"
-            phx-value-provider="codex"
-            title={!@logged_in && "Run mix catalyst.login first"}
-          >
-            Codex {if @logged_in, do: "✓", else: "🔒"}
-          </button>
+
+          <%= if @logged_in do %>
+            <button
+              class={["btn btn-xs", @provider == :codex && "btn-primary"]}
+              phx-click="set_provider"
+              phx-value-provider="codex"
+            >
+              Codex ✓
+            </button>
+            <button class="btn btn-xs btn-ghost" phx-click="logout" title="Sign out of ChatGPT">⏏</button>
+          <% else %>
+            <button
+              :if={@login_state != :pending}
+              class="btn btn-xs btn-secondary"
+              phx-click="login"
+            >
+              Sign in to ChatGPT
+            </button>
+            <span :if={@login_state == :pending} class="text-xs flex items-center gap-1">
+              <span class="loading loading-spinner loading-xs"></span> finish in your browser…
+            </span>
+          <% end %>
+
           <button class="btn btn-xs btn-ghost" phx-click="new_session">New</button>
         </div>
       </header>

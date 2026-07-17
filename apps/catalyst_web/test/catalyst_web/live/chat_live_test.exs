@@ -31,4 +31,20 @@ defmodule CatalystWeb.ChatLiveTest do
     html = wait_render(view, "offline Demo provider", 80)
     assert html =~ "ls"
   end
+
+  test "the Sign in button runs OAuth (stubbed) and switches to Codex", %{conn: conn} do
+    # Stub the OAuth flow so no browser/callback server is involved.
+    Application.put_env(:catalyst_web, :login_fun, fn -> {:ok, "acct_test"} end)
+    on_exit(fn -> Application.delete_env(:catalyst_web, :login_fun) end)
+
+    {:ok, view, html} = live(conn, ~p"/")
+    assert html =~ "Sign in to ChatGPT"
+
+    view |> element("button", "Sign in to ChatGPT") |> render_click()
+
+    # Async login result flips the UI to logged-in and switches the provider.
+    html = wait_render(view, "Codex ✓", 80)
+    refute html =~ "Sign in to ChatGPT"
+    assert html =~ "Codex"
+  end
 end

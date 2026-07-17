@@ -12,6 +12,9 @@ defmodule Catalyst.Auth do
   @doc "Whether we have Codex credentials."
   def logged_in?, do: TokenStore.logged_in?(@provider)
 
+  @doc "Forget the stored Codex credentials."
+  def logout, do: TokenStore.delete(@provider)
+
   @doc """
   Run the ChatGPT OAuth PKCE flow: open the browser, capture the redirect on
   :1455, exchange the code, and store credentials. Returns `{:ok, account_id}`.
