@@ -49,16 +49,21 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp do_handle("response.output_item.added", %{"item" => item}, s, sink) do
     case item["type"] do
       "reasoning" ->
-        %{s | current: {:reasoning, %{thinking: ""}}}
+        %{s | current: {:reasoning, %{thinking: []}}}
 
       "message" ->
         sink.(%Event.TextStart{})
-        %{s | current: {:text, %{text: "", id: item["id"]}}}
+        %{s | current: {:text, %{text: [], id: item["id"]}}}
 
       "function_call" ->
         id = "#{item["call_id"]}|#{item["id"]}"
         sink.(%Event.ToolCallStart{id: id, name: item["name"]})
-        %{s | current: {:tool, %{id: id, name: item["name"], partial: item["arguments"] || ""}}}
+
+        %{
+          s
+          | current:
+              {:tool, %{id: id, name: item["name"], partial: chunks(item["arguments"] || "")}}
+        }
 
       _ ->
         s
@@ -76,7 +81,7 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
       {:reasoning, r} ->
         delta = ev["delta"] || ""
         sink.(%Event.ThinkingDelta{delta: delta})
-        %{s | current: {:reasoning, %{r | thinking: r.thinking <> delta}}}
+        %{s | current: {:reasoning, %{r | thinking: add_chunk(r.thinking, delta)}}}
 
       _ ->
         s
@@ -88,7 +93,7 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
       {:text, t} ->
         delta = ev["delta"] || ""
         sink.(%Event.TextDelta{delta: delta})
-        %{s | current: {:text, %{t | text: t.text <> delta}}}
+        %{s | current: {:text, %{t | text: add_chunk(t.text, delta)}}}
 
       _ ->
         s
@@ -100,7 +105,7 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
       {:tool, t} ->
         delta = ev["delta"] || ""
         sink.(%Event.ToolCallDelta{id: t.id, delta: delta})
-        %{s | current: {:tool, %{t | partial: t.partial <> delta}}}
+        %{s | current: {:tool, %{t | partial: add_chunk(t.partial, delta)}}}
 
       _ ->
         s
@@ -109,8 +114,11 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
 
   defp do_handle("response.function_call_arguments.done", ev, s, _sink) do
     case s.current do
-      {:tool, t} -> %{s | current: {:tool, %{t | partial: ev["arguments"] || t.partial}}}
-      _ -> s
+      {:tool, t} ->
+        %{s | current: {:tool, %{t | partial: replace_chunks(t.partial, ev["arguments"])}}}
+
+      _ ->
+        s
     end
   end
 
@@ -226,14 +234,14 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp flush_current(%{current: nil} = s), do: s
 
   defp flush_current(%{current: {:text, t}} = s),
-    do: %{s | blocks: [%Content.Text{text: t.text} | s.blocks], current: nil}
+    do: %{s | blocks: [%Content.Text{text: chunks_to_binary(t.text)} | s.blocks], current: nil}
 
   # A mid-stream reasoning item was never completed, so its `output_item.added`
   # payload lacks `encrypted_content`; replaying it next turn risks a 400. Keep
   # the partial thinking text for the UI but emit no signature — Request skips
   # nil-signature thinking blocks on replay.
   defp flush_current(%{current: {:reasoning, r}} = s) do
-    block = %Content.Thinking{thinking: r.thinking, signature: nil}
+    block = %Content.Thinking{thinking: chunks_to_binary(r.thinking), signature: nil}
     %{s | blocks: [block | s.blocks], current: nil}
   end
 
@@ -251,10 +259,11 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
 
   # ---- helpers --------------------------------------------------------------
 
-  defp current_text(%{current: {:text, t}}), do: t.text
+  defp current_text(%{current: {:text, t}}), do: chunks_to_binary(t.text)
   defp current_text(_), do: nil
 
-  defp current_tool(%{current: {:tool, t}}, _item), do: {t.id, t.name, t.partial}
+  defp current_tool(%{current: {:tool, t}}, _item),
+    do: {t.id, t.name, chunks_to_binary(t.partial)}
 
   defp current_tool(_, item),
     do: {"#{item["call_id"]}|#{item["id"]}", item["name"], item["arguments"] || "{}"}
@@ -279,8 +288,22 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
     end
   end
 
-  defp reasoning_partial(%{current: {:reasoning, r}}), do: r.thinking
+  defp reasoning_partial(%{current: {:reasoning, r}}), do: chunks_to_binary(r.thinking)
   defp reasoning_partial(_), do: ""
+
+  defp chunks(""), do: []
+  defp chunks(binary) when is_binary(binary), do: [binary]
+
+  defp add_chunk(chunks, ""), do: chunks
+  defp add_chunk(chunks, delta) when is_binary(delta), do: [delta | chunks]
+
+  defp replace_chunks(current, nil), do: current
+  defp replace_chunks(_current, binary) when is_binary(binary), do: chunks(binary)
+  defp replace_chunks(current, _other), do: current
+
+  defp chunks_to_binary(chunks) when is_list(chunks) do
+    chunks |> Enum.reverse() |> IO.iodata_to_binary()
+  end
 
   defp decode_args(partial, fallback) do
     json = if is_binary(partial) and partial != "", do: partial, else: fallback || "{}"

@@ -14,6 +14,15 @@ defmodule Catalyst.Extensions.BootGuard do
   Limitation: a crash *after* the stabilization window (e.g. an extension that
   only blows up on first use, taking the VM down minutes in) is not detected —
   this guards boot-time bricking specifically.
+
+  False-positive containment: quitting the app inside the stabilization window
+  leaves the marker at `booting`, indistinguishable from a crash. Three
+  mitigations: graceful stops mark clean via `Catalyst.Application.stop/1`; the
+  desktop window's quit menu marks clean before its `System.halt` (which skips
+  stop callbacks); and a stale marker with an *empty* extensions directory is
+  ignored at boot (nothing to guard) and self-heals. Residual: a halt-quit
+  (⌘Q via the Apple menu, window close) inside the window *with extensions
+  installed* still reads as a crash on the next boot.
   """
 
   @doc "Path of the marker file (`~/.catalyst/boot_marker`; test-overridable)."

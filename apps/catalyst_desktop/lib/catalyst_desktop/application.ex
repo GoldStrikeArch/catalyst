@@ -33,6 +33,9 @@ defmodule CatalystDesktop.Application do
       id: CatalystWindow,
       title: Application.get_env(:catalyst_desktop, :window_title, "Catalyst"),
       size: Application.get_env(:catalyst_desktop, :window_size, {1100, 800}),
+      # Required for ⌘Q on macOS: Desktop.Window only wires the Apple menu's
+      # Quit item when the frame has a menubar attached.
+      menubar: CatalystDesktop.MenuBar,
       url: &CatalystWeb.Endpoint.url/0
     ]
   end

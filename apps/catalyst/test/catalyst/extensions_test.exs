@@ -129,6 +129,28 @@ defmodule Catalyst.ExtensionsTest do
     assert length(owner_hooks("multikind")) == 1
   end
 
+  test "auto-loaded tools must return binary names" do
+    source = ~S'''
+    defmodule Catalyst.Ext.BadNameTool do
+      use Catalyst.Tools.Tool
+      @impl true
+      def name, do: :bad_name_tool
+      @impl true
+      def description, do: "bad tool"
+      @impl true
+      def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+      @impl true
+      def execute(_args, _ctx), do: result("bad")
+    end
+    '''
+
+    path = write_ext("bad_name_tool", source)
+
+    assert {:error, {:bad_tool_name, :bad_name_tool}} = Extensions.load_file(path)
+    assert Extensions.fetch("bad_name_tool") == :error
+    refute Code.ensure_loaded?(Catalyst.Ext.BadNameTool)
+  end
+
   test "reloading an extension purges its prior hooks (no duplicates)" do
     on_exit(fn -> Extensions.uninstall("multikind") end)
     path = write_ext("multikind", @multikind_source)
@@ -373,7 +395,7 @@ defmodule Catalyst.ExtensionsTest do
       :code.delete(mod)
     end)
 
-    assert Catalyst.Ext.Shadowed.version() == :original
+    assert apply(Catalyst.Ext.Shadowed, :version, []) == :original
 
     # An extension redefines (shadows) it...
     path =
@@ -384,12 +406,12 @@ defmodule Catalyst.ExtensionsTest do
       ''')
 
     capture_log(fn -> assert {:ok, _} = Extensions.load_file(path) end)
-    assert Catalyst.Ext.Shadowed.version() == :shadowed
+    assert apply(Catalyst.Ext.Shadowed, :version, []) == :shadowed
 
     # ...and removing the extension restores the original code, not just the registry.
     File.rm!(path)
     capture_log(fn -> Extensions.load_all() end)
-    assert Catalyst.Ext.Shadowed.version() == :original
+    assert apply(Catalyst.Ext.Shadowed, :version, []) == :original
   end
 
   test "reloading the same file keeps its modules (no restore-clobber mid-reload)" do
@@ -402,7 +424,7 @@ defmodule Catalyst.ExtensionsTest do
     end)
 
     assert Extensions.fetch("mk_tool") == {:ok, Catalyst.Ext.MultiKindTool}
-    assert Catalyst.Ext.MultiKindTool.execute(%{}, %{}).content
+    assert apply(Catalyst.Ext.MultiKindTool, :execute, [%{}, %{}]).content
   end
 
   defp capture_log_compile(source) do

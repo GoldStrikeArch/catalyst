@@ -29,6 +29,80 @@ defmodule Catalyst.Extensions.BootGuardTest do
     refute BootGuard.crashed_last_boot?()
   end
 
+  test "a stale booting marker with no extension files boots normally and self-heals" do
+    # The previous boot was quit inside the stabilization window (desktop quit
+    # is a halt — nothing marks clean): with nothing to load, safe mode would
+    # protect nothing, so boot proceeds and the marker self-heals.
+    File.rm_rf!(Extensions.dir())
+    BootGuard.mark_booting()
+
+    capture_log(fn ->
+      restart_extensions()
+
+      assert Extensions.boot_status() == :ok
+      # Marker re-arms and flips to ok after the boot load + stabilization
+      # window (50ms in test env).
+      wait_until(fn -> not BootGuard.crashed_last_boot?() end)
+    end)
+  end
+
+  test "a stale booting marker with extension files present engages safe mode" do
+    File.mkdir_p!(Extensions.dir())
+    path = Path.join(Extensions.dir(), "guard_present.ex")
+
+    File.write!(path, """
+    defmodule Catalyst.Ext.GuardPresent do
+      def name, do: "guard_present"
+      def description, do: "boot guard probe"
+      def parameters, do: %{"type" => "object", "properties" => %{}}
+      def execute(_args, _ctx), do: %{content: "ok"}
+    end
+    """)
+
+    on_exit(fn -> File.rm_rf!(Extensions.dir()) end)
+    BootGuard.mark_booting()
+
+    capture_log(fn ->
+      restart_extensions()
+
+      # The extension is skipped, the status reports it, and the marker stays
+      # stale so a relaunch is still safe.
+      assert Extensions.boot_status() == {:safe_mode, :crash_detected}
+      assert Extensions.fetch("guard_present") == :error
+      assert BootGuard.crashed_last_boot?()
+
+      # Documented recovery: remove/fix the files and run an explicit load.
+      File.rm_rf!(path)
+      assert {:ok, %{failed: []}} = Extensions.load_all()
+      assert Extensions.boot_status() == :ok
+      refute BootGuard.crashed_last_boot?()
+    end)
+  end
+
+  defp restart_extensions do
+    pid = Process.whereis(Extensions)
+    assert pid, "expected Catalyst.Extensions to be running"
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+
+    wait_until(fn ->
+      case Process.whereis(Extensions) do
+        nil -> false
+        ^pid -> false
+        _new -> true
+      end
+    end)
+  end
+
+  defp wait_until(fun, tries \\ 100) do
+    cond do
+      fun.() -> :ok
+      tries == 0 -> flunk("condition never became true")
+      true -> Process.sleep(10) && wait_until(fun, tries - 1)
+    end
+  end
+
   test "a successful explicit load_all clears crash-detected safe mode" do
     BootGuard.mark_booting()
     assert BootGuard.crashed_last_boot?()

@@ -29,9 +29,10 @@ defmodule Catalyst.Tools.Read do
   end
 
   # Files up to this size are read whole (exact line totals in the notice);
-  # larger ones are streamed line-by-line with bounded accumulation so a huge
-  # file can never be loaded into memory just to return a 50KB slice.
+  # larger ones are streamed in fixed-size chunks with bounded accumulation so
+  # a huge file can never be loaded into memory just to return a 50KB slice.
   @max_in_memory 16 * 1024 * 1024
+  @stream_chunk_size 64 * 1024
 
   @impl true
   def execute(%{"path" => path} = args, ctx) do
@@ -89,23 +90,16 @@ defmodule Catalyst.Tools.Read do
 
   # Streamed path: drop to the offset, accumulate at most the line/byte budget,
   # and stop reading. Totals are unknown (no full scan); the notice reports the
-  # file size instead. (A single line longer than the budget is still buffered
-  # by line-mode reads; the binary sniff above catches the usual such files.)
+  # file size instead.
   defp read_streamed(abs, args, size) do
     start = max((args["offset"] || 1) - 1, 0)
     max_lines = min(args["limit"] || Truncate.default_max_lines(), Truncate.default_max_lines())
     max_bytes = Truncate.default_max_bytes()
 
-    {lines, count, _bytes} =
+    %{acc: acc, lines: count} =
       abs
-      |> File.stream!()
-      |> Stream.drop(start)
-      |> Enum.reduce_while({[], 0, 0}, fn line, {acc, count, bytes} ->
-        case count < max_lines and bytes < max_bytes do
-          true -> {:cont, {[line | acc], count + 1, bytes + byte_size(line)}}
-          false -> {:halt, {acc, count, bytes}}
-        end
-      end)
+      |> File.stream!(@stream_chunk_size, [])
+      |> Enum.reduce_while(stream_state(start, max_lines, max_bytes), &stream_chunk/2)
 
     case {count, start} do
       # Nothing collected because the offset skipped the whole file.
@@ -118,12 +112,7 @@ defmodule Catalyst.Tools.Read do
         })
 
       _ ->
-        text =
-          lines
-          |> Enum.reverse()
-          |> IO.iodata_to_binary()
-          |> String.trim_trailing("\n")
-          |> Truncate.scrub_utf8()
+        text = acc |> Enum.reverse() |> IO.iodata_to_binary() |> streamed_text()
 
         {out, _info} = Truncate.head(text)
         notice = "\n... [showing #{count} line(s) from line #{start + 1}; file is #{size} bytes]"
@@ -135,6 +124,96 @@ defmodule Catalyst.Tools.Read do
           offset: start + 1
         })
     end
+  end
+
+  defp stream_state(skip, max_lines, max_bytes) do
+    %{
+      skip: skip,
+      max_lines: max_lines,
+      max_bytes: max_bytes,
+      acc: [],
+      bytes: 0,
+      lines: 0,
+      line_open?: false
+    }
+  end
+
+  defp stream_chunk(chunk, %{skip: skip} = state) when skip > 0 do
+    case skip_lines(chunk, state) do
+      {<<>>, state} -> {:cont, state}
+      {rest, state} -> collect_chunk(rest, state)
+    end
+  end
+
+  defp stream_chunk(chunk, state), do: collect_chunk(chunk, state)
+
+  defp skip_lines(chunk, %{skip: 0} = state), do: {chunk, state}
+  defp skip_lines(<<>>, state), do: {<<>>, state}
+
+  defp skip_lines(chunk, %{skip: skip} = state) do
+    case :binary.match(chunk, "\n") do
+      {index, 1} ->
+        rest_start = index + 1
+        rest = binary_part(chunk, rest_start, byte_size(chunk) - rest_start)
+        skip_lines(rest, %{state | skip: skip - 1})
+
+      :nomatch ->
+        {<<>>, state}
+    end
+  end
+
+  defp collect_chunk(<<>>, state), do: {:cont, state}
+
+  defp collect_chunk(_chunk, %{bytes: bytes, max_bytes: max_bytes} = state)
+       when bytes >= max_bytes,
+       do: {:halt, state}
+
+  defp collect_chunk(_chunk, %{lines: lines, max_lines: max_lines, line_open?: false} = state)
+       when lines >= max_lines,
+       do: {:halt, state}
+
+  defp collect_chunk(chunk, state) do
+    case :binary.match(chunk, "\n") do
+      {index, 1} ->
+        line_end = index + 1
+        segment = binary_part(chunk, 0, line_end)
+        rest = binary_part(chunk, line_end, byte_size(chunk) - line_end)
+
+        case append_segment(segment, state) do
+          {:cont, state} -> collect_chunk(rest, %{state | line_open?: false})
+          {:halt, state} -> {:halt, state}
+        end
+
+      :nomatch ->
+        append_segment(chunk, state)
+    end
+  end
+
+  defp append_segment(<<>>, state), do: {:cont, state}
+
+  defp append_segment(segment, state) do
+    remaining = state.max_bytes - state.bytes
+    take = min(byte_size(segment), remaining)
+    data = binary_part(segment, 0, take)
+    state = state |> open_line() |> append_data(data)
+
+    case take == byte_size(segment) do
+      true -> {:cont, state}
+      false -> {:halt, state}
+    end
+  end
+
+  defp open_line(%{line_open?: true} = state), do: state
+  defp open_line(state), do: %{state | line_open?: true, lines: state.lines + 1}
+
+  defp append_data(state, data) do
+    %{state | acc: [data | state.acc], bytes: state.bytes + byte_size(data)}
+  end
+
+  defp streamed_text(text) do
+    text
+    |> String.trim_trailing("\n")
+    |> Truncate.scrub_utf8()
   end
 
   defp slice(lines, offset, limit) do

@@ -121,13 +121,13 @@ defmodule Catalyst.Tools.SelfModTest do
 
     capture_log(fn ->
       assert {:ok, _} = Installer.install("reinstall_probe", @reinstall_v1)
-      assert Catalyst.Ext.ReinstallProbe.version() == :v1
+      assert apply(Catalyst.Ext.ReinstallProbe, :version, []) == :v1
 
       # v2's first module compiles (redefining the probe to :v2) before its
       # second module raises: restoring the backup bytes on disk alone would
       # leave the half-compiled v2 live in the VM with v1 in the file.
       assert {:error, _} = Installer.install("reinstall_probe", @reinstall_v2_broken)
-      assert Catalyst.Ext.ReinstallProbe.version() == :v1
+      assert apply(Catalyst.Ext.ReinstallProbe, :version, []) == :v1
 
       # The file on disk is the restored v1 source, matching the loaded code.
       assert File.read!(Path.join(Extensions.dir(), "reinstall_probe.ex")) =~ ":v1"

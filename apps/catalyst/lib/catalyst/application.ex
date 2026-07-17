@@ -39,6 +39,15 @@ defmodule Catalyst.Application do
     Supervisor.start_link(children, strategy: :one_for_one, name: Catalyst.Supervisor)
   end
 
+  @impl true
+  def stop(_state) do
+    # A graceful shutdown is not a crash: without this, a System.stop within
+    # the BootGuard stabilization window flips the next boot into extension
+    # safe mode. The desktop quit path is a System.halt and never reaches
+    # here — the window's quit menu marks it instead.
+    Catalyst.Extensions.mark_clean_shutdown()
+  end
+
   # Order is load-bearing (:rest_for_one): each child depends on the ones
   # before it, and a crashed child restarts everything after it — ending with
   # Catalyst.Extensions, whose load_all re-registers extension contributions

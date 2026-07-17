@@ -97,10 +97,12 @@ defmodule CatalystWeb.UI.Registry do
 
   ## commands
 
+  @doc "Register or replace a command-palette entry."
   @spec register_command(String.t(), keyword()) :: :ok
   def register_command(name, opts \\ []),
     do: GenServer.call(__MODULE__, {:register_command, name, opts})
 
+  @doc "All registered command-palette entries."
   @spec list_commands() :: [map()]
   def list_commands do
     @table |> :ets.match_object({{:command, :_}, :_}) |> Enum.map(&elem(&1, 1))

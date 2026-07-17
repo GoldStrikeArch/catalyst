@@ -192,6 +192,25 @@ defmodule Catalyst.Extensions do
   def boot_status, do: :persistent_term.get({__MODULE__, :boot_status}, :ok)
 
   @doc """
+  Record that this boot is ending by user intent, not a crash.
+
+  Quitting inside the BootGuard stabilization window otherwise leaves the
+  marker at "booting", and the NEXT boot flips into extension safe mode — a
+  false positive that stays sticky until an explicit reload. Called from
+  `Catalyst.Application.stop/1` (graceful stops) and the desktop quit menu
+  (desktop quit is a `System.halt/1`, which skips stop callbacks). No-op when
+  this boot is already in safe mode: its stale marker must survive until the
+  bad extension is actually fixed.
+  """
+  @spec mark_clean_shutdown() :: :ok
+  def mark_clean_shutdown do
+    case boot_status() do
+      :ok -> BootGuard.mark_ok()
+      {:safe_mode, _why} -> :ok
+    end
+  end
+
+  @doc """
   Human-readable rendering of the tagged error reasons returned by
   `load_file/1`, `load_all/0`, `register_tool/2`, and `Installer.install/3`.
   Tools format at this boundary; the tagged tuples stay matchable for callers.
@@ -235,6 +254,18 @@ defmodule Catalyst.Extensions do
         Logger.info("[extensions] safe mode (CATALYST_SAFE_MODE) — skipping extension load")
         {:ok, state}
 
+      BootGuard.crashed_last_boot?() and extension_files() == [] ->
+        # A stale "booting" marker with nothing to load protects nothing: the
+        # previous boot was quit inside the stabilization window (desktop quit
+        # is a System.halt — no stop callback runs to mark it clean), not
+        # bricked by an extension. Boot normally; the marker re-arms and
+        # self-heals once this boot stabilizes.
+        Logger.info(
+          "[extensions] stale boot marker but no extension files in #{dir()} — booting normally"
+        )
+
+        normal_boot(state)
+
       BootGuard.crashed_last_boot?() ->
         put_boot_status({:safe_mode, :crash_detected})
 
@@ -246,10 +277,14 @@ defmodule Catalyst.Extensions do
         {:ok, state}
 
       true ->
-        put_boot_status(:ok)
-        BootGuard.mark_booting()
-        {:ok, state, {:continue, :load_all}}
+        normal_boot(state)
     end
+  end
+
+  defp normal_boot(state) do
+    put_boot_status(:ok)
+    BootGuard.mark_booting()
+    {:ok, state, {:continue, :load_all}}
   end
 
   @impl true
@@ -379,6 +414,13 @@ defmodule Catalyst.Extensions do
   # loads ordered without putting compile/setup work back inside this GenServer.
   defp serialized_load(fun), do: :global.trans(@load_lock, fun, [node()], :infinity)
 
+  defp extension_files do
+    case File.dir?(dir()) do
+      true -> dir() |> Path.join("*.ex") |> Path.wildcard()
+      false -> []
+    end
+  end
+
   defp do_load_all do
     # The extensions repo is ensured on the load path, NOT in init/1: git runs
     # with a deadline but can still take seconds, and a safe-mode boot (whose
@@ -386,11 +428,7 @@ defmodule Catalyst.Extensions do
     # Explicit safe-mode load_all (the recovery path) still lands here.
     Catalyst.Extensions.Versioning.ensure_repo(dir())
 
-    paths =
-      case File.dir?(dir()) do
-        true -> dir() |> Path.join("*.ex") |> Path.wildcard()
-        false -> []
-      end
+    paths = extension_files()
 
     # Purge file-backed contributions whose source file is gone — e.g. removed
     # by a rollback or by hand. Without this, reverted code stays registered
@@ -532,20 +570,33 @@ defmodule Catalyst.Extensions do
   defp static_module_name(_name, _prefix), do: :error
 
   defp compile_and_classify(path) do
-    modules = path |> Code.compile_file() |> Enum.map(&elem(&1, 0))
+    modules = path |> compile_extension_file() |> Enum.map(&elem(&1, 0))
     {ext_mods, tool_mods} = classify(modules)
 
-    {:ok,
-     %{
-       modules: modules,
-       ext_mods: ext_mods,
-       tool_mods: tool_mods,
-       tool_names: Enum.map(tool_mods, & &1.name())
-     }}
+    with {:ok, tool_names} <- safe_tool_names(tool_mods) do
+      {:ok,
+       %{
+         modules: modules,
+         ext_mods: ext_mods,
+         tool_mods: tool_mods,
+         tool_names: tool_names
+       }}
+    end
   rescue
     e -> {:error, {:compile, Exception.message(e)}}
   catch
     kind, reason -> {:error, {:compile, {kind, reason}}}
+  end
+
+  defp compile_extension_file(path) do
+    previous = Code.compiler_options()
+    Code.compiler_options(ignore_module_conflict: true)
+
+    try do
+      Code.compile_file(path)
+    after
+      Code.compiler_options(previous)
+    end
   end
 
   defp compile_and_classify_async(path) do
@@ -748,6 +799,20 @@ defmodule Catalyst.Extensions do
       end
     else
       {:error, {:not_a_tool, module}}
+    end
+  end
+
+  defp safe_tool_names(modules) do
+    modules
+    |> Enum.reduce_while({:ok, []}, fn module, {:ok, names} ->
+      case safe_tool_name(module) do
+        {:ok, name} -> {:cont, {:ok, [name | names]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, names} -> {:ok, Enum.reverse(names)}
+      {:error, _reason} = error -> error
     end
   end
 

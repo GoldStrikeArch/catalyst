@@ -18,16 +18,55 @@ defmodule Catalyst.Agent.Event do
       turn_end
   """
 
-  defmodule AgentStart, do: defstruct([])
-  defmodule AgentEnd, do: defstruct([:messages])
-  defmodule TurnStart, do: defstruct([])
-  defmodule TurnEnd, do: defstruct([:message, :tool_results])
-  defmodule MessageStart, do: defstruct([:message])
-  defmodule MessageUpdate, do: defstruct([:llm_event])
-  defmodule MessageEnd, do: defstruct([:message])
-  defmodule ToolExecutionStart, do: defstruct([:call_id, :name, :args])
-  defmodule ToolExecutionUpdate, do: defstruct([:call_id, :name, :args, :partial])
-  defmodule ToolExecutionEnd, do: defstruct([:call_id, :name, :result, :is_error])
+  defmodule AgentStart do
+    @moduledoc "Emitted when an agent loop starts."
+    defstruct []
+  end
+
+  defmodule AgentEnd do
+    @moduledoc "Emitted when an agent loop finishes with the final message list."
+    defstruct [:messages]
+  end
+
+  defmodule TurnStart do
+    @moduledoc "Emitted before a model turn begins."
+    defstruct []
+  end
+
+  defmodule TurnEnd do
+    @moduledoc "Emitted after a model turn and any requested tool executions finish."
+    defstruct [:message, :tool_results]
+  end
+
+  defmodule MessageStart do
+    @moduledoc "Emitted when an assistant message begins streaming."
+    defstruct [:message]
+  end
+
+  defmodule MessageUpdate do
+    @moduledoc "Emitted for a normalized LLM stream event during message generation."
+    defstruct [:llm_event]
+  end
+
+  defmodule MessageEnd do
+    @moduledoc "Emitted when a message has been finalized."
+    defstruct [:message]
+  end
+
+  defmodule ToolExecutionStart do
+    @moduledoc "Emitted before a tool call starts executing."
+    defstruct [:call_id, :name, :args]
+  end
+
+  defmodule ToolExecutionUpdate do
+    @moduledoc "Emitted while a tool call reports partial output."
+    defstruct [:call_id, :name, :args, :partial]
+  end
+
+  defmodule ToolExecutionEnd do
+    @moduledoc "Emitted after a tool call finishes or fails."
+    defstruct [:call_id, :name, :result, :is_error]
+  end
 
   @type t ::
           %AgentStart{}

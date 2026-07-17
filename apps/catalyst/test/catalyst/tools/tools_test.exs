@@ -50,6 +50,17 @@ defmodule Catalyst.ToolsTest do
     assert text(res) =~ "offset 50000 is beyond the end of the file"
   end
 
+  test "streamed read bounds a single very long line", %{tmp: tmp, ctx: ctx} do
+    File.write!(Path.join(tmp, "one_line.txt"), String.duplicate("x", 17 * 1024 * 1024))
+
+    res = Read.execute(%{"path" => "one_line.txt"}, ctx)
+    out = text(res)
+
+    assert res.details.lines_shown == 1
+    assert out =~ "[showing 1 line(s) from line 1; file is "
+    assert byte_size(out) <= 60 * 1024
+  end
+
   test "ls suffixes directories", %{ctx: ctx} do
     Write.execute(%{"path" => "lib/x.ex", "content" => "x"}, ctx)
     out = text(Ls.execute(%{}, ctx))
