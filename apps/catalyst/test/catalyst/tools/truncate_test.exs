@@ -36,4 +36,26 @@ defmodule Catalyst.Tools.TruncateTest do
     assert byte_size(out) <= 50
     assert String.valid?(out)
   end
+
+  test "scrub_utf8 replaces invalid bytes and passes valid input through" do
+    assert Truncate.scrub_utf8("plain text") == "plain text"
+    scrubbed = Truncate.scrub_utf8(<<"a", 255, 254, "b">>)
+    assert String.valid?(scrubbed)
+    assert scrubbed == "a��b"
+  end
+
+  test "notice appends/prepends a truncation marker only when truncated" do
+    content = Enum.map_join(1..100, "\n", &"line #{&1}")
+
+    {out, info} = Truncate.head(content, max_lines: 10)
+
+    assert Truncate.notice(out, info, :head) =~
+             "[output truncated: showing first 10 of 100 lines]"
+
+    {out, info} = Truncate.tail(content, max_lines: 10)
+    assert Truncate.notice(out, info, :tail) =~ "[output truncated: showing last 10 of 100 lines]"
+
+    {out, info} = Truncate.head("a\nb")
+    assert Truncate.notice(out, info, :head) == "a\nb"
+  end
 end

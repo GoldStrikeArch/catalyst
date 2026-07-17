@@ -17,7 +17,10 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
             response_id: nil,
             usage: %Usage{},
             stop_reason: :stop,
-            error: nil
+            error: nil,
+            # Set by a terminal event (completed/incomplete/failed/cancelled/error);
+            # finalize/2 marks the turn as errored when the stream ends without one.
+            done: false
 
   def new, do: %__MODULE__{}
 
@@ -136,26 +139,55 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
     blocks = s.blocks
 
     stop =
-      if stop == :stop and Enum.any?(blocks, &match?(%Content.ToolCall{}, &1)),
-        do: :tool_use,
-        else: stop
+      cond do
+        # A prior "error" event wins — don't let a late completed mask it.
+        s.error -> :error
+        stop == :stop and Enum.any?(blocks, &match?(%Content.ToolCall{}, &1)) -> :tool_use
+        true -> stop
+      end
 
-    %{s | usage: usage, stop_reason: stop, response_id: resp["id"] || s.response_id}
+    %{s | usage: usage, stop_reason: stop, response_id: resp["id"] || s.response_id, done: true}
+  end
+
+  # Terminal event for a truncated response (e.g. max output tokens hit).
+  defp do_handle("response.incomplete", %{"response" => resp}, s, _sink) do
+    reason = get_in(resp, ["incomplete_details", "reason"]) || "incomplete"
+
+    %{
+      s
+      | usage: usage_from(resp["usage"]),
+        stop_reason: :length,
+        error: s.error || "response incomplete: #{reason}",
+        response_id: resp["id"] || s.response_id,
+        done: true
+    }
+  end
+
+  defp do_handle("response.cancelled", %{"response" => resp}, s, _sink) do
+    %{
+      s
+      | usage: usage_from(resp["usage"]),
+        stop_reason: :aborted,
+        response_id: resp["id"] || s.response_id,
+        done: true
+    }
   end
 
   defp do_handle("error", ev, s, _sink),
-    do: %{s | error: "Error #{ev["code"]}: #{ev["message"]}", stop_reason: :error}
+    do: %{s | error: "Error #{ev["code"]}: #{ev["message"]}", stop_reason: :error, done: true}
 
   defp do_handle("response.failed", %{"response" => resp}, s, _sink) do
     err = resp["error"]
     msg = if err, do: "#{err["code"] || "unknown"}: #{err["message"]}", else: "response failed"
-    %{s | error: msg, stop_reason: :error}
+    %{s | error: msg, stop_reason: :error, done: true}
   end
 
   defp do_handle(_type, _ev, s, _sink), do: s
 
   @doc "Build the final assistant message."
   def finalize(%__MODULE__{} = s, model) do
+    s = s |> flush_current() |> mark_truncated()
+
     content =
       if s.error,
         do: Enum.reverse([%Content.Text{text: s.error} | s.blocks]),
@@ -173,6 +205,31 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
       timestamp: Message.now()
     }
   end
+
+  # Keep partially-streamed text/reasoning the UI already rendered. A partial
+  # tool call is dropped instead: the loop executes any ToolCall block it sees,
+  # and half-received arguments must not run.
+  defp flush_current(%{current: nil} = s), do: s
+
+  defp flush_current(%{current: {:text, t}} = s),
+    do: %{s | blocks: [%Content.Text{text: t.text} | s.blocks], current: nil}
+
+  defp flush_current(%{current: {:reasoning, r}} = s) do
+    block = %Content.Thinking{thinking: r.thinking, signature: Jason.encode!(r.item)}
+    %{s | blocks: [block | s.blocks], current: nil}
+  end
+
+  defp flush_current(%{current: {:tool, t}} = s) do
+    err = "stream ended mid tool call (#{t.name}); the call was discarded"
+    %{s | current: nil, error: s.error || err, stop_reason: :error}
+  end
+
+  # No terminal event seen (connection dropped mid-stream): the turn must not
+  # look like a clean :stop.
+  defp mark_truncated(%{done: false, error: nil} = s),
+    do: %{s | stop_reason: :error, error: "response stream ended before completion"}
+
+  defp mark_truncated(s), do: s
 
   # ---- helpers --------------------------------------------------------------
 

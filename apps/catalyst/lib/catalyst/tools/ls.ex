@@ -42,7 +42,20 @@ defmodule Catalyst.Tools.Ls do
       end)
 
     shown = Enum.take(entries, limit)
-    {out, info} = Truncate.head(Enum.join(shown, "\n"))
-    result(out, %{path: abs, truncation: info, entry_limit_reached: length(entries) > limit})
+    limited? = length(entries) > limit
+    text = Enum.join(shown, "\n")
+
+    text =
+      if limited?,
+        do: text <> "\n... [showing first #{limit} of #{length(entries)} entries]",
+        else: text
+
+    {out, info} = Truncate.head(text)
+
+    result(Truncate.notice(out, info, :head), %{
+      path: abs,
+      truncation: info,
+      entry_limit_reached: limited?
+    })
   end
 end

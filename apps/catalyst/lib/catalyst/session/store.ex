@@ -16,7 +16,11 @@ defmodule Catalyst.Session.Store do
   def root,
     do: Application.get_env(:catalyst, :sessions_root) || Path.expand("~/.catalyst/sessions")
 
-  @doc "Create a new session file with a header line; returns its handle."
+  @doc """
+  Open the session file for an id, creating it with a header line if it does
+  not exist yet; returns its handle. An existing file is left untouched so a
+  crash-restarted `Session.Server` can resume it via `load/1`.
+  """
   @spec new(String.t(), keyword()) :: handle()
   def new(cwd, opts \\ []) do
     id = Keyword.get(opts, :id) || gen_id()
@@ -32,7 +36,7 @@ defmodule Catalyst.Session.Store do
       "timestamp" => now()
     }
 
-    File.write!(path, line(header))
+    unless File.exists?(path), do: File.write!(path, line(header))
 
     %{id: id, path: path, cwd: cwd}
   end
@@ -66,8 +70,10 @@ defmodule Catalyst.Session.Store do
       "api" => m.api,
       "provider" => m.provider,
       "model" => m.model,
+      "usage" => encode_usage(m.usage),
       "stopReason" => to_string(m.stop_reason),
       "errorMessage" => m.error_message,
+      "responseId" => m.response_id,
       "timestamp" => m.timestamp
     }
   end
@@ -81,6 +87,19 @@ defmodule Catalyst.Session.Store do
       "isError" => m.is_error,
       "details" => encodable(m.details),
       "timestamp" => m.timestamp
+    }
+  end
+
+  defp encode_usage(nil), do: nil
+
+  defp encode_usage(%Usage{} = u) do
+    %{
+      "input" => u.input,
+      "output" => u.output,
+      "cacheRead" => u.cache_read,
+      "cacheWrite" => u.cache_write,
+      "totalTokens" => u.total_tokens,
+      "cost" => u.cost
     }
   end
 
@@ -114,11 +133,15 @@ defmodule Catalyst.Session.Store do
 
   # ---- decoding -------------------------------------------------------------
 
+  # Best-effort: a corrupt or forward-versioned line must not make the whole
+  # session unloadable, so decode failures skip the line.
   defp decode_line(line) do
     case Jason.decode(String.trim(line)) do
       {:ok, %{"type" => "message", "message" => m}} -> [decode(m)]
       _ -> []
     end
+  rescue
+    _ -> []
   end
 
   @doc "Decode a JSON message map back into a struct."
@@ -131,9 +154,10 @@ defmodule Catalyst.Session.Store do
       api: m["api"],
       provider: m["provider"],
       model: m["model"],
-      usage: %Usage{},
+      usage: decode_usage(m["usage"]),
       stop_reason: decode_reason(m["stopReason"]),
       error_message: m["errorMessage"],
+      response_id: m["responseId"],
       timestamp: m["timestamp"]
     }
   end
@@ -148,6 +172,19 @@ defmodule Catalyst.Session.Store do
       timestamp: m["timestamp"]
     }
   end
+
+  defp decode_usage(%{} = u) do
+    %Usage{
+      input: u["input"] || 0,
+      output: u["output"] || 0,
+      cache_read: u["cacheRead"] || 0,
+      cache_write: u["cacheWrite"] || 0,
+      total_tokens: u["totalTokens"] || 0,
+      cost: u["cost"] || 0.0
+    }
+  end
+
+  defp decode_usage(_), do: %Usage{}
 
   defp decode_content(blocks) when is_list(blocks), do: Enum.map(blocks, &decode_block/1)
   defp decode_content(_), do: []
@@ -167,8 +204,10 @@ defmodule Catalyst.Session.Store do
   defp decode_block(%{"type" => "toolCall"} = b),
     do: %Content.ToolCall{id: b["id"], name: b["name"], arguments: b["arguments"] || %{}}
 
-  defp decode_reason(nil), do: :stop
-  defp decode_reason(s), do: String.to_existing_atom(s)
+  defp decode_reason(s) when s in ~w(stop length tool_use error aborted),
+    do: String.to_existing_atom(s)
+
+  defp decode_reason(_), do: :stop
 
   # ---- helpers --------------------------------------------------------------
 

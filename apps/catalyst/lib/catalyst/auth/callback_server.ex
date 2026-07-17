@@ -3,7 +3,9 @@ defmodule Catalyst.Auth.CallbackServer do
   Transient localhost HTTP server for the OAuth redirect. Bound to
   `127.0.0.1:1455` (the fixed Codex redirect URI), it serves a single
   `/auth/callback` route, validates `state`, captures `code`, and hands it to the
-  waiting login process, then shuts down.
+  waiting login process, then shuts down. Requests without the expected `state`
+  get a 400 and the server keeps waiting, so a drive-by request can't abort a
+  pending sign-in.
   """
 
   alias Catalyst.Auth.OpenAIOAuth
@@ -59,30 +61,31 @@ defmodule Catalyst.Auth.CallbackServer do
       params = conn.query_params
 
       cond do
+        # Only a request carrying the expected state can resolve the flow: a
+        # drive-by request (browser prefetch, malicious page hitting
+        # localhost:1455) must not be able to abort a pending sign-in.
+        params["state"] != expected ->
+          respond(conn, 400, error_html("state mismatch"))
+
         params["error"] ->
           send(parent, {:oauth_error, params["error"]})
-          respond(conn, error_html(params["error"]))
-
-        params["state"] != expected ->
-          send(parent, {:oauth_error, :state_mismatch})
-          respond(conn, error_html("state mismatch"))
+          respond(conn, 200, error_html(params["error"]))
 
         is_binary(params["code"]) ->
           send(parent, {:oauth_code, params["code"]})
-          respond(conn, success_html())
+          respond(conn, 200, success_html())
 
         true ->
-          send(parent, {:oauth_error, :missing_code})
-          respond(conn, error_html("missing code"))
+          respond(conn, 400, error_html("missing code"))
       end
     end
 
     def call(conn, _opts), do: send_resp(conn, 404, "not found")
 
-    defp respond(conn, html) do
+    defp respond(conn, status, html) do
       conn
       |> put_resp_content_type("text/html")
-      |> send_resp(200, html)
+      |> send_resp(status, html)
     end
 
     defp success_html do

@@ -4,6 +4,7 @@ defmodule CatalystWeb.Application do
   @moduledoc false
 
   use Application
+  require Logger
 
   @impl true
   def start(_type, _args) do
@@ -26,6 +27,7 @@ defmodule CatalystWeb.Application do
     opts = [strategy: :one_for_one, name: CatalystWeb.Supervisor]
     result = Supervisor.start_link(children, opts)
     register_web_tools()
+    reload_extensions()
     result
   end
 
@@ -33,10 +35,22 @@ defmodule CatalystWeb.Application do
   # (`:catalyst` boots before `:catalyst_web`, so `Catalyst.Extensions` is up.)
   defp register_web_tools do
     Enum.each([CatalystWeb.Tools.RebuildAssets, CatalystWeb.Tools.ReconnectUi], fn tool ->
-      Catalyst.Extensions.register_tool(tool)
+      case Catalyst.Extensions.register_tool(tool) do
+        {:ok, _} -> :ok
+        other -> Logger.warning("failed to register #{inspect(tool)}: #{inspect(other)}")
+      end
     end)
   rescue
-    _ -> :ok
+    e -> Logger.warning("web tool registration failed: #{Exception.message(e)}")
+  end
+
+  # The boot-time extension load in :catalyst ran before this app wired the UI
+  # kinds (:renderer/:component/:page) into ExtensionAPI, so any UI
+  # registrations from extensions were dropped. Reload now that they resolve.
+  defp reload_extensions do
+    unless Catalyst.Extensions.safe_mode?(), do: Catalyst.Extensions.load_all()
+  rescue
+    e -> Logger.warning("extension reload after UI wiring failed: #{Exception.message(e)}")
   end
 
   # Tell Phoenix to update the endpoint configuration

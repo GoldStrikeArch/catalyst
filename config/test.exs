@@ -14,6 +14,9 @@ config :catalyst_web, CatalystWeb.Endpoint,
   secret_key_base: "YEFSoTMJ0FlpC47T+CGpr9KXtPxk6qrA3IJ4t2rt3s2Imdw+UmHuDfLP65piqAnb",
   server: false
 
+# Each test mount gets a fresh session; reattach is exercised explicitly.
+config :catalyst_web, reattach_sessions: false
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

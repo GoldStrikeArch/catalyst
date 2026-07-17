@@ -60,9 +60,15 @@ defmodule Catalyst.Tools.Ripgrep do
         limited? = length(matches) > limit
         shown = Enum.take(matches, limit)
         text = if shown == [], do: "No matches.", else: Enum.join(shown, "\n")
+
+        text =
+          if limited?,
+            do: text <> "\n... [showing first #{limit} of #{length(matches)} matches]",
+            else: text
+
         {body, info} = Truncate.head(text)
 
-        result(body, %{
+        result(Truncate.notice(body, info, :head), %{
           match_count: length(shown),
           match_limit_reached: limited?,
           truncation: info

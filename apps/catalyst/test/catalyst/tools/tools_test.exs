@@ -112,6 +112,87 @@ defmodule Catalyst.ToolsTest do
     assert out =~ "marker"
   end
 
+  test "read refuses binary files", %{tmp: tmp, ctx: ctx} do
+    File.write!(Path.join(tmp, "bin.dat"), <<0, 255, 1, 2>>)
+
+    assert_raise RuntimeError, ~r/binary file/, fn ->
+      Read.execute(%{"path" => "bin.dat"}, ctx)
+    end
+  end
+
+  test "read scrubs invalid UTF-8 instead of poisoning the transcript", %{tmp: tmp, ctx: ctx} do
+    File.write!(Path.join(tmp, "latin.txt"), <<"caf", 233, "\n">>)
+    out = text(Read.execute(%{"path" => "latin.txt"}, ctx))
+    assert String.valid?(out)
+    assert out =~ "caf"
+  end
+
+  test "read appends a truncation notice the model can see", %{ctx: ctx} do
+    content = Enum.map_join(1..3000, "\n", &"line #{&1}")
+    Write.execute(%{"path" => "big.txt", "content" => content}, ctx)
+
+    out = text(Read.execute(%{"path" => "big.txt"}, ctx))
+    assert out =~ "[output truncated: showing first 2000 of 3000 lines]"
+  end
+
+  test "bash output with invalid UTF-8 is scrubbed", %{ctx: ctx} do
+    out = text(Bash.execute(%{"command" => "printf 'a\\xffb'"}, ctx))
+    assert String.valid?(out)
+    assert out =~ "a�b"
+  end
+
+  test "bash times out with the effective timeout and partial output", %{ctx: ctx} do
+    err =
+      assert_raise RuntimeError, fn ->
+        Bash.execute(%{"command" => "echo started && sleep 5", "timeout" => 1}, ctx)
+      end
+
+    assert err.message =~ "timed out after 1s"
+    assert err.message =~ "started"
+  end
+
+  test "edit matches all oldTexts against the original, not accumulated content", %{ctx: ctx} do
+    Write.execute(%{"path" => "m.txt", "content" => "alpha beta"}, ctx)
+
+    # Edit 1's newText introduces "beta"; under accumulated matching edit 2
+    # would become ambiguous. Against the original, both apply cleanly.
+    Edit.execute(
+      %{
+        "path" => "m.txt",
+        "edits" => [
+          %{"oldText" => "alpha", "newText" => "beta X"},
+          %{"oldText" => "beta", "newText" => "B"}
+        ]
+      },
+      ctx
+    )
+
+    assert text(Read.execute(%{"path" => "m.txt"}, ctx)) == "beta X B"
+  end
+
+  test "edit rejects overlapping edits", %{ctx: ctx} do
+    Write.execute(%{"path" => "o.txt", "content" => "alpha beta gamma"}, ctx)
+
+    assert_raise RuntimeError, ~r/overlap/, fn ->
+      Edit.execute(
+        %{
+          "path" => "o.txt",
+          "edits" => [
+            %{"oldText" => "alpha beta", "newText" => "x"},
+            %{"oldText" => "beta gamma", "newText" => "y"}
+          ]
+        },
+        ctx
+      )
+    end
+  end
+
+  test "find (fd) treats a leading-dash pattern as a pattern, not flags", %{tmp: tmp, ctx: ctx} do
+    File.write!(Path.join(tmp, "-dashfile.txt"), "x")
+    out = text(Fd.execute(%{"pattern" => "-dash*"}, ctx))
+    assert out =~ "-dashfile.txt"
+  end
+
   test "tools expose JSON-schema parameters", _ do
     for mod <- [Read, Write, Edit, Ls, Bash, Ripgrep, Fd, Sd, AstGrep] do
       params = mod.parameters()

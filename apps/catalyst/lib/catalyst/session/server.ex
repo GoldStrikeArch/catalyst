@@ -30,6 +30,9 @@ defmodule Catalyst.Session.Server do
       :opts,
       :store,
       :run,
+      # Ref identifying the CURRENT run; events from killed/finished runs that
+      # are still buffered in the mailbox carry a stale ref and are dropped.
+      :run_ref,
       messages: [],
       streaming_message: nil,
       pending_tool_calls: MapSet.new(),
@@ -78,6 +81,7 @@ defmodule Catalyst.Session.Server do
 
     id = Keyword.fetch!(opts, :id)
     cwd = Keyword.get(opts, :cwd, File.cwd!())
+    store = Store.new(cwd, id: id)
 
     state = %State{
       id: id,
@@ -89,7 +93,10 @@ defmodule Catalyst.Session.Server do
       # resolved per turn by the loop. Pass an explicit list to pin tools.
       tools: Keyword.get(opts, :tools, :extensions),
       opts: Keyword.get(opts, :opts, []),
-      store: Store.new(cwd, id: id)
+      store: store,
+      # Resume the persisted transcript so a crash-restart (or reattach to a
+      # known id) doesn't lose the conversation.
+      messages: Store.load(store.path)
     }
 
     Catalyst.Debug.mark_latest(id)
@@ -127,6 +134,10 @@ defmodule Catalyst.Session.Server do
     do: {:noreply, %{state | follow_up: :queue.in(msg, state.follow_up)}}
 
   def handle_cast(:abort, %State{run: %Task{} = task} = state) do
+    # Clear run_ref FIRST: events the killed task already cast are still queued
+    # behind this message and must not fold into the post-abort state.
+    state = %{state | run_ref: nil}
+
     state =
       case shutdown_run(task) do
         {:ok, _result} -> %{state | run: nil}
@@ -149,25 +160,30 @@ defmodule Catalyst.Session.Server do
            error_message: nil
        }}
 
-  def handle_cast({:agent_event, event}, state) do
+  def handle_cast({:agent_event, run_ref, event}, %State{run_ref: run_ref} = state)
+      when run_ref != nil do
     Catalyst.Debug.log_event(state.id, event)
     state = Reducer.reduce(event, state)
     broadcast(state, event)
     {:noreply, state}
   end
 
+  # Stale event from an aborted/replaced run — drop it.
+  def handle_cast({:agent_event, _stale_ref, _event}, state), do: {:noreply, state}
+
   @impl true
-  # Task returned normally — its events already drove the state.
+  # Task returned normally — its events already drove the state (casts from the
+  # task are ordered before its completion message).
   def handle_info({ref, _result}, %State{run: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
-    {:noreply, %{state | run: nil}}
+    {:noreply, %{state | run: nil, run_ref: nil}}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, :normal}, %State{run: %Task{ref: ref}} = state),
-    do: {:noreply, %{state | run: nil}}
+    do: {:noreply, %{state | run: nil, run_ref: nil}}
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %State{run: %Task{ref: ref}} = state),
-    do: {:noreply, handle_failure(state, reason)}
+    do: {:noreply, handle_failure(%{state | run_ref: nil}, reason)}
 
   def handle_info(_msg, state), do: {:noreply, state}
 
@@ -183,16 +199,17 @@ defmodule Catalyst.Session.Server do
 
   defp start_run(state, prompts) do
     server = self()
+    run_ref = make_ref()
     context = %{system_prompt: state.system_prompt, messages: state.messages}
     config = RunConfig.build(state, server)
-    emit = fn event -> GenServer.cast(server, {:agent_event, event}) end
+    emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
 
     task =
       Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
         Loop.run(prompts, context, config, emit)
       end)
 
-    %{state | run: task, error_message: nil}
+    %{state | run: task, run_ref: run_ref, error_message: nil}
   end
 
   defp handle_failure(state, reason) do

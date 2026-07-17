@@ -95,6 +95,39 @@ defmodule Catalyst.Tools.SelfModTest do
     assert Extensions.fetch("reloaded_one") == Catalyst.Ext.ReloadedOne
   end
 
+  @gittool_ext ~S'''
+  defmodule Catalyst.Ext.GitTool do
+    use Catalyst.Tools.Tool
+    @impl true
+    def name, do: "git_tool"
+    @impl true
+    def description, do: "versioned tool"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+    @impl true
+    def execute(_args, _ctx), do: result("ok")
+  end
+  '''
+
+  @tag :git
+  test "develop_tool changes are git-committed so rollback can revert them", %{ctx: ctx} do
+    if Versioning.available?() do
+      on_exit(fn -> Extensions.uninstall("gittool") end)
+      Versioning.ensure_repo(Extensions.dir())
+
+      capture_log(fn ->
+        assert %{content: _} =
+                 Catalyst.Tools.DevelopTool.execute(
+                   %{"name" => "gittool", "source" => @gittool_ext},
+                   ctx
+                 )
+      end)
+
+      {log, 0} = System.cmd("git", ["log", "--oneline"], cd: Extensions.dir())
+      assert log =~ "develop_tool gittool"
+    end
+  end
+
   @tag :git
   test "git versioning round-trips: commit then rollback removes the change" do
     if Versioning.available?() do

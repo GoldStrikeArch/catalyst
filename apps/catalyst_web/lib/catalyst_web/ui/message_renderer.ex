@@ -11,6 +11,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   alias CatalystWeb.UI.Registry
 
   @doc "Render a message: a registered `:message` renderer if one matches, else built-in."
+  @spec render_message(map()) :: Phoenix.LiveView.Rendered.t()
   def render_message(assigns) do
     case Registry.renderer(:message, assigns.msg) do
       nil -> message(assigns)
@@ -19,6 +20,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   end
 
   @doc "Render a content block: a registered `:block` renderer if one matches, else built-in."
+  @spec render_block(map()) :: Phoenix.LiveView.Rendered.t()
   def render_block(assigns) do
     case Registry.renderer(:block, assigns.block) do
       nil -> block(assigns)
@@ -30,8 +32,8 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp message(%{msg: %Message.User{}} = assigns) do
     ~H"""
-    <div class="chat chat-end">
-      <div class="chat-bubble chat-bubble-primary whitespace-pre-wrap">
+    <div data-message-role="user" class="flex justify-end">
+      <div class="max-w-[82%] rounded-3xl rounded-br-md bg-slate-950 px-4 py-3 text-sm leading-6 text-white shadow-lg shadow-slate-900/15 dark:bg-indigo-500 dark:shadow-indigo-950/20">
         {Content.text_of(@msg.content)}
       </div>
     </div>
@@ -40,8 +42,8 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp message(%{msg: %Message.Assistant{}} = assigns) do
     ~H"""
-    <div :if={@msg.content != []} class="chat chat-start">
-      <div class="chat-bubble chat-bubble-neutral whitespace-pre-wrap">
+    <div :if={@msg.content != []} data-message-role="assistant" class="flex justify-start">
+      <div class="max-w-[82%] rounded-3xl rounded-bl-md border border-slate-200 bg-white/85 px-4 py-3 text-sm leading-6 text-slate-700 shadow-sm shadow-slate-200/50 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:text-slate-100 dark:shadow-black/20">
         <%= for b <- @msg.content do %>
           {render_block(%{block: b})}
         <% end %>
@@ -52,17 +54,24 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp message(%{msg: %Message.ToolResult{}} = assigns) do
     ~H"""
-    <div class="px-2">
+    <div data-message-role="tool-result" data-tool-error={to_string(@msg.is_error)} class="px-2">
       <div class={[
-        "rounded-lg border text-xs font-mono overflow-hidden",
-        @msg.is_error && "border-error/50 bg-error/10",
-        !@msg.is_error && "border-base-300 bg-base-100"
+        "overflow-hidden rounded-2xl border text-xs font-mono shadow-sm backdrop-blur",
+        @msg.is_error &&
+          "border-rose-200 bg-rose-50/90 text-rose-950 dark:border-rose-400/20 dark:bg-rose-500/10 dark:text-rose-100",
+        !@msg.is_error &&
+          "border-slate-200 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/10 dark:text-slate-200"
       ]}>
-        <div class="px-3 py-1 border-b border-base-300/50 font-semibold flex items-center gap-2">
+        <div class="flex items-center gap-2 border-b border-current/10 px-3 py-1.5 font-semibold">
           <span>{@msg.tool_name}</span>
-          <span :if={@msg.is_error} class="badge badge-error badge-xs">error</span>
+          <span
+            :if={@msg.is_error}
+            class="rounded-full bg-rose-600 px-1.5 py-0.5 text-[0.65rem] uppercase tracking-wide text-white"
+          >
+            error
+          </span>
         </div>
-        <pre class="px-3 py-2 whitespace-pre-wrap max-h-60 overflow-y-auto">{tool_output(@msg)}</pre>
+        <pre class="max-h-60 overflow-y-auto whitespace-pre-wrap px-3 py-2">{tool_output(@msg)}</pre>
       </div>
     </div>
     """
@@ -76,17 +85,21 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp block(%{block: %Content.Thinking{}} = assigns) do
     ~H"""
-    <details class="text-xs italic opacity-60 my-1">
-      <summary class="cursor-pointer">thinking</summary>
-      <div class="whitespace-pre-wrap mt-1">{@block.thinking}</div>
+    <details class="my-1 rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 text-xs italic text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
+      <summary class="cursor-pointer font-medium not-italic text-slate-500 dark:text-slate-300">
+        thinking
+      </summary>
+      <div class="mt-2 whitespace-pre-wrap">{@block.thinking}</div>
     </details>
     """
   end
 
   defp block(%{block: %Content.ToolCall{}} = assigns) do
     ~H"""
-    <div class="text-xs opacity-70 my-1">
-      <span class="badge badge-xs badge-ghost">tool</span>
+    <div class="my-1 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs text-indigo-700 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-200">
+      <span class="rounded-full bg-indigo-600 px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-white dark:bg-indigo-400 dark:text-indigo-950">
+        tool
+      </span>
       <code>{@block.name}({short_args(@block.arguments)})</code>
     </div>
     """

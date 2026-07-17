@@ -137,4 +137,71 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParserTest do
     assert assistant.error_message =~ "rate_limit"
     assert %Message.Assistant{} = assistant
   end
+
+  test "a stream that drops mid-text keeps the partial text and reports an error" do
+    events = [
+      %{"type" => "response.output_item.added", "item" => %{"type" => "message", "id" => "m"}},
+      %{"type" => "response.output_text.delta", "delta" => "Hello wo"}
+      # connection drops: no output_item.done, no response.completed
+    ]
+
+    assistant = run(events)
+    assert assistant.stop_reason == :error
+    assert assistant.error_message =~ "ended before completion"
+    assert Enum.any?(assistant.content, &match?(%Content.Text{text: "Hello wo"}, &1))
+  end
+
+  test "a stream that drops mid-tool-call discards the partial call" do
+    events = [
+      %{
+        "type" => "response.output_item.added",
+        "item" => %{"type" => "function_call", "id" => "fc", "call_id" => "c", "name" => "bash"}
+      },
+      %{"type" => "response.function_call_arguments.delta", "delta" => "{\"comm"}
+    ]
+
+    assistant = run(events)
+    assert assistant.stop_reason == :error
+    assert assistant.error_message =~ "discarded"
+    refute Enum.any?(assistant.content, &match?(%Content.ToolCall{}, &1))
+  end
+
+  test "response.incomplete maps to :length and keeps usage" do
+    events = [
+      %{"type" => "response.output_item.added", "item" => %{"type" => "message", "id" => "m"}},
+      %{"type" => "response.output_text.delta", "delta" => "partial"},
+      %{
+        "type" => "response.output_item.done",
+        "item" => %{
+          "type" => "message",
+          "id" => "m",
+          "content" => [%{"type" => "output_text", "text" => "partial"}]
+        }
+      },
+      %{
+        "type" => "response.incomplete",
+        "response" => %{
+          "id" => "r",
+          "incomplete_details" => %{"reason" => "max_output_tokens"},
+          "usage" => %{"input_tokens" => 7, "output_tokens" => 3, "total_tokens" => 10}
+        }
+      }
+    ]
+
+    assistant = run(events)
+    assert assistant.stop_reason == :length
+    assert assistant.error_message =~ "max_output_tokens"
+    assert assistant.usage.output == 3
+  end
+
+  test "a late response.completed does not mask a prior error event" do
+    events = [
+      %{"type" => "error", "code" => "boom", "message" => "exploded"},
+      %{"type" => "response.completed", "response" => %{"id" => "r", "status" => "completed"}}
+    ]
+
+    assistant = run(events)
+    assert assistant.stop_reason == :error
+    assert assistant.error_message =~ "boom"
+  end
 end

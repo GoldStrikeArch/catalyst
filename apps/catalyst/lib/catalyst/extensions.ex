@@ -37,6 +37,10 @@ defmodule Catalyst.Extensions do
 
   @table :catalyst_tools
 
+  # Process-dictionary key (server process only) collecting tools registered
+  # from a setup/1 that is executing inside this GenServer — see wire_core_kinds.
+  @setup_tools {__MODULE__, :setup_tools}
+
   # ---- API ------------------------------------------------------------------
 
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -147,7 +151,21 @@ defmodule Catalyst.Extensions do
   # Provider (E3) and UI (E5) kinds/purgers are wired by their own subsystems.
   defp wire_core_kinds do
     ExtensionAPI.register_kind(:tool, fn api, module ->
-      register_tool(module, owner: api.owner)
+      # setup/1 runs inside this GenServer, so a call to self would deadlock
+      # (and crash-loop the server on timeout): register inline in that case,
+      # stashing the module so do_load_file can fold it into owner tracking.
+      if self() == Process.whereis(__MODULE__) do
+        case insert(module) do
+          {:ok, _} = ok ->
+            Process.put(@setup_tools, [module | Process.get(@setup_tools, [])])
+            ok
+
+          err ->
+            err
+        end
+      else
+        register_tool(module, owner: api.owner)
+      end
     end)
 
     ExtensionAPI.register_kind(:hook, fn api, point, fun, opts ->
@@ -177,28 +195,36 @@ defmodule Catalyst.Extensions do
   # ---- loading --------------------------------------------------------------
 
   defp do_load_all(state) do
-    dir = dir()
+    paths =
+      case File.dir?(dir()) do
+        true -> dir() |> Path.join("*.ex") |> Path.wildcard()
+        false -> []
+      end
 
-    if File.dir?(dir) do
-      {summaries, state} =
-        dir
-        |> Path.join("*.ex")
-        |> Path.wildcard()
-        |> Enum.reduce({[], state}, fn path, {acc, st} ->
-          case do_load_file(path, st) do
-            {{:ok, summary}, st} ->
-              {[summary | acc], st}
+    # Purge contributions whose source file is gone — e.g. removed by a
+    # rollback or by hand. Without this, reverted code stays registered (and
+    # callable) until the next restart.
+    live_owners = MapSet.new(paths, &ext_id/1)
 
-            {{:error, reason}, st} ->
-              Logger.warning("[extensions] failed to load #{path}: #{inspect(reason)}")
-              {acc, st}
-          end
-        end)
+    state =
+      state.contrib
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(live_owners, &1))
+      |> Enum.reduce(state, fn owner, st -> purge_owner(owner, st) end)
 
-      {{:ok, Enum.reverse(summaries)}, state}
-    else
-      {{:ok, []}, state}
-    end
+    {summaries, state} =
+      Enum.reduce(paths, {[], state}, fn path, {acc, st} ->
+        case do_load_file(path, st) do
+          {{:ok, summary}, st} ->
+            {[summary | acc], st}
+
+          {{:error, reason}, st} ->
+            Logger.warning("[extensions] failed to load #{path}: #{inspect(reason)}")
+            {acc, st}
+        end
+      end)
+
+    {{:ok, Enum.reverse(summaries)}, state}
   end
 
   defp do_load_file(path, state) do
@@ -214,6 +240,8 @@ defmodule Catalyst.Extensions do
     state = Enum.reduce(tool_mods, state, fn mod, st -> register_owned(mod, owner, st) end)
     api = ExtensionAPI.new(owner, path)
 
+    Process.put(@setup_tools, [])
+
     Enum.each(ext_mods, fn mod ->
       try do
         mod.setup(api)
@@ -222,13 +250,23 @@ defmodule Catalyst.Extensions do
           Logger.warning(
             "[extensions] #{owner}: #{inspect(mod)}.setup/1 raised: #{Exception.message(e)}"
           )
+      catch
+        kind, reason ->
+          Logger.warning(
+            "[extensions] #{owner}: #{inspect(mod)}.setup/1 #{kind}: #{inspect(reason)}"
+          )
       end
     end)
+
+    setup_tools = Process.delete(@setup_tools) || []
+    state = Enum.reduce(setup_tools, state, fn mod, st -> track(mod, owner, st) end)
 
     summary = %{owner: owner, tools: Enum.map(tool_mods, & &1.name()), extensions: ext_mods}
     {{:ok, summary}, state}
   rescue
     e -> {{:error, Exception.message(e)}, state}
+  catch
+    kind, reason -> {{:error, {kind, reason}}, state}
   end
 
   # Extensions take precedence: a module that is both is treated as an extension.

@@ -11,45 +11,89 @@ defmodule CatalystWeb.Pages.ChatPage do
 
   def render(assigns) do
     ~H"""
-    <div id="messages" phx-hook="ScrollBottom" class="flex-1 overflow-y-auto px-4 py-6 space-y-2">
-      <div :if={@messages == [] and is_nil(@streaming)} class="text-center text-base-content/50 mt-20">
-        <p class="text-sm">Ask Catalyst to inspect this project.</p>
-        <p class="text-xs mt-1">cwd: {@cwd}</p>
-      </div>
+    <main
+      id="messages"
+      phx-hook="ScrollBottom"
+      class="flex-1 overflow-y-auto px-4 py-6 sm:px-6"
+    >
+      <div class="mx-auto flex max-w-5xl flex-col gap-3">
+        <div
+          :if={@message_count == 0 and is_nil(@streaming)}
+          id="chat-empty-state"
+          class="mx-auto mt-24 max-w-md rounded-3xl border border-slate-200 bg-white/75 p-8 text-center shadow-xl shadow-slate-200/60 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:shadow-black/20"
+        >
+          <div class="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-lg shadow-indigo-900/20">
+            <.icon name="hero-sparkles" class="size-6" />
+          </div>
+          <p class="text-sm font-semibold text-slate-800 dark:text-white">
+            Ask Catalyst to inspect this project.
+          </p>
+          <p class="mt-2 truncate font-mono text-xs text-slate-400 dark:text-slate-500">
+            cwd: {@cwd}
+          </p>
+        </div>
 
-      <%= for msg <- @messages do %>
-        {MessageRenderer.render_message(%{msg: msg})}
-      <% end %>
+        <div id="message-stream" phx-update="stream" class="flex flex-col gap-3">
+          <div :for={{dom_id, %{msg: msg}} <- @streams.messages} id={dom_id}>
+            {MessageRenderer.render_message(%{msg: msg})}
+          </div>
+        </div>
 
-      <div :if={@streaming} class="chat chat-start">
-        <div class="chat-bubble chat-bubble-neutral whitespace-pre-wrap">
-          <span :if={@streaming.thinking != ""} class="block text-xs italic opacity-60 mb-1">{@streaming.thinking}</span>{@streaming.text}<span class="animate-pulse">▌</span>
+        <%!-- Deltas are appended client-side by the StreamingMessage hook
+        (push_event "stream_delta"); the server never re-sends accumulated text. --%>
+        <div
+          :if={@streaming}
+          id="streaming-message"
+          phx-hook="StreamingMessage"
+          data-message-role="assistant-streaming"
+          class="flex justify-start"
+        >
+          <div class="max-w-[82%] rounded-3xl rounded-bl-md border border-slate-200 bg-white/85 px-4 py-3 text-sm leading-6 text-slate-700 shadow-sm shadow-slate-200/50 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:text-slate-100 dark:shadow-black/20">
+            <span
+              data-stream="thinking"
+              class="mb-2 hidden whitespace-pre-wrap border-l-2 border-indigo-300 pl-3 text-xs italic text-slate-500 dark:border-indigo-400/60 dark:text-slate-400"
+            >
+            </span>
+            <span data-stream="text" class="whitespace-pre-wrap"></span>
+            <span class="ml-0.5 animate-pulse text-indigo-500">▌</span>
+          </div>
+        </div>
+
+        <div :for={{_id, t} <- @tools} class="flex justify-start">
+          <div class="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 shadow-sm dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-200">
+            <span class="size-3 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600 dark:border-indigo-200/20 dark:border-t-indigo-200">
+            </span>
+            running <code class="font-mono">{t.name}</code>…
+          </div>
         </div>
       </div>
+    </main>
 
-      <div :for={{_id, t} <- @tools} class="chat chat-start">
-        <div class="chat-bubble chat-bubble-info text-sm flex items-center gap-2">
-          <span class="loading loading-spinner loading-xs"></span> running <code>{t.name}</code>…
-        </div>
-      </div>
-    </div>
-
-    <form
+    <.form
+      for={@chat_form}
+      id="chat-form"
       phx-submit="send"
       phx-change="typing"
-      class="bg-base-100 border-t border-base-300 p-3 flex gap-2"
+      class="border-t border-slate-200/80 bg-white/85 px-4 py-3 shadow-[0_-8px_30px_rgba(15,23,42,0.06)] backdrop-blur dark:border-white/10 dark:bg-slate-950/80 dark:shadow-black/20"
     >
-      <input
-        type="text"
-        name="message"
-        value={@input}
-        autocomplete="off"
-        placeholder="Ask Catalyst…  (e.g. “list the files” or “search defmodule”)"
-        class="input input-bordered flex-1"
-      />
-      <button :if={!@running} type="submit" class="btn btn-primary">Send</button>
-      <button :if={@running} type="button" phx-click="abort" class="btn btn-error">Stop</button>
-    </form>
+      <div class="mx-auto flex max-w-5xl items-end gap-3">
+        <div class="min-w-0 flex-1">
+          <.input
+            field={@chat_form[:message]}
+            type="text"
+            autocomplete="off"
+            placeholder="Ask Catalyst…  (e.g. “list the files” or “search defmodule”)"
+            class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/15 dark:border-white/10 dark:bg-white/10 dark:text-white dark:placeholder:text-slate-500"
+          />
+        </div>
+        <div :if={!@running} class="mb-3">
+          <.button type="submit" variant="primary">Send</.button>
+        </div>
+        <div :if={@running} class="mb-3">
+          <.button type="button" phx-click="abort" variant="danger">Stop</.button>
+        </div>
+      </div>
+    </.form>
     """
   end
 end

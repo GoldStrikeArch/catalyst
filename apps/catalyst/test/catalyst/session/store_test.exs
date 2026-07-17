@@ -18,8 +18,9 @@ defmodule Catalyst.Session.StoreTest do
         provider: "faux",
         api: "faux",
         model: "faux-1",
-        usage: %Usage{},
+        usage: %Usage{input: 8, output: 5, cache_read: 2, total_tokens: 15, cost: 0.01},
         stop_reason: :tool_use,
+        response_id: "resp_1",
         timestamp: 123
       },
       %Message.ToolResult{
@@ -40,6 +41,8 @@ defmodule Catalyst.Session.StoreTest do
 
     assert Content.text_of(a.content) == "let me look"
     assert a.stop_reason == :tool_use
+    assert a.usage == %Usage{input: 8, output: 5, cache_read: 2, total_tokens: 15, cost: 0.01}
+    assert a.response_id == "resp_1"
     [_text, tool_call] = a.content
     assert %Content.ToolCall{name: "read", arguments: %{"path" => "x"}} = tool_call
 
@@ -51,5 +54,36 @@ defmodule Catalyst.Session.StoreTest do
     store = Store.new("/tmp/proj2")
     on_exit(fn -> File.rm_rf!(store.path) end)
     assert Store.load(store.path) == []
+  end
+
+  test "reopening an existing session file preserves its transcript" do
+    id = "resume_#{System.unique_integer([:positive])}"
+    store = Store.new("/tmp/proj3", id: id)
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    Store.append_message(store, Message.user("hello"))
+
+    # Same id again (what a crash-restarted Session.Server does) must not truncate.
+    reopened = Store.new("/tmp/proj3", id: id)
+    assert reopened.path == store.path
+    assert [%Message.User{}] = Store.load(reopened.path)
+  end
+
+  test "load skips corrupt or unknown lines instead of crashing" do
+    store = Store.new("/tmp/proj4")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    Store.append_message(store, Message.user("kept"))
+    File.write!(store.path, "not json at all\n", [:append])
+    File.write!(store.path, ~s({"type":"message","message":{"role":"martian"}}\n), [:append])
+
+    File.write!(
+      store.path,
+      ~s({"type":"message","message":{"role":"assistant","stopReason":"new_unknown_reason"}}\n),
+      [:append]
+    )
+
+    loaded = Store.load(store.path)
+    assert [%Message.User{}, %Message.Assistant{stop_reason: :stop}] = loaded
   end
 end

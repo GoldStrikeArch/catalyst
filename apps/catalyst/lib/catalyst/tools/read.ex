@@ -33,19 +33,30 @@ defmodule Catalyst.Tools.Read do
     abs = Paths.resolve(path, ctx.cwd)
     content = File.read!(abs)
 
+    if binary_content?(content) do
+      raise "#{path} appears to be a binary file (#{byte_size(content)} bytes); not returning its contents"
+    end
+
     text =
       content
+      |> Truncate.scrub_utf8()
       |> String.split("\n")
       |> slice(args["offset"], args["limit"])
       |> Enum.join("\n")
 
     {out, info} = Truncate.head(text)
-    result(out, %{path: abs, truncation: info})
+    result(Truncate.notice(out, info, :head), %{path: abs, truncation: info})
   end
 
   defp slice(lines, offset, limit) do
     start = max((offset || 1) - 1, 0)
     dropped = Enum.drop(lines, start)
     if limit, do: Enum.take(dropped, limit), else: dropped
+  end
+
+  # Null byte in the first 8KB — the same heuristic git/grep use.
+  defp binary_content?(bin) do
+    head = binary_part(bin, 0, min(byte_size(bin), 8 * 1024))
+    :binary.match(head, <<0>>) != :nomatch
   end
 end

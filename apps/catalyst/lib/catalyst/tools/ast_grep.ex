@@ -66,7 +66,11 @@ defmodule Catalyst.Tools.AstGrep do
         matches = parse_matches(out)
         text = if matches == [], do: "No matches.", else: Enum.join(matches, "\n")
         {body, info} = Truncate.head(text)
-        result(body, %{match_count: length(matches), truncation: info})
+
+        result(Truncate.notice(body, info, :head), %{
+          match_count: length(matches),
+          truncation: info
+        })
 
       {:ok, %{out: out, status: status}} ->
         raise "ast-grep error (status #{status}): #{String.slice(out, 0, 300)}"

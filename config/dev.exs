@@ -15,7 +15,9 @@ config :catalyst_web, CatalystWeb.Endpoint,
   # points at this url.
   http: [ip: {127, 0, 0, 1}, port: 4000],
   url: [host: "localhost", port: 4000, scheme: "http"],
-  check_origin: false,
+  # Pinned even in dev: this socket fronts a shell-executing agent, and
+  # check_origin: false would let any origin (e.g. via DNS rebinding) drive it.
+  check_origin: ["http://localhost:4000", "http://127.0.0.1:4000"],
   code_reloader: true,
   debug_errors: true,
   secret_key_base: "FhnZ9g06kSF6yjBiNEaq7CEdwFvlzyD/g5KY1++jjeLKTk7ty6UoJcNTEOzaEBGY",

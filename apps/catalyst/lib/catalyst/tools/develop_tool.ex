@@ -11,7 +11,7 @@ defmodule Catalyst.Tools.DevelopTool do
   """
   use Catalyst.Tools.Tool
 
-  alias Catalyst.Extensions
+  alias Catalyst.Extensions.Installer
 
   @impl true
   def execution_mode, do: :sequential
@@ -49,16 +49,13 @@ defmodule Catalyst.Tools.DevelopTool do
 
   @impl true
   def execute(%{"name" => name, "source" => source}, _ctx) do
-    dir = Extensions.dir()
-    File.mkdir_p!(dir)
-    path = Path.join(dir, sanitize(name) <> ".ex")
-    File.write!(path, source)
-
-    case Extensions.load_file(path) do
-      {:ok, %{tools: []}} ->
+    # Same write/restore/commit pipeline as install_extension, so develop_tool
+    # changes are git-versioned and rollback_extension can revert them.
+    case Installer.install(name, source, "develop_tool") do
+      {:ok, %{tools: [], path: path}} ->
         raise "Compiled #{path} but found no tool module. Did you `use Catalyst.Tools.Tool` and implement name/0, parameters/0, execute/2?"
 
-      {:ok, %{tools: tool_names}} ->
+      {:ok, %{tools: tool_names, path: path}} ->
         result(
           "Created and loaded #{length(tool_names)} tool(s): #{Enum.join(tool_names, ", ")}. " <>
             "They are available to call now (next turn).",
@@ -67,17 +64,6 @@ defmodule Catalyst.Tools.DevelopTool do
 
       {:error, reason} ->
         raise "Failed to compile the new tool: #{reason}"
-    end
-  end
-
-  defp sanitize(name) do
-    name
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9_]+/, "_")
-    |> String.trim("_")
-    |> case do
-      "" -> "ext_#{System.unique_integer([:positive])}"
-      ok -> ok
     end
   end
 end

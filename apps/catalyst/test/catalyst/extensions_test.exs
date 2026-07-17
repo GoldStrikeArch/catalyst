@@ -139,6 +139,70 @@ defmodule Catalyst.ExtensionsTest do
     assert length(owner_hooks("multikind")) == 1
   end
 
+  # Defined here (not in the extension source) so registration can only come
+  # from the extension's setup/1 call, not from file-level auto-classification.
+  defmodule SetupOnlyTool do
+    use Catalyst.Tools.Tool
+    @impl true
+    def name, do: "setup_only_tool"
+    @impl true
+    def description, do: "registered from setup/1"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+    @impl true
+    def execute(_args, _ctx), do: result("ok")
+  end
+
+  @setup_reg_source ~S'''
+  defmodule Catalyst.Ext.SetupReg do
+    use Catalyst.Extension
+    @impl true
+    def setup(api) do
+      {:ok, _} = Catalyst.ExtensionAPI.register_tool(api, Catalyst.ExtensionsTest.SetupOnlyTool)
+      :ok
+    end
+  end
+  '''
+
+  test "setup/1 can register a tool through the API without deadlocking the server" do
+    on_exit(fn -> Extensions.uninstall("setupreg") end)
+    path = write_ext("setupreg", @setup_reg_source)
+
+    assert {:ok, summary} = Extensions.load_file(path)
+    assert summary.extensions == [Catalyst.Ext.SetupReg]
+    assert Extensions.fetch("setup_only_tool") == SetupOnlyTool
+
+    # The setup-registered tool is owner-tracked, so uninstall removes it.
+    Extensions.uninstall("setupreg")
+    assert Extensions.fetch("setup_only_tool") == nil
+  end
+
+  @ephemeral_source ~S'''
+  defmodule Catalyst.Ext.EphemeralTool do
+    use Catalyst.Tools.Tool
+    @impl true
+    def name, do: "ephemeral_tool"
+    @impl true
+    def description, do: "test tool"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+    @impl true
+    def execute(_args, _ctx), do: result("ok")
+  end
+  '''
+
+  test "load_all purges contributions whose source file was removed (rollback path)" do
+    path = write_ext("ephemeral", @ephemeral_source)
+
+    assert {:ok, _} = Extensions.load_file(path)
+    assert Extensions.fetch("ephemeral_tool")
+
+    # A rollback (or manual delete) removes the file; reload must deactivate it.
+    File.rm!(path)
+    capture_log(fn -> Extensions.load_all() end)
+    assert Extensions.fetch("ephemeral_tool") == nil
+  end
+
   test "a broken extension file registers nothing and returns an error" do
     source = ~S'''
     defmodule Catalyst.Ext.BrokenTool do

@@ -9,10 +9,14 @@ defmodule Catalyst.Tools.Bash do
   @impl true
   def name, do: "bash"
 
+  @default_timeout_s 120
+
   @impl true
   def description,
     do:
-      "Run a bash/sh command in the working directory. Output (stdout+stderr) is tail-truncated to 2000 lines / 50KB."
+      "Run a bash/sh command in the working directory. Output (stdout+stderr) is tail-truncated " <>
+        "to 2000 lines / 50KB. Commands time out after #{@default_timeout_s}s unless `timeout` is given. " <>
+        "Commands run without a stdin; anything interactive will hit the timeout."
 
   @impl true
   def parameters do
@@ -20,7 +24,10 @@ defmodule Catalyst.Tools.Bash do
       "type" => "object",
       "properties" => %{
         "command" => %{"type" => "string", "description" => "Shell command to run"},
-        "timeout" => %{"type" => "integer", "description" => "Timeout in seconds (optional)"}
+        "timeout" => %{
+          "type" => "integer",
+          "description" => "Timeout in seconds (default #{@default_timeout_s})"
+        }
       },
       "required" => ["command"]
     }
@@ -28,19 +35,27 @@ defmodule Catalyst.Tools.Bash do
 
   @impl true
   def execute(%{"command" => command} = args, ctx) do
-    timeout_ms = if args["timeout"], do: args["timeout"] * 1000, else: nil
+    timeout_s = timeout_seconds(args["timeout"])
 
-    case Exec.bash(command, cwd: ctx.cwd, timeout: timeout_ms) do
+    case Exec.bash(command, cwd: ctx.cwd, timeout: timeout_s * 1000) do
       {:ok, %{out: out, status: status}} ->
         {text, info} = Truncate.tail(out)
+        text = Truncate.notice(text, info, :tail)
         body = if status == 0, do: text, else: text <> "\n[exit status: #{status}]"
         result(body, %{exit_status: status, truncation: info})
 
-      {:error, :timeout} ->
-        raise "bash command timed out after #{args["timeout"]}s"
+      {:error, {:timeout, partial}} ->
+        {tail, _info} = Truncate.tail(partial, max_lines: 50)
+
+        raise "bash command timed out after #{timeout_s}s" <>
+                if(tail == "", do: "", else: ". Output before timeout:\n" <> tail)
 
       {:error, reason} ->
         raise "bash failed: #{inspect(reason)}"
     end
   end
+
+  defp timeout_seconds(s) when is_integer(s) and s > 0, do: s
+  defp timeout_seconds(s) when is_float(s) and s > 0, do: round(s)
+  defp timeout_seconds(_), do: @default_timeout_s
 end

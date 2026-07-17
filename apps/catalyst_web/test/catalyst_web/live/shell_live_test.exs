@@ -4,7 +4,9 @@ defmodule CatalystWeb.ShellLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias Catalyst.Agent.Event
   alias Catalyst.Message
+  alias Catalyst.Session.Server
   alias CatalystWeb.UI.Registry
 
   defmodule SettingsPage do
@@ -17,18 +19,21 @@ defmodule CatalystWeb.ShellLiveTest do
     def card(assigns), do: ~H|<div>CUSTOM-LS-CARD:{@msg.tool_name}</div>|
   end
 
-  defp wait_render(_view, sub, 0), do: flunk("did not render #{inspect(sub)} in time")
+  defp session_id(view) do
+    html = view |> element("#catalyst-shell") |> render()
+    [_, id] = Regex.run(~r/data-session-id="([^"]+)"/, html)
+    id
+  end
 
-  defp wait_render(view, sub, tries) do
-    html = render(view)
+  defp submit_prompt(view, prompt) do
+    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(session_id(view)))
 
-    if html =~ sub,
-      do: html,
-      else:
-        (
-          Process.sleep(50)
-          wait_render(view, sub, tries - 1)
-        )
+    view
+    |> form("#chat-form", %{"message" => prompt})
+    |> render_submit()
+
+    assert_receive {:agent_event, %Event.AgentEnd{}}, 5_000
+    render(view)
   end
 
   test "a runtime-registered page renders via the catch-all route", %{conn: conn} do
@@ -41,7 +46,6 @@ defmodule CatalystWeb.ShellLiveTest do
 
     {:ok, _view, html} = live(conn, "/settings")
     assert html =~ "SETTINGS-PAGE-CONTENT"
-    # The page nav now lists both pages.
     assert html =~ "Settings"
   end
 
@@ -57,16 +61,22 @@ defmodule CatalystWeb.ShellLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    view |> form("form", %{"message" => "list the files"}) |> render_submit()
+    html = submit_prompt(view, "list the files")
 
-    # The Demo provider runs `ls`; our custom renderer replaces the default card.
-    assert wait_render(view, "CUSTOM-LS-CARD", 80) =~ "CUSTOM-LS-CARD:ls"
+    assert html =~ "CUSTOM-LS-CARD:ls"
+    refute html =~ "Ask Catalyst to inspect this project."
   end
 
   test "the chat page is the default at /", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/")
+    {:ok, view, html} = live(conn, ~p"/")
     assert html =~ "Catalyst"
-    assert html =~ "Ask Catalyst"
+    assert has_element?(view, "#chat-empty-state")
+  end
+
+  test "the chat starts empty and renders messages through a LiveView stream", %{conn: conn} do
+    {:ok, view, html} = live(conn, ~p"/")
+    assert html =~ "Ask Catalyst to inspect this project."
+    assert has_element?(view, "#message-stream")
   end
 
   test "the web self-modification tools are registered into the core tool set" do

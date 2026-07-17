@@ -34,7 +34,8 @@ defmodule Catalyst.Tools.Fd do
     target = Paths.resolve(args["path"] || ".", ctx.cwd)
     limit = args["limit"] || @default_limit
 
-    fd_args = ["--color", "never", "--hidden", "--glob", pattern, target]
+    # `--` keeps a leading-dash pattern from being parsed as fd flags (e.g. -x = exec).
+    fd_args = ["--color", "never", "--hidden", "--glob", "--", pattern, target]
 
     case Exec.collect(fd, fd_args, cwd: ctx.cwd) do
       {:ok, %{out: out, status: status}} when status in [0, 1] ->
@@ -42,9 +43,15 @@ defmodule Catalyst.Tools.Fd do
         limited? = length(results) > limit
         shown = Enum.take(results, limit)
         text = if shown == [], do: "No files found.", else: Enum.join(shown, "\n")
+
+        text =
+          if limited?,
+            do: text <> "\n... [showing first #{limit} of #{length(results)} results]",
+            else: text
+
         {body, info} = Truncate.head(text)
 
-        result(body, %{
+        result(Truncate.notice(body, info, :head), %{
           result_count: length(shown),
           result_limit_reached: limited?,
           truncation: info

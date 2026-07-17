@@ -11,8 +11,7 @@ defmodule Catalyst.Tools.InstallExtension do
   """
   use Catalyst.Tools.Tool
 
-  alias Catalyst.Extensions
-  alias Catalyst.Extensions.Versioning
+  alias Catalyst.Extensions.Installer
 
   @impl true
   def execution_mode, do: :sequential
@@ -50,22 +49,11 @@ defmodule Catalyst.Tools.InstallExtension do
 
   @impl true
   def execute(%{"name" => name, "source" => source}, _ctx) do
-    dir = Extensions.dir()
-    File.mkdir_p!(dir)
-    path = Path.join(dir, sanitize(name) <> ".ex")
-    existed = File.exists?(path)
-    backup = if existed, do: File.read!(path), else: nil
-
-    File.write!(path, source)
-
-    case Extensions.load_file(path) do
+    case Installer.install(name, source) do
       {:ok, summary} ->
-        Versioning.commit(dir, "install #{summary.owner}")
-        result(describe(summary), Map.put(summary, :path, path))
+        result(describe(summary), summary)
 
       {:error, reason} ->
-        # Restore the prior version (or remove a brand-new broken file).
-        if existed, do: File.write!(path, backup), else: File.rm(path)
         raise "Failed to compile/load the extension: #{reason}"
     end
   end
@@ -80,16 +68,5 @@ defmodule Catalyst.Tools.InstallExtension do
 
     summary = if parts == [], do: "no tools/extensions found", else: Enum.join(parts, "; ")
     "Installed #{owner} (#{summary}). Active now."
-  end
-
-  defp sanitize(name) do
-    name
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9_]+/, "_")
-    |> String.trim("_")
-    |> case do
-      "" -> "ext_#{System.unique_integer([:positive])}"
-      ok -> ok
-    end
   end
 end

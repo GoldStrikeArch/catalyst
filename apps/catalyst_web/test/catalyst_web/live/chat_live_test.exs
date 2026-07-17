@@ -3,54 +3,88 @@ defmodule CatalystWeb.ChatLiveTest do
 
   import Phoenix.LiveViewTest
 
-  defp wait_render(_view, sub, 0), do: flunk("did not render #{inspect(sub)} in time")
+  alias Catalyst.Agent.Event
+  alias Catalyst.Session.Server
 
-  defp wait_render(view, sub, tries) do
-    html = render(view)
+  defp session_id(view) do
+    html = view |> element("#catalyst-shell") |> render()
+    [_, id] = Regex.run(~r/data-session-id="([^"]+)"/, html)
+    id
+  end
 
-    if html =~ sub,
-      do: html,
-      else:
-        (
-          Process.sleep(50)
-          wait_render(view, sub, tries - 1)
-        )
+  defp submit_prompt(view, prompt) do
+    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(session_id(view)))
+
+    view
+    |> form("#chat-form", %{"message" => prompt})
+    |> render_submit()
+
+    assert_receive {:agent_event, %Event.AgentEnd{}}, 5_000
+    render(view)
   end
 
   test "renders the chat shell with the Demo provider", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/")
+    {:ok, view, html} = live(conn, ~p"/")
     assert html =~ "Catalyst"
     assert html =~ "Demo (offline)"
-    assert html =~ "Ask Catalyst"
+    assert has_element?(view, "#chat-empty-state")
+    assert has_element?(view, "#chat-form")
   end
 
   test "sending a prompt streams a Demo reply with a tool result", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 
-    view
-    |> form("form", %{"message" => "list the files"})
-    |> render_submit()
+    html = submit_prompt(view, "list the files")
 
-    # The user message is echoed back via the agent event stream.
-    assert wait_render(view, "list the files", 80) =~ "list the files"
-
-    # The Demo provider runs `ls` (a tool-result card) then streams a reply.
-    html = wait_render(view, "offline Demo provider", 80)
+    assert html =~ "list the files"
+    assert html =~ "offline Demo provider"
     assert html =~ "ls"
+    refute has_element?(view, "#chat-empty-state")
+  end
+
+  test "a remounted LiveView reattaches to the live session and its transcript", %{conn: conn} do
+    # Earlier tests' sessions are still alive (sessions outlive their LiveView)
+    # and have stored pointers — start this scenario from a clean slate.
+    :persistent_term.erase({CatalystWeb.ShellLive, :current_session})
+    Application.put_env(:catalyst_web, :reattach_sessions, true)
+
+    on_exit(fn ->
+      Application.put_env(:catalyst_web, :reattach_sessions, false)
+      :persistent_term.erase({CatalystWeb.ShellLive, :current_session})
+    end)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+    assert submit_prompt(view, "list the files") =~ "list the files"
+
+    # A reconnect/refresh mounts a fresh LiveView; it must pick up the same
+    # session and replay the conversation instead of starting over.
+    {:ok, view2, _html} = live(conn, ~p"/")
+    assert session_id(view2) == id
+
+    html = render(view2)
+    assert html =~ "list the files"
+    assert html =~ "offline Demo provider"
+    refute has_element?(view2, "#chat-empty-state")
   end
 
   test "the Sign in button runs OAuth (stubbed) and switches to Codex", %{conn: conn} do
-    # Stub the OAuth flow so no browser/callback server is involved.
-    Application.put_env(:catalyst_web, :login_fun, fn -> {:ok, "acct_test"} end)
+    parent = self()
+
+    Application.put_env(:catalyst_web, :login_fun, fn ->
+      send(parent, :login_called)
+      {:ok, "acct_test"}
+    end)
+
     on_exit(fn -> Application.delete_env(:catalyst_web, :login_fun) end)
 
     {:ok, view, html} = live(conn, ~p"/")
     assert html =~ "Sign in to ChatGPT"
 
     view |> element("button", "Sign in to ChatGPT") |> render_click()
+    assert_receive :login_called, 1_000
 
-    # Async login result flips the UI to logged-in and switches the provider.
-    html = wait_render(view, "Codex ✓", 80)
+    html = render(view)
     refute html =~ "Sign in to ChatGPT"
     assert html =~ "Codex"
   end

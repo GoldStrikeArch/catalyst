@@ -19,17 +19,24 @@ defmodule CatalystWeb.UI.Registry do
 
   @table :catalyst_ui
 
+  @type kind :: :message | :block
+  @type target :: module() | {module(), atom()}
+  @type render_fun :: (map() -> Phoenix.LiveView.Rendered.t())
+
   # ---- API ------------------------------------------------------------------
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   ## pages
 
   @doc "Register (replace) a page at `path`. `target` is a module (uses `render/1`) or `{module, fun}`."
+  @spec register_page(String.t(), target(), keyword()) :: :ok
   def register_page(path, target, opts \\ []),
     do: GenServer.call(__MODULE__, {:register_page, path, normalize_target(target), opts})
 
   @doc "`{module, function}` for a page path, or nil."
+  @spec fetch_page(String.t()) :: {module(), atom()} | nil
   def fetch_page(path) do
     case :ets.lookup(@table, {:page, path}) do
       [{_, entry} | _] -> {entry.mod, entry.fun}
@@ -40,6 +47,7 @@ defmodule CatalystWeb.UI.Registry do
   end
 
   @doc "All registered pages (`%{path, label, ...}`), sorted by label."
+  @spec list_pages() :: [map()]
   def list_pages do
     @table
     |> :ets.match_object({{:page, :_}, :_})
@@ -52,10 +60,12 @@ defmodule CatalystWeb.UI.Registry do
   ## renderers
 
   @doc "Register a renderer for `kind` (`:message`/`:block`). `match_fun.(value)` -> bool; `render_fun.(assigns)` -> rendered."
+  @spec register_renderer(kind(), (term() -> boolean()), render_fun(), keyword()) :: :ok
   def register_renderer(kind, match_fun, render_fun, opts \\ []),
     do: GenServer.call(__MODULE__, {:register_renderer, kind, match_fun, render_fun, opts})
 
   @doc "The newest matching render function for `value` at `kind`, or nil."
+  @spec renderer(kind(), term()) :: render_fun() | nil
   def renderer(kind, value) do
     @table
     |> :ets.lookup({:renderer, kind})
@@ -69,10 +79,12 @@ defmodule CatalystWeb.UI.Registry do
   ## components
 
   @doc "Register a slot component (`fun.(assigns) -> rendered`)."
+  @spec register_component(atom(), render_fun(), keyword()) :: :ok
   def register_component(slot, fun, opts \\ []),
     do: GenServer.call(__MODULE__, {:register_component, slot, fun, opts})
 
   @doc "Component render functions for a slot, newest first."
+  @spec components(atom()) :: [render_fun()]
   def components(slot) do
     @table
     |> :ets.lookup({:component, slot})
@@ -85,9 +97,11 @@ defmodule CatalystWeb.UI.Registry do
 
   ## commands
 
+  @spec register_command(String.t(), keyword()) :: :ok
   def register_command(name, opts \\ []),
     do: GenServer.call(__MODULE__, {:register_command, name, opts})
 
+  @spec list_commands() :: [map()]
   def list_commands do
     @table |> :ets.match_object({{:command, :_}, :_}) |> Enum.map(&elem(&1, 1))
   rescue
@@ -97,6 +111,7 @@ defmodule CatalystWeb.UI.Registry do
   ## purge
 
   @doc "Remove every UI contribution made by `owner`."
+  @spec unregister_owner(term()) :: :ok
   def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
 
   # ---- callbacks ------------------------------------------------------------

@@ -65,6 +65,27 @@ const Hooks = {
       if (this.shouldScroll) this.el.scrollTop = this.el.scrollHeight;
     },
   },
+
+  // Streaming deltas are appended client-side (server pushes only the delta,
+  // not the whole accumulated text — O(n) wire traffic instead of O(n²)).
+  StreamingMessage: {
+    mounted() {
+      this.handleEvent("stream_delta", ({ kind, delta }) => {
+        const el = this.el.querySelector(`[data-stream="${kind}"]`);
+        if (!el) return;
+        // The thinking span starts hidden; inline style beats the class.
+        if (kind === "thinking") el.style.display = "block";
+        el.textContent += delta;
+        const scroller = document.getElementById("messages");
+        if (
+          scroller &&
+          scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 120
+        ) {
+          scroller.scrollTop = scroller.scrollHeight;
+        }
+      });
+    },
+  },
 };
 
 const csrfToken = document

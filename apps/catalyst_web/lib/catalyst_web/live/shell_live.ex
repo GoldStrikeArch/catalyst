@@ -1,9 +1,11 @@
 defmodule CatalystWeb.ShellLive do
   @moduledoc """
-  The single LiveView for the whole app, mounted at `/` and `/:page`. It owns the
-  `Catalyst.Session.Server` (started on connect), subscribes to its
-  `"session:<id>"` topic, and renders the shell chrome (title, provider/login,
-  page nav) plus the **active page** resolved from `CatalystWeb.UI.Registry`.
+  The single LiveView for the whole app, mounted at `/` and `/:page`. On connect
+  it reattaches to the app's current `Catalyst.Session.Server` (or starts one),
+  subscribes to its `"session:<id>"` topic, and renders the shell chrome (title,
+  provider/login, page nav) plus the **active page** resolved from
+  `CatalystWeb.UI.Registry`. Sessions outlive the LiveView, so reconnects and
+  self-triggered UI reloads resume the conversation instead of discarding it.
 
   The default page is `"chat"` (`CatalystWeb.Pages.ChatPage`); extensions can
   register additional pages (e.g. `/settings`) at runtime with no router change.
@@ -40,13 +42,14 @@ defmodule CatalystWeb.ShellLive do
   @impl true
   def mount(_params, _session, socket) do
     socket =
-      assign(socket,
+      socket
+      |> assign(
         page: "chat",
-        messages: [],
         streaming: nil,
         running: false,
         tools: %{},
         input: "",
+        chat_form: chat_form(""),
         logged_in: Catalyst.Auth.logged_in?(),
         login_state: :idle,
         login_ref: nil,
@@ -54,12 +57,19 @@ defmodule CatalystWeb.ShellLive do
         model_label: "Demo (offline)",
         session_id: nil,
         session_pid: nil,
-        cwd: default_cwd()
+        cwd: default_cwd(),
+        # Conversation is a LiveView stream (append-only), so the socket never
+        # retains the full transcript. `message_seq` is a monotonic counter used
+        # as the stable DOM id (messages carry no id of their own); `message_count`
+        # drives the empty state.
+        message_seq: 0,
+        message_count: 0
       )
+      |> stream(:messages, [])
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Catalyst.PubSub, Assets.topic())
-      {:ok, start_session(socket, :demo)}
+      {:ok, attach_or_start(socket)}
     else
       {:ok, socket}
     end
@@ -69,17 +79,16 @@ defmodule CatalystWeb.ShellLive do
   def handle_params(params, _uri, socket),
     do: {:noreply, assign(socket, page: Map.get(params, "page", "chat"))}
 
-  @impl true
-  def terminate(_reason, socket) do
-    if socket.assigns.session_id, do: Manager.stop(socket.assigns.session_id)
-    :ok
-  end
+  # No terminate/2 session cleanup: the session outlives the LiveView so a
+  # reconnect, page refresh, or self-triggered reload (reload_ui/rebuild_assets)
+  # reattaches instead of killing the conversation — including an in-flight run.
+  # Sessions are stopped explicitly when a new one replaces them (start_session).
 
   # ---- events ---------------------------------------------------------------
 
   @impl true
   def handle_event("typing", %{"message" => text}, socket),
-    do: {:noreply, assign(socket, input: text)}
+    do: {:noreply, assign_input(socket, text)}
 
   def handle_event("send", %{"message" => text}, socket) do
     text = String.trim(text)
@@ -94,7 +103,7 @@ defmodule CatalystWeb.ShellLive do
 
       true ->
         Server.prompt(socket.assigns.session_pid, text)
-        {:noreply, assign(socket, input: "", running: true)}
+        {:noreply, socket |> assign_input("") |> assign(running: true)}
     end
   end
 
@@ -178,24 +187,36 @@ defmodule CatalystWeb.ShellLive do
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: inspect(reason)
 
+  defp chat_form(input), do: to_form(%{"message" => input})
+
+  defp assign_input(socket, text), do: assign(socket, input: text, chat_form: chat_form(text))
+
   defp apply_event(%Event.MessageStart{message: %Message.Assistant{}}, socket),
-    do: assign(socket, streaming: %{text: "", thinking: ""})
+    do: assign(socket, streaming: true)
 
   defp apply_event(
          %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{delta: d}},
          socket
        ),
-       do: update_streaming(socket, :text, d)
+       do: push_stream_delta(socket, "text", d)
 
   defp apply_event(
          %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.ThinkingDelta{delta: d}},
          socket
        ),
-       do: update_streaming(socket, :thinking, d)
+       do: push_stream_delta(socket, "thinking", d)
 
   defp apply_event(%Event.MessageEnd{message: message}, socket) do
     streaming = if match?(%Message.Assistant{}, message), do: nil, else: socket.assigns.streaming
-    assign(socket, messages: socket.assigns.messages ++ [message], streaming: streaming)
+    seq = socket.assigns.message_seq + 1
+
+    socket
+    |> assign(
+      streaming: streaming,
+      message_seq: seq,
+      message_count: socket.assigns.message_count + 1
+    )
+    |> stream_insert(:messages, %{id: seq, msg: message})
   end
 
   defp apply_event(%Event.ToolExecutionStart{call_id: id, name: name, args: args}, socket),
@@ -204,20 +225,85 @@ defmodule CatalystWeb.ShellLive do
   defp apply_event(%Event.ToolExecutionEnd{call_id: id}, socket),
     do: assign(socket, tools: Map.delete(socket.assigns.tools, id))
 
+  # Also clear tool spinners: an aborted/failed run never emits
+  # ToolExecutionEnd for its pending calls.
   defp apply_event(%Event.AgentEnd{}, socket),
-    do: assign(socket, running: false, streaming: nil)
+    do: assign(socket, running: false, streaming: nil, tools: %{})
 
   defp apply_event(_event, socket), do: socket
 
-  defp update_streaming(socket, key, delta) do
-    streaming = socket.assigns.streaming || %{text: "", thinking: ""}
-    assign(socket, streaming: Map.update(streaming, key, delta, &(&1 <> delta)))
+  # Send only the delta; the StreamingMessage JS hook appends it client-side,
+  # so wire traffic stays O(total text) instead of O(n²).
+  defp push_stream_delta(socket, kind, delta) do
+    socket
+    |> ensure_streaming()
+    |> push_event("stream_delta", %{kind: kind, delta: delta})
+  end
+
+  # A delta with no open bubble (e.g. reattached mid-stream) still gets one.
+  defp ensure_streaming(socket) do
+    if socket.assigns.streaming, do: socket, else: assign(socket, streaming: true)
   end
 
   # ---- session lifecycle ----------------------------------------------------
 
+  # The most recent session for this (single-user) app instance. A remounting
+  # LiveView — reconnect, refresh, or a self-triggered UI reload — reattaches to
+  # it instead of starting over.
+  @session_ptr {__MODULE__, :current_session}
+
+  defp remember_session(id, provider),
+    do: :persistent_term.put(@session_ptr, %{id: id, provider: provider})
+
+  defp remembered_session do
+    if Application.get_env(:catalyst_web, :reattach_sessions, true) do
+      :persistent_term.get(@session_ptr, nil)
+    end
+  end
+
+  defp attach_or_start(socket) do
+    with %{id: id, provider: provider} <- remembered_session(),
+         pid when is_pid(pid) <- Manager.whereis(id) do
+      reattach_session(socket, id, pid, provider)
+    else
+      _ -> start_session(socket, :demo)
+    end
+  end
+
+  # Rebuild the UI from the live server's snapshot: replay the transcript into
+  # the stream and pick up an in-flight run (its events keep arriving via PubSub).
+  defp reattach_session(socket, id, pid, provider) do
+    snapshot = Server.state(pid)
+    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+    {_mod, _model, label} = provider_config(provider)
+
+    {socket, seq} =
+      Enum.reduce(snapshot.messages, {socket, 0}, fn msg, {sock, seq} ->
+        {stream_insert(sock, :messages, %{id: seq + 1, msg: msg}), seq + 1}
+      end)
+
+    assign(socket,
+      session_id: id,
+      session_pid: pid,
+      provider: provider,
+      model_label: label,
+      cwd: snapshot.cwd,
+      running: snapshot.running,
+      streaming: nil,
+      tools: %{},
+      message_seq: seq,
+      message_count: seq
+    )
+  catch
+    # The server died between whereis and the state call — start fresh.
+    kind, _reason when kind in [:exit, :error] -> start_session(socket, :demo)
+  end
+
   defp start_session(socket, provider) do
-    if socket.assigns.session_id, do: Manager.stop(socket.assigns.session_id)
+    if old_id = socket.assigns.session_id do
+      Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(old_id))
+      Manager.stop(old_id)
+    end
 
     {provider_mod, model, label} = provider_config(provider)
 
@@ -230,17 +316,23 @@ defmodule CatalystWeb.ShellLive do
       )
 
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+    remember_session(id, provider)
 
-    assign(socket,
+    socket
+    |> assign(
       session_id: id,
       session_pid: pid,
       provider: provider,
       model_label: label,
-      messages: [],
       streaming: nil,
       running: false,
-      tools: %{}
+      tools: %{},
+      message_seq: 0,
+      message_count: 0,
+      input: "",
+      chat_form: chat_form("")
     )
+    |> stream(:messages, [], reset: true)
   end
 
   defp provider_config(:codex) do
@@ -266,7 +358,10 @@ defmodule CatalystWeb.ShellLive do
     expanded = Path.expand(path)
 
     if File.dir?(expanded) do
-      socket |> assign(cwd: expanded, input: "") |> start_session(socket.assigns.provider)
+      socket
+      |> assign(cwd: expanded)
+      |> assign_input("")
+      |> start_session(socket.assigns.provider)
     else
       put_flash(socket, :error, "Not a directory: #{expanded}")
     end
@@ -277,68 +372,120 @@ defmodule CatalystWeb.ShellLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.flash_group flash={@flash} />
-    <div class="flex flex-col h-screen bg-base-200">
-      <header class="navbar bg-base-100 border-b border-base-300 px-4 min-h-0 py-2">
-        <div class="flex-1 flex items-center gap-2">
-          <span class="text-lg font-bold">Catalyst</span>
-          <span class="badge badge-sm badge-ghost">{@model_label}</span>
-          <span :if={@running} class="loading loading-dots loading-xs text-primary"></span>
-
-          <nav :if={length(UI.Registry.list_pages()) > 1} class="flex items-center gap-1 ml-3">
-            <.link
-              :for={p <- UI.Registry.list_pages()}
-              patch={~p"/#{p.path}"}
-              class={["btn btn-xs btn-ghost", @page == p.path && "btn-active"]}
-            >
-              {p.label}
-            </.link>
-          </nav>
-
-          <span
-            class="text-xs text-base-content/50 font-mono ml-2 truncate max-w-xs"
-            title="Working directory — change with /cd <path>"
-          >
-            {@cwd}
-          </span>
-        </div>
-        <div class="flex-none flex items-center gap-1">
-          {render_slot_components(:header_extra, assigns)}
-          <button
-            class={["btn btn-xs", @provider == :demo && "btn-primary"]}
-            phx-click="set_provider"
-            phx-value-provider="demo"
-          >
-            Demo
-          </button>
-
-          <%= if @logged_in do %>
-            <button
-              class={["btn btn-xs", @provider == :codex && "btn-primary"]}
-              phx-click="set_provider"
-              phx-value-provider="codex"
-            >
-              Codex ✓
-            </button>
-            <button class="btn btn-xs btn-ghost" phx-click="logout" title="Sign out of ChatGPT">
-              ⏏
-            </button>
-          <% else %>
-            <button :if={@login_state != :pending} class="btn btn-xs btn-secondary" phx-click="login">
-              Sign in to ChatGPT
-            </button>
-            <span :if={@login_state == :pending} class="text-xs flex items-center gap-1">
-              <span class="loading loading-spinner loading-xs"></span> finish in your browser…
+    <Layouts.app flash={@flash} class="min-h-screen bg-slate-950 text-slate-950 dark:text-slate-50">
+      <div
+        id="catalyst-shell"
+        data-session-id={@session_id || ""}
+        class="flex h-screen flex-col bg-[radial-gradient(circle_at_top_left,rgba(99,102,241,0.16),transparent_32rem),linear-gradient(135deg,#f8fafc,#eef2ff_45%,#f8fafc)] dark:bg-[radial-gradient(circle_at_top_left,rgba(129,140,248,0.20),transparent_32rem),linear-gradient(135deg,#020617,#0f172a_45%,#111827)]"
+      >
+        <header class="flex min-h-14 items-center gap-3 border-b border-slate-200/80 bg-white/80 px-4 shadow-sm shadow-slate-200/60 backdrop-blur dark:border-white/10 dark:bg-slate-950/70 dark:shadow-black/20">
+          <div class="flex min-w-0 flex-1 items-center gap-2">
+            <span class="text-lg font-bold tracking-tight text-slate-950 dark:text-white">
+              Catalyst
             </span>
-          <% end %>
+            <span class="rounded-full border border-slate-200 bg-white/70 px-2 py-0.5 text-xs font-medium text-slate-500 dark:border-white/10 dark:bg-white/10 dark:text-slate-300">
+              {@model_label}
+            </span>
+            <span :if={@running} class="flex items-center gap-1" aria-label="Agent running">
+              <span class="size-1.5 animate-pulse rounded-full bg-indigo-500"></span>
+              <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-150"></span>
+              <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-300"></span>
+            </span>
 
-          <button class="btn btn-xs btn-ghost" phx-click="new_session">New</button>
-        </div>
-      </header>
+            <nav :if={length(UI.Registry.list_pages()) > 1} class="ml-3 flex items-center gap-1">
+              <.link
+                :for={p <- UI.Registry.list_pages()}
+                patch={~p"/#{p.path}"}
+                class={[
+                  "rounded-full px-3 py-1 text-xs font-medium transition",
+                  @page == p.path && "bg-slate-950 text-white dark:bg-white dark:text-slate-950",
+                  @page != p.path &&
+                    "text-slate-500 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+                ]}
+              >
+                {p.label}
+              </.link>
+            </nav>
 
-      {render_active_page(assigns)}
-    </div>
+            <span
+              class="ml-2 truncate font-mono text-xs text-slate-400 dark:text-slate-500"
+              title="Working directory — change with /cd <path>"
+            >
+              {@cwd}
+            </span>
+          </div>
+
+          <div class="flex flex-none items-center gap-1.5">
+            {render_slot_components(:header_extra, assigns)}
+            <button
+              class={provider_button_class(@provider == :demo)}
+              phx-click="set_provider"
+              phx-value-provider="demo"
+              type="button"
+            >
+              Demo
+            </button>
+
+            <%= if @logged_in do %>
+              <button
+                class={provider_button_class(@provider == :codex)}
+                phx-click="set_provider"
+                phx-value-provider="codex"
+                type="button"
+              >
+                Codex ✓
+              </button>
+              <button
+                class="rounded-full p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+                phx-click="logout"
+                title="Sign out of ChatGPT"
+                type="button"
+              >
+                <.icon name="hero-arrow-right-start-on-rectangle" class="size-4" />
+              </button>
+            <% else %>
+              <button
+                :if={@login_state != :pending}
+                class="rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm shadow-indigo-900/20 transition hover:bg-indigo-500"
+                phx-click="login"
+                type="button"
+              >
+                Sign in to ChatGPT
+              </button>
+              <span
+                :if={@login_state == :pending}
+                class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-300"
+              >
+                <span class="size-3 animate-spin rounded-full border-2 border-slate-300 border-t-indigo-500 dark:border-white/20 dark:border-t-indigo-300">
+                </span>
+                finish in your browser…
+              </span>
+            <% end %>
+
+            <button
+              class="rounded-full px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+              phx-click="new_session"
+              type="button"
+            >
+              New
+            </button>
+          </div>
+        </header>
+
+        {render_active_page(assigns)}
+      </div>
+    </Layouts.app>
     """
+  end
+
+  defp provider_button_class(active?) do
+    [
+      "rounded-full px-3 py-1.5 text-xs font-medium transition",
+      active? &&
+        "bg-slate-950 text-white shadow-sm shadow-slate-950/20 dark:bg-white dark:text-slate-950",
+      !active? &&
+        "text-slate-500 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+    ]
   end
 
   # Render the active page from the registry (falling back to chat).

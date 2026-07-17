@@ -34,7 +34,8 @@ defmodule Catalyst.Tools.Exec do
 
     try do
       port = Port.open({:spawn_executable, path}, port_opts)
-      collect_loop(port, [], timeout)
+      deadline = System.monotonic_time(:millisecond) + timeout
+      collect_loop(port, [], deadline)
     rescue
       e -> {:error, e}
     end
@@ -47,15 +48,19 @@ defmodule Catalyst.Tools.Exec do
     end
   end
 
-  defp collect_loop(port, acc, timeout) do
+  # The timeout is an absolute deadline: a process emitting output forever
+  # still gets killed when its budget runs out.
+  defp collect_loop(port, acc, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
     receive do
       {^port, {:data, data}} ->
-        collect_loop(port, [acc, data], timeout)
+        collect_loop(port, [acc, data], deadline)
 
       {^port, {:exit_status, status}} ->
-        {:ok, %{out: IO.iodata_to_binary(acc), status: status}}
+        {:ok, %{out: scrub(IO.iodata_to_binary(acc)), status: status}}
     after
-      timeout ->
+      remaining ->
         kill_port(port)
         {:error, :timeout}
     end
@@ -78,36 +83,31 @@ defmodule Catalyst.Tools.Exec do
   end
 
   @doc """
-  Run a shell command. Options: `:cwd`, `:timeout` (ms, default none),
-  `:env`. Returns `{:ok, %{out, status}}` or `{:error, :timeout}`. On timeout the
-  process group is killed via MuonTrap.
+  Run a shell command. Options: `:cwd`, `:timeout` (ms, default none), `:env`.
+  Returns `{:ok, %{out, status}}` or `{:error, {:timeout, partial_out}}`. The
+  timeout is MuonTrap's own (SIGTERM then SIGKILL on the whole process group),
+  so partial output is preserved. Runs in the calling process — a raise becomes
+  `{:error, exception}` instead of killing a linked caller.
   """
-  @spec bash(String.t(), keyword()) :: collect_result()
+  @spec bash(String.t(), keyword()) :: collect_result() | {:error, {:timeout, String.t()}}
   def bash(command, opts \\ []) do
     cwd = Keyword.get(opts, :cwd) || File.cwd!()
-    timeout = Keyword.get(opts, :timeout)
 
-    cmd_opts = [cd: cwd, stderr_to_stdout: true] ++ muontrap_env(opts)
+    cmd_opts =
+      [cd: cwd, stderr_to_stdout: true] ++ timeout_opt(opts) ++ muontrap_env(opts)
 
-    task = Task.async(fn -> MuonTrap.cmd("sh", ["-c", command], cmd_opts) end)
+    case MuonTrap.cmd("sh", ["-c", command], cmd_opts) do
+      {out, :timeout} -> {:error, {:timeout, scrub(out)}}
+      {out, status} -> {:ok, %{out: scrub(out), status: status}}
+    end
+  rescue
+    e -> {:error, e}
+  end
 
-    result =
-      if timeout do
-        Task.yield(task, timeout) || :timeout
-      else
-        {:ok, Task.await(task, :infinity)}
-      end
-
-    case result do
-      {:ok, {out, status}} ->
-        {:ok, %{out: out, status: status}}
-
-      {:exit, reason} ->
-        {:error, reason}
-
-      :timeout ->
-        Task.shutdown(task, :brutal_kill)
-        {:error, :timeout}
+  defp timeout_opt(opts) do
+    case Keyword.get(opts, :timeout) do
+      nil -> []
+      ms -> [timeout: ms]
     end
   end
 
@@ -117,4 +117,7 @@ defmodule Catalyst.Tools.Exec do
       env -> [env: Enum.map(env, fn {k, v} -> {to_string(k), to_string(v)} end)]
     end
   end
+
+  # Command output ends up in LLM request JSON, which requires valid UTF-8.
+  defp scrub(out), do: Catalyst.Tools.Truncate.scrub_utf8(out)
 end

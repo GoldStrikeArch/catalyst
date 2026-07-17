@@ -74,6 +74,38 @@ defmodule Catalyst.Session.ServerTest do
     assert :ok = Server.prompt(pid, "once more")
   end
 
+  test "a session restarted with the same id resumes its transcript", %{tmp: tmp, model: model} do
+    script = [{:text, "first reply"}]
+    {id, pid} = start(tmp, model, script)
+
+    assert :ok = Server.prompt(pid, "hello")
+    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+
+    Manager.stop(id)
+    wait_until(fn -> Manager.whereis(id) == nil end)
+
+    {:ok, %{pid: pid2}} =
+      Manager.start_session(
+        id: id,
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        opts: [script: script]
+      )
+
+    snap = Server.state(pid2)
+    assert [%Message.User{}, %Message.Assistant{} = a] = snap.messages
+    assert Content.text_of(a.content) == "first reply"
+  end
+
+  defp wait_until(fun, tries \\ 50) do
+    cond do
+      fun.() -> :ok
+      tries == 0 -> flunk("condition never became true")
+      true -> Process.sleep(10) && wait_until(fun, tries - 1)
+    end
+  end
+
   test "abort kills the run and synthesizes an aborted turn", %{tmp: tmp, model: model} do
     script = [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}]
     {_id, pid} = start(tmp, model, script)
@@ -85,5 +117,23 @@ defmodule Catalyst.Session.ServerTest do
     snap = Server.state(pid)
     assert snap.error_message == "Run aborted."
     assert Enum.any?(snap.messages, &match?(%Message.Assistant{stop_reason: :aborted}, &1))
+  end
+
+  test "events from a dead run are dropped (abort race)", %{tmp: tmp, model: model} do
+    script = [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}]
+    {_id, pid} = start(tmp, model, script)
+
+    assert :ok = Server.prompt(pid, "long task")
+    Server.abort(pid)
+    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
+
+    before = Server.state(pid).messages
+
+    # A buffered event from the killed run carries a stale ref and must not
+    # fold into (or persist after) the synthesized abort state.
+    stale = %Event.MessageEnd{message: Catalyst.Message.user("stale")}
+    GenServer.cast(pid, {:agent_event, make_ref(), stale})
+
+    assert Server.state(pid).messages == before
   end
 end

@@ -55,7 +55,7 @@ defmodule Catalyst.Tools.Edit do
     original = File.read!(abs)
     edits = normalize_edits(args)
 
-    updated = Enum.reduce(edits, original, fn {old, new}, acc -> apply_edit(acc, old, new) end)
+    updated = apply_edits(original, edits)
     File.write!(abs, updated)
 
     result("Applied #{length(edits)} edit(s) to #{abs}", %{
@@ -72,20 +72,50 @@ defmodule Catalyst.Tools.Edit do
 
   defp normalize_edits(%{"oldText" => old, "newText" => new}), do: [{old, new}]
 
-  defp apply_edit(_content, "", _new), do: raise("edit failed: oldText must not be empty")
+  # Every oldText is located in the ORIGINAL content (unique + non-overlapping),
+  # then all replacements are spliced positionally — so one edit's newText can
+  # never change what another edit matches.
+  defp apply_edits(original, edits) do
+    spans =
+      edits
+      |> Enum.map(fn {old, new} -> {locate(original, old), old, new} end)
+      |> Enum.sort_by(fn {start, _old, _new} -> start end)
 
-  defp apply_edit(content, old, new) do
-    case count_occurrences(content, old) do
-      0 ->
+    check_overlaps!(spans)
+
+    # Splice back-to-front so earlier positions stay valid.
+    spans
+    |> Enum.reverse()
+    |> Enum.reduce(original, fn {start, old, new}, acc ->
+      after_old = start + byte_size(old)
+      binary_part(acc, 0, start) <> new <> binary_part(acc, after_old, byte_size(acc) - after_old)
+    end)
+  end
+
+  defp locate(_content, ""), do: raise("edit failed: oldText must not be empty")
+
+  defp locate(content, old) do
+    case :binary.matches(content, old) do
+      [{start, _len}] ->
+        start
+
+      [] ->
         raise "edit failed: oldText not found: #{inspect(String.slice(old, 0, 60))}"
 
-      1 ->
-        String.replace(content, old, new)
-
-      n ->
-        raise "edit failed: oldText occurs #{n} times (must be unique): #{inspect(String.slice(old, 0, 60))}"
+      matches ->
+        raise "edit failed: oldText occurs #{length(matches)} times (must be unique): " <>
+                inspect(String.slice(old, 0, 60))
     end
   end
 
-  defp count_occurrences(content, old), do: length(String.split(content, old)) - 1
+  defp check_overlaps!(spans) do
+    spans
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.each(fn [{s1, old1, _}, {s2, old2, _}] ->
+      if s1 + byte_size(old1) > s2 do
+        raise "edit failed: edits overlap: #{inspect(String.slice(old1, 0, 40))} and " <>
+                inspect(String.slice(old2, 0, 40))
+      end
+    end)
+  end
 end

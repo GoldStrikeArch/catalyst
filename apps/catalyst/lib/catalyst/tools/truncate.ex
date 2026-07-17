@@ -23,6 +23,41 @@ defmodule Catalyst.Tools.Truncate do
     truncate(content, opts, :head)
   end
 
+  @doc """
+  Replace invalid UTF-8 bytes with the replacement character (U+FFFD).
+
+  Tool results become LLM request JSON, so every text block must be valid
+  UTF-8 — `Jason.encode!` raises otherwise, after the content is already in
+  the transcript.
+  """
+  @spec scrub_utf8(binary()) :: String.t()
+  def scrub_utf8(bin) when is_binary(bin) do
+    if String.valid?(bin), do: bin, else: do_scrub(bin, [])
+  end
+
+  defp do_scrub(<<c::utf8, rest::binary>>, acc), do: do_scrub(rest, [acc, <<c::utf8>>])
+  defp do_scrub(<<_byte, rest::binary>>, acc), do: do_scrub(rest, [acc, "�"])
+  defp do_scrub(<<>>, acc), do: IO.iodata_to_binary(acc)
+
+  @doc """
+  Append (head) or prepend (tail) an in-text truncation notice so the model
+  can tell output was cut; the bare text is returned when nothing was.
+  """
+  @spec notice(String.t(), info(), :head | :tail) :: String.t()
+  def notice(text, %{truncated: false}, _side), do: text
+
+  def notice(text, info, :head),
+    do: text <> "\n... [output truncated: showing first #{summary(info)}]"
+
+  def notice(text, info, :tail),
+    do: "... [output truncated: showing last #{summary(info)}]\n" <> text
+
+  defp summary(%{truncated_by: :bytes} = info),
+    do:
+      "#{info.output_lines} of #{info.total_lines} lines (#{div(info.total_bytes, 1024)}KB total)"
+
+  defp summary(info), do: "#{info.output_lines} of #{info.total_lines} lines"
+
   @doc "Keep the last lines/bytes within budget."
   @spec tail(String.t(), keyword()) :: {String.t(), info()}
   def tail(content, opts \\ []) when is_binary(content) do

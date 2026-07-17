@@ -42,7 +42,12 @@ defmodule Catalyst.Umbrella.MixProject do
           runtime_tools: :permanent,
           ssl: :permanent
         ],
-        steps: [:assemble, &bundle_assets/1, &Desktop.Deployment.generate_installer/1]
+        steps: [
+          :assemble,
+          &bundle_assets/1,
+          &Desktop.Deployment.generate_installer/1,
+          &native_macos_launcher/1
+        ]
       ],
       # Headless self-contained binary of Catalyst's core (no wx) via Burrito.
       # Build with: MIX_ENV=prod mix release catalyst_cli
@@ -112,6 +117,99 @@ defmodule Catalyst.Umbrella.MixProject do
 
     bundle_fast_tools(release)
     release
+  end
+
+  # Release step (desktop): give the .app a native arm64 main executable.
+  #
+  # desktop_deployment makes Contents/MacOS/run (a #!/bin/bash script) the
+  # CFBundleExecutable. A script has no Mach-O header, so macOS LaunchServices
+  # mislabels the bundle "Intel" and launches the x86_64 slice of /bin/bash ->
+  # the Rosetta / "Intel app" prompt, even though everything we ship is arm64.
+  #
+  # We compile a tiny native arm64 launcher (rel/macos/launcher.c) that execs the
+  # existing `run` script, point CFBundleExecutable at it, then rebuild the .dmg
+  # from the fixed app so a shared image is native too. No-op off macOS / without cc.
+  defp native_macos_launcher(release) do
+    app = macos_app_root(release)
+
+    cond do
+      :os.type() != {:unix, :darwin} ->
+        release
+
+      System.find_executable("cc") == nil ->
+        IO.warn("native_macos_launcher: cc not found, leaving script launcher")
+        release
+
+      app == nil or not File.dir?(app) ->
+        IO.warn("native_macos_launcher: #{package()[:name]}.app not found, skipping")
+        release
+
+      true ->
+        name = package()[:name]
+        launcher = Path.join([app, "Contents/MacOS", name])
+        plist = Path.join(app, "Contents/Info.plist")
+
+        cmd!("cc", ["-arch", "arm64", "-O2", "-o", launcher, "rel/macos/launcher.c"])
+        File.chmod!(launcher, 0o755)
+        # Ad-hoc sign the launcher as a standalone Mach-O *before* it becomes the
+        # bundle's main executable. If we flipped CFBundleExecutable first, codesign
+        # would treat this path as the app's main exec and try to seal the whole
+        # bundle, which fails on the unsigned `run` script.
+        cmd!("codesign", ["--force", "-s", "-", launcher])
+        cmd!("plutil", ["-replace", "CFBundleExecutable", "-string", name, plist])
+        IO.puts("native_macos_launcher: installed native arm64 launcher (#{name})")
+
+        rebuild_installers(release, app)
+        release
+    end
+  end
+
+  # _build/<env>/Catalyst.app — mirrors Package.MacOS: build_root = release.path/../..
+  defp macos_app_root(release) do
+    build_root = Path.expand(Path.join([release.path, "..", ".."]))
+    Path.join(build_root, "#{package()[:name]}.app")
+  end
+
+  # Rebuild the distributables (.dmg/.pkg) from the fixed app so a shared image is
+  # native too — generate_installer built them from the pre-launcher app. Best-effort:
+  # warns instead of failing the release (the runnable .app is already correct).
+  defp rebuild_installers(release, app) do
+    name = package()[:name]
+    build_root = Path.expand(Path.join([release.path, "..", ".."]))
+    dmg = Path.join(build_root, "#{name}-#{release.version}.dmg")
+    pkg = Path.join(build_root, "#{name}-#{release.version}.pkg")
+    volume = Path.join("/Volumes", name)
+
+    if File.exists?(volume), do: System.cmd("hdiutil", ["detach", volume, "-force"])
+
+    if File.exists?(dmg) do
+      File.rm(dmg)
+
+      rebuild!(
+        "dmg",
+        "hdiutil",
+        ["create", "-srcfolder", app, "-volname", name, "-ov", "-format", "ULFO", dmg]
+      )
+    end
+
+    if File.exists?(pkg) do
+      File.rm(pkg)
+      rebuild!("pkg", "productbuild", ["--component", app, "/Applications", pkg])
+    end
+  end
+
+  defp rebuild!(label, exe, args) do
+    case System.cmd(exe, args, stderr_to_stdout: true) do
+      {_, 0} -> IO.puts("native_macos_launcher: rebuilt #{label}")
+      {out, code} -> IO.warn("native_macos_launcher: #{label} rebuild failed (#{code}): #{out}")
+    end
+  end
+
+  defp cmd!(exe, args) do
+    case System.cmd(exe, args, stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {out, code} -> raise "#{exe} #{Enum.join(args, " ")} failed (#{code}):\n#{out}"
+    end
   end
 
   # Bundle the fast-tool binaries (rg/fd/sd/ast-grep) into the core app's priv/bin
