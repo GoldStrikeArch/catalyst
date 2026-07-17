@@ -3,6 +3,14 @@ defmodule Catalyst.Tools.DiffTest do
 
   alias Catalyst.Tools.Diff
 
+  test "rendered diff scrubs invalid UTF-8" do
+    rendered = Diff.rendered("old\n", <<"new", 255, "\n">>)
+
+    assert String.valid?(rendered)
+    assert rendered =~ "-old"
+    assert rendered =~ "+new�"
+  end
+
   test "identical strings produce an empty diff" do
     assert Diff.unified("a\nb\nc", "a\nb\nc") == ""
   end

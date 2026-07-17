@@ -33,9 +33,12 @@ defmodule Catalyst.Agent.Loop do
   @doc "Run the loop for the given prompts. Returns `{:ok, new_messages, final_context}`."
   @spec run([Message.t()], map(), map(), (Event.t() -> any())) :: {:ok, [Message.t()], map()}
   def run(prompts, context, config, emit) do
-    # Every event is also offered to registered observers (Hooks `on/1`), isolated.
+    observer_key = Keyword.get(config[:opts] || [], :session_id, self())
+
+    # Every event is also offered to registered observers (Hooks `on/1`). The
+    # dispatcher preserves order for this session without delaying the loop.
     emit = fn ev ->
-      Hooks.notify(ev)
+      Hooks.notify(ev, observer_key)
       emit.(ev)
     end
 
@@ -113,7 +116,15 @@ defmodule Catalyst.Agent.Loop do
       {context, acc} = finish_turn(context, acc, assistant, [], emit)
       {:halt, context, acc}
     else
-      run_turn_tail(Message.tool_calls(assistant), assistant, context, acc, config, turn_config, emit)
+      run_turn_tail(
+        Message.tool_calls(assistant),
+        assistant,
+        context,
+        acc,
+        config,
+        turn_config,
+        emit
+      )
     end
   end
 

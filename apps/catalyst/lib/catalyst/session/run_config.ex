@@ -5,8 +5,12 @@ defmodule Catalyst.Session.RunConfig do
   so the run-assembly + provider-resolution rules can be hot-reloaded.
   """
 
-  alias Catalyst.Model
+  alias Catalyst.{Model, Tasks}
   alias Catalyst.LLM.Registry
+
+  require Logger
+
+  @provider_cleanup_timeout 1_000
 
   @doc """
   Assemble the loop config for `state`; `server` backs the steering/follow-up
@@ -28,7 +32,8 @@ defmodule Catalyst.Session.RunConfig do
            cwd: state.cwd,
            tools: state.tools,
            # Stable session id → Codex prompt_cache_key + request headers.
-           opts: Keyword.put_new(state.opts, :session_id, state.id),
+           # `:session_id` is an internal identity, never caller-overridable.
+           opts: Keyword.put(state.opts, :session_id, state.id),
            get_steering: fn -> drain(server, {:drain_steering, run_ref}) end,
            get_follow_up: fn -> drain(server, {:drain_follow_up, run_ref}) end
          }}
@@ -46,6 +51,7 @@ defmodule Catalyst.Session.RunConfig do
   and reverts by deleting the env; the module must export `run/4` with
   `Catalyst.Agent.Loop`'s contract.
   """
+  @spec resolve_loop(map()) :: module()
   def resolve_loop(state) do
     Keyword.get(state.opts || [], :loop) ||
       Application.get_env(:catalyst, :agent_loop, Catalyst.Agent.Loop)
@@ -68,6 +74,92 @@ defmodule Catalyst.Session.RunConfig do
     do: Registry.fetch(api)
 
   def resolve_provider(_), do: {:error, :no_provider}
+
+  @doc """
+  Start provider warmup: when the session's provider exports
+  `prewarm/3` (the Codex websocket warmup, `"generate": false`), build the
+  same context the next run would send and call it in a supervised task —
+  the first turn then rides a connection-scoped delta upload. Providers
+  without `prewarm/3` (Faux, Demo, …) make this a no-op.
+  """
+  @spec start_prewarm(map()) :: {:ok, pid()} | {:error, term()} | :ok
+  def start_prewarm(state) do
+    with {:ok, provider} <- resolve_provider(state),
+         true <- Code.ensure_loaded?(provider) and function_exported?(provider, :prewarm, 3) do
+      model = state.model
+      opts = Keyword.put(state.opts, :session_id, state.id)
+
+      context = %Catalyst.LLM.Context{
+        system_prompt: state.system_prompt || Catalyst.SystemPrompt.get(),
+        # Server state holds messages newest-first; requests are chronological.
+        messages: Enum.reverse(state.messages),
+        tools: Catalyst.Tools.Registry.to_provider_tools(Catalyst.Extensions.resolve(state.tools))
+      }
+
+      Tasks.start_background(fn -> provider.prewarm(model, context, opts) end)
+    else
+      _no_provider_or_no_prewarm -> :ok
+    end
+  end
+
+  @doc """
+  Let every live provider release session-scoped resources.
+
+  Providers without the optional `cleanup_session/1` callback are a no-op.
+  Cleanup failures are isolated because session termination must still finish.
+  """
+  @spec cleanup_session(map()) :: :ok
+  def cleanup_session(state) do
+    state
+    |> cleanup_providers()
+    |> Enum.each(&cleanup_provider(&1, state.id))
+
+    :ok
+  end
+
+  defp cleanup_providers(state) do
+    registered =
+      Registry.list()
+      |> Map.values()
+      |> Enum.map(& &1.module)
+
+    selected =
+      case resolve_provider(state) do
+        {:ok, provider} -> [provider]
+        {:error, _reason} -> []
+      end
+
+    Enum.uniq(selected ++ registered)
+  end
+
+  defp cleanup_provider(provider, session_id) do
+    case Code.ensure_loaded?(provider) and function_exported?(provider, :cleanup_session, 1) do
+      true -> run_provider_cleanup(provider, session_id)
+      false -> :ok
+    end
+  end
+
+  defp run_provider_cleanup(provider, session_id) do
+    task = Tasks.async(fn -> provider.cleanup_session(session_id) end)
+
+    case Tasks.await(task, provider_cleanup_timeout()) do
+      {:ok, _result} -> :ok
+      {:exit, reason} -> log_cleanup_failure(provider, session_id, {:exit, reason})
+      :timeout -> log_cleanup_failure(provider, session_id, :timeout)
+    end
+  end
+
+  defp log_cleanup_failure(provider, session_id, reason) do
+    Logger.warning(
+      "[session] provider #{inspect(provider)} cleanup for #{session_id} failed: " <>
+        inspect(reason)
+    )
+
+    :ok
+  end
+
+  defp provider_cleanup_timeout,
+    do: Application.get_env(:catalyst, :provider_cleanup_timeout, @provider_cleanup_timeout)
 
   defp drain(server, message) do
     # :infinity is deliberate: a finite timeout abandons a call the server still

@@ -278,4 +278,161 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParserTest do
     assert assistant.stop_reason == :error
     assert assistant.error_message =~ "boom"
   end
+
+  test "malformed or non-object tool arguments finalize as errors without executable calls" do
+    for bad_json <- ["{not-json", "[]"] do
+      events = [
+        %{
+          "type" => "response.output_item.added",
+          "output_index" => 0,
+          "item" => %{
+            "type" => "function_call",
+            "id" => "fc_bad",
+            "call_id" => "call_bad",
+            "name" => "bash"
+          }
+        },
+        %{
+          "type" => "response.output_item.done",
+          "output_index" => 0,
+          "item" => %{
+            "type" => "function_call",
+            "id" => "fc_bad",
+            "call_id" => "call_bad",
+            "name" => "bash",
+            "arguments" => bad_json
+          }
+        },
+        %{
+          "type" => "response.completed",
+          "response" => %{"id" => "bad", "status" => "completed"}
+        }
+      ]
+
+      assistant = run(events)
+
+      assert assistant.stop_reason == :error
+      assert assistant.error_message =~ "invalid tool arguments"
+      refute Enum.any?(assistant.content, &match?(%Content.ToolCall{}, &1))
+      refute_received {:ev, %Event.ToolCallEnd{id: "call_bad|fc_bad"}}
+    end
+  end
+
+  test "interleaved parallel output items retain their own arguments and output order" do
+    events = [
+      %{
+        "type" => "response.output_item.added",
+        "output_index" => 0,
+        "item" => %{
+          "type" => "function_call",
+          "id" => "fc_read",
+          "call_id" => "call_read",
+          "name" => "read"
+        }
+      },
+      %{
+        "type" => "response.output_item.added",
+        "output_index" => 1,
+        "item" => %{
+          "type" => "function_call",
+          "id" => "fc_grep",
+          "call_id" => "call_grep",
+          "name" => "grep"
+        }
+      },
+      %{
+        "type" => "response.function_call_arguments.delta",
+        "item_id" => "fc_read",
+        "output_index" => 0,
+        "delta" => "{\"path\":\"README.md\"}"
+      },
+      %{
+        "type" => "response.function_call_arguments.delta",
+        "output_index" => 1,
+        "delta" => "{\"pattern\":\"TODO\"}"
+      },
+      %{
+        "type" => "response.output_item.done",
+        "output_index" => 1,
+        "item" => %{
+          "type" => "function_call",
+          "id" => "fc_grep",
+          "call_id" => "call_grep",
+          "name" => "grep"
+        }
+      },
+      %{
+        "type" => "response.output_item.done",
+        "output_index" => 0,
+        "item" => %{
+          "type" => "function_call",
+          "id" => "fc_read",
+          "call_id" => "call_read",
+          "name" => "read"
+        }
+      },
+      %{
+        "type" => "response.completed",
+        "response" => %{"id" => "parallel", "status" => "completed"}
+      }
+    ]
+
+    assistant = run(events)
+
+    assert assistant.stop_reason == :tool_use
+
+    assert [
+             %Content.ToolCall{name: "read", arguments: %{"path" => "README.md"}},
+             %Content.ToolCall{name: "grep", arguments: %{"pattern" => "TODO"}}
+           ] = assistant.content
+  end
+
+  test "cancelled and incomplete terminals preserve their reason while discarding a partial call" do
+    prefix = [
+      %{
+        "type" => "response.output_item.added",
+        "item" => %{
+          "type" => "function_call",
+          "id" => "fc_partial",
+          "call_id" => "call_partial",
+          "name" => "bash"
+        }
+      },
+      %{
+        "type" => "response.function_call_arguments.delta",
+        "item_id" => "fc_partial",
+        "delta" => "{\"command\":"
+      }
+    ]
+
+    cancelled =
+      run(
+        prefix ++
+          [
+            %{
+              "type" => "response.completed",
+              "response" => %{"id" => "cancelled", "status" => "cancelled"}
+            }
+          ]
+      )
+
+    incomplete =
+      run(
+        prefix ++
+          [
+            %{
+              "type" => "response.incomplete",
+              "response" => %{
+                "id" => "incomplete",
+                "incomplete_details" => %{"reason" => "max_output_tokens"}
+              }
+            }
+          ]
+      )
+
+    assert cancelled.stop_reason == :aborted
+    assert incomplete.stop_reason == :length
+    refute Enum.any?(cancelled.content, &match?(%Content.ToolCall{}, &1))
+    refute Enum.any?(incomplete.content, &match?(%Content.ToolCall{}, &1))
+  end
 end

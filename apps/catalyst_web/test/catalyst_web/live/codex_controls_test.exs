@@ -15,7 +15,8 @@ defmodule CatalystWeb.CodexControlsTest do
   defp session_pid(view) do
     html = view |> element("#catalyst-shell") |> render()
     [_, id] = Regex.run(~r/data-session-id="([^"]+)"/, html)
-    Manager.whereis(id)
+    {:ok, pid} = Manager.whereis(id)
+    pid
   end
 
   test "the run controls reconfigure the live session in place", %{conn: conn} do

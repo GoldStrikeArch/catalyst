@@ -7,6 +7,8 @@ defmodule Catalyst.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = Catalyst.Debug.init()
+
     children = [
       {Phoenix.PubSub, name: Catalyst.PubSub},
       # HTTP pool for LLM SSE streaming.
@@ -14,8 +16,15 @@ defmodule Catalyst.Application do
       # Supervises the loop/tool Tasks spawned per run (and token refreshes),
       # so it must start before TokenStore.
       {Task.Supervisor, name: Catalyst.TaskSupervisor},
+      # Validates built-in tool metadata once; extension registrations populate
+      # the same hot-reload-safe cache before a tool becomes visible.
+      Catalyst.Tools.Registry,
       # Holds OAuth credentials, refreshes tokens on demand.
       Catalyst.Auth.TokenStore,
+      # Live Codex model metadata with monotonic freshness and single-flight refresh.
+      Catalyst.LLM.OpenAICodex.CatalogCache,
+      # Idle Codex websocket connections between runs (delta-upload state).
+      Catalyst.LLM.OpenAICodex.ConnCache,
       # The extension runtime registries, grouped under :rest_for_one because
       # they have hard inter-child dependencies (see extension_runtime/0).
       # Under the previous flat :one_for_one those held only at first boot: a
@@ -60,6 +69,8 @@ defmodule Catalyst.Application do
       Catalyst.Hooks.TableOwner,
       # Runtime agent-loop hook registry (before/after tool call, etc.).
       Catalyst.Hooks,
+      # Ordered, bounded asynchronous delivery for read-only event observers.
+      Catalyst.Hooks.ObserverDispatcher,
       # Runtime LLM provider registry (built-ins + runtime-registered providers).
       Catalyst.LLM.Registry,
       # Supervised home for extension-owned processes: one DynamicSupervisor per

@@ -21,6 +21,8 @@ defmodule Catalyst.LLM.Demo do
   def model, do: %Model{id: "demo", name: "Demo (offline)", api: "demo", provider: "demo"}
 
   @impl true
+  @spec stream(Model.t(), Catalyst.LLM.Context.t(), keyword(), Catalyst.LLM.Provider.sink()) ::
+          {:ok, Message.Assistant.t()} | {:error, term()}
   def stream(model, context, _opts, sink) do
     assistant =
       case List.last(context.messages) do

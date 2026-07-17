@@ -19,6 +19,13 @@
 
 // Include phoenix_html to handle method=PUT/DELETE in forms and buttons.
 import "phoenix_html";
+
+import hljs from "../vendor/highlight.es.min.js";
+import hljsElixir from "../vendor/hljs-elixir.es.min.js";
+import hljsErlang from "../vendor/hljs-erlang.es.min.js";
+
+hljs.registerLanguage("elixir", hljsElixir);
+hljs.registerLanguage("erlang", hljsErlang);
 // Establish Phoenix Socket and LiveView configuration.
 import { Socket } from "phoenix";
 import { LiveSocket } from "phoenix_live_view";
@@ -47,31 +54,169 @@ window.addEventListener("phx:set-theme", (e) =>
 );
 
 // Keep a scroll container pinned to the bottom as content streams in,
-// unless the user has scrolled up to read history.
+// unless the user has scrolled up to read history. The pin changes only on
+// USER intent: wheel/touch/keys unpin before the scroll they cause is even
+// applied (winning the race against per-delta autoscrolls), the scroll
+// listener covers scrollbar drags and momentum tails, and the hook's own
+// scrolls are recognized by landing position so they can never re-latch it.
 const Hooks = {
   ScrollBottom: {
-    pinned() {
+    atBottom() {
       const el = this.el;
       return el.scrollHeight - el.clientHeight - el.scrollTop < 80;
     },
-    mounted() {
-      this.shouldScroll = true;
-      this.el.addEventListener("scroll", () => {
-        this.shouldScroll = this.pinned();
-      });
+    setPinned(pinned) {
+      this.pinnedToBottom = pinned;
+      if (this.pill) {
+        this.pill.classList.toggle("hidden", pinned);
+        this.pill.classList.toggle("inline-flex", !pinned);
+      }
+    },
+    scrollToBottom() {
       this.el.scrollTop = this.el.scrollHeight;
+      // scrollTop clamps to the real max; remember where our scroll landed so
+      // the resulting async scroll event is attributed to us, not the user.
+      this.programmaticTarget = this.el.scrollTop;
+    },
+    // Deltas arrive 10-30+/s; coalesce to at most one scroll per frame, and
+    // re-check the pin at fire time (an unpin may have landed in between).
+    requestScroll() {
+      if (!this.pinnedToBottom || this.raf) return;
+      this.raf = requestAnimationFrame(() => {
+        this.raf = null;
+        if (this.pinnedToBottom) this.scrollToBottom();
+      });
+    },
+    mounted() {
+      const el = this.el;
+      this.raf = null;
+      this.programmaticTarget = null;
+      this.lastScrollTop = el.scrollTop;
+      this.pill = document.getElementById("jump-to-bottom");
+      this.setPinned(true);
+      this.scrollToBottom();
+
+      // Upward user intent — these fire BEFORE the browser moves the
+      // container, so the unpin wins the race against per-delta autoscrolls.
+      // The scrollable check keeps wheel fidgeting over a short chat from
+      // disabling follow before there is anything to scroll.
+      el.addEventListener(
+        "wheel",
+        (e) => {
+          if (e.deltaY < 0 && el.scrollHeight > el.clientHeight) {
+            this.setPinned(false);
+          }
+        },
+        { passive: true },
+      );
+      el.addEventListener(
+        "touchstart",
+        (e) => (this.lastTouchY = e.touches[0].clientY),
+        { passive: true },
+      );
+      el.addEventListener(
+        "touchmove",
+        (e) => {
+          const y = e.touches[0].clientY;
+          // Finger moving down drags earlier content into view.
+          if (y > this.lastTouchY && el.scrollHeight > el.clientHeight) {
+            this.setPinned(false);
+          }
+          this.lastTouchY = y;
+        },
+        { passive: true },
+      );
+      el.addEventListener("keydown", (e) => {
+        if (["ArrowUp", "PageUp", "Home"].includes(e.key)) {
+          this.setPinned(false);
+        }
+      });
+
+      // Covers what the intent listeners can't (scrollbar drags, momentum
+      // tails) and re-pins when the user returns to the bottom.
+      el.addEventListener("scroll", () => {
+        const top = el.scrollTop;
+        const up = top < this.lastScrollTop;
+        this.lastScrollTop = top;
+        if (
+          this.programmaticTarget !== null &&
+          Math.abs(top - this.programmaticTarget) <= 1
+        ) {
+          this.programmaticTarget = null; // our own scrollToBottom() landing
+          return;
+        }
+        if (el.scrollHeight - el.clientHeight - top <= 1) {
+          // Hard bottom: the user arriving at the end, or a browser clamp
+          // after a stream_tail trim shrank the content — pinned either way.
+          this.setPinned(true);
+        } else if (up) {
+          this.setPinned(false);
+        } else if (this.atBottom()) {
+          this.setPinned(true);
+        }
+      });
+
+      if (this.pill) {
+        this.pill.addEventListener("click", () => {
+          this.setPinned(true);
+          this.scrollToBottom();
+        });
+      }
+
       // Client-side appends (streaming deltas) don't trigger updated(); the
       // StreamingMessage hook dispatches this event instead.
-      this.autoscroll = () => {
-        if (this.shouldScroll) this.el.scrollTop = this.el.scrollHeight;
-      };
+      this.autoscroll = () => this.requestScroll();
       window.addEventListener("catalyst:autoscroll", this.autoscroll);
     },
     updated() {
-      if (this.shouldScroll) this.el.scrollTop = this.el.scrollHeight;
+      this.requestScroll();
     },
     destroyed() {
       window.removeEventListener("catalyst:autoscroll", this.autoscroll);
+      if (this.raf) cancelAnimationFrame(this.raf);
+    },
+  },
+
+  // Syntax-highlight fenced code blocks under this element. PI's hard-won
+  // rule: EXPLICIT fence language only (auto-detection misidentifies prose);
+  // input goes through textContent, so hljs only ever sees escaped text and
+  // inserts its own span markup.
+  Highlight: {
+    mounted() {
+      this.highlightAll();
+    },
+    updated() {
+      this.highlightAll();
+    },
+    highlightAll() {
+      this.el.querySelectorAll("pre code[data-lang]").forEach((code) => {
+        if (code.dataset.highlighted === "yes") return;
+        const lang = code.dataset.lang.toLowerCase();
+        if (!hljs.getLanguage(lang)) return;
+        const { value } = hljs.highlight(code.textContent, {
+          language: lang,
+          ignoreIllegals: true,
+        });
+        code.innerHTML = value;
+        code.dataset.highlighted = "yes";
+      });
+    },
+  },
+
+  // Pasted screenshots: clipboard images anywhere in the chat form feed the
+  // LiveView :image upload (chips render above the input; send attaches them
+  // to the prompt as image content blocks).
+  PasteImages: {
+    mounted() {
+      this.el.addEventListener("paste", (e) => {
+        const files = Array.from(e.clipboardData?.items || [])
+          .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+          .map((item) => item.getAsFile())
+          .filter(Boolean);
+        if (files.length === 0) return;
+        e.preventDefault();
+        this.upload("image", files);
+      });
     },
   },
 
@@ -85,10 +230,23 @@ const Hooks = {
         const target = this.el.querySelector(`[data-stream="${kind}"]`);
         if (!target) return;
         target.appendChild(document.createTextNode(delta));
-        const dots = this.el.querySelector("[data-stream-dots]");
-        if (dots) dots.style.display = "none";
+        this.hideDots();
         window.dispatchEvent(new Event("catalyst:autoscroll"));
       });
+
+      // Blocks were committed server-side (rendered above the tail): trim the
+      // raw tail to just the still-open block's source.
+      this.handleEvent("stream_tail", ({ text }) => {
+        const target = this.el.querySelector('[data-stream="text"]');
+        if (!target) return;
+        target.textContent = text;
+        this.hideDots();
+        window.dispatchEvent(new Event("catalyst:autoscroll"));
+      });
+    },
+    hideDots() {
+      const dots = this.el.querySelector("[data-stream-dots]");
+      if (dots) dots.style.display = "none";
     },
   },
 };

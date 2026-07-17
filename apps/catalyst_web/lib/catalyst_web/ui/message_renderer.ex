@@ -29,6 +29,16 @@ defmodule CatalystWeb.UI.MessageRenderer do
     end
   end
 
+  @doc """
+  Render one parsed Markdown block (`CatalystWeb.UI.Markdown.block/0`).
+
+  Used by the streaming block-commit path (`ShellLive`) so blocks committed
+  MID-stream render through exactly the same pipeline as the finished message —
+  the `message_end` swap is then pixel-identical.
+  """
+  @spec markdown_block(map()) :: Phoenix.LiveView.Rendered.t()
+  def markdown_block(assigns), do: formatted_block(assigns)
+
   # A broken extension renderer must not crash-loop the LiveView on every
   # render of the transcript (recovery — asking the agent to reload_extensions
   # — needs the chat UI it would take down). Every fun reaching here is
@@ -56,7 +66,13 @@ defmodule CatalystWeb.UI.MessageRenderer do
     ~H"""
     <div data-message-role="user" class="flex justify-end">
       <div class="max-w-[82%] rounded-3xl rounded-br-md bg-slate-950 px-4 py-3 text-sm leading-6 text-white shadow-lg shadow-slate-900/15 dark:bg-indigo-500 dark:shadow-indigo-950/20">
-        {Content.text_of(@msg.content)}
+        <img
+          :for={img <- user_images(@msg.content)}
+          src={"data:#{img.mime_type};base64,#{img.data}"}
+          alt="attached image"
+          class="mb-2 max-h-64 max-w-full rounded-xl"
+        />
+        <span :if={Content.text_of(@msg.content) != ""}>{Content.text_of(@msg.content)}</span>
       </div>
     </div>
     """
@@ -107,7 +123,10 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :blocks, Markdown.parse(text))
 
     ~H"""
-    <div class="space-y-2 text-sm leading-6 text-slate-700 dark:text-slate-100">
+    <div
+      data-block-kind="text"
+      class="space-y-2 text-sm leading-6 text-slate-700 dark:text-slate-100"
+    >
       <%= for block <- @blocks do %>
         <.formatted_block block={block} />
       <% end %>
@@ -117,7 +136,10 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp block(%{block: %Content.Thinking{}} = assigns) do
     ~H"""
-    <details class="my-1 rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 text-xs italic text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
+    <details
+      data-block-kind="thinking"
+      class="my-1 rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 text-xs italic text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400"
+    >
       <summary class="cursor-pointer font-medium not-italic text-slate-500 dark:text-slate-300">
         thinking
       </summary>
@@ -128,7 +150,10 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp block(%{block: %Content.ToolCall{}} = assigns) do
     ~H"""
-    <div class="my-1 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs text-indigo-700 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-200">
+    <div
+      data-block-kind="tool-call"
+      class="my-1 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs text-indigo-700 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-200"
+    >
       <span class="rounded-full bg-indigo-600 px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-white dark:bg-indigo-400 dark:text-indigo-950">
         tool
       </span>
@@ -214,7 +239,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
       >
         {@lang}
       </div>
-      <pre class="overflow-x-auto px-3 py-2 text-xs leading-5"><code>{@code}</code></pre>
+      <pre class="overflow-x-auto px-3 py-2 text-xs leading-5"><code data-lang={@lang}>{@code}</code></pre>
     </div>
     """
   end
@@ -306,4 +331,9 @@ defmodule CatalystWeb.UI.MessageRenderer do
   defp short_args(args) when is_map(args) and map_size(args) == 0, do: ""
   defp short_args(args) when is_map(args), do: args |> Jason.encode!() |> String.slice(0, 80)
   defp short_args(_), do: ""
+
+  defp user_images(content) when is_list(content),
+    do: Enum.filter(content, &match?(%Content.Image{}, &1))
+
+  defp user_images(_), do: []
 end

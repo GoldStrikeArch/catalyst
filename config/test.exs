@@ -12,9 +12,13 @@ test_tmp = Path.join(System.tmp_dir!(), "catalyst_test_#{System.pid()}")
 config :catalyst_web, codex_provider_mod: Catalyst.LLM.Demo
 
 config :catalyst,
+  home: test_tmp,
   auth_path: Path.join(test_tmp, "auth.json"),
   sessions_root: Path.join(test_tmp, "sessions"),
   extensions_dir: Path.join(test_tmp, "extensions"),
+  # Never fetch the live Codex model catalog from tests (several tests PUT
+  # real-looking tokens into the TokenStore, which would arm the fetch).
+  codex_live_models: false,
   # Keep the boot marker + system-prompt override out of ~/.catalyst too (a
   # stale "booting" marker in a shared location would flip test boots into
   # safe mode); short stabilization so boot marks itself ok quickly.

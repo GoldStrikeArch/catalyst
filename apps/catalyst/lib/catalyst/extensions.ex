@@ -26,12 +26,10 @@ defmodule Catalyst.Extensions do
   compile + classify run before any registry is touched, and the prior version
   stays active. Because `Code.compile_file/1` defines modules sequentially, a
   multi-module file can fail with its first modules already redefined in the VM:
-  the failed load purges any module it newly introduced (not previously loaded
-  and not tracked by any owner); modules that pre-existed are left alone — for a
-  reinstall over an existing file, `Catalyst.Extensions.Installer` re-loads the
-  restored prior source so the VM runs the old definitions again. Once a file
-  compiles, its registration is committed even if a `setup/1` raises or times
-  out mid-way: whatever it registered before failing stays registered
+  Catalyst retains the exact BEAM binaries from every accepted load and restores
+  those binaries on failure; newly introduced partial modules are removed. Once
+  a file compiles, its registration is committed even if a `setup/1` raises or
+  times out mid-way: whatever it registered before failing stays registered
   (owner-tagged, so the next reload or uninstall purges it cleanly).
 
   Set `CATALYST_SAFE_MODE=1` (or `config :catalyst, :safe_mode, true`) to skip
@@ -40,7 +38,10 @@ defmodule Catalyst.Extensions do
   (`Catalyst.Extensions.BootGuard`) detects that the previous boot died while its
   extensions were active and skips loading, so a bricking extension is recovered
   by a plain relaunch. `boot_status/0` reports it; a successful explicit
-  `load_all/0` (the `reload_extensions` tool) clears it.
+  `load_all/0` (the `reload_extensions` tool) clears it. A boot-time load
+  failure is retained in `boot_status/0` and deliberately leaves the marker
+  armed, so the next launch enters safe mode instead of silently treating the
+  broken directory as clean.
 
   Purging an owner also undoes its **module definitions**: modules its file
   compiled are removed from the VM, and any module that shadowed one shipping
@@ -51,14 +52,16 @@ defmodule Catalyst.Extensions do
   use GenServer
   require Logger
 
-  alias Catalyst.{Extension, ExtensionAPI, Hooks}
-  alias Catalyst.Extensions.{BootGuard, Processes, Versioning}
+  alias Catalyst.{ExtensionAPI, Hooks, Tasks}
+  alias Catalyst.Extensions.{BootGuard, Loader, Processes, Versioning}
+  alias Catalyst.Files.AtomicWrite
+  alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @table :catalyst_tools
+  @host_owner :host
 
-  @compile_timeout 30_000
-  @setup_timeout 30_000
   @load_lock {__MODULE__, :load_lock}
+  @load_context_key {__MODULE__, :load_context}
 
   @typedoc "Per-file load summary. `:conflicts` is present only when this file redefines modules another loaded file also defines."
   @type summary :: %{
@@ -98,11 +101,19 @@ defmodule Catalyst.Extensions do
 
   @doc "Names of all registered tools."
   @spec names() :: [String.t()]
-  def names, do: Enum.map(tools(), & &1.name())
+  def names do
+    @table |> :ets.tab2list() |> Enum.map(&elem(&1, 0))
+  rescue
+    ArgumentError -> Enum.map(ToolRegistry.default_tools(), & &1.name())
+  end
 
-  @doc "Register a tool module (last write wins). `opts[:owner]` tags it for purge-on-reload."
+  @doc "Register a validated tool module. `opts[:owner]` tags it for purge-on-reload."
   @spec register_tool(module(), keyword()) :: {:ok, module()} | {:error, term()}
-  def register_tool(module, opts \\ []), do: GenServer.call(__MODULE__, {:register, module, opts})
+  def register_tool(module, opts \\ []) do
+    with {:ok, definition} <- ToolRegistry.definition(module) do
+      GenServer.call(__MODULE__, {:register, module, definition, opts})
+    end
+  end
 
   @doc """
   Register `mod.fun/0` to be re-run on every (re)start of this server.
@@ -133,20 +144,22 @@ defmodule Catalyst.Extensions do
   failures are reported, not swallowed. Crash-detected safe mode is cleared
   only when `failed` is empty.
   """
-  @spec load_all() :: {:ok, load_result()}
+  @spec load_all() :: {:ok, load_result()} | {:error, term()}
   def load_all do
-    result = serialized_load(&do_load_all/0)
+    serialized_load(fn ->
+      result = do_load_all()
 
-    case result do
-      {:ok, %{failed: []}} ->
-        BootGuard.mark_ok()
-        put_boot_status(:ok)
+      case result do
+        {:ok, %{failed: []}} ->
+          BootGuard.mark_ok()
+          put_boot_status(:ok)
 
-      _ ->
-        :ok
-    end
+        _ ->
+          :ok
+      end
 
-    result
+      result
+    end)
   end
 
   @doc """
@@ -157,7 +170,7 @@ defmodule Catalyst.Extensions do
   mode or touches the boot marker, so a bricking extension can't be re-loaded
   by a later app's boot. Returns `{:ok, load_result}` or `{:skipped, status}`.
   """
-  @spec reload_after_wiring() :: {:ok, load_result()} | {:skipped, term()}
+  @spec reload_after_wiring() :: {:ok, load_result()} | {:error, term()} | {:skipped, term()}
   def reload_after_wiring do
     case boot_status() do
       :ok -> serialized_load(&do_load_all/0)
@@ -173,11 +186,19 @@ defmodule Catalyst.Extensions do
     serialized_load(fn -> GenServer.call(__MODULE__, {:uninstall, owner}) end)
   end
 
+  @doc false
+  @spec record_setup_collision(reference(), term()) :: :ok
+  def record_setup_collision(load_ref, reason) when is_reference(load_ref) do
+    GenServer.call(__MODULE__, {:record_setup_collision, load_ref, reason})
+  end
+
   @doc """
   Run `fun` under the extensions load lock — the same lock `load_file/1`,
-  `load_all/0`, `disable/1`… take. Per-process re-entrant, so a caller may
-  compose locked steps (the installer's write → load → commit) into one
-  critical section that a concurrent load can't interleave.
+  `load_all/0`, `disable/1`… take. The function runs in a supervised,
+  caller-independent transaction process, so it must not depend on the
+  caller's mailbox or process dictionary. Calls nested by that transaction
+  are re-entrant; this lets the installer compose write → load → commit into
+  one critical section that a concurrent load cannot interleave or abandon.
   """
   @spec locked((-> result)) :: result when result: term()
   def locked(fun) when is_function(fun, 0), do: serialized_load(fun)
@@ -186,6 +207,7 @@ defmodule Catalyst.Extensions do
   @type loaded_info :: %{
           owner: String.t(),
           path: Path.t() | nil,
+          managed?: boolean(),
           tools: [String.t()],
           modules: [module()],
           metadata: map()
@@ -199,15 +221,9 @@ defmodule Catalyst.Extensions do
   """
   @spec list_loaded() :: [loaded_info()]
   def list_loaded do
-    files = Map.new(extension_files(), &{ext_id(&1), &1})
-
     __MODULE__
     |> GenServer.call(:snapshot)
-    |> Enum.map(fn {owner, info} ->
-      info
-      |> Map.put(:path, Map.get(files, owner))
-      |> Map.put(:metadata, Catalyst.Extension.metadata_of(info.modules))
-    end)
+    |> Enum.map(&elem(&1, 1))
     |> Enum.sort_by(& &1.owner)
   end
 
@@ -223,9 +239,9 @@ defmodule Catalyst.Extensions do
   @doc "The source file backing `owner`, enabled or disabled. `:error` for file-less owners."
   @spec source_file(String.t()) :: {:ok, Path.t()} | :error
   def source_file(owner) do
-    case file_for(owner) || disabled_file_for(owner) do
-      nil -> :error
-      path -> {:ok, path}
+    case file_for(owner) do
+      {:ok, path} -> {:ok, path}
+      :error -> disabled_file_for(owner)
     end
   end
 
@@ -234,8 +250,8 @@ defmodule Catalyst.Extensions do
   def reload(owner) do
     serialized_load(fn ->
       case file_for(owner) do
-        nil -> {:error, :no_file}
-        path -> do_load_file(path)
+        {:ok, path} -> do_load_file(path)
+        :error -> {:error, :no_file}
       end
     end)
   end
@@ -250,19 +266,20 @@ defmodule Catalyst.Extensions do
   def disable(owner) do
     serialized_load(fn ->
       case file_for(owner) do
-        nil ->
-          {:error, :no_file}
-
-        path ->
+        {:ok, path} ->
           disabled = path <> ".disabled"
 
           # Rename first (under the load lock) so a concurrent load can't
           # recompile the file between the purge and the rename.
-          with :ok <- File.rename(path, disabled) do
+          with :ok <- ensure_managed_source(path),
+               :ok <- File.rename(path, disabled) do
             :ok = GenServer.call(__MODULE__, {:uninstall, owner})
-            _ = Versioning.commit(dir(), "disable #{owner}")
+            commit_lifecycle_change([path, disabled], "disable #{owner}")
             {:ok, disabled}
           end
+
+        :error ->
+          {:error, :no_file}
       end
     end)
   end
@@ -276,17 +293,17 @@ defmodule Catalyst.Extensions do
   def enable(owner) do
     serialized_load(fn ->
       case disabled_file_for(owner) do
-        nil ->
-          {:error, :no_file}
-
-        disabled ->
+        {:ok, disabled} ->
           path = String.replace_suffix(disabled, ".disabled", "")
 
           with :ok <- File.rename(disabled, path) do
             result = do_load_file(path)
-            _ = Versioning.commit(dir(), "enable #{owner}")
+            commit_lifecycle_change([disabled, path], "enable #{owner}")
             result
           end
+
+        :error ->
+          {:error, :no_file}
       end
     end)
   end
@@ -294,7 +311,16 @@ defmodule Catalyst.Extensions do
   @doc "Directory holding extension source files."
   @spec dir() :: Path.t()
   def dir,
-    do: Application.get_env(:catalyst, :extensions_dir) || Path.expand("~/.catalyst/extensions")
+    do: Application.get_env(:catalyst, :extensions_dir) || Catalyst.Paths.extensions()
+
+  @doc "Normalize a source-file/name string into its extension owner id."
+  @spec sanitize_owner(String.t()) :: String.t()
+  def sanitize_owner(name) do
+    name
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9_]+/, "_")
+    |> String.trim("_")
+  end
 
   @doc "Resolve a session's `tools` setting into a concrete module list (per turn)."
   @spec resolve([module()] | (-> [module()]) | term()) :: [module()]
@@ -309,8 +335,9 @@ defmodule Catalyst.Extensions do
       Application.get_env(:catalyst, :safe_mode, false)
   end
 
-  @doc "Boot status: `:ok`, or `{:safe_mode, :env | :crash_detected}` when extensions were skipped."
-  @spec boot_status() :: :ok | {:safe_mode, :env | :crash_detected}
+  @doc "Boot status: `:ok`, a safe-mode reason, or `{:load_failed, reason}`."
+  @spec boot_status() ::
+          :ok | {:safe_mode, :env | :crash_detected} | {:load_failed, term()}
   def boot_status, do: :persistent_term.get({__MODULE__, :boot_status}, :ok)
 
   @doc """
@@ -328,7 +355,7 @@ defmodule Catalyst.Extensions do
   def mark_clean_shutdown do
     case boot_status() do
       :ok -> BootGuard.mark_ok()
-      {:safe_mode, _why} -> :ok
+      _not_clean -> :ok
     end
   end
 
@@ -345,14 +372,51 @@ defmodule Catalyst.Extensions do
 
   def format_error({:compile, reason}), do: "compile failed: " <> format_error(reason)
   def format_error({:register, reason}), do: "registration failed: " <> format_error(reason)
+
+  def format_error({:owner_collision, owner, paths}) do
+    "multiple extension files normalize to owner #{inspect(owner)}: #{Enum.join(paths, ", ")}"
+  end
+
   def format_error(:no_file), do: "no extension source file found for that owner"
+
+  def format_error(:external_source),
+    do: "only files inside the extensions directory can be disabled"
+
   def format_error(:timeout), do: "timed out"
   def format_error({:exit, reason}), do: "exited: #{inspect(reason)}"
 
   def format_error({:not_a_tool, module}),
-    do: "#{inspect(module)} is not a tool (needs name/0, parameters/0, execute/2)"
+    do:
+      "#{inspect(module)} is not a tool " <>
+        "(needs name/0, description/0, parameters/0, execute/2)"
 
   def format_error({:bad_tool_name, reason}), do: "tool name/0 failed: #{inspect(reason)}"
+
+  def format_error({:bad_tool_description, reason}),
+    do: "tool description/0 failed: #{inspect(reason)}"
+
+  def format_error({:bad_tool_parameters, reason}),
+    do: "tool parameters/0 failed: #{inspect(reason)}"
+
+  def format_error({:bad_tool_mode, reason}),
+    do: "tool execution_mode/0 failed: #{inspect(reason)}"
+
+  def format_error({:tool_metadata_timeout, module}),
+    do: "tool metadata timed out for #{inspect(module)}"
+
+  def format_error({:tool_metadata_exit, module, reason}),
+    do: "tool metadata exited for #{inspect(module)}: #{inspect(reason)}"
+
+  def format_error({:tool_owner_collision, name, existing, attempted}) do
+    "tool #{inspect(name)} is already owned by #{inspect(existing)}; " <>
+      "#{inspect(attempted)} cannot replace it"
+  end
+
+  def format_error({:provider_owner_collision, api, existing, attempted}) do
+    "provider #{inspect(api)} is already owned by #{inspect(existing)}; " <>
+      "#{inspect(attempted)} cannot replace it"
+  end
+
   def format_error(reason) when is_binary(reason), do: reason
   def format_error(reason), do: inspect(reason)
 
@@ -369,7 +433,15 @@ defmodule Catalyst.Extensions do
     # are app wiring, not extension code.
     run_reseeders()
 
-    state = %{contrib: %{}, modules: %{}}
+    state = %{
+      contrib: %{},
+      owners: %{},
+      modules: %{},
+      module_versions: %{},
+      metadata: %{},
+      paths: %{},
+      setup_collisions: %{}
+    }
 
     cond do
       safe_mode?() ->
@@ -414,17 +486,16 @@ defmodule Catalyst.Extensions do
   def handle_continue(:load_all, state) do
     server = self()
 
-    {:ok, _pid} =
-      Task.Supervisor.start_child(Catalyst.TaskSupervisor, fn ->
-        _ = serialized_load(&do_load_all/0)
-        send(server, :boot_load_finished)
-      end)
+    case Tasks.start_background(fn -> send(server, {:boot_load_finished, boot_load()}) end) do
+      {:ok, _pid} -> :ok
+      {:error, reason} -> send(server, {:boot_load_finished, {:error, reason}})
+    end
 
     {:noreply, state}
   end
 
   @impl true
-  def handle_info(:boot_load_finished, state) do
+  def handle_info({:boot_load_finished, {:ok, %{failed: []}}}, state) do
     # If the app survives the stabilization window after the boot load finished,
     # this boot's extensions are considered safe. Dying before the timer fires
     # leaves the marker at "booting", which the next boot reads as crash-detected
@@ -433,15 +504,68 @@ defmodule Catalyst.Extensions do
     {:noreply, state}
   end
 
-  def handle_info(:mark_boot_ok, state) do
-    BootGuard.mark_ok()
+  def handle_info({:boot_load_finished, {:ok, %{failed: failures}}}, state) do
+    boot_load_failed(failures)
     {:noreply, state}
   end
 
+  def handle_info({:boot_load_finished, {:error, reason}}, state) do
+    boot_load_failed(reason)
+    {:noreply, state}
+  end
+
+  def handle_info(:mark_boot_ok, state) do
+    case boot_status() do
+      :ok -> BootGuard.mark_ok()
+      _not_clean -> :ok
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
+    collisions =
+      Enum.reduce(state.setup_collisions, state.setup_collisions, fn
+        {load_ref, %{monitor: ^monitor}}, acc -> Map.delete(acc, load_ref)
+        _entry, acc -> acc
+      end)
+
+    {:noreply, %{state | setup_collisions: collisions}}
+  end
+
   @impl true
-  def handle_call({:register, module, opts}, _from, state) do
-    {result, state} = do_register(module, opts, state)
+  def handle_call({:register, module, definition, opts}, _from, state) do
+    {result, state} = do_register(module, definition, opts, state)
     {:reply, result, state}
+  end
+
+  def handle_call({:record_setup_collision, load_ref, reason}, _from, state) do
+    collisions =
+      case Map.fetch(state.setup_collisions, load_ref) do
+        {:ok, entry} ->
+          Map.put(state.setup_collisions, load_ref, %{
+            entry
+            | collisions: [reason | entry.collisions]
+          })
+
+        :error ->
+          state.setup_collisions
+      end
+
+    {:reply, :ok, %{state | setup_collisions: collisions}}
+  end
+
+  def handle_call({:begin_setup, load_ref}, {caller, _tag}, state) do
+    entry = %{monitor: Process.monitor(caller), collisions: []}
+    collisions = Map.put(state.setup_collisions, load_ref, entry)
+    {:reply, :ok, %{state | setup_collisions: collisions}}
+  end
+
+  def handle_call({:take_setup_collisions, load_ref}, _from, state) do
+    {entry, remaining} = Map.pop(state.setup_collisions, load_ref)
+    collisions = finish_setup_entry(entry)
+
+    {:reply, collisions, %{state | setup_collisions: remaining}}
   end
 
   def handle_call({:purge_gone, live_owners}, _from, state) do
@@ -454,8 +578,13 @@ defmodule Catalyst.Extensions do
     {:reply, :ok, state}
   end
 
-  def handle_call({:purge_partial_compile, candidates, preloaded}, _from, state) do
-    purge_partial_compile(candidates, preloaded, state)
+  def handle_call({:purge_partial_compile, candidates}, _from, state) do
+    restore_compiled_modules(candidates, state, "failed multi-module compile")
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:purge_rejected_compile, candidates}, _from, state) do
+    restore_compiled_modules(candidates, state, "rejected compiled contribution")
     {:reply, :ok, state}
   end
 
@@ -466,6 +595,13 @@ defmodule Catalyst.Extensions do
 
   def handle_call({:uninstall, owner}, _from, state) do
     {:reply, :ok, purge_owner(owner, state)}
+  end
+
+  def handle_call({:path_for, owner}, _from, state) do
+    case Map.fetch(state.paths, owner) do
+      {:ok, path} -> {:reply, {:ok, path}, state}
+      :error -> {:reply, :error, state}
+    end
   end
 
   def handle_call(:snapshot, _from, state) do
@@ -480,13 +616,42 @@ defmodule Catalyst.Extensions do
         tools =
           state.contrib |> Map.get(owner, MapSet.new()) |> Enum.map(&elem(&1, 0)) |> Enum.sort()
 
-        {owner, %{owner: owner, tools: tools, modules: Map.get(state.modules, owner, [])}}
+        {owner,
+         %{
+           owner: owner,
+           path: Map.get(state.paths, owner),
+           managed?: managed_source?(Map.get(state.paths, owner)),
+           tools: tools,
+           modules: Map.get(state.modules, owner, []),
+           metadata: Map.get(state.metadata, owner, %{})
+         }}
       end)
 
     {:reply, snapshot, state}
   end
 
+  defp finish_setup_entry(nil), do: []
+
+  defp finish_setup_entry(%{monitor: monitor, collisions: collisions}) do
+    Process.demonitor(monitor, [:flush])
+    Enum.reverse(collisions)
+  end
+
   # ---- boot helpers ---------------------------------------------------------
+
+  defp boot_load do
+    serialized_load(&do_load_all/0)
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp boot_load_failed(reason) do
+    put_boot_status({:load_failed, reason})
+
+    Logger.error(
+      "[extensions] boot load failed; leaving the boot marker armed: #{inspect(reason)}"
+    )
+  end
 
   defp seed_builtins do
     Enum.each(Catalyst.Tools.Registry.default_tools(), &insert/1)
@@ -520,7 +685,7 @@ defmodule Catalyst.Extensions do
   defp reseeders, do: :persistent_term.get({__MODULE__, :reseeders}, %{})
 
   defp run_reseeders do
-    Task.Supervisor.start_child(Catalyst.TaskSupervisor, fn ->
+    Tasks.start_background(fn ->
       Enum.each(Map.keys(reseeders()), fn {mod, fun} ->
         try do
           apply(mod, fun, [])
@@ -539,25 +704,95 @@ defmodule Catalyst.Extensions do
   # Publish the bundled self-extension guide to a stable, agent-readable path.
   defp ensure_guide do
     src = Application.app_dir(:catalyst, "priv/guide.md")
+    dest = Catalyst.Paths.join("guide.md")
 
-    if File.exists?(src) do
-      dest = Path.join(Path.dirname(dir()), "guide.md")
-      File.mkdir_p!(Path.dirname(dest))
-      File.cp!(src, dest)
+    result =
+      with {:ok, contents} <- File.read(src),
+           :ok <- File.mkdir_p(Path.dirname(dest)),
+           :ok <- AtomicWrite.write(dest, contents) do
+        :ok
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[extensions] could not publish extension guide to #{dest}: #{inspect(reason)}"
+        )
+
+        :ok
     end
-  rescue
-    _ -> :ok
   end
 
   # ---- loading --------------------------------------------------------------
 
   # Keep boot load, post-web-wiring reload, explicit reload, and single-file
   # loads ordered without putting compile/setup work back inside this GenServer.
-  # The lock requester must be the calling pid: `:global` treats locks held by
-  # the SAME requester id as compatible, so a fixed atom requester would let
-  # any two processes hold the "lock" at once (no mutual exclusion at all).
-  # With `self()` it excludes across processes and stays re-entrant within one.
-  defp serialized_load(fun), do: :global.trans({@load_lock, self()}, fun, [node()], :infinity)
+  # A supervised, unlinked transaction process deliberately owns the operation:
+  # if a UI/session caller disappears after commit_load/4, the transaction still
+  # reaches setup collision handling and either accepts or rolls back the file.
+  # Nested calls (Installer holds the lock and then calls load_file/1) execute in
+  # that same transaction process via the process-local context marker.
+  defp serialized_load(fun) do
+    case Process.get(@load_context_key, false) do
+      true -> fun.()
+      false -> run_serialized_task(fun)
+    end
+  end
+
+  defp run_serialized_task(fun) do
+    case start_serialized_task(fun) do
+      {:ok, task} -> await_serialized_task(task)
+      :error -> with_load_lock(fun)
+    end
+  end
+
+  defp start_serialized_task(fun) do
+    task =
+      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
+        capture_load_outcome(fn -> with_load_lock(fun) end)
+      end)
+
+    {:ok, task}
+  catch
+    :exit, _reason -> :error
+  end
+
+  defp await_serialized_task(task) do
+    case Task.yield(task, :infinity) do
+      {:ok, {:return, result}} -> result
+      {:ok, {:raised, kind, reason, stacktrace}} -> :erlang.raise(kind, reason, stacktrace)
+      {:exit, reason} -> exit(reason)
+    end
+  end
+
+  defp capture_load_outcome(fun) do
+    {:return, fun.()}
+  catch
+    kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+  end
+
+  # The lock requester must be the transaction pid: `:global` treats locks held
+  # by the SAME requester id as compatible, so a fixed atom requester would let
+  # unrelated processes hold the "lock" concurrently.
+  defp with_load_lock(fun) do
+    :global.trans(
+      {@load_lock, self()},
+      fn ->
+        Process.put(@load_context_key, true)
+
+        try do
+          fun.()
+        after
+          Process.delete(@load_context_key)
+        end
+      end,
+      [node()],
+      :infinity
+    )
+  end
 
   defp extension_files do
     case File.dir?(dir()) do
@@ -574,7 +809,14 @@ defmodule Catalyst.Extensions do
     Versioning.ensure_repo(dir())
 
     paths = extension_files()
+    owner_paths = index_owner_paths(paths)
 
+    with :ok <- ensure_distinct_owners(owner_paths) do
+      load_paths(paths)
+    end
+  end
+
+  defp load_paths(paths) do
     # Purge file-backed contributions whose source file is gone — e.g. removed
     # by a rollback or by hand. Without this, reverted code stays registered
     # (and callable) until the next restart. Only owners present in
@@ -585,7 +827,7 @@ defmodule Catalyst.Extensions do
 
     {loaded, failed} =
       Enum.reduce(paths, {[], []}, fn path, {ok, bad} ->
-        case do_load_file(path) do
+        case compile_and_load(path, ext_id(path)) do
           {:ok, summary} ->
             {[summary | ok], bad}
 
@@ -601,189 +843,103 @@ defmodule Catalyst.Extensions do
   defp do_load_file(path) do
     owner = ext_id(path)
 
-    # Code.compile_file/1 defines modules SEQUENTIALLY: a file whose first
-    # module compiles but whose second raises fails the load with module 1
-    # already redefined in the VM. Snapshot the file's candidate module names
-    # (from its AST) and which of them are loaded before the attempt, so the
-    # error path below can purge what a partial compile left behind.
-    candidates = candidate_modules(path)
-    preloaded = MapSet.new(Enum.filter(candidates, &:erlang.module_loaded/1))
+    with :ok <- ensure_owner_path(owner, path) do
+      compile_and_load(path, owner)
+    end
+  end
 
+  defp compile_and_load(path, owner) do
     # Compile + classify FIRST, in their own failure domain: a broken file
     # fails here, before we touch any registry or tracking, so a failed reload
     # neither registers nor drops the prior version.
-    case compile_and_classify_async(path) do
+    case Loader.compile(path) do
       {:ok, contribution} ->
         case GenServer.call(__MODULE__, {:commit_load, owner, path, contribution}, 30_000) do
           {:ok, summary} ->
-            setup_status = run_setups_async(contribution.ext_mods, ExtensionAPI.new(owner, path))
-            {:ok, annotate_setup_status(summary, setup_status)}
+            load_ref = make_ref()
+            :ok = GenServer.call(__MODULE__, {:begin_setup, load_ref}, 30_000)
+
+            setup_status =
+              Loader.run_setups(
+                contribution.ext_mods,
+                ExtensionAPI.new(owner, path, load_ref)
+              )
+
+            recorded_collisions =
+              GenServer.call(__MODULE__, {:take_setup_collisions, load_ref}, 30_000)
+
+            case List.first(recorded_collisions) || ownership_collision(setup_status) do
+              nil ->
+                {:ok, annotate_setup_status(summary, setup_status)}
+
+              collision ->
+                # setup may have registered other owner-tagged effects before
+                # hitting this collision. Reject the contribution as a unit,
+                # then restore the prior owner's code outside the GenServer.
+                :ok = GenServer.call(__MODULE__, {:uninstall, owner}, 30_000)
+                {:error, collision}
+            end
 
           {:error, _reason} = err ->
+            :ok =
+              GenServer.call(
+                __MODULE__,
+                {:purge_rejected_compile, contribution.modules},
+                30_000
+              )
+
             err
         end
 
-      {:error, reason} ->
-        _ = GenServer.call(__MODULE__, {:purge_partial_compile, candidates, preloaded}, 30_000)
+      {:error, reason, emitted_modules} ->
+        # Compiler-traced modules are exact: unlike an AST scan this includes
+        # dynamic names and excludes modules in quotes/non-executed branches.
+        :ok = GenServer.call(__MODULE__, {:purge_partial_compile, emitted_modules}, 30_000)
         {:error, reason}
     end
   end
 
-  # After a failed compile, drop any module the partial compile left live: a
-  # candidate that is loaded NOW but was not loaded before this attempt and is
-  # not claimed by any owner's tracking. Deliberately conservative — a module
-  # that pre-existed (e.g. the prior version of this same file, or a shadowed
-  # app module) is never purged here, because purging would remove the new AND
-  # old definitions at once; the Installer repairs that case by re-loading the
-  # restored backup source instead.
-  defp purge_partial_compile(candidates, preloaded, state) do
-    tracked = state.modules |> Map.values() |> List.flatten() |> MapSet.new()
+  defp ensure_distinct_owners(paths) do
+    paths
+    |> Enum.find(fn {_owner, owner_paths} -> length(owner_paths) > 1 end)
+    |> case do
+      nil -> :ok
+      {owner, owner_paths} -> {:error, {:owner_collision, owner, Enum.sort(owner_paths)}}
+    end
+  end
 
+  defp ensure_owner_path(owner, path) do
+    paths =
+      [path | extension_files()]
+      |> index_owner_paths()
+      |> Map.get(owner, [])
+
+    case paths do
+      [_path] -> :ok
+      paths -> {:error, {:owner_collision, owner, Enum.sort(paths)}}
+    end
+  end
+
+  defp index_owner_paths(paths) do
+    paths
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+    |> Enum.group_by(&ext_id/1)
+  end
+
+  # `Code.compile_file/1` installs each module as it is emitted. Keep the exact
+  # accepted BEAM binaries in state so a later partial/rejected compile can put
+  # the last-known-good code back without rereading source that may now be
+  # broken. Untracked modules fall back to the original code-path beam (or are
+  # removed when they were introduced by the failed compile).
+  defp restore_compiled_modules(candidates, state, context) do
     candidates
-    |> Enum.reject(&MapSet.member?(preloaded, &1))
-    |> Enum.reject(&MapSet.member?(tracked, &1))
-    |> Enum.filter(&:erlang.module_loaded/1)
-    |> Enum.each(fn mod ->
-      Logger.warning(
-        "[extensions] purging #{inspect(mod)} left behind by a failed multi-module compile"
-      )
-
-      restore_module(mod)
+    |> Enum.uniq()
+    |> Enum.each(fn module ->
+      Logger.warning("[extensions] restoring #{inspect(module)} after #{context}")
+      restore_current_version(module, state.module_versions)
     end)
   end
-
-  # Module names a source file would define, read from its AST without
-  # compiling anything (best effort: an unparseable file defines nothing, so
-  # it yields []). Used only to clean up after a partial compile.
-  defp candidate_modules(path) do
-    with {:ok, source} <- File.read(path),
-         {:ok, ast} <- Code.string_to_quoted(source) do
-      ast |> collect_defmodules([], []) |> Enum.uniq()
-    else
-      _ -> []
-    end
-  rescue
-    # Arbitrary user source flows through here; a walker edge case must degrade
-    # to "no candidates", never crash the caller.
-    _ -> []
-  end
-
-  # Walk the AST collecting defmodule names, nesting prefixes the way the
-  # compiler does (`defmodule B` inside `defmodule A` defines A.B; a name
-  # starting with `Elixir.` is absolute). Dynamic names (interpolation, module
-  # attributes) can't be resolved statically and are skipped — failing to
-  # purge such a module is a leak, purging a wrongly-guessed name would be
-  # far worse.
-  defp collect_defmodules({:defmodule, _, [name | rest]}, prefix, acc) do
-    case static_module_name(name, prefix) do
-      {:ok, mod, child_prefix} ->
-        Enum.reduce(rest, [mod | acc], &collect_defmodules(&1, child_prefix, &2))
-
-      :error ->
-        Enum.reduce(rest, acc, &collect_defmodules(&1, prefix, &2))
-    end
-  end
-
-  defp collect_defmodules({form, _meta, args}, prefix, acc) when is_list(args) do
-    acc = collect_defmodules(form, prefix, acc)
-    Enum.reduce(args, acc, &collect_defmodules(&1, prefix, &2))
-  end
-
-  defp collect_defmodules({a, b}, prefix, acc),
-    do: collect_defmodules(b, prefix, collect_defmodules(a, prefix, acc))
-
-  defp collect_defmodules(list, prefix, acc) when is_list(list),
-    do: Enum.reduce(list, acc, &collect_defmodules(&1, prefix, &2))
-
-  defp collect_defmodules(_other, _prefix, acc), do: acc
-
-  defp static_module_name({:__aliases__, _, segments}, prefix) do
-    cond do
-      segments == [] or not Enum.all?(segments, &is_atom/1) ->
-        :error
-
-      prefix == [] or hd(segments) == :"Elixir" ->
-        {:ok, Module.concat(segments), segments}
-
-      true ->
-        {:ok, Module.concat(prefix ++ segments), prefix ++ segments}
-    end
-  end
-
-  # `defmodule :raw_atom` defines exactly that atom (no Elixir. prefix).
-  defp static_module_name(name, _prefix) when is_atom(name), do: {:ok, name, [name]}
-  defp static_module_name(_name, _prefix), do: :error
-
-  defp compile_and_classify(path) do
-    modules = path |> compile_extension_file() |> Enum.map(&elem(&1, 0))
-    {ext_mods, tool_mods} = classify(modules)
-
-    with {:ok, tool_names} <- safe_tool_names(tool_mods) do
-      {:ok,
-       %{
-         modules: modules,
-         ext_mods: ext_mods,
-         tool_mods: tool_mods,
-         tool_names: tool_names
-       }}
-    end
-  rescue
-    e -> {:error, {:compile, Exception.message(e)}}
-  catch
-    kind, reason -> {:error, {:compile, {kind, reason}}}
-  end
-
-  defp compile_extension_file(path) do
-    previous = Code.compiler_options()
-    Code.compiler_options(ignore_module_conflict: true)
-
-    try do
-      Code.compile_file(path)
-    after
-      Code.compiler_options(previous)
-    end
-  end
-
-  defp compile_and_classify_async(path) do
-    task = async_task(fn -> compile_and_classify(path) end)
-
-    case await_task(task, compile_timeout()) do
-      {:ok, {:ok, contribution}} -> {:ok, contribution}
-      {:ok, {:error, reason}} -> {:error, reason}
-      {:exit, reason} -> {:error, {:exit, reason}}
-      :timeout -> {:error, :timeout}
-    end
-  end
-
-  defp async_task(fun) do
-    case Process.whereis(Catalyst.TaskSupervisor) do
-      nil -> Task.async(fun)
-      _pid -> Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fun)
-    end
-  end
-
-  defp await_task(task, timeout) do
-    case Task.yield(task, timeout) do
-      {:ok, value} ->
-        {:ok, value}
-
-      {:exit, reason} ->
-        {:exit, reason}
-
-      nil ->
-        case Task.shutdown(task, :brutal_kill) do
-          {:ok, value} -> {:ok, value}
-          {:exit, reason} -> {:exit, reason}
-          nil -> :timeout
-        end
-    end
-  end
-
-  defp compile_timeout,
-    do: Application.get_env(:catalyst, :extension_compile_timeout, @compile_timeout)
-
-  defp setup_timeout,
-    do: Application.get_env(:catalyst, :extension_setup_timeout, @setup_timeout)
 
   # Commit a compiled file: purge the prior version's side effects, apply the
   # new ones, and return the new tracking. The tracking is assembled BEFORE the
@@ -791,25 +947,76 @@ defmodule Catalyst.Extensions do
   # VM, so even if a step below raises unexpectedly, the caller gets tracking
   # that claims them for this owner (never the stale pre-purge snapshot, which
   # would let registries and state tracking silently diverge).
-  defp commit_load(owner, _path, contribution, state) do
-    %{modules: modules, ext_mods: ext_mods, tool_mods: tool_mods, tool_names: tool_names} =
-      contribution
+  defp commit_load(owner, path, contribution, state) do
+    %{
+      modules: modules,
+      beams: beams,
+      ext_mods: ext_mods,
+      tool_mods: tool_mods,
+      tool_names: tool_names,
+      metadata: metadata
+    } = contribution
 
+    case tool_owner_conflicts(owner, tool_names, state) do
+      [] ->
+        commit_contribution(
+          owner,
+          path,
+          beams,
+          modules,
+          ext_mods,
+          tool_mods,
+          tool_names,
+          metadata,
+          state
+        )
+
+      [{name, existing_owner} | _] ->
+        {{:error, {:tool_owner_collision, name, existing_owner, owner}}, state}
+    end
+  end
+
+  defp commit_contribution(
+         owner,
+         path,
+         beams,
+         modules,
+         ext_mods,
+         tool_mods,
+         tool_names,
+         metadata,
+         state
+       ) do
     conflicts = module_conflicts(owner, modules, state)
     log_conflicts(owner, conflicts)
 
     pairs = Enum.zip(tool_names, tool_mods)
 
+    module_versions = put_module_versions(state.module_versions, owner, path, beams)
+
+    owners =
+      state.owners
+      |> Map.reject(fn {_name, existing_owner} -> existing_owner == owner end)
+      |> then(fn current -> Enum.reduce(pairs, current, &Map.put(&2, elem(&1, 0), owner)) end)
+
     committed = %{
       state
       | contrib: Map.put(state.contrib, owner, MapSet.new(pairs)),
-        modules: Map.put(state.modules, owner, modules)
+        owners: owners,
+        modules: Map.put(state.modules, owner, modules),
+        module_versions: module_versions,
+        metadata: Map.put(state.metadata, owner, metadata),
+        paths: Map.put(state.paths, owner, path)
     }
 
     try do
       # Modules the new file still defines were just redefined by the compile
       # above and must survive the purge; ones it dropped are restored/removed.
-      purge_owner_effects(owner, state, keep_modules: modules)
+      purge_owner_effects(owner, state,
+        keep_modules: modules,
+        module_versions: module_versions
+      )
+
       Enum.each(pairs, fn {name, mod} -> :ets.insert(@table, {name, mod}) end)
       {{:ok, build_summary(owner, tool_names, ext_mods, conflicts)}, committed}
     rescue
@@ -819,48 +1026,29 @@ defmodule Catalyst.Extensions do
     end
   end
 
-  # Run each extension module's setup/1 outside the registry GenServer. A raising
-  # setup is logged, not fatal: everything it registered before raising stays
-  # registered (owner-tagged, hence purgeable). A hung setup task is killed at a
-  # bounded timeout so reload/install callers return and the registry stays live.
-  defp run_setups_async([], _api), do: :ok
-
-  defp run_setups_async(ext_mods, api) do
-    task = async_task(fn -> Enum.each(ext_mods, &run_setup(&1, api)) end)
-
-    case await_task(task, setup_timeout()) do
-      {:ok, :ok} ->
-        :ok
-
-      {:exit, reason} ->
-        Logger.warning("[extensions] #{api.owner}: setup task exited: #{inspect(reason)}")
-        {:error, {:setup_exit, reason}}
-
-      :timeout ->
-        Logger.warning("[extensions] #{api.owner}: setup timed out after #{setup_timeout()}ms")
-        {:error, :setup_timeout}
-    end
-  end
-
   defp annotate_setup_status(summary, :ok), do: summary
 
   defp annotate_setup_status(summary, {:error, reason}) do
     Map.put(summary, :warning, "setup did not finish cleanly: #{inspect(reason)}")
   end
 
-  defp run_setup(mod, api) do
-    mod.setup(api)
-  rescue
-    e ->
-      Logger.warning(
-        "[extensions] #{api.owner}: #{inspect(mod)}.setup/1 raised: #{Exception.message(e)}"
-      )
-  catch
-    kind, reason ->
-      Logger.warning(
-        "[extensions] #{api.owner}: #{inspect(mod)}.setup/1 #{kind}: #{inspect(reason)}"
-      )
+  defp ownership_collision({:error, {:setup_errors, errors}}) do
+    Enum.find_value(errors, fn {_module, reason} -> ownership_collision_reason(reason) end)
   end
+
+  defp ownership_collision(_setup_status), do: nil
+
+  defp ownership_collision_reason(
+         {:tool_owner_collision, _name, _existing_owner, _attempted_owner} = reason
+       ),
+       do: reason
+
+  defp ownership_collision_reason(
+         {:provider_owner_collision, _api, _existing_owner, _attempted_owner} = reason
+       ),
+       do: reason
+
+  defp ownership_collision_reason(_reason), do: nil
 
   defp build_summary(owner, tool_names, ext_mods, []),
     do: %{owner: owner, tools: tool_names, extensions: ext_mods}
@@ -895,91 +1083,74 @@ defmodule Catalyst.Extensions do
     end)
   end
 
-  # Extensions take precedence: a module that is both is treated as an extension.
-  defp classify(modules) do
-    Enum.reduce(modules, {[], []}, fn mod, {exts, tools} ->
-      cond do
-        Extension.extension_module?(mod) -> {[mod | exts], tools}
-        tool_module?(mod) -> {exts, [mod | tools]}
-        true -> {exts, tools}
-      end
-    end)
-    |> then(fn {exts, tools} -> {Enum.reverse(exts), Enum.reverse(tools)} end)
-  end
-
   # ---- registration + owner tracking ----------------------------------------
 
-  defp do_register(module, opts, state) do
-    case safe_tool_name(module) do
-      {:ok, name} ->
-        :ets.insert(@table, {name, module})
-        {{:ok, module}, track(name, module, opts[:owner], state)}
+  defp do_register(module, definition, opts, state) do
+    name = definition.name
+    owner = normalize_registration_owner(opts[:owner])
 
-      {:error, _reason} = err ->
-        {err, state}
+    case tool_owner(state, name) do
+      nil ->
+        :ets.insert(@table, {name, module})
+        {{:ok, module}, track(name, module, owner, state)}
+
+      ^owner ->
+        :ets.insert(@table, {name, module})
+        {{:ok, module}, track(name, module, owner, state)}
+
+      existing_owner ->
+        {{:error, {:tool_owner_collision, name, existing_owner, owner}}, state}
     end
   end
 
-  defp track(_name, _module, nil, state), do: state
+  defp track(name, _module, @host_owner, state),
+    do: put_in(state.owners[name], @host_owner)
 
   defp track(name, module, owner, state) do
     pairs = Map.get(state.contrib, owner, MapSet.new())
-    put_in(state.contrib[owner], MapSet.put(pairs, {name, module}))
+
+    state
+    |> put_in([:contrib, owner], MapSet.put(pairs, {name, module}))
+    |> put_in([:owners, name], owner)
   end
 
-  # `name/0` is extension-authored code reached inside this GenServer; a raise
-  # would crash the registry and destroy the tools table with it, so resolve it
-  # defensively and reject instead.
-  defp safe_tool_name(module) do
-    if tool_module?(module) do
-      try do
-        case module.name() do
-          name when is_binary(name) -> {:ok, name}
-          other -> {:error, {:bad_tool_name, other}}
-        end
-      rescue
-        e -> {:error, {:bad_tool_name, Exception.message(e)}}
-      catch
-        kind, reason -> {:error, {:bad_tool_name, {kind, reason}}}
-      end
-    else
-      {:error, {:not_a_tool, module}}
-    end
-  end
-
-  defp safe_tool_names(modules) do
-    modules
-    |> Enum.reduce_while({:ok, []}, fn module, {:ok, names} ->
-      case safe_tool_name(module) do
-        {:ok, name} -> {:cont, {:ok, [name | names]}}
-        {:error, _reason} = error -> {:halt, error}
+  defp tool_owner_conflicts(owner, names, state) do
+    Enum.flat_map(names, fn name ->
+      case tool_owner(state, name) do
+        nil -> []
+        ^owner -> []
+        other_owner -> [{name, other_owner}]
       end
     end)
-    |> case do
-      {:ok, names} -> {:ok, Enum.reverse(names)}
-      {:error, _reason} = error -> error
-    end
   end
 
+  defp tool_owner(state, name), do: Map.get(state.owners, name)
+
+  defp normalize_registration_owner(nil), do: @host_owner
+  defp normalize_registration_owner(owner), do: owner
+
   defp insert(module) do
-    if tool_module?(module) do
-      :ets.insert(@table, {module.name(), module})
-      {:ok, module}
-    else
-      {:error, {:not_a_tool, module}}
-    end
+    :ets.insert(@table, {module.name(), module})
+    {:ok, module}
   end
 
   # Remove an owner's tools from the table (restoring a built-in if one was
   # shadowed), drop its hooks/providers/UI/processes via purgers, undo its module
   # definitions (minus `keep_modules`), and clear its tracking.
   defp purge_owner(owner, state, opts \\ []) do
-    purge_owner_effects(owner, state, opts)
+    module_versions = drop_owner_versions(state.module_versions, owner)
+    purge_opts = Keyword.put(opts, :module_versions, module_versions)
+    purge_owner_effects(owner, state, purge_opts)
 
     %{
       state
       | contrib: Map.delete(state.contrib, owner),
-        modules: Map.delete(state.modules, owner)
+        owners:
+          Map.reject(state.owners, fn {_name, existing_owner} -> existing_owner == owner end),
+        modules: Map.delete(state.modules, owner),
+        module_versions: module_versions,
+        metadata: Map.delete(state.metadata, owner),
+        paths: Map.delete(state.paths, owner)
     }
   end
 
@@ -987,11 +1158,12 @@ defmodule Catalyst.Extensions do
   # tracking change — commit_load assembles the new tracking itself, up front.
   defp purge_owner_effects(owner, state, opts) do
     keep = MapSet.new(Keyword.get(opts, :keep_modules, []))
+    module_versions = Keyword.fetch!(opts, :module_versions)
 
     state.modules
     |> Map.get(owner, [])
     |> Enum.reject(&MapSet.member?(keep, &1))
-    |> Enum.each(&restore_module/1)
+    |> Enum.each(&restore_removed_owner_module(&1, owner, state.module_versions, module_versions))
 
     pairs = Map.get(state.contrib, owner, MapSet.new())
     builtins = builtins_index()
@@ -1009,6 +1181,66 @@ defmodule Catalyst.Extensions do
     end)
 
     ExtensionAPI.purge_owner(owner)
+  end
+
+  defp put_module_versions(module_versions, owner, path, beams) do
+    module_versions
+    |> drop_owner_versions(owner)
+    |> then(fn versions ->
+      Enum.reduce(beams, versions, fn {module, beam}, acc ->
+        version = %{owner: owner, path: path, beam: beam}
+        Map.update(acc, module, [version], &[version | &1])
+      end)
+    end)
+  end
+
+  defp drop_owner_versions(module_versions, owner) do
+    Enum.reduce(module_versions, %{}, fn {module, versions}, acc ->
+      case Enum.reject(versions, &(&1.owner == owner)) do
+        [] -> acc
+        remaining -> Map.put(acc, module, remaining)
+      end
+    end)
+  end
+
+  defp restore_removed_owner_module(module, owner, old_versions, new_versions) do
+    case Map.get(old_versions, module, []) do
+      [%{owner: ^owner} | _rest] -> restore_current_version(module, new_versions)
+      _not_active -> :ok
+    end
+  end
+
+  defp restore_current_version(module, module_versions) do
+    case Map.get(module_versions, module, []) do
+      [version | _rest] -> load_version(module, version)
+      [] -> restore_module(module)
+    end
+  end
+
+  defp load_version(module, %{path: path, beam: beam}) do
+    :code.purge(module)
+    :code.delete(module)
+    :code.purge(module)
+
+    case :code.load_binary(module, String.to_charlist(path), beam) do
+      {:module, ^module} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "[extensions] could not restore accepted BEAM for #{inspect(module)}: " <>
+            inspect(reason)
+        )
+
+        restore_module(module)
+    end
+  catch
+    kind, reason ->
+      Logger.error(
+        "[extensions] restoring accepted BEAM for #{inspect(module)} #{kind}: #{inspect(reason)}"
+      )
+
+      restore_module(module)
   end
 
   # Drop an extension's version of a module from the VM. If an original beam
@@ -1044,29 +1276,72 @@ defmodule Catalyst.Extensions do
     Map.new(Catalyst.Tools.Registry.default_tools(), &{&1.name(), &1})
   end
 
+  defp ensure_managed_source(path) do
+    case managed_source?(path) do
+      true -> :ok
+      false -> {:error, :external_source}
+    end
+  end
+
+  defp managed_source?(nil), do: false
+
+  defp managed_source?(path) do
+    relative = path |> Path.expand() |> Path.relative_to(Path.expand(dir()))
+
+    Path.type(relative) == :relative and relative != ".." and
+      not String.starts_with?(relative, "../")
+  end
+
+  defp commit_lifecycle_change(paths, message) do
+    Versioning.ensure_repo(dir())
+
+    case Versioning.commit_paths(dir(), paths, message) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[extensions] #{message} succeeded but could not be git-versioned: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
   defp ext_id(path), do: path |> Path.basename(".ex") |> sanitize_owner()
 
   defp disabled_owner(path), do: path |> Path.basename(".ex.disabled") |> sanitize_owner()
 
-  defp sanitize_owner(base), do: String.replace(base, ~r/[^a-zA-Z0-9_]/, "_")
+  defp file_for(owner) do
+    case GenServer.call(__MODULE__, {:path_for, owner}) do
+      {:ok, path} -> existing_file(path, owner)
+      :error -> find_file(extension_files(), owner, &ext_id/1)
+    end
+  catch
+    :exit, _reason -> find_file(extension_files(), owner, &ext_id/1)
+  end
 
-  defp file_for(owner), do: Enum.find(extension_files(), &(ext_id(&1) == owner))
+  defp existing_file(path, owner) do
+    case File.regular?(path) do
+      true -> {:ok, path}
+      false -> find_file(extension_files(), owner, &ext_id/1)
+    end
+  end
 
   defp disabled_file_for(owner),
-    do: dir() |> disabled_files() |> Enum.find(&(disabled_owner(&1) == owner))
+    do: dir() |> disabled_files() |> find_file(owner, &disabled_owner/1)
+
+  defp find_file(paths, owner, owner_fun) do
+    case Enum.find(paths, &(owner_fun.(&1) == owner)) do
+      nil -> :error
+      path -> {:ok, path}
+    end
+  end
 
   defp disabled_files(dir) do
     case File.dir?(dir) do
       true -> dir |> Path.join("*.ex.disabled") |> Path.wildcard()
       false -> []
     end
-  end
-
-  # Duck-typed: a tool exports name/0, parameters/0 and execute/2.
-  defp tool_module?(module) do
-    Code.ensure_loaded?(module) and
-      function_exported?(module, :name, 0) and
-      function_exported?(module, :parameters, 0) and
-      function_exported?(module, :execute, 2)
   end
 end

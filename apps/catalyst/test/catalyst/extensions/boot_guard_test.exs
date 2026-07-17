@@ -29,6 +29,28 @@ defmodule Catalyst.Extensions.BootGuardTest do
     refute BootGuard.crashed_last_boot?()
   end
 
+  test "an unwritable marker logs a warning but remains best-effort" do
+    blocker =
+      Path.join(System.tmp_dir!(), "boot_marker_blocker_#{System.unique_integer([:positive])}")
+
+    File.write!(blocker, "not a directory")
+    previous = Application.get_env(:catalyst, :boot_marker_path)
+    Application.put_env(:catalyst, :boot_marker_path, Path.join(blocker, "marker"))
+
+    on_exit(fn ->
+      File.rm(blocker)
+
+      case previous do
+        nil -> Application.delete_env(:catalyst, :boot_marker_path)
+        path -> Application.put_env(:catalyst, :boot_marker_path, path)
+      end
+    end)
+
+    log = capture_log(fn -> assert :ok = BootGuard.mark_booting() end)
+
+    assert log =~ "could not write boot marker"
+  end
+
   test "a stale booting marker with no extension files boots normally and self-heals" do
     # The previous boot was quit inside the stabilization window (desktop quit
     # is a halt — nothing marks clean): with nothing to load, safe mode would
@@ -79,6 +101,65 @@ defmodule Catalyst.Extensions.BootGuardTest do
     end)
   end
 
+  test "a boot owner collision is surfaced and never marks the boot clean" do
+    File.mkdir_p!(Extensions.dir())
+    first = Path.join(Extensions.dir(), "Boot Owner.ex")
+    second = Path.join(Extensions.dir(), "boot---owner.ex")
+    File.write!(first, "defmodule Catalyst.Ext.BootOwnerA do end")
+    File.write!(second, "defmodule Catalyst.Ext.BootOwnerB do end")
+
+    on_exit(fn ->
+      File.rm(first)
+      File.rm(second)
+      _ = Extensions.load_all()
+    end)
+
+    BootGuard.mark_ok()
+
+    log =
+      capture_log(fn ->
+        restart_extensions()
+        wait_until(fn -> match?({:load_failed, _reason}, Extensions.boot_status()) end)
+      end)
+
+    assert {:load_failed, {:owner_collision, "boot_owner", paths}} = Extensions.boot_status()
+    assert Enum.sort(paths) == Enum.sort([first, second])
+    assert BootGuard.crashed_last_boot?()
+    assert log =~ "boot load failed"
+    refute Code.ensure_loaded?(Catalyst.Ext.BootOwnerA)
+    refute Code.ensure_loaded?(Catalyst.Ext.BootOwnerB)
+  end
+
+  test "the published guide follows an explicit Catalyst home" do
+    root =
+      Path.join(System.tmp_dir!(), "catalyst_guide_home_#{System.unique_integer([:positive])}")
+
+    home = Path.join(root, "home")
+    extensions = Path.join([root, "elsewhere", "extensions"])
+    old_home = Application.fetch_env(:catalyst, :home)
+    old_extensions = Application.fetch_env(:catalyst, :extensions_dir)
+    old_safe_mode = Application.fetch_env(:catalyst, :safe_mode)
+
+    Application.put_env(:catalyst, :home, home)
+    Application.put_env(:catalyst, :extensions_dir, extensions)
+    Application.put_env(:catalyst, :safe_mode, true)
+    File.mkdir_p!(extensions)
+    BootGuard.mark_ok()
+
+    on_exit(fn ->
+      restore_env(:home, old_home)
+      restore_env(:extensions_dir, old_extensions)
+      restore_env(:safe_mode, old_safe_mode)
+      BootGuard.mark_ok()
+      restart_extensions()
+      File.rm_rf(root)
+    end)
+
+    restart_extensions()
+    assert File.regular?(Path.join(home, "guide.md"))
+    refute File.exists?(Path.join(Path.dirname(extensions), "guide.md"))
+  end
+
   defp restart_extensions do
     pid = Process.whereis(Extensions)
     assert pid, "expected Catalyst.Extensions to be running"
@@ -102,6 +183,9 @@ defmodule Catalyst.Extensions.BootGuardTest do
       true -> Process.sleep(10) && wait_until(fun, tries - 1)
     end
   end
+
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
 
   test "a successful explicit load_all clears crash-detected safe mode" do
     BootGuard.mark_booting()

@@ -58,6 +58,70 @@ defmodule Catalyst.Session.StoreTest do
     assert Store.load(store.path) == []
   end
 
+  test "model_change and thinking_level_change entries fold to the LAST values" do
+    store = Store.new("/tmp/some/project")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    # A fresh file has no settings.
+    assert %{model: nil, thinking_level: nil} = Store.load_settings(store.path)
+
+    m1 = %Catalyst.Model{id: "m-1", api: "faux", provider: "faux", input: [:text]}
+    m2 = %Catalyst.Model{id: "m-2", api: "faux", provider: "faux", input: [:text, :image]}
+
+    Store.append_model_change(store, m1)
+    Store.append_thinking_level_change(store, "low")
+    Store.append_message(store, Message.user("hi"))
+    Store.append_model_change(store, m2)
+    Store.append_thinking_level_change(store, "xhigh")
+    # Settings are session-level: a transcript reset does not undo them.
+    Store.append_reset(store)
+
+    settings = Store.load_settings(store.path)
+    assert settings.model.id == "m-2"
+    assert settings.model.input == [:text, :image]
+    assert settings.thinking_level == "xhigh"
+    assert settings.model_set?
+    assert settings.thinking_level_set?
+
+    Store.append_model_change(store, nil)
+    Store.append_thinking_level_change(store, nil)
+
+    assert %{
+             model: nil,
+             model_set?: true,
+             thinking_level: nil,
+             thinking_level_set?: true
+           } = Store.load_settings(store.path)
+
+    # The transcript loader ignores settings entries (and honors the reset).
+    assert Store.load(store.path) == []
+  end
+
+  test "load_state folds transcript and settings together while preserving tombstones" do
+    store = Store.new("/tmp/proj_load_state")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    model = %Catalyst.Model{id: "m-1", api: "faux", provider: "faux", input: [:text]}
+
+    Store.append_message(store, Message.user("discarded"))
+    Store.append_model_change(store, model)
+    Store.append_thinking_level_change(store, "high")
+    Store.append_reset(store)
+    Store.append_message(store, Message.user("kept"))
+    Store.append_model_change(store, nil)
+    Store.append_thinking_level_change(store, nil)
+
+    assert %{
+             messages: [%Message.User{} = message],
+             model: nil,
+             model_set?: true,
+             thinking_level: nil,
+             thinking_level_set?: true
+           } = Store.load_state(store.path)
+
+    assert Content.text_of(message.content) == "kept"
+  end
+
   test "reopening an existing session file preserves its transcript" do
     id = "resume_#{System.unique_integer([:positive])}"
     store = Store.new("/tmp/proj3", id: id)

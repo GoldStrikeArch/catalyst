@@ -13,19 +13,24 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
   @doc "Build the JSON-encodable request body map."
   @spec build(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) :: map()
   def build(model, context, opts \\ []) do
-    body = %{
+    model
+    |> base(context, opts)
+    |> Map.put("input", convert_messages(context.messages, image_input?(model)))
+  end
+
+  @doc "Build request fields other than `input`, for websocket delta selection."
+  @spec base(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) :: map()
+  def base(model, context, opts \\ []) do
+    %{
       "model" => model.id,
       "store" => false,
       "stream" => true,
       "instructions" => context.system_prompt || "You are a helpful assistant.",
-      "input" => convert_messages(context.messages),
       "text" => %{"verbosity" => Keyword.get(opts, :text_verbosity, "low")},
       "include" => ["reasoning.encrypted_content"],
       "tool_choice" => "auto",
       "parallel_tool_calls" => true
     }
-
-    body
     |> maybe_put("prompt_cache_key", opts[:session_id])
     # "Fast mode": service_tier "priority" (the only tier the Codex backend
     # exposes; ~1.5x speed, increased usage). Omitted entirely otherwise.
@@ -37,10 +42,16 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
   @doc """
   Responses `input` items for a message list (what `build/3` puts under
   `"input"`). The websocket delta path uses this to encode ONLY the messages
-  the connection's `previous_response_id` doesn't already cover.
+  the connection's `previous_response_id` doesn't already cover. Pass the
+  model so image handling matches what `build/3` would produce.
   """
-  @spec input_items([Catalyst.Message.t()]) :: [map()]
-  def input_items(messages), do: convert_messages(messages)
+  @spec input_items([Catalyst.Message.t()], Catalyst.Model.t() | nil) :: [map()]
+  def input_items(messages, model \\ nil), do: convert_messages(messages, image_input?(model))
+
+  @doc "Whether the model accepts image input (nil model → assume yes)."
+  @spec image_input?(Catalyst.Model.t() | nil) :: boolean()
+  def image_input?(nil), do: true
+  def image_input?(model), do: :image in List.wrap(model.input)
 
   defp maybe_put(body, _key, nil), do: body
   defp maybe_put(body, key, value), do: Map.put(body, key, value)
@@ -71,36 +82,78 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
 
   # ---- messages -> Responses input items ------------------------------------
 
-  defp convert_messages(messages), do: Enum.flat_map(messages, &convert_message/1)
+  defp convert_messages(messages, image_input?),
+    do: Enum.flat_map(messages, &convert_message(&1, image_input?))
 
-  defp convert_message(%Message.User{content: content}),
-    do: [%{"role" => "user", "content" => user_content(content)}]
+  defp convert_message(%Message.User{content: content}, image_input?),
+    do: [%{"role" => "user", "content" => user_content(content, image_input?)}]
 
-  defp convert_message(%Message.Assistant{content: blocks}),
+  defp convert_message(%Message.Assistant{content: blocks}, _image_input?),
     do: Enum.flat_map(blocks, &assistant_block/1)
 
-  defp convert_message(%Message.ToolResult{tool_call_id: id, content: content}) do
+  # Tool results with images ship as a function_call_output ITEM LIST
+  # (input_text + input_image parts) when the model accepts images — PI's
+  # openai-responses-shared behavior; a non-vision model gets the text (or a
+  # placeholder note) instead.
+  defp convert_message(%Message.ToolResult{tool_call_id: id, content: content}, image_input?) do
     {call_id, _item} = split_id(id)
+    images = Enum.filter(content, &match?(%Content.Image{}, &1))
+    text = Content.text_of(content)
 
-    [
-      %{
-        "type" => "function_call_output",
-        "call_id" => call_id,
-        "output" => Content.text_of(content)
-      }
-    ]
+    output =
+      cond do
+        images != [] and image_input? ->
+          text_parts = if text == "", do: [], else: [%{"type" => "input_text", "text" => text}]
+
+          text_parts ++
+            Enum.map(images, fn %Content.Image{data: d, mime_type: mt} ->
+              %{
+                "type" => "input_image",
+                "detail" => "auto",
+                "image_url" => "data:#{mt};base64,#{d}"
+              }
+            end)
+
+        images != [] and text == "" ->
+          "(see attached image)"
+
+        true ->
+          text
+      end
+
+    [%{"type" => "function_call_output", "call_id" => call_id, "output" => output}]
   end
 
-  defp convert_message(_), do: []
+  defp convert_message(_, _image_input?), do: []
 
-  defp user_content(content) do
-    Enum.map(content, fn
-      %Content.Text{text: t} ->
-        %{"type" => "input_text", "text" => t}
+  defp user_content(content, image_input?) do
+    parts =
+      Enum.flat_map(content, fn
+        %Content.Text{text: text} ->
+          [%{"type" => "input_text", "text" => text}]
 
-      %Content.Image{data: d, mime_type: mt} ->
-        %{"type" => "input_image", "detail" => "auto", "image_url" => "data:#{mt};base64,#{d}"}
-    end)
+        %Content.Image{data: data, mime_type: mime_type} when image_input? ->
+          [
+            %{
+              "type" => "input_image",
+              "detail" => "auto",
+              "image_url" => "data:#{mime_type};base64,#{data}"
+            }
+          ]
+
+        %Content.Image{} ->
+          []
+
+        # Unknown block types (e.g. from extensions) are dropped, mirroring
+        # assistant_block/1 — the request must never crash the run task.
+        _other ->
+          []
+      end)
+
+    case {parts, Enum.any?(content, &match?(%Content.Image{}, &1))} do
+      {[], true} -> [%{"type" => "input_text", "text" => "(see attached image)"}]
+      _ -> parts
+    end
   end
 
   # Reasoning items are replayed verbatim from their stored signature.
@@ -148,5 +201,5 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
     end
   end
 
-  defp gen_msg_id, do: "msg_" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+  defp gen_msg_id, do: "msg_" <> Catalyst.Ids.hex(12)
 end

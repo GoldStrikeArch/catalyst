@@ -1,7 +1,8 @@
 defmodule Catalyst.Tools.Write do
   @moduledoc "Create or overwrite a file, creating parent directories."
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.{AtomicWrite, Paths}
+  alias Catalyst.Files.AtomicWrite
+  alias Catalyst.Tools.Paths
 
   @impl true
   def execution_mode, do: :sequential

@@ -50,4 +50,33 @@ defmodule Catalyst.Session.RunConfigTest do
     assert {:error, {:unknown_api, "nope"}} =
              RunConfig.build(state(provider: "nope"), self(), make_ref())
   end
+
+  test "the canonical session id overrides nested caller options" do
+    config = build!(state(opts: [session_id: "../../outside"]))
+    assert config.opts[:session_id] == "run-config-test"
+  end
+
+  test "prewarm receives the canonical session id" do
+    Application.put_env(:catalyst, :blocking_prewarm_test, self())
+    on_exit(fn -> Application.delete_env(:catalyst, :blocking_prewarm_test) end)
+
+    assert {:ok, pid} =
+             RunConfig.start_prewarm(
+               state(
+                 provider: Catalyst.Test.BlockingPrewarmProvider,
+                 opts: [session_id: "../../outside"],
+                 messages: [],
+                 system_prompt: "test",
+                 tools: []
+               )
+             )
+
+    monitor = Process.monitor(pid)
+    assert_receive {:blocking_prewarm_started, ^pid}
+    assert_receive {:blocking_prewarm_opts, opts}
+    assert opts[:session_id] == "run-config-test"
+
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}
+  end
 end

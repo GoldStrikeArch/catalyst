@@ -49,6 +49,72 @@ defmodule CatalystWeb.UI.Markdown do
     |> Enum.reverse()
   end
 
+  @doc """
+  Split streaming text into `{stable_blocks, tail_source}` for progressive
+  rendering.
+
+  Every block except the last is STABLE: block classification is line-anchored,
+  so once a new block has started after it, no appended text can reinterpret
+  it — the stable prefix of a longer text is always an extension of the stable
+  prefix of a shorter one, and converges to `parse/1` of the full text.
+
+  Two safeguards make that invariant hold:
+
+    * **Newline gating** (the Codex CLI's rule): only complete
+      (newline-terminated) lines participate in parsing. A half-received
+      `---` would otherwise briefly parse as an `hr`, prematurely
+      stabilizing the paragraph before it, and then merge back INTO that
+      paragraph when the line continues (`---anything` is paragraph text).
+    * **The last block always stays in the tail** (it may still absorb
+      lines), with one refinement: a trailing fence-CLOSED code block is
+      committed immediately — nothing can merge backward into it, and it's
+      the block that benefits most from prompt rendering (highlighting).
+
+  The tail is raw SOURCE (last block + any partial line), suited for a plain
+  live-append display; `stable_blocks ++ parse(tail_source)` == `parse(text)`.
+  """
+  @spec stable_split(String.t()) :: {[block()], String.t()}
+  def stable_split(text) when is_binary(text) do
+    lines = text |> normalize_newlines() |> String.split("\n", trim: false)
+    {complete, [partial]} = Enum.split(lines, length(lines) - 1)
+
+    {stable_rev, tail_lines} = do_stable_split(complete, [])
+    {Enum.reverse(stable_rev), Enum.join(tail_lines ++ [partial], "\n")}
+  end
+
+  defp do_stable_split(lines, acc) do
+    case Enum.drop_while(lines, &blank?/1) do
+      [] ->
+        # Nothing but blanks left — they belong to the (empty) tail.
+        {acc, lines}
+
+      remaining ->
+        {block, rest} = take_one_block(remaining)
+        consumed = Enum.take(remaining, length(remaining) - length(rest))
+
+        cond do
+          # A later block has started — this one can no longer change.
+          Enum.any?(rest, &(not blank?(&1))) ->
+            do_stable_split(rest, [block | acc])
+
+          trailing_closed_code?(block, consumed) ->
+            {[block | acc], rest}
+
+          true ->
+            # Last block: keep it (and its leading blanks) as the tail.
+            {acc, lines}
+        end
+    end
+  end
+
+  # A last-position code block whose fence actually closed is final: any later
+  # line starts a NEW block (even another ``` opens a fresh fence). Checked on
+  # the lines the block CONSUMED (trailing blanks already sit in `rest`).
+  defp trailing_closed_code?({:code, _lang, _body}, consumed) when length(consumed) >= 2,
+    do: Regex.match?(@fence_close, List.last(consumed))
+
+  defp trailing_closed_code?(_block, _consumed), do: false
+
   @doc "True when a link destination is safe to place in an href attribute."
   @spec safe_href?(String.t()) :: boolean()
   def safe_href?(href) when is_binary(href) do
@@ -74,38 +140,27 @@ defmodule CatalystWeb.UI.Markdown do
     |> String.replace("\r", "\n")
   end
 
-  defp parse_blocks([], acc), do: acc
+  defp parse_blocks(lines, acc) do
+    case Enum.drop_while(lines, &blank?/1) do
+      [] ->
+        acc
 
-  defp parse_blocks([line | rest], acc) do
+      remaining ->
+        {block, rest} = take_one_block(remaining)
+        parse_blocks(rest, [block | acc])
+    end
+  end
+
+  # `lines` starts with a non-blank line; consume exactly one block.
+  defp take_one_block([line | rest] = lines) do
     cond do
-      blank?(line) ->
-        parse_blocks(rest, acc)
-
-      fenced_code?(line) ->
-        {block, rest} = take_fenced_code(line, rest)
-        parse_blocks(rest, [block | acc])
-
-      heading?(line) ->
-        parse_blocks(rest, [heading_block(line) | acc])
-
-      hr?(line) ->
-        parse_blocks(rest, [:hr | acc])
-
-      blockquote?(line) ->
-        {block, rest} = take_blockquote([line | rest])
-        parse_blocks(rest, [block | acc])
-
-      ul_item?(line) ->
-        {block, rest} = take_list([line | rest], :ul)
-        parse_blocks(rest, [block | acc])
-
-      ol_item?(line) ->
-        {block, rest} = take_list([line | rest], :ol)
-        parse_blocks(rest, [block | acc])
-
-      true ->
-        {block, rest} = take_paragraph([line | rest])
-        parse_blocks(rest, [block | acc])
+      fenced_code?(line) -> take_fenced_code(line, rest)
+      heading?(line) -> {heading_block(line), rest}
+      hr?(line) -> {:hr, rest}
+      blockquote?(line) -> take_blockquote(lines)
+      ul_item?(line) -> take_list(lines, :ul)
+      ol_item?(line) -> take_list(lines, :ol)
+      true -> take_paragraph(lines)
     end
   end
 

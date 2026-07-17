@@ -47,6 +47,51 @@ defmodule Catalyst.Extensions.VersioningTest do
   end
 
   @tag :git
+  test "commit_paths ignores an untracked missing rename source" do
+    if Versioning.available?() do
+      dir = tmp_repo!("untracked_rename")
+      missing_source = Path.join(dir, "direct_load.ex")
+      disabled = missing_source <> ".disabled"
+      File.write!(disabled, "# disabled direct load\n")
+
+      assert :ok =
+               Versioning.commit_paths(
+                 dir,
+                 [missing_source, disabled],
+                 "disable direct_load"
+               )
+
+      {shown, 0} = System.cmd("git", ["show", "--name-only", "--format=", "HEAD"], cd: dir)
+      assert shown =~ "direct_load.ex.disabled"
+      refute shown =~ "\ndirect_load.ex\n"
+    end
+  end
+
+  @tag :git
+  test "commit_paths excludes changes that were already staged" do
+    if Versioning.available?() do
+      dir = tmp_repo!("prestaged")
+      mine = Path.join(dir, "mine.ex")
+      staged = Path.join(dir, "staged.ex")
+
+      File.write!(staged, "# belongs to someone else\n")
+      {_, 0} = System.cmd("git", ["add", "--", "staged.ex"], cd: dir)
+      File.write!(mine, "# mine\n")
+
+      assert :ok = Versioning.commit_paths(dir, [mine], "install mine")
+
+      {shown, 0} = System.cmd("git", ["show", "--name-only", "--format=", "HEAD"], cd: dir)
+      assert shown =~ "mine.ex"
+      refute shown =~ "staged.ex"
+
+      # The unrelated file is still staged exactly as it was before our commit.
+      {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: dir)
+      assert status =~ "A  staged.ex"
+      refute status =~ "mine.ex"
+    end
+  end
+
+  @tag :git
   test "repeated rollbacks walk the change history LIFO instead of toggling" do
     if Versioning.available?() do
       dir = tmp_repo!("lifo")

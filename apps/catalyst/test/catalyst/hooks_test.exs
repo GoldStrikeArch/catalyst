@@ -6,7 +6,9 @@ defmodule Catalyst.HooksTest do
 
   import ExUnit.CaptureLog
 
+  alias Catalyst.Agent.Event
   alias Catalyst.Hooks
+  alias Catalyst.Hooks.ObserverDispatcher
 
   setup do
     owner = "hooks_test_#{System.unique_integer([:positive])}"
@@ -73,7 +75,13 @@ defmodule Catalyst.HooksTest do
       end
     end)
 
-    Hooks.register(:test_filter, fn _v, _ctx -> Process.sleep(:infinity) end,
+    Hooks.register(
+      :test_filter,
+      fn _v, _ctx ->
+        receive do
+          :never -> :ok
+        end
+      end,
       owner: owner,
       priority: 10
     )
@@ -115,6 +123,19 @@ defmodule Catalyst.HooksTest do
     end)
   end
 
+  test "after_tool_call rejects non-boolean error and terminate fields", %{owner: owner} do
+    original = {"out", %{}, false, false}
+
+    Hooks.register(
+      :after_tool_call,
+      fn _value, _ctx -> {:ok, {"poisoned", %{}, :not_boolean, "also-not-boolean"}} end,
+      owner: owner
+    )
+
+    log = capture_log(fn -> assert Hooks.after_tool_call(original, %{}) == original end)
+    assert log =~ "malformed"
+  end
+
   test "unregister/1 removes only that owner's handlers", %{owner: owner} do
     other = "other_#{System.unique_integer([:positive])}"
     on_exit(fn -> Hooks.unregister(other) end)
@@ -133,9 +154,218 @@ defmodule Catalyst.HooksTest do
     pid = self()
     Hooks.on(fn ev -> send(pid, {:obs, ev}) end, owner: owner)
 
-    Hooks.notify({:sentinel, ref})
+    assert :ok = Hooks.notify({:sentinel, ref})
 
     assert_receive {:obs, {:sentinel, ^ref}}
+    assert :ok = Hooks.await_observers()
+  end
+
+  test "a crashing observer is isolated and later observers still run", %{owner: owner} do
+    parent = self()
+    session = {:crashing_observer, make_ref()}
+
+    Hooks.on(fn _event -> raise "observer boom" end, owner: owner, priority: 10)
+
+    Hooks.on(fn event -> send(parent, {:observer_after_crash, event}) end,
+      owner: owner,
+      priority: 20
+    )
+
+    log =
+      capture_log(fn ->
+        assert :ok = Hooks.notify(:event, session)
+        assert :ok = Hooks.await_observers(session)
+      end)
+
+    assert_receive {:observer_after_crash, :event}
+    assert log =~ "observer boom"
+    assert Process.alive?(Process.whereis(ObserverDispatcher))
+  end
+
+  test "event observers are asynchronous and ordered per session", %{owner: owner} do
+    parent = self()
+    session = {:ordered, make_ref()}
+
+    Hooks.on(
+      fn event ->
+        send(parent, {:observer_started, session, event, self()})
+
+        receive do
+          {:release, ^event} -> send(parent, {:observer_finished, session, event})
+        end
+      end,
+      owner: owner
+    )
+
+    assert :ok = Hooks.notify(:first, session)
+    assert_receive {:observer_started, ^session, :first, first_pid}, 1_000
+
+    # The dispatcher owns the observer task directly. There is no intermediate
+    # per-event task that then starts another task for the callback.
+    dispatcher_state = :sys.get_state(ObserverDispatcher)
+    assert get_in(dispatcher_state, [:sessions, session, :active, :handler, :pid]) == first_pid
+
+    # The first observer is still blocked, but notification itself and queueing
+    # later events return immediately.
+    assert :ok = Hooks.notify(:second, session)
+    assert :ok = Hooks.notify(:third, session)
+    refute_receive {:observer_started, ^session, :second, _pid}, 0
+
+    send(first_pid, {:release, :first})
+    assert_receive {:observer_finished, ^session, :first}, 1_000
+    assert_receive {:observer_started, ^session, :second, second_pid}, 1_000
+
+    send(second_pid, {:release, :second})
+    assert_receive {:observer_finished, ^session, :second}, 1_000
+    assert_receive {:observer_started, ^session, :third, third_pid}, 1_000
+
+    send(third_pid, {:release, :third})
+    assert_receive {:observer_finished, ^session, :third}, 1_000
+    assert :ok = Hooks.await_observers(session)
+  end
+
+  test "a blocked session does not delay observers for another session", %{owner: owner} do
+    parent = self()
+    blocked = {:blocked, make_ref()}
+    independent = {:independent, make_ref()}
+
+    Hooks.on(
+      fn event ->
+        send(parent, {:parallel_observer, event, self()})
+
+        receive do
+          {:release, ^event} -> :ok
+        end
+      end,
+      owner: owner
+    )
+
+    assert :ok = Hooks.notify(:blocked_event, blocked)
+    assert_receive {:parallel_observer, :blocked_event, blocked_pid}, 1_000
+
+    assert :ok = Hooks.notify(:independent_event, independent)
+    assert_receive {:parallel_observer, :independent_event, independent_pid}, 1_000
+
+    send(independent_pid, {:release, :independent_event})
+    send(blocked_pid, {:release, :blocked_event})
+    assert :ok = Hooks.await_observers(independent)
+    assert :ok = Hooks.await_observers(blocked)
+  end
+
+  test "observer admission is bounded and drops the newest update explicitly", %{owner: owner} do
+    put_app_env(:hook_observer_queue_limit, 2)
+    parent = self()
+    session = {:overflow, make_ref()}
+
+    Hooks.on(
+      fn event ->
+        send(parent, {:bounded_observer, event, self()})
+
+        receive do
+          {:release, ^event} -> :ok
+        end
+      end,
+      owner: owner
+    )
+
+    active = %Event.MessageUpdate{llm_event: :accepted_active}
+    queued = %Event.MessageUpdate{llm_event: :accepted_queued}
+    dropped = %Event.MessageUpdate{llm_event: :dropped_newest}
+
+    assert :ok = Hooks.notify(active, session)
+    assert_receive {:bounded_observer, ^active, active_pid}, 1_000
+    assert :ok = Hooks.notify(queued, session)
+
+    log =
+      capture_log(fn ->
+        assert {:dropped, :queue_full} = Hooks.notify(dropped, session)
+      end)
+
+    assert log =~ "observer queue full"
+
+    send(active_pid, {:release, active})
+    assert_receive {:bounded_observer, ^queued, queued_pid}, 1_000
+    refute_receive {:bounded_observer, ^dropped, _pid}, 0
+
+    send(queued_pid, {:release, queued})
+    assert :ok = Hooks.await_observers(session)
+
+    dispatcher_state = :sys.get_state(ObserverDispatcher)
+    refute Map.has_key?(dispatcher_state.sessions, session)
+  end
+
+  test "a lifecycle event evicts a queued stream update at capacity", %{owner: owner} do
+    put_app_env(:hook_observer_queue_limit, 2)
+    parent = self()
+    session = {:lifecycle, make_ref()}
+
+    Hooks.on(
+      fn event ->
+        send(parent, {:lifecycle_observer, event, self()})
+
+        receive do
+          {:release, ^event} -> :ok
+        end
+      end,
+      owner: owner
+    )
+
+    active = %Event.MessageUpdate{llm_event: :active}
+    evicted = %Event.MessageUpdate{llm_event: :evicted}
+    terminal = %Event.MessageEnd{message: :complete}
+
+    assert :ok = Hooks.notify(active, session)
+    assert_receive {:lifecycle_observer, ^active, active_pid}, 1_000
+    assert :ok = Hooks.notify(evicted, session)
+
+    log = capture_log(fn -> assert :ok = Hooks.notify(terminal, session) end)
+    assert log =~ "preserve a lifecycle event"
+
+    send(active_pid, {:release, active})
+    assert_receive {:lifecycle_observer, ^terminal, terminal_pid}, 1_000
+    refute_receive {:lifecycle_observer, ^evicted, _pid}, 0
+
+    send(terminal_pid, {:release, terminal})
+    assert :ok = Hooks.await_observers(session)
+  end
+
+  test "a killed notifier cannot leak admission or lose its queued lifecycle event", %{
+    owner: owner
+  } do
+    put_app_env(:hook_observer_queue_limit, 1)
+    parent = self()
+    session = {:killed_notifier, make_ref()}
+
+    Hooks.on(
+      fn event ->
+        send(parent, {:durable_lifecycle, event, self()})
+
+        receive do
+          {:release, ^event} -> :ok
+        end
+      end,
+      owner: owner
+    )
+
+    first = %Event.MessageEnd{message: :first}
+    terminal = %Event.AgentEnd{messages: []}
+
+    assert :ok = Hooks.notify(first, session)
+    assert_receive {:durable_lifecycle, ^first, first_pid}, 1_000
+
+    notifier = start_supervised!({Task, fn -> Hooks.notify(terminal, session) end})
+    _state = :sys.get_state(ObserverDispatcher)
+    notifier_ref = Process.monitor(notifier)
+    Process.exit(notifier, :kill)
+    assert_receive {:DOWN, ^notifier_ref, :process, ^notifier, :killed}
+
+    send(first_pid, {:release, first})
+    assert_receive {:durable_lifecycle, ^terminal, terminal_pid}, 1_000
+    send(terminal_pid, {:release, terminal})
+    assert :ok = Hooks.await_observers(session)
+
+    dispatcher_state = :sys.get_state(ObserverDispatcher)
+    refute Map.has_key?(dispatcher_state.sessions, session)
   end
 
   test "registered handlers survive a Hooks crash (table owned by TableOwner)", %{owner: owner} do
@@ -167,4 +397,13 @@ defmodule Catalyst.HooksTest do
     Hooks.register(:test_filter, fn v, _ctx -> {:ok, v <> "+new"} end, owner: owner)
     assert Hooks.run_filter(:test_filter, "", %{}) == "survived+new"
   end
+
+  defp put_app_env(key, value) do
+    previous = Application.fetch_env(:catalyst, key)
+    Application.put_env(:catalyst, key, value)
+    on_exit(fn -> restore_app_env(key, previous) end)
+  end
+
+  defp restore_app_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
+  defp restore_app_env(key, :error), do: Application.delete_env(:catalyst, key)
 end

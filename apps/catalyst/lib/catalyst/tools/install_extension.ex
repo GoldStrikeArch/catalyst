@@ -58,7 +58,7 @@ defmodule Catalyst.Tools.InstallExtension do
     end
   end
 
-  defp describe(%{owner: owner, tools: tools, extensions: exts}) do
+  defp describe(%{owner: owner, tools: tools, extensions: exts} = result) do
     parts =
       [
         tools != [] && "tools: #{Enum.join(tools, ", ")}",
@@ -67,6 +67,11 @@ defmodule Catalyst.Tools.InstallExtension do
       |> Enum.filter(& &1)
 
     summary = if parts == [], do: "no tools/extensions found", else: Enum.join(parts, "; ")
+
     "Installed #{owner} (#{summary}). Active now."
+    |> append_warning(result[:warning])
   end
+
+  defp append_warning(text, nil), do: text
+  defp append_warning(text, warning), do: text <> " Warning: #{warning}"
 end

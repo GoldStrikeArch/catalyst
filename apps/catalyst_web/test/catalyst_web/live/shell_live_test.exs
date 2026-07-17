@@ -123,8 +123,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
     send(
       view.pid,
-      {:agent_event, id,
-       %Event.MessageUpdate{llm_event: %LLMEvent.ThinkingDelta{delta: "hmm…"}}}
+      {:agent_event, id, %Event.MessageUpdate{llm_event: %LLMEvent.ThinkingDelta{delta: "hmm…"}}}
     )
 
     send(
@@ -146,6 +145,57 @@ defmodule CatalystWeb.ShellLiveTest do
     assert has_element?(view, "ul li")
     assert has_element?(view, "code", "item")
     assert render(view) =~ "final"
+  end
+
+  test "streaming commits stable markdown blocks progressively through the real renderer",
+       %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+
+    send(
+      view.pid,
+      {:agent_event, id, %Event.MessageStart{message: %Message.Assistant{content: []}}}
+    )
+
+    deltas = [
+      "# Ti",
+      "tle\n",
+      "\nintro para\n",
+      "\n```elixir\ndef f, do: :ok\n",
+      "```\n",
+      "\nclosing thoughts"
+    ]
+
+    for d <- deltas do
+      send(
+        view.pid,
+        {:agent_event, id, %Event.MessageUpdate{llm_event: %LLMEvent.TextDelta{delta: d}}}
+      )
+    end
+
+    html = render(view)
+
+    # The heading, paragraph, and (fence-closed) code block stabilized and
+    # rendered through MessageRenderer while the message is still streaming.
+    assert has_element?(view, "#stream-blocks", "Title")
+    assert has_element?(view, "#stream-blocks p", "intro para")
+    assert has_element?(view, "#stream-blocks pre code[data-lang=elixir]")
+    assert html =~ "def f, do: :ok"
+
+    # Each commit trimmed the client tail to the open block's source.
+    assert_push_event(view, "stream_tail", %{text: _})
+
+    # The raw open tail ("closing thoughts", no newline yet) is NOT committed.
+    refute has_element?(view, "#stream-blocks", "closing thoughts")
+
+    full = "# Title\n\nintro para\n\n```elixir\ndef f, do: :ok\n```\n\nclosing thoughts"
+    final = %Message.Assistant{content: Content.text(full)}
+    send(view.pid, {:agent_event, id, %Event.MessageEnd{message: final}})
+
+    # The bubble is gone; the final message shows the same blocks.
+    refute has_element?(view, "#streaming-message")
+    assert has_element?(view, "#message-stream pre code[data-lang=elixir]")
+    assert render(view) =~ "closing thoughts"
   end
 
   defmodule SlowStreamProvider do
@@ -243,10 +293,49 @@ defmodule CatalystWeb.ShellLiveTest do
     assert render(view) =~ "brand new message"
   end
 
+  # 1x1 red-pixel PNG.
+  @png_bytes Base.decode64!(
+               "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+             )
+
+  test "a pasted image is sent as an image content block and rendered in the bubble",
+       %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+
+    input =
+      file_input(view, "#chat-form", :image, [
+        %{name: "shot.png", content: @png_bytes, type: "image/png"}
+      ])
+
+    render_upload(input, "shot.png")
+
+    view |> form("#chat-form", %{"message" => "what is in this screenshot?"}) |> render_submit()
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
+
+    # The user bubble shows the attached thumbnail alongside the text.
+    html = render(view)
+    assert html =~ "data:image/png;base64,"
+    assert html =~ "what is in this screenshot?"
+
+    # And the session's transcript carries a real image content block.
+    [{session_pid, _}] = Elixir.Registry.lookup(Catalyst.Session.Registry, id)
+    user = Server.state(session_pid).messages |> Enum.find(&match?(%Message.User{}, &1))
+
+    assert [%Catalyst.Content.Text{}, %Catalyst.Content.Image{} = img] = user.content
+    assert img.mime_type == "image/png"
+    assert Base.decode64!(img.data) == @png_bytes
+  end
+
   defp wait_until(fun, tries \\ 50) do
     cond do
-      fun.() -> :ok
-      tries == 0 -> flunk("condition never became true")
+      fun.() ->
+        :ok
+
+      tries == 0 ->
+        flunk("condition never became true")
+
       true ->
         Process.sleep(20)
         wait_until(fun, tries - 1)

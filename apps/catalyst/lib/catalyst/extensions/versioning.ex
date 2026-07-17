@@ -15,6 +15,8 @@ defmodule Catalyst.Extensions.Versioning do
       Extensions server or an install forever.
   """
 
+  require Logger
+
   alias Catalyst.Tools.Exec
 
   # Commit as a fixed identity so a fresh repo can commit without global git
@@ -45,15 +47,22 @@ defmodule Catalyst.Extensions.Versioning do
   @doc "Initialise a repo in `dir` (with an empty root commit) if needed."
   @spec ensure_repo(Path.t()) :: :ok
   def ensure_repo(dir) do
-    if available?() and not File.dir?(Path.join(dir, ".git")) do
-      File.mkdir_p!(dir)
-      git(dir, ["init", "-q"])
-      git(dir, @id ++ ["commit", "-q", "--allow-empty", "-m", "init"])
-    end
+    case available?() and not File.dir?(Path.join(dir, ".git")) do
+      false ->
+        :ok
 
-    :ok
-  rescue
-    _ -> :ok
+      true ->
+        with :ok <- File.mkdir_p(dir),
+             {:ok, _output, 0} <- git(dir, ["init", "-q"]),
+             {:ok, _output, 0} <-
+               git(dir, @id ++ ["commit", "-q", "--allow-empty", "-m", "init"]) do
+          :ok
+        else
+          {:error, reason} ->
+            Logger.warning("[extensions] could not initialise versioning: #{inspect(reason)}")
+            :ok
+        end
+    end
   end
 
   @doc """
@@ -71,25 +80,25 @@ defmodule Catalyst.Extensions.Versioning do
 
       true ->
         case git(dir, ["add", "-A"]) do
-          {_out, 0} -> commit_staged(dir, message)
-          other -> error(other)
+          {:ok, _output, 0} -> commit_staged(dir, message)
+          {:error, _reason} = error -> error
         end
     end
   end
 
   defp commit_staged(dir, message) do
     case git(dir, ["status", "--porcelain"]) do
-      {"", 0} ->
+      {:ok, "", 0} ->
         :ok
 
-      {_dirty, 0} ->
+      {:ok, _dirty, 0} ->
         case git(dir, @id ++ ["commit", "-q", "-m", message]) do
-          {_out, 0} -> :ok
-          other -> error(other)
+          {:ok, _output, 0} -> :ok
+          {:error, _reason} = error -> error
         end
 
-      other ->
-        error(other)
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -106,31 +115,57 @@ defmodule Catalyst.Extensions.Versioning do
         {:error, :no_git}
 
       true ->
-        rel = Enum.map(paths, &Path.relative_to(&1, dir))
+        rel =
+          paths
+          |> Enum.map(&Path.relative_to(&1, dir))
+          |> Enum.filter(&stageable_path?(dir, &1))
 
-        case git(dir, ["add", "--"] ++ rel) do
-          {_out, 0} -> commit_staged_index(dir, message)
-          other -> error(other)
+        case rel do
+          [] ->
+            :ok
+
+          paths ->
+            case git(dir, ["add", "--"] ++ paths) do
+              {:ok, _output, 0} -> commit_staged_paths(dir, paths, message)
+              {:error, _reason} = error -> error
+            end
         end
+    end
+  end
+
+  # `git add -- missing-new-file` rejects the whole command. A lifecycle rename
+  # can legitimately mention such a path when the source was loaded directly
+  # and had never been committed, so stage only files that exist now or are
+  # already tracked (tracked deletions still need to be staged).
+  defp stageable_path?(dir, path) do
+    File.exists?(Path.join(dir, path)) or tracked_path?(dir, path)
+  end
+
+  defp tracked_path?(dir, path) do
+    case git(dir, ["ls-files", "--error-unmatch", "--", path]) do
+      {:ok, _output, 0} -> true
+      {:error, _reason} -> false
     end
   end
 
   # Commit the index only when something is actually staged (exit 1 from
   # `diff --cached --quiet` = differences): a byte-identical reinstall stays a
   # no-op `:ok` for the same empty-commit reason as `commit/2`.
-  defp commit_staged_index(dir, message) do
-    case git(dir, ["diff", "--cached", "--quiet"]) do
-      {_out, 0} ->
+  defp commit_staged_paths(dir, paths, message) do
+    case git(dir, ["diff", "--cached", "--quiet", "--"] ++ paths, [0, 1]) do
+      {:ok, _output, 0} ->
         :ok
 
-      {_out, 1} ->
-        case git(dir, @id ++ ["commit", "-q", "-m", message]) do
-          {_out, 0} -> :ok
-          other -> error(other)
+      {:ok, _output, 1} ->
+        # Supplying a pathspec makes git commit ONLY these paths from the index;
+        # unrelated changes that were already staged stay staged for their owner.
+        case git(dir, @id ++ ["commit", "-q", "-m", message, "--"] ++ paths) do
+          {:ok, _output, 0} -> :ok
+          {:error, _reason} = error -> error
         end
 
-      other ->
-        error(other)
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -203,7 +238,7 @@ defmodule Catalyst.Extensions.Versioning do
       end
 
     case git(dir, ["log", "--format=%H%x09%s", "-n", Integer.to_string(@log_window)] ++ pathspec) do
-      {out, 0} ->
+      {:ok, out, 0} ->
         commits =
           out
           |> String.split("\n", trim: true)
@@ -216,8 +251,8 @@ defmodule Catalyst.Extensions.Versioning do
 
         {:ok, commits}
 
-      other ->
-        error(other)
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -261,13 +296,13 @@ defmodule Catalyst.Extensions.Versioning do
 
   defp do_revert(dir, hash) do
     case git(dir, @id ++ ["revert", "--no-edit", hash]) do
-      {_out, 0} ->
+      {:ok, _output, 0} ->
         :ok
 
-      other ->
+      {:error, _reason} = error ->
         # Conflict (or any failure): abort so no sequencer state survives.
         git(dir, ["revert", "--abort"])
-        error(other)
+        error
     end
   end
 
@@ -276,22 +311,24 @@ defmodule Catalyst.Extensions.Versioning do
   defp repo?(dir), do: available?() and File.dir?(Path.join(dir, ".git"))
 
   # All git calls run through Exec.collect/3 (port + absolute deadline) so a
-  # hung git can't block the caller. Returns `{output, exit_status}` like
-  # System.cmd, or `{:error, reason}` (e.g. `:timeout`) on collection failure.
-  defp git(dir, args) do
+  # hung git can't block the caller. Expected statuses are explicitly tagged;
+  # every other exit and transport failure has one `{:error, reason}` shape.
+  defp git(dir, args, expected_statuses \\ [0]) do
     case System.find_executable("git") do
       nil ->
         {:error, :no_git}
 
       git ->
         case Exec.collect(git, args, cwd: dir, timeout: @timeout) do
-          {:ok, %{out: out, status: status}} -> {out, status}
-          {:error, reason} -> {:error, reason}
+          {:ok, %{out: out, status: status}} ->
+            case status in expected_statuses do
+              true -> {:ok, out, status}
+              false -> {:error, {status, out}}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   end
-
-  # Normalise a failed git/2 result into the {:error, ...} contract.
-  defp error({:error, reason}), do: {:error, reason}
-  defp error({out, code}), do: {:error, {code, out}}
 end

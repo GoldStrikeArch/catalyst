@@ -12,6 +12,7 @@ defmodule Catalyst.Session.Snapshot do
   `streaming_message` carries the deltas streamed so far as content blocks, so
   a reattaching UI can rebuild the in-flight bubble.
   """
+  @spec of(map()) :: map()
   def of(state) do
     %{
       id: state.id,

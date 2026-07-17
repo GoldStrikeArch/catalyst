@@ -11,5 +11,5 @@ defmodule Catalyst.Auth.PKCE do
 
   @doc "A random opaque `state` value."
   @spec state() :: String.t()
-  def state, do: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+  def state, do: Catalyst.Ids.hex(16)
 end

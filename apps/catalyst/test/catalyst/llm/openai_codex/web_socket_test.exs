@@ -36,6 +36,9 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
           # Push one event, then close BEFORE the terminal event.
           frames = [text(%{"type" => "response.output_text.delta", "delta" => "oops"})]
           {:stop, :normal, 1000, frames, state}
+
+        "invalid" ->
+          {:push, [{:text, <<255>>}], state}
       end
     end
 
@@ -82,6 +85,10 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
       send_resp(conn, 401, "no token for you")
     end
 
+    get "/denied-large" do
+      send_resp(conn, 403, String.duplicate("x", 100_000))
+    end
+
     match _ do
       send_resp(conn, 404, "not found")
     end
@@ -122,6 +129,29 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
     WebSocket.close(conn)
   end
 
+  test "accepts a response.create frame that the caller already encoded", %{port: port} do
+    url = "ws://127.0.0.1:#{port}/codex/responses?mode=happy"
+    frame = Jason.encode!(%{"type" => "response.create", "model" => "m"})
+
+    assert {:ok, conn} = WebSocket.connect(url, [])
+    assert {:ok, conn, events} = WebSocket.request(conn, frame, [], &collect/2)
+    assert Enum.any?(events, &(&1["type"] == "response.completed"))
+    WebSocket.close(conn)
+  end
+
+  test "an initial send failure closes the checked-out socket", %{port: port} do
+    url = "ws://127.0.0.1:#{port}/codex/responses?mode=happy"
+
+    assert {:ok, conn} = WebSocket.connect(url, [])
+    socket = conn.conn.socket
+    invalid = %{conn | ref: make_ref()}
+
+    assert {:error, _reason, [], 0} =
+             WebSocket.request(invalid, %{"model" => "m"}, [], &collect/2)
+
+    assert Port.info(socket) == nil
+  end
+
   test "a close before the terminal event is an error that reports emitted events",
        %{port: port} do
     url = "ws://127.0.0.1:#{port}/codex/responses?mode=truncate"
@@ -142,6 +172,13 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
     assert body =~ "no token"
   end
 
+  test "a rejected upgrade caps its response body", %{port: port} do
+    url = "ws://127.0.0.1:#{port}/denied-large"
+
+    assert {:error, {:upgrade, 403, body}} = WebSocket.connect(url, [])
+    assert byte_size(body) == 65_536
+  end
+
   test "connecting to a closed port is a tagged error", %{port: port} do
     # The Bandit server from setup is NOT on port+1; grab a port nothing
     # listens on by binding and closing it.
@@ -151,5 +188,23 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
 
     assert {:error, _reason} = WebSocket.connect("ws://127.0.0.1:#{free_port}/x", [])
     assert port > 0
+  end
+
+  test "rejects unknown and missing URL schemes before connecting" do
+    assert {:error, {:invalid_websocket_url_scheme, "ftp"}} =
+             WebSocket.connect("ftp://example.com/codex/responses", [])
+
+    assert {:error, {:invalid_websocket_url_scheme, nil}} =
+             WebSocket.connect("example.com/codex/responses", [])
+  end
+
+  test "a decoded frame error closes the request instead of being ignored", %{port: port} do
+    url = "ws://127.0.0.1:#{port}/codex/responses?mode=invalid"
+    assert {:ok, conn} = WebSocket.connect(url, [])
+
+    assert {:error, reason, [], 0} =
+             WebSocket.request(conn, %{"model" => "m"}, [], &collect/2, idle_timeout: 1_000)
+
+    refute reason == :idle_timeout
   end
 end

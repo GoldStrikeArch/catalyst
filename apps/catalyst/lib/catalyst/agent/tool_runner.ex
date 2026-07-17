@@ -10,7 +10,8 @@ defmodule Catalyst.Agent.ToolRunner do
 
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Hooks, Message}
-  alias Catalyst.Tools.Registry
+  alias Catalyst.Content.Text
+  alias Catalyst.Tools.{Registry, Truncate}
 
   @type outcome :: %{message: Message.ToolResult.t(), terminate: boolean()}
 
@@ -38,8 +39,8 @@ defmodule Catalyst.Agent.ToolRunner do
 
     outcomes =
       case batch_mode(tool_calls, config, index) do
-        :sequential -> Enum.map(tool_calls, &run_one(&1, index, config, emit))
-        :parallel -> run_parallel(tool_calls, index, config, emit)
+        :sequential -> run_stream(tool_calls, index, config, emit, 1)
+        :parallel -> run_stream(tool_calls, index, config, emit, max_concurrency(config))
       end
 
     results = Enum.map(outcomes, & &1.message)
@@ -50,10 +51,10 @@ defmodule Catalyst.Agent.ToolRunner do
     {results, terminate?}
   end
 
-  defp run_parallel(tool_calls, index, config, emit) do
+  defp run_stream(tool_calls, index, config, emit, max_concurrency) do
     tool_calls
     |> Task.async_stream(&run_one(&1, index, config, emit),
-      max_concurrency: Map.get(config, :max_tool_concurrency, System.schedulers_online()),
+      max_concurrency: max_concurrency,
       ordered: true,
       timeout: Map.get(config, :tool_timeout, :infinity),
       on_timeout: :kill_task
@@ -64,6 +65,9 @@ defmodule Catalyst.Agent.ToolRunner do
       {{:exit, reason}, tool_call} -> failed_outcome(tool_call, reason, emit)
     end)
   end
+
+  defp max_concurrency(config),
+    do: Map.get(config, :max_tool_concurrency, System.schedulers_online())
 
   defp batch_mode(tool_calls, config, index) do
     cond do
@@ -109,6 +113,7 @@ defmodule Catalyst.Agent.ToolRunner do
     raw_result = run_registered_tool(index, name, args, tool_call, hook_ctx, config, emit)
 
     {content, details, error?, terminate} = apply_after_tool_hook(raw_result, hook_ctx)
+    content = scrub_text_content(content)
 
     emit_tool_end(id, name, content, details, error?, emit)
 
@@ -168,12 +173,22 @@ defmodule Catalyst.Agent.ToolRunner do
   end
 
   defp blocked_tool_result(reason) do
-    {Content.text(to_string(reason)), %{blocked: true}, true, false}
+    {Content.text(format_block_reason(reason)), %{blocked: true}, true, false}
   end
+
+  defp format_block_reason(reason) when is_binary(reason), do: reason
+  defp format_block_reason(reason), do: inspect(reason)
 
   defp apply_after_tool_hook(raw_result, hook_ctx) do
     # Hooks may override the result (content/details/is_error/terminate).
     Hooks.after_tool_call(raw_result, hook_ctx)
+  end
+
+  defp scrub_text_content(content) do
+    Enum.map(content, fn
+      %Text{text: text} = block -> %{block | text: Truncate.scrub_utf8(text)}
+      block -> block
+    end)
   end
 
   defp emit_tool_end(id, name, content, details, error?, emit) do
@@ -241,18 +256,20 @@ defmodule Catalyst.Agent.ToolRunner do
   end
 
   # Resolving a schema is expensive, so cache the result in :persistent_term,
-  # ONE entry per tool module holding {params_hash, resolved}: a hot-reloaded
-  # tool whose schema changed REPLACES its entry (hash mismatch → re-resolve)
+  # ONE entry per tool module holding {params, resolved}: a hot-reloaded
+  # tool whose schema changed REPLACES its entry (exact mismatch → re-resolve)
   # instead of accumulating one permanent entry per schema version, while
   # unchanged tools hit the cache.
   defp resolved_schema(module) do
-    params = module.parameters()
-    key = {__MODULE__, module}
-    hash = :erlang.phash2(params)
+    with {:ok, %{parameters: params}} <- Registry.cached_definition(module) do
+      key = {__MODULE__, module}
 
-    case :persistent_term.get(key, :unresolved) do
-      {^hash, resolved} -> resolved
-      _missing_or_stale -> cache_schema(key, hash, params)
+      case :persistent_term.get(key, :unresolved) do
+        {^params, resolved} -> resolved
+        _missing_or_stale -> cache_schema(key, params)
+      end
+    else
+      {:error, _reason} -> :error
     end
   rescue
     _ -> :error
@@ -260,9 +277,9 @@ defmodule Catalyst.Agent.ToolRunner do
     _kind, _reason -> :error
   end
 
-  defp cache_schema(key, hash, params) do
+  defp cache_schema(key, params) do
     resolved = resolve_schema(params)
-    :persistent_term.put(key, {hash, resolved})
+    :persistent_term.put(key, {params, resolved})
     resolved
   end
 

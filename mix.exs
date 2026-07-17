@@ -53,7 +53,11 @@ defmodule Catalyst.Umbrella.MixProject do
       # Build with: MIX_ENV=prod mix release catalyst_cli
       catalyst_cli: [
         applications: [catalyst_cli: :permanent],
-        steps: [:assemble, &Burrito.wrap/1],
+        # CATALYST_RELEASE_PLAIN=1 skips the Burrito wrap (needs zig): the plain
+        # assembled release is what the release smoke tier boots.
+        steps:
+          [:assemble] ++
+            if(System.get_env("CATALYST_RELEASE_PLAIN"), do: [], else: [&Burrito.wrap/1]),
         burrito: [
           targets: [
             macos: [os: :darwin, cpu: :aarch64]
@@ -292,7 +296,11 @@ defmodule Catalyst.Umbrella.MixProject do
     [
       # run `mix setup` in all child apps
       setup: ["cmd mix setup"],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
+      # flexibility tier only (it also runs as part of plain `mix test`)
+      "test.flex": ["test --only flexibility"],
+      # release smoke tier (excluded from plain `mix test`; builds a real release)
+      "test.release": ["test --only release"]
     ]
   end
 end

@@ -8,15 +8,23 @@ defmodule Catalyst.Session.Store do
   `load/1` folds the lines back into a message list for resume.
   """
 
-  alias Catalyst.{Content, Message, Usage}
+  alias Catalyst.Message
+  alias Catalyst.Session.Store.Codec
 
   require Logger
 
   @type handle :: %{id: String.t(), path: String.t(), cwd: String.t()}
+  @type loaded_state :: %{
+          messages: [Message.t()],
+          model: Catalyst.Model.t() | nil,
+          model_set?: boolean(),
+          thinking_level: String.t() | nil,
+          thinking_level_set?: boolean()
+        }
 
   @doc "Root directory for all session logs (override with `config :catalyst, :sessions_root`)."
   def root,
-    do: Application.get_env(:catalyst, :sessions_root) || Path.expand("~/.catalyst/sessions")
+    do: Application.get_env(:catalyst, :sessions_root) || Catalyst.Paths.sessions()
 
   @doc """
   Open the session file for an id, creating it with a header line if it does
@@ -35,10 +43,13 @@ defmodule Catalyst.Session.Store do
       "version" => 1,
       "id" => id,
       "cwd" => cwd,
-      "timestamp" => now()
+      "timestamp" => Message.now()
     }
 
-    unless File.exists?(path), do: File.write!(path, line(header))
+    case File.exists?(path) do
+      true -> :ok
+      false -> File.write!(path, line(header))
+    end
 
     %{id: id, path: path, cwd: cwd}
   end
@@ -63,6 +74,57 @@ defmodule Catalyst.Session.Store do
     append_line(handle, fn -> %{"type" => "reset"} end)
   end
 
+  @doc """
+  Append a `model_change` entry (PI's session entry type): the session was
+  switched to this model, and a crash-restarted server should resume with it
+  rather than the boot default. Best-effort like `append_message/2`.
+  """
+  @spec append_model_change(handle(), Catalyst.Model.t() | nil) :: :ok
+  def append_model_change(handle, %Catalyst.Model{} = model) do
+    append_line(handle, fn ->
+      %{"type" => "model_change", "model" => Codec.encode_model(model)}
+    end)
+  end
+
+  def append_model_change(handle, nil) do
+    append_line(handle, fn -> %{"type" => "model_change", "model" => nil} end)
+  end
+
+  @doc "Append a `thinking_level_change` entry (the session's reasoning effort changed)."
+  @spec append_thinking_level_change(handle(), String.t() | nil) :: :ok
+  def append_thinking_level_change(handle, level) when is_binary(level) do
+    append_line(handle, fn -> %{"type" => "thinking_level_change", "level" => level} end)
+  end
+
+  def append_thinking_level_change(handle, nil) do
+    append_line(handle, fn -> %{"type" => "thinking_level_change", "level" => nil} end)
+  end
+
+  @doc """
+  Fold the settings entries: the LAST persisted model/thinking level plus flags
+  recording whether each setting has ever been written. A written `nil` is an
+  explicit clear tombstone, distinct from a fresh session with no entry.
+  Deliberately independent of `reset` markers — a transcript reset does not
+  undo a model choice.
+  """
+  @spec load_settings(String.t()) :: %{
+          model: Catalyst.Model.t() | nil,
+          model_set?: boolean(),
+          thinking_level: String.t() | nil,
+          thinking_level_set?: boolean()
+        }
+  def load_settings(path) do
+    path
+    |> load_state()
+    |> Map.take([:model, :model_set?, :thinking_level, :thinking_level_set?])
+  rescue
+    _ -> empty_settings()
+  end
+
+  defp empty_settings do
+    Map.take(empty_loaded_state(), [:model, :model_set?, :thinking_level, :thinking_level_set?])
+  end
+
   # Encode + write inside the rescue, so neither a Jason failure (tool results
   # can carry values JSON can't represent) nor a disk error propagates into the
   # session server.
@@ -74,184 +136,93 @@ defmodule Catalyst.Session.Store do
       :ok
   end
 
-  @doc "Load the messages from a session file (header skipped, last reset honored)."
-  @spec load(String.t()) :: [Message.t()]
-  def load(path) do
+  @doc """
+  Load the transcript and persisted settings in one pass through a session file.
+
+  Messages are chronological and only those after the last reset are returned.
+  Setting changes are independent of reset markers. The `*_set?` fields
+  distinguish an explicit `nil` tombstone from a setting that was never written.
+  Corrupt and unknown lines are skipped.
+  """
+  @spec load_state(String.t()) :: loaded_state()
+  def load_state(path) do
     path
     |> File.stream!()
-    |> Enum.reduce([], &fold_line/2)
-    |> Enum.reverse()
+    |> Enum.reduce(empty_loaded_state(), &fold_state_line/2)
+    |> Map.update!(:messages, &Enum.reverse/1)
   end
 
-  # ---- encoding -------------------------------------------------------------
+  @doc "Load the messages from a session file (header skipped, last reset honored)."
+  @spec load(String.t()) :: [Message.t()]
+  def load(path), do: load_state(path).messages
 
   defp line(map), do: Jason.encode!(map) <> "\n"
 
-  def encode(%Message.User{content: c, timestamp: ts}) do
-    %{"role" => "user", "content" => encode_content(c), "timestamp" => ts}
-  end
+  @doc "Encode a session message into its persisted JSON map."
+  @spec encode(Message.t()) :: map()
+  defdelegate encode(message), to: Codec
 
-  def encode(%Message.Assistant{} = m) do
+  @doc "Decode a persisted JSON message map back into a session message."
+  @spec decode(map()) :: Message.t()
+  defdelegate decode(message), to: Codec
+
+  defp empty_loaded_state do
     %{
-      "role" => "assistant",
-      "content" => encode_content(m.content),
-      "api" => m.api,
-      "provider" => m.provider,
-      "model" => m.model,
-      "usage" => encode_usage(m.usage),
-      "stopReason" => to_string(m.stop_reason),
-      "errorMessage" => m.error_message,
-      "responseId" => m.response_id,
-      "timestamp" => m.timestamp
+      messages: [],
+      model: nil,
+      model_set?: false,
+      thinking_level: nil,
+      thinking_level_set?: false
     }
   end
 
-  def encode(%Message.ToolResult{} = m) do
-    %{
-      "role" => "toolResult",
-      "toolCallId" => m.tool_call_id,
-      "toolName" => m.tool_name,
-      "content" => encode_content(m.content),
-      "isError" => m.is_error,
-      "details" => encodable(m.details),
-      "timestamp" => m.timestamp
-    }
-  end
-
-  defp encode_usage(nil), do: nil
-
-  defp encode_usage(%Usage{} = u) do
-    %{
-      "input" => u.input,
-      "output" => u.output,
-      "cacheRead" => u.cache_read,
-      "cacheWrite" => u.cache_write,
-      "totalTokens" => u.total_tokens,
-      "cost" => u.cost
-    }
-  end
-
-  defp encode_content(content) when is_list(content), do: Enum.map(content, &encode_block/1)
-
-  # Tool results are duck-typed (extension/LLM-authored tools return arbitrary
-  # shapes), so non-list content is wrapped as a single block rather than crash.
-  defp encode_content(other), do: [encode_block(other)]
-
-  defp encode_block(%Content.Text{text: t}), do: %{"type" => "text", "text" => t}
-
-  defp encode_block(%Content.Thinking{} = b),
-    do: %{
-      "type" => "thinking",
-      "thinking" => b.thinking,
-      "signature" => b.signature,
-      "redacted" => b.redacted
-    }
-
-  defp encode_block(%Content.Image{data: d, mime_type: mt}),
-    do: %{"type" => "image", "data" => d, "mimeType" => mt}
-
-  defp encode_block(%Content.ToolCall{id: id, name: n, arguments: a}),
-    do: %{"type" => "toolCall", "id" => id, "name" => n, "arguments" => a}
-
-  # Unknown block shapes degrade to inspected text so the line stays decodable.
-  defp encode_block(other), do: %{"type" => "text", "text" => inspect(other)}
-
-  # Details are best-effort JSON; drop anything not encodable rather than crash.
-  defp encodable(nil), do: nil
-
-  defp encodable(details) do
-    case Jason.encode(details) do
-      {:ok, _} -> details
-      {:error, _} -> nil
-    end
-  end
-
-  # ---- decoding -------------------------------------------------------------
-
-  # Best-effort: a corrupt or forward-versioned line must not make the whole
-  # session unloadable, so decode failures skip the line. The accumulator is
-  # newest-first; a reset marker drops everything seen so far.
-  defp fold_line(line, acc) do
+  # Decode each JSON line once. Failures are isolated to the line so a corrupt
+  # or forward-versioned entry cannot make the whole session unloadable.
+  defp fold_state_line(line, state) do
     case Jason.decode(String.trim(line)) do
-      {:ok, %{"type" => "message", "message" => m}} -> [decode(m) | acc]
-      {:ok, %{"type" => "reset"}} -> []
-      _ -> acc
+      {:ok, entry} -> fold_entry(entry, state)
+      {:error, _reason} -> state
     end
   rescue
-    _ -> acc
+    _error -> state
   end
 
-  @doc "Decode a JSON message map back into a struct."
-  def decode(%{"role" => "user"} = m),
-    do: %Message.User{content: decode_content(m["content"]), timestamp: m["timestamp"]}
-
-  def decode(%{"role" => "assistant"} = m) do
-    %Message.Assistant{
-      content: decode_content(m["content"]),
-      api: m["api"],
-      provider: m["provider"],
-      model: m["model"],
-      usage: decode_usage(m["usage"]),
-      stop_reason: decode_reason(m["stopReason"]),
-      error_message: m["errorMessage"],
-      response_id: m["responseId"],
-      timestamp: m["timestamp"]
-    }
+  defp fold_entry(%{"type" => "message", "message" => message}, state) do
+    %{state | messages: [Codec.decode(message) | state.messages]}
   end
 
-  def decode(%{"role" => "toolResult"} = m) do
-    %Message.ToolResult{
-      tool_call_id: m["toolCallId"],
-      tool_name: m["toolName"],
-      content: decode_content(m["content"]),
-      details: m["details"],
-      is_error: m["isError"] || false,
-      timestamp: m["timestamp"]
-    }
+  defp fold_entry(%{"type" => "reset"}, state), do: %{state | messages: []}
+
+  defp fold_entry(%{"type" => "model_change", "model" => nil}, state) do
+    %{state | model: nil, model_set?: true}
   end
 
-  defp decode_usage(%{} = u) do
-    %Usage{
-      input: u["input"] || 0,
-      output: u["output"] || 0,
-      cache_read: u["cacheRead"] || 0,
-      cache_write: u["cacheWrite"] || 0,
-      total_tokens: u["totalTokens"] || 0,
-      cost: u["cost"] || 0.0
-    }
+  defp fold_entry(%{"type" => "model_change", "model" => encoded}, state)
+       when is_map(encoded) do
+    case Codec.decode_model(encoded) do
+      {:ok, model} -> %{state | model: model, model_set?: true}
+      :error -> state
+    end
   end
 
-  defp decode_usage(_), do: %Usage{}
+  defp fold_entry(
+         %{"type" => "thinking_level_change", "level" => level},
+         state
+       )
+       when is_binary(level) do
+    %{state | thinking_level: level, thinking_level_set?: true}
+  end
 
-  defp decode_content(blocks) when is_list(blocks), do: Enum.map(blocks, &decode_block/1)
-  defp decode_content(_), do: []
+  defp fold_entry(%{"type" => "thinking_level_change", "level" => nil}, state) do
+    %{state | thinking_level: nil, thinking_level_set?: true}
+  end
 
-  defp decode_block(%{"type" => "text", "text" => t}), do: %Content.Text{text: t}
-
-  defp decode_block(%{"type" => "thinking"} = b),
-    do: %Content.Thinking{
-      thinking: b["thinking"],
-      signature: b["signature"],
-      redacted: b["redacted"] || false
-    }
-
-  defp decode_block(%{"type" => "image"} = b),
-    do: %Content.Image{data: b["data"], mime_type: b["mimeType"]}
-
-  defp decode_block(%{"type" => "toolCall"} = b),
-    do: %Content.ToolCall{id: b["id"], name: b["name"], arguments: b["arguments"] || %{}}
-
-  defp decode_reason(s) when s in ~w(stop length tool_use error aborted),
-    do: String.to_existing_atom(s)
-
-  defp decode_reason(_), do: :stop
+  defp fold_entry(_entry, state), do: state
 
   # ---- helpers --------------------------------------------------------------
 
-  defp gen_id, do: Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+  defp gen_id, do: Catalyst.Ids.hex(16)
 
   defp cwd_hash(cwd),
     do: :sha256 |> :crypto.hash(cwd) |> Base.encode16(case: :lower) |> binary_part(0, 16)
-
-  defp now, do: System.system_time(:millisecond)
 end

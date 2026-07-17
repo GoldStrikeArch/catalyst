@@ -24,6 +24,7 @@ defmodule Catalyst.Extensions.Installer do
 
   alias Catalyst.Extensions
   alias Catalyst.Extensions.Versioning
+  alias Catalyst.Files.AtomicWrite
 
   @doc """
   Write `source` as `<sanitized name>.ex` in the extensions dir, load it, and
@@ -66,7 +67,7 @@ defmodule Catalyst.Extensions.Installer do
       existed = File.exists?(path)
       backup = if existed, do: File.read!(path), else: nil
 
-      File.write!(path, source)
+      AtomicWrite.write!(path, source)
 
       case Extensions.load_file(path) do
         {:ok, summary} ->
@@ -92,16 +93,23 @@ defmodule Catalyst.Extensions.Installer do
       {:error, reason} ->
         Logger.warning("[installer] could not git-commit #{path}: #{inspect(reason)}")
 
+        warning =
+          "the change was NOT git-versioned (#{inspect(reason)}) — " <>
+            "rollback_extension cannot revert it"
+
         {:ok,
          summary
          |> Map.put(:path, path)
          |> Map.put(:versioned, false)
-         |> Map.put(
-           :warning,
-           "the change was NOT git-versioned (#{inspect(reason)}) — " <>
-             "rollback_extension cannot revert it"
-         )}
+         |> append_warning(warning)}
     end
+  end
+
+  defp append_warning(summary, warning) do
+    Map.update(summary, :warning, warning, fn
+      existing when is_binary(existing) -> existing <> "; " <> warning
+      _other -> warning
+    end)
   end
 
   # On a failed load over an existing file, restoring the bytes on disk is not
@@ -111,7 +119,7 @@ defmodule Catalyst.Extensions.Installer do
   # again. (For a brand-new file, Extensions purges the partial modules itself
   # and there is nothing to re-load.)
   defp restore_prior(path, true = _existed, backup) do
-    File.write!(path, backup)
+    AtomicWrite.write!(path, backup)
 
     case Extensions.load_file(path) do
       {:ok, _summary} ->
@@ -132,9 +140,7 @@ defmodule Catalyst.Extensions.Installer do
   @spec sanitize(String.t()) :: String.t()
   def sanitize(name) do
     name
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9_]+/, "_")
-    |> String.trim("_")
+    |> Extensions.sanitize_owner()
     |> case do
       "" -> "ext_#{System.unique_integer([:positive])}"
       ok -> ok

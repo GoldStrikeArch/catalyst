@@ -49,6 +49,9 @@ defmodule CatalystWeb.ShellLive do
         # Codex run settings (model/effort/fast/transport) — survive remounts
         # via persistent_term, applied to the session via Server.configure.
         codex_prefs: load_codex_prefs(),
+        # UI-only display prefs (quiet mode) — survive remounts via
+        # persistent_term; never applied to the session (no Server.configure).
+        ui_prefs: load_ui_prefs(),
         session_model: nil,
         session_opts: [],
         # "@" file references: the active search (trailing @query in the input)
@@ -71,6 +74,19 @@ defmodule CatalystWeb.ShellLive do
         message_count: 0
       )
       |> stream(:messages, [])
+      # Markdown blocks committed mid-stream (the block-commit streaming path):
+      # stabilized blocks of the CURRENT streaming message, rendered through
+      # the real MessageRenderer as they complete. Reset per message.
+      |> stream(:stream_blocks, [])
+      # Pasted/attached screenshots for the next prompt (the PasteImages hook
+      # feeds clipboard images in via this.upload); sent as Content.Image
+      # blocks alongside the text.
+      |> allow_upload(:image,
+        accept: ~w(.png .jpg .jpeg .gif .webp),
+        max_entries: 4,
+        max_file_size: 5_000_000,
+        auto_upload: true
+      )
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Catalyst.PubSub, Assets.topic())
@@ -141,7 +157,12 @@ defmodule CatalystWeb.ShellLive do
     text = socket.assigns.file_refs |> expand_file_refs(String.trim(text)) |> String.trim()
 
     cond do
-      text == "" or socket.assigns.running ->
+      socket.assigns.running ->
+        {:noreply, socket}
+
+      # Empty prompt — unless pasted images are attached (an image-only
+      # prompt is a legitimate "what is this?" message).
+      text == "" and not completed_images?(socket) ->
         {:noreply, socket}
 
       # Sessionless shell (start_session failed at mount) — no pid to prompt.
@@ -155,9 +176,13 @@ defmodule CatalystWeb.ShellLive do
         {:ok, name, arg} = parse_command(text)
         {:noreply, run_command(name, arg, socket)}
 
+      uploading_images?(socket) ->
+        {:noreply,
+         put_flash(socket, :error, "Images are still uploading — try again in a moment.")}
+
       true ->
         try do
-          case Server.prompt(socket.assigns.session_pid, text) do
+          case Server.prompt(socket.assigns.session_pid, prompt_content(socket, text)) do
             :ok ->
               {:noreply, socket |> assign_input("") |> assign(running: true, file_search: nil)}
 
@@ -173,6 +198,9 @@ defmodule CatalystWeb.ShellLive do
         end
     end
   end
+
+  def handle_event("cancel_image", %{"ref" => ref}, socket),
+    do: {:noreply, cancel_upload(socket, :image, ref)}
 
   def handle_event("pick_file", %{"label" => label, "path" => path}, socket) do
     text = socket.assigns.chat_form.params["message"] || ""
@@ -219,6 +247,14 @@ defmodule CatalystWeb.ShellLive do
   def handle_event("codex_fast", _params, socket) do
     prefs = clamp_fast(%{socket.assigns.codex_prefs | fast: not socket.assigns.codex_prefs.fast})
     {:noreply, apply_codex_prefs(socket, prefs)}
+  end
+
+  # Quiet mode is display-only (CSS [data-quiet] rules in app.css hide tool
+  # chips/results and thinking) — it never touches the agent session.
+  def handle_event("toggle_quiet", _params, socket) do
+    prefs = %{socket.assigns.ui_prefs | quiet: not socket.assigns.ui_prefs.quiet}
+    save_ui_prefs(prefs)
+    {:noreply, assign(socket, ui_prefs: prefs)}
   end
 
   # ---- extensions panel actions ----------------------------------------------
@@ -356,19 +392,27 @@ defmodule CatalystWeb.ShellLive do
 
   defp assign_input(socket, text), do: assign(socket, chat_form: chat_form(text))
 
-  # `streaming` is nil (no open bubble) or a seed map %{thinking, text} — the
-  # content rendered INTO the bubble on its first paint. Subsequent deltas are
-  # push_event'd and appended client-side (the bubble is phx-update="ignore",
-  # so LiveView never repaints over the appended text). A stale MessageStart
-  # replayed around a reattach must not blank an already-seeded bubble.
-  defp apply_event(%Event.MessageStart{message: %Message.Assistant{}}, socket),
-    do: assign(socket, streaming: socket.assigns.streaming || empty_stream_seed())
+  # `streaming` is nil (no open bubble) or the bubble state: `thinking`/`tail`
+  # seed the ignored client-append regions on first paint, `acc` is the full
+  # accumulated text, `committed` counts blocks already stabilized into the
+  # :stream_blocks stream, and `epoch` scopes their DOM ids to this message.
+  # A stale MessageStart replayed around a reattach must not blank an
+  # already-seeded bubble.
+  defp apply_event(%Event.MessageStart{message: %Message.Assistant{}}, socket) do
+    if socket.assigns.streaming, do: socket, else: start_stream_bubble(socket)
+  end
 
   defp apply_event(
          %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{delta: delta}},
          socket
-       ),
-       do: socket |> ensure_streaming() |> push_stream_delta("text", delta)
+       ) do
+    # Order matters: the client appends the delta to its raw tail FIRST, then
+    # a commit (if any) replaces the tail with the post-commit remainder.
+    socket
+    |> ensure_streaming()
+    |> push_stream_delta("text", delta)
+    |> accumulate_stream_text(delta)
+  end
 
   defp apply_event(
          %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.ThinkingDelta{delta: delta}},
@@ -388,14 +432,15 @@ defmodule CatalystWeb.ShellLive do
         assign(socket, replayed_tail: rest)
 
       :new ->
-        streaming =
-          if match?(%Message.Assistant{}, message), do: nil, else: socket.assigns.streaming
-
         seq = socket.assigns.message_seq + 1
+
+        socket =
+          if match?(%Message.Assistant{}, message),
+            do: clear_stream_bubble(socket),
+            else: socket
 
         socket
         |> assign(
-          streaming: streaming,
           message_seq: seq,
           message_count: socket.assigns.message_count + 1,
           replayed_tail: []
@@ -433,22 +478,102 @@ defmodule CatalystWeb.ShellLive do
   # ToolExecutionEnd for its pending calls. The run may have installed or
   # removed extensions, so a visible panel snapshot is rebuilt too.
   defp apply_event(%Event.AgentEnd{}, socket),
-    do: socket |> assign(running: false, streaming: nil, tools: %{}) |> maybe_refresh_panel()
+    do:
+      socket
+      |> assign(running: false, tools: %{})
+      |> clear_stream_bubble()
+      |> maybe_refresh_panel()
 
   defp apply_event(_event, socket), do: socket
 
   # A delta with no open bubble (e.g. reattached mid-stream) opens one.
   defp ensure_streaming(socket) do
-    if socket.assigns.streaming,
-      do: socket,
-      else: assign(socket, streaming: empty_stream_seed())
+    if socket.assigns.streaming, do: socket, else: start_stream_bubble(socket)
   end
 
-  defp empty_stream_seed, do: %{thinking: "", text: ""}
+  defp start_stream_bubble(socket) do
+    socket
+    |> assign(streaming: empty_stream_seed())
+    |> stream(:stream_blocks, [], reset: true)
+  end
+
+  defp clear_stream_bubble(socket) do
+    socket
+    |> assign(streaming: nil)
+    |> stream(:stream_blocks, [], reset: true)
+  end
+
+  defp empty_stream_seed do
+    %{thinking: "", tail: "", acc: "", committed: 0, epoch: System.unique_integer([:positive])}
+  end
+
+  # Block-commit streaming: grow the accumulated text; a delta carrying a
+  # newline may have completed lines that stabilize leading blocks (a block
+  # can only close at a line boundary — see Markdown.stable_split/1).
+  defp accumulate_stream_text(socket, delta) do
+    s = socket.assigns.streaming
+    socket = assign(socket, streaming: %{s | acc: s.acc <> delta})
+
+    if String.contains?(delta, "\n"), do: commit_stable_blocks(socket), else: socket
+  end
+
+  # Newly stabilized blocks render ONCE through the real renderer (into the
+  # :stream_blocks stream); the client's raw tail is then trimmed to just the
+  # open block's source via the "stream_tail" event.
+  defp commit_stable_blocks(socket) do
+    s = socket.assigns.streaming
+    {blocks, tail} = UI.Markdown.stable_split(s.acc)
+
+    if length(blocks) > s.committed do
+      socket =
+        blocks
+        |> Enum.drop(s.committed)
+        |> Enum.with_index(s.committed)
+        |> Enum.reduce(socket, fn {block, i}, sock ->
+          stream_insert(sock, :stream_blocks, %{id: "sb#{s.epoch}-#{i}", block: block})
+        end)
+
+      socket
+      |> assign(streaming: %{s | committed: length(blocks), tail: tail})
+      |> push_event("stream_tail", %{text: tail})
+    else
+      socket
+    end
+  end
 
   defp partial_text(%{output: out}) when is_binary(out), do: out
   defp partial_text(out) when is_binary(out), do: out
   defp partial_text(_other), do: nil
+
+  # ---- pasted-image uploads ---------------------------------------------------
+
+  defp completed_images?(socket),
+    do: Enum.any?(socket.assigns.uploads.image.entries, & &1.done?)
+
+  defp uploading_images?(socket),
+    do: Enum.any?(socket.assigns.uploads.image.entries, &(not &1.done?))
+
+  # The prompt content: plain text (the common case), or text + Content.Image
+  # blocks when screenshots were pasted (Server.prompt accepts both; the Codex
+  # request converts image blocks to input_image parts).
+  defp prompt_content(socket, text) do
+    images =
+      consume_uploaded_entries(socket, :image, fn %{path: path}, entry ->
+        {:ok,
+         %Catalyst.Content.Image{
+           data: path |> File.read!() |> Base.encode64(),
+           mime_type: entry.client_type || "image/png"
+         }}
+      end)
+
+    case images do
+      [] -> text
+      _some -> text_block(text) ++ images
+    end
+  end
+
+  defp text_block(""), do: []
+  defp text_block(text), do: [%Catalyst.Content.Text{text: text}]
 
   defp push_stream_delta(socket, kind, delta),
     do: push_event(socket, "stream_delta", %{kind: kind, delta: delta})
@@ -473,16 +598,17 @@ defmodule CatalystWeb.ShellLive do
   end
 
   defp reload_all_extensions do
-    {:ok, %{loaded: loaded, failed: failed}} = Extensions.load_all()
+    case Extensions.load_all() do
+      {:ok, %{loaded: loaded, failed: []}} ->
+        {:ok, "Reloaded #{length(loaded)} extension file(s)." <> warnings_section(loaded)}
 
-    case failed do
-      [] ->
-        {:ok, "Reloaded #{length(loaded)} extension file(s)."}
-
-      failed ->
+      {:ok, %{loaded: loaded, failed: failed}} ->
         {:error,
          "Reloaded #{length(loaded)} file(s); #{length(failed)} failed — " <>
-           failure_lines(failed)}
+           failure_lines(failed) <> warnings_section(loaded)}
+
+      {:error, reason} ->
+        {:error, "Reload failed: " <> Extensions.format_error(reason)}
     end
   end
 
@@ -518,34 +644,41 @@ defmodule CatalystWeb.ShellLive do
 
   # nil = global: undo the newest non-reverted change across all extensions.
   defp rollback_extension(nil) do
-    Extensions.dir()
-    |> Versioning.rollback()
-    |> rollback_result("the most recent extension change")
+    Extensions.locked(fn ->
+      Extensions.dir()
+      |> Versioning.rollback()
+      |> rollback_result("the most recent extension change")
+    end)
   end
 
   defp rollback_extension(owner) do
-    case Extensions.source_file(owner) do
-      {:ok, path} ->
-        Extensions.dir()
-        |> Versioning.rollback_file(path)
-        |> rollback_result("#{owner}'s most recent change")
+    Extensions.locked(fn ->
+      case Extensions.source_file(owner) do
+        {:ok, path} ->
+          Extensions.dir()
+          |> Versioning.rollback_file(path)
+          |> rollback_result("#{owner}'s most recent change")
 
-      :error ->
-        {:error, "Rollback failed: no source file found for #{owner}."}
-    end
+        :error ->
+          {:error, "Rollback failed: no source file found for #{owner}."}
+      end
+    end)
   end
 
   defp rollback_result(:ok, what) do
-    {:ok, %{loaded: loaded, failed: failed}} = Extensions.load_all()
+    case Extensions.load_all() do
+      {:ok, %{loaded: loaded, failed: []}} ->
+        {:ok,
+         "Rolled back #{what} and reloaded #{length(loaded)} file(s)." <>
+           warnings_section(loaded)}
 
-    case failed do
-      [] ->
-        {:ok, "Rolled back #{what} and reloaded #{length(loaded)} file(s)."}
-
-      failed ->
+      {:ok, %{loaded: loaded, failed: failed}} ->
         {:error,
          "Rolled back #{what}, but #{length(failed)} file(s) failed to load — " <>
-           failure_lines(failed)}
+           failure_lines(failed) <> warnings_section(loaded)}
+
+      {:error, reason} ->
+        {:error, "Rolled back #{what}, but reload failed: " <> Extensions.format_error(reason)}
     end
   end
 
@@ -574,6 +707,19 @@ defmodule CatalystWeb.ShellLive do
     end)
   end
 
+  defp warnings_section(loaded) do
+    warnings =
+      for summary <- loaded,
+          warning = summary[:warning],
+          is_binary(warning),
+          do: "#{summary.owner}: #{warning}"
+
+    case warnings do
+      [] -> ""
+      warnings -> " Warnings — " <> Enum.join(warnings, "; ")
+    end
+  end
+
   # ---- session lifecycle ----------------------------------------------------
 
   # The most recent session for this (single-user) app instance. A remounting
@@ -593,10 +739,10 @@ defmodule CatalystWeb.ShellLive do
     case remembered_session() do
       %{id: id} ->
         case await_session(id) do
-          pid when is_pid(pid) ->
+          {:ok, pid} ->
             reattach_session(socket, id, pid)
 
-          nil ->
+          :error ->
             # Stop the abandoned id: a crashed session's supervisor restart
             # could still re-register it after we've moved on, and nothing
             # would ever attach to (or stop) it again.
@@ -618,12 +764,12 @@ defmodule CatalystWeb.ShellLive do
 
   defp await_session(id, retries) do
     case Manager.whereis(id) do
-      nil ->
+      :error ->
         Process.sleep(20)
         await_session(id, retries - 1)
 
-      pid ->
-        pid
+      {:ok, _pid} = found ->
+        found
     end
   end
 
@@ -666,6 +812,7 @@ defmodule CatalystWeb.ShellLive do
       end)
 
     socket
+    |> stream(:stream_blocks, [], reset: true)
     |> assign(
       cwd: snapshot.cwd,
       running: snapshot.running,
@@ -682,20 +829,37 @@ defmodule CatalystWeb.ShellLive do
 
   # Rebuild the in-flight bubble from the snapshot's accumulated partial
   # content — a late joiner (reattach, page return) sees the text streamed so
-  # far, and deltas arriving after the snapshot append client-side on top.
+  # far (stable blocks fully rendered, the open block as the raw tail), and
+  # deltas arriving after the snapshot append client-side on top.
   defp seed_streaming(socket, %Message.Assistant{content: content}) do
+    thinking =
+      content
+      |> Enum.filter(&match?(%Catalyst.Content.Thinking{}, &1))
+      |> Enum.map_join("", & &1.thinking)
+
+    text =
+      content
+      |> Enum.filter(&match?(%Catalyst.Content.Text{}, &1))
+      |> Enum.map_join("", & &1.text)
+
+    {blocks, tail} = UI.Markdown.stable_split(text)
+    epoch = System.unique_integer([:positive])
+
     seed = %{
-      thinking:
-        content
-        |> Enum.filter(&match?(%Catalyst.Content.Thinking{}, &1))
-        |> Enum.map_join("", & &1.thinking),
-      text:
-        content
-        |> Enum.filter(&match?(%Catalyst.Content.Text{}, &1))
-        |> Enum.map_join("", & &1.text)
+      thinking: thinking,
+      tail: tail,
+      acc: text,
+      committed: length(blocks),
+      epoch: epoch
     }
 
-    assign(socket, streaming: seed)
+    socket = socket |> assign(streaming: seed) |> stream(:stream_blocks, [], reset: true)
+
+    blocks
+    |> Enum.with_index()
+    |> Enum.reduce(socket, fn {block, i}, sock ->
+      stream_insert(sock, :stream_blocks, %{id: "sb#{epoch}-#{i}", block: block})
+    end)
   end
 
   defp seed_streaming(socket, _none), do: socket
@@ -810,6 +974,23 @@ defmodule CatalystWeb.ShellLive do
   end
 
   defp save_codex_prefs(prefs), do: :persistent_term.put(@codex_prefs_ptr, prefs)
+
+  # UI-only preferences (quiet mode). Kept in a SEPARATE persistent_term from
+  # codex_prefs: sync_codex_ui/1 rebuilds codex_prefs wholesale from the
+  # session snapshot on reattach, which would drop any UI-only key stored
+  # alongside it.
+  @ui_prefs_ptr {__MODULE__, :ui_prefs}
+
+  defp load_ui_prefs do
+    default = %{quiet: false}
+
+    case :persistent_term.get(@ui_prefs_ptr, nil) do
+      %{} = saved -> Map.merge(default, saved)
+      _none -> default
+    end
+  end
+
+  defp save_ui_prefs(prefs), do: :persistent_term.put(@ui_prefs_ptr, prefs)
 
   defp put_pref(prefs, _key, nil), do: prefs
   defp put_pref(prefs, key, value), do: Map.put(prefs, key, value)
@@ -993,6 +1174,14 @@ defmodule CatalystWeb.ShellLive do
 
   @impl true
   def render(assigns) do
+    catalog = OpenAICodex.catalog_snapshot(assigns.codex_prefs.model)
+
+    assigns =
+      assign(assigns,
+        codex_catalog: catalog.models,
+        selected_codex_entry: catalog.selected
+      )
+
     ~H"""
     <Layouts.app flash={@flash} class="min-h-screen bg-slate-950 text-slate-950 dark:text-slate-50">
       <div
@@ -1034,13 +1223,25 @@ defmodule CatalystWeb.ShellLive do
           <div class="flex flex-none items-center gap-1.5">
             {render_slot_components(:header_extra, assigns)}
 
+            <%!-- Quiet mode: display-only — hides tool chips/results and
+            thinking via CSS ([data-quiet] rules in app.css). Provider-agnostic,
+            so it lives outside the Codex cluster; never touches the session. --%>
+            <button
+              type="button"
+              phx-click="toggle_quiet"
+              title="Quiet mode: hide tool calls/results and thinking (display only)"
+              class={quiet_button_class(@ui_prefs.quiet)}
+            >
+              <.icon name="hero-eye-slash" class="size-3.5" /> Quiet
+            </button>
+
             <%!-- Codex run settings: applied to the live session for the NEXT
             run (Server.configure) — no session restart, transcript stays. --%>
             <div class="flex items-center gap-1.5">
               <form id="codex-opts" phx-change="codex_opts" class="flex items-center gap-1.5">
                 <select name="model" class={codex_select_class()} title="Codex model">
                   <option
-                    :for={m <- OpenAICodex.list_models()}
+                    :for={m <- @codex_catalog}
                     value={m.id}
                     selected={m.id == @codex_prefs.model}
                   >
@@ -1049,7 +1250,7 @@ defmodule CatalystWeb.ShellLive do
                 </select>
                 <select name="effort" class={codex_select_class()} title="Reasoning effort">
                   <option
-                    :for={e <- OpenAICodex.catalog_entry(@codex_prefs.model).efforts}
+                    :for={e <- @selected_codex_entry.efforts}
                     value={e}
                     selected={e == @codex_prefs.effort}
                   >
@@ -1071,7 +1272,7 @@ defmodule CatalystWeb.ShellLive do
                 </select>
               </form>
               <button
-                :if={OpenAICodex.catalog_entry(@codex_prefs.model).fast?}
+                :if={@selected_codex_entry.fast?}
                 type="button"
                 phx-click="codex_fast"
                 title="Fast mode (priority service tier): ~1.5x speed, increased usage"
@@ -1123,7 +1324,7 @@ defmodule CatalystWeb.ShellLive do
           :if={@boot_status != :ok}
           class="border-b border-amber-300/60 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200"
         >
-          ⚠ Extensions were not loaded — {boot_status_reason(@boot_status)}. Recover from the
+          ⚠ {boot_status_heading(@boot_status)} — {boot_status_reason(@boot_status)}. Recover from the
           <.link patch={~p"/extensions"} class="font-semibold underline">Extensions panel</.link>
           (disable or roll back the offender, then load again), or ask the agent to run <code class="font-mono">reload_extensions</code>.
         </div>
@@ -1134,10 +1335,16 @@ defmodule CatalystWeb.ShellLive do
     """
   end
 
+  defp boot_status_heading({:load_failed, _reason}), do: "Extension boot load failed"
+  defp boot_status_heading(_status), do: "Extensions were not loaded"
+
   defp boot_status_reason({:safe_mode, :env}), do: "CATALYST_SAFE_MODE is set"
 
   defp boot_status_reason({:safe_mode, :crash_detected}),
     do: "the previous boot crashed while extensions were active"
+
+  defp boot_status_reason({:load_failed, reason}),
+    do: "the boot-time load failed: #{Catalyst.Extensions.format_error(reason)}"
 
   defp boot_status_reason(_), do: "safe mode"
 
@@ -1152,6 +1359,16 @@ defmodule CatalystWeb.ShellLive do
       "rounded-full border px-2.5 py-1 text-xs font-semibold transition",
       active? &&
         "border-amber-400 bg-amber-100 text-amber-900 dark:border-amber-400/40 dark:bg-amber-400/20 dark:text-amber-200",
+      !active? &&
+        "border-slate-200 text-slate-500 hover:bg-slate-100 dark:border-white/10 dark:text-slate-300 dark:hover:bg-white/10"
+    ]
+  end
+
+  defp quiet_button_class(active?) do
+    [
+      "flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold transition",
+      active? &&
+        "border-indigo-400 bg-indigo-100 text-indigo-900 dark:border-indigo-400/40 dark:bg-indigo-400/20 dark:text-indigo-200",
       !active? &&
         "border-slate-200 text-slate-500 hover:bg-slate-100 dark:border-white/10 dark:text-slate-300 dark:hover:bg-white/10"
     ]

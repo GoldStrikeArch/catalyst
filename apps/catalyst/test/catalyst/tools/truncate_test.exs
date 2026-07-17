@@ -82,6 +82,20 @@ defmodule Catalyst.Tools.TruncateTest do
     assert scrubbed == "a��b"
   end
 
+  test "head and tail scrub invalid UTF-8 even when no truncation is needed" do
+    invalid = <<"a", 255, "b">>
+
+    {head, head_info} = Truncate.head(invalid)
+    {tail, tail_info} = Truncate.tail(invalid)
+
+    assert head == "a�b"
+    assert tail == "a�b"
+    assert String.valid?(head)
+    assert String.valid?(tail)
+    refute head_info.truncated
+    refute tail_info.truncated
+  end
+
   test "notice appends/prepends a truncation marker only when truncated" do
     content = Enum.map_join(1..100, "\n", &"line #{&1}")
 
@@ -95,5 +109,16 @@ defmodule Catalyst.Tools.TruncateTest do
 
     {out, info} = Truncate.head("a\nb")
     assert Truncate.notice(out, info, :head) == "a\nb"
+  end
+
+  test "head_notice and tail_notice return bounded text plus metadata" do
+    {head, head_info} = Truncate.head_notice("a\nb\nc", max_lines: 2)
+    {tail, tail_info} = Truncate.tail_notice("a\nb\nc", max_lines: 2)
+
+    assert head =~ "a\nb\n... [output truncated: showing first"
+    assert tail =~ "... [output truncated: showing last"
+    assert tail =~ "b\nc"
+    assert head_info.truncated
+    assert tail_info.truncated
   end
 end

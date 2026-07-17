@@ -13,6 +13,8 @@ defmodule Catalyst.Extensions.Processes do
   @top Catalyst.Extensions.ProcessSupervisor
   @registry Catalyst.Extensions.ProcessRegistry
 
+  alias Catalyst.Tasks
+
   # Reloading an extension purges its owner supervisor and immediately starts
   # new children (commit_load → stop_owner → setup/1 → start_child), but the
   # Registry removes a dead supervisor's `:via` entry ASYNCHRONOUSLY — so for a
@@ -80,16 +82,13 @@ defmodule Catalyst.Extensions.Processes do
   defp stop_sup(pid) do
     kids = children(pid)
 
-    task =
-      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-        DynamicSupervisor.terminate_child(@top, pid)
-      end)
+    task = Tasks.async(fn -> DynamicSupervisor.terminate_child(@top, pid) end)
 
-    case Task.yield(task, stop_timeout()) || Task.shutdown(task, :brutal_kill) do
+    case Tasks.await(task, stop_timeout()) do
       {:ok, _result} ->
         :ok
 
-      _timeout_or_crash ->
+      _timeout_or_exit ->
         Process.exit(pid, :kill)
         Enum.each(kids, &Process.exit(&1, :kill))
         :ok

@@ -2,6 +2,9 @@
    https://tailwindcss.com/docs/configuration */
 
 @import "tailwindcss" source(none);
+/* Syntax highlighting theme (code blocks render on a dark shell in BOTH app
+   themes, so one dark hljs palette is correct everywhere). */
+@import "../vendor/highlight-github-dark.min.css";
 @source "../css";
 @source "../js";
 @source "../../lib/catalyst_web";
@@ -33,4 +36,32 @@ html[data-theme="dark"] {
 body {
     min-height: 100vh;
     margin: 0;
+}
+
+/* ---- Quiet mode -----------------------------------------------------------
+   [data-quiet] is set on the transcript container (main#messages) by the
+   header "Quiet" toggle (ShellLive "toggle_quiet"). Hiding is CSS-only on
+   purpose: transcript items live in phx-update="stream"/"ignore" regions
+   that never re-render on assign changes, so visibility must not depend on
+   server re-rendering. */
+
+/* tool-call chips + tool-result cards */
+[data-quiet] [data-block-kind="tool-call"],
+[data-quiet] [data-message-role="tool-result"] {
+    display: none;
+}
+
+/* thinking: committed <details> blocks + the live streaming region */
+[data-quiet] [data-block-kind="thinking"],
+[data-quiet] [data-stream="thinking"] {
+    display: none;
+}
+
+/* An assistant bubble whose content is ONLY hidden noise (thinking and/or
+   tool chips, no text block) would remain as an empty shell — hide it.
+   Deliberately its own rule: an engine without :has() drops just this rule
+   (cosmetic empty bubble), not the ones above. The exact-value match cannot
+   hit the streaming bubble (role "assistant-streaming"), whose dots stay. */
+[data-quiet] [data-message-role="assistant"]:not(:has([data-block-kind="text"])) {
+    display: none;
 }

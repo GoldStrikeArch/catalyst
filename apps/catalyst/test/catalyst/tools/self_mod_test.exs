@@ -3,6 +3,7 @@ defmodule Catalyst.Tools.SelfModTest do
   # (shared, tmp) extensions dir.
   use ExUnit.Case, async: false
 
+  import Bitwise, only: [band: 2]
   import ExUnit.CaptureLog
 
   alias Catalyst.{Extensions, Hooks}
@@ -116,6 +117,12 @@ defmodule Catalyst.Tools.SelfModTest do
   end
   '''
 
+  @reinstall_v2 ~S'''
+  defmodule Catalyst.Ext.ReinstallProbe do
+    def version, do: :v2
+  end
+  '''
+
   test "a failed reinstall restores the prior version's loaded code, not just its file" do
     on_exit(fn -> Extensions.uninstall("reinstall_probe") end)
 
@@ -132,6 +139,43 @@ defmodule Catalyst.Tools.SelfModTest do
       # The file on disk is the restored v1 source, matching the loaded code.
       assert File.read!(Path.join(Extensions.dir(), "reinstall_probe.ex")) =~ ":v1"
     end)
+  end
+
+  test "an atomic install write failure preserves the prior source byte-for-byte" do
+    case :os.type() do
+      {:win32, _variant} ->
+        :ok
+
+      _unix ->
+        on_exit(fn -> Extensions.uninstall("reinstall_probe") end)
+
+        capture_log(fn ->
+          assert {:ok, _summary} = Installer.install("reinstall_probe", @reinstall_v1)
+        end)
+
+        dir = Extensions.dir()
+        path = Path.join(dir, "reinstall_probe.ex")
+        original = File.read!(path)
+        stat = File.stat!(dir)
+        mode = band(stat.mode, 0o7777)
+
+        try do
+          # AtomicWrite creates its temp beside the target. Removing directory
+          # write permission makes that creation fail before the existing
+          # source can be truncated or replaced.
+          File.chmod!(dir, 0o500)
+
+          assert_raise File.Error, fn ->
+            Installer.install("reinstall_probe", @reinstall_v2)
+          end
+        after
+          File.chmod!(dir, mode)
+        end
+
+        assert File.read!(path) == original
+        assert apply(Catalyst.Ext.ReinstallProbe, :version, []) == :v1
+        assert Path.wildcard(Path.join(dir, ".reinstall_probe.ex.catalyst-*.tmp")) == []
+    end
   end
 
   test "a broken install errors and leaves no file behind", %{ctx: ctx} do

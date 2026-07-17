@@ -26,7 +26,9 @@ defmodule Catalyst.Tools.Bash do
         "command" => %{"type" => "string", "description" => "Shell command to run"},
         "timeout" => %{
           "type" => "integer",
-          "description" => "Timeout in seconds (default #{@default_timeout_s})"
+          "description" => "Timeout in seconds (default #{@default_timeout_s})",
+          "minimum" => 1,
+          "maximum" => 3600
         }
       },
       "required" => ["command"]
@@ -46,25 +48,34 @@ defmodule Catalyst.Tools.Bash do
         # truncated: true means Exec.bash killed the command at its output
         # cap — tell the model, the way a timeout is reported.
         capped? = Map.get(res, :truncated, false)
-        {text, info} = Truncate.tail(out)
+        {text, info} = Truncate.tail_notice(out)
 
         text =
           text
-          |> Truncate.notice(info, :tail)
           |> Exec.append_capped_notice(
             capped?,
             Exec.bash_max_output_bytes(),
             "command killed before completion"
           )
 
-        body = if status == 0, do: text, else: text <> "\n[exit status: #{status}]"
+        body =
+          case status do
+            0 -> text
+            _ -> text <> "\n[exit status: #{status}]"
+          end
+
         result(body, %{exit_status: status, output_capped: capped?, truncation: info})
 
       {:error, {:timeout, partial}} ->
         {tail, _info} = Truncate.tail(partial, max_lines: 50)
 
-        raise "bash command timed out after #{timeout_s}s" <>
-                if(tail == "", do: "", else: ". Output before timeout:\n" <> tail)
+        suffix =
+          case tail do
+            "" -> ""
+            tail -> ". Output before timeout:\n" <> tail
+          end
+
+        raise "bash command timed out after #{timeout_s}s" <> suffix
 
       {:error, reason} ->
         raise "bash failed: #{inspect(reason)}"
@@ -94,11 +105,14 @@ defmodule Catalyst.Tools.Bash do
       tail = take_tail(tail <> chunk, @partial_tail_bytes)
       now = System.monotonic_time(:millisecond)
 
-      if is_function(report, 1) and (last_ms == nil or now - last_ms >= @report_interval_ms) do
-        report.(%{output: Truncate.scrub_utf8(tail)})
-        Process.put(key, {now, tail})
-      else
-        Process.put(key, {last_ms, tail})
+      case is_function(report, 1) and
+             (last_ms == nil or now - last_ms >= @report_interval_ms) do
+        true ->
+          report.(%{output: Truncate.scrub_utf8(tail)})
+          Process.put(key, {now, tail})
+
+        false ->
+          Process.put(key, {last_ms, tail})
       end
     end
   end

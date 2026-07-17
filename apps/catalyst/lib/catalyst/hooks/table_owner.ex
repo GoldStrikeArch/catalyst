@@ -21,14 +21,17 @@ defmodule Catalyst.Hooks.TableOwner do
 
   @table :catalyst_hooks
 
+  @doc "Start the singleton ETS table owner."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @impl true
   def init(:ok) do
     # Idempotent: a restart of this process after a supervisor-level restart
     # (or a test that created the table first) must not crash on a clash.
-    if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
+    case :ets.whereis(@table) do
+      :undefined -> :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
+      _table -> :ok
     end
 
     {:ok, :ok}

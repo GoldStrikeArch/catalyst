@@ -52,6 +52,22 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     assert html =~ "pondering"
   end
 
+  # Quiet mode's CSS ([data-quiet] rules in app.css) targets these attributes.
+  test "blocks carry stable data-block-kind attributes (quiet-mode contract)" do
+    msg = %Message.Assistant{
+      content: [
+        %Content.Thinking{thinking: "pondering"},
+        %Content.Text{text: "let me look"},
+        %Content.ToolCall{id: "c1", name: "ls", arguments: %{}}
+      ]
+    }
+
+    html = render_html(msg)
+    assert html =~ ~s(data-block-kind="text")
+    assert html =~ ~s(data-block-kind="thinking")
+    assert html =~ ~s(data-block-kind="tool-call")
+  end
+
   test "assistant text renders common markdown structure" do
     msg = %Message.Assistant{
       content:

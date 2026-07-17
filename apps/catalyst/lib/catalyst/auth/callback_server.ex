@@ -10,12 +10,23 @@ defmodule Catalyst.Auth.CallbackServer do
 
   alias Catalyst.Auth.OpenAIOAuth
 
+  @current_key {__MODULE__, :current}
+
+  defstruct [:server, :parent]
+
+  @type t :: %__MODULE__{server: pid(), parent: pid()}
+
   @doc """
-  Start the callback server, block until the redirect arrives (or `timeout`),
-  then stop. Returns `{:ok, code}` or `{:error, reason}`.
+  Bind the callback listener and return only after Bandit has started it.
+
+  An abandoned earlier sign-in (browser tab closed, user retried) is
+  SUPERSEDED, not waited out: its server is stopped so the fixed port frees
+  immediately, and its waiting process gets `{:error, :superseded}` — a second
+  login attempt within the 5-minute window used to fail with address-in-use.
   """
-  @spec await(String.t(), timeout()) :: {:ok, String.t()} | {:error, term()}
-  def await(expected_state, timeout \\ 300_000) do
+  @spec start(String.t()) :: {:ok, t()} | {:error, term()}
+  def start(expected_state) do
+    supersede_previous()
     parent = self()
     plug = {__MODULE__.Handler, %{parent: parent, state: expected_state}}
 
@@ -27,20 +38,55 @@ defmodule Catalyst.Auth.CallbackServer do
            startup_log: false
          ) do
       {:ok, server} ->
-        result =
-          receive do
-            {:oauth_code, code} -> {:ok, code}
-            {:oauth_error, reason} -> {:error, reason}
-          after
-            timeout -> {:error, :timeout}
-          end
-
-        stop(server)
-        result
+        :persistent_term.put(@current_key, {server, parent})
+        {:ok, %__MODULE__{server: server, parent: parent}}
 
       {:error, reason} ->
         {:error, {:callback_server, reason}}
     end
+  end
+
+  @doc """
+  Wait for the redirect on a listener returned by `start/1`, then stop it.
+
+  Must be called by the same process that called `start/1`. Returns
+  `{:ok, code}` or `{:error, reason}`.
+  """
+  @spec await(t(), timeout()) :: {:ok, String.t()} | {:error, term()}
+  def await(callback, timeout \\ 300_000)
+
+  def await(%__MODULE__{server: server, parent: parent}, timeout) when parent == self() do
+    result =
+      receive do
+        {:oauth_code, code} -> {:ok, code}
+        {:oauth_error, reason} -> {:error, reason}
+      after
+        timeout -> {:error, :timeout}
+      end
+
+    release(server)
+    result
+  end
+
+  defp supersede_previous do
+    case :persistent_term.get(@current_key, nil) do
+      {server, parent} when is_pid(server) ->
+        if Process.alive?(parent), do: send(parent, {:oauth_error, :superseded})
+        stop(server)
+        :persistent_term.erase(@current_key)
+
+      _none ->
+        :ok
+    end
+  end
+
+  defp release(server) do
+    case :persistent_term.get(@current_key, nil) do
+      {^server, _parent} -> :persistent_term.erase(@current_key)
+      _superseded_or_none -> :ok
+    end
+
+    stop(server)
   end
 
   defp stop(server) do
@@ -48,69 +94,6 @@ defmodule Catalyst.Auth.CallbackServer do
       Supervisor.stop(server, :normal, 5_000)
     catch
       _, _ -> Process.exit(server, :kill)
-    end
-  end
-
-  defmodule Handler do
-    @moduledoc false
-    import Plug.Conn
-
-    def init(opts), do: opts
-
-    def call(%{request_path: "/auth/callback"} = conn, %{parent: parent, state: expected}) do
-      conn = fetch_query_params(conn)
-      params = conn.query_params
-
-      cond do
-        # Only a request carrying the expected state can resolve the flow: a
-        # drive-by request (browser prefetch, malicious page hitting
-        # localhost:1455) must not be able to abort a pending sign-in.
-        params["state"] != expected ->
-          respond(conn, 400, error_html("state mismatch"))
-
-        params["error"] ->
-          send(parent, {:oauth_error, params["error"]})
-          respond(conn, 200, error_html(params["error"]))
-
-        is_binary(params["code"]) ->
-          send(parent, {:oauth_code, params["code"]})
-          respond(conn, 200, success_html())
-
-        true ->
-          respond(conn, 400, error_html("missing code"))
-      end
-    end
-
-    def call(conn, _opts), do: send_resp(conn, 404, "not found")
-
-    defp respond(conn, status, html) do
-      conn
-      |> put_resp_content_type("text/html")
-      |> send_resp(status, html)
-    end
-
-    defp success_html do
-      page(
-        "Signed in to Catalyst",
-        "You're signed in. You can close this tab and return to the app."
-      )
-    end
-
-    defp error_html(reason) do
-      page(
-        "Catalyst sign-in failed",
-        "Sign-in failed: #{Plug.HTML.html_escape(to_string(reason))}."
-      )
-    end
-
-    defp page(title, body) do
-      """
-      <!doctype html><html><head><meta charset="utf-8"><title>#{title}</title>
-      <style>body{font-family:system-ui,sans-serif;background:#0b0b0f;color:#e7e7ea;
-      display:grid;place-items:center;height:100vh;margin:0}.c{text-align:center;max-width:28rem}
-      h1{font-size:1.25rem}p{color:#a1a1aa}</style></head>
-      <body><div class="c"><h1>#{title}</h1><p>#{body}</p></div></body></html>
-      """
     end
   end
 end

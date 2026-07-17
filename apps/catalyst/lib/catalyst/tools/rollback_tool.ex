@@ -46,10 +46,8 @@ defmodule Catalyst.Tools.RollbackTool do
 
   @impl true
   def execute(args, _ctx) do
-    case do_rollback(args["name"]) do
-      :ok ->
-        {:ok, %{loaded: loaded, failed: failed}} = Extensions.load_all()
-
+    case rollback_and_reload(args["name"]) do
+      {:ok, loaded, failed} ->
         result(
           "Rolled back the most recent non-reverted extension change#{scope_label(args["name"])} " <>
             "and reloaded #{length(loaded)} file(s)." <> failures_section(failed),
@@ -67,8 +65,17 @@ defmodule Catalyst.Tools.RollbackTool do
       {:error, reason} ->
         # Includes "nothing to revert" cases (e.g. only the empty init commit
         # exists): git's message is surfaced so the agent can tell them apart.
-        raise "Rollback failed: #{inspect(reason)}"
+        raise "Rollback failed: #{Extensions.format_error(reason)}"
     end
+  end
+
+  defp rollback_and_reload(name) do
+    Extensions.locked(fn ->
+      with :ok <- do_rollback(name),
+           {:ok, %{loaded: loaded, failed: failed}} <- Extensions.load_all() do
+        {:ok, loaded, failed}
+      end
+    end)
   end
 
   defp do_rollback(name) when is_binary(name) and name != "" do
@@ -94,6 +101,8 @@ defmodule Catalyst.Tools.RollbackTool do
 
   defp failures_section(failed) do
     "\n#{length(failed)} file(s) FAILED to load after the revert:\n" <>
-      Enum.map_join(failed, "\n", fn {path, reason} -> "  - #{path}: #{inspect(reason)}" end)
+      Enum.map_join(failed, "\n", fn {path, reason} ->
+        "  - #{path}: #{Extensions.format_error(reason)}"
+      end)
   end
 end

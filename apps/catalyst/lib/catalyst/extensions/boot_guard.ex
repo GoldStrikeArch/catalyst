@@ -25,11 +25,13 @@ defmodule Catalyst.Extensions.BootGuard do
   installed* still reads as a crash on the next boot.
   """
 
+  require Logger
+
   @doc "Path of the marker file (`~/.catalyst/boot_marker`; test-overridable)."
   @spec marker_path() :: Path.t()
   def marker_path do
     Application.get_env(:catalyst, :boot_marker_path) ||
-      Path.join(Path.dirname(Catalyst.Extensions.dir()), "boot_marker")
+      Catalyst.Paths.boot_marker()
   end
 
   @doc "Record that extension loading is starting (called right before load_all at boot)."
@@ -51,11 +53,21 @@ defmodule Catalyst.Extensions.BootGuard do
 
   defp write(status) do
     path = marker_path()
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, status <> "\n")
-    :ok
-  rescue
-    # An unwritable marker must never block boot or extension loading.
-    _ -> :ok
+
+    result =
+      with :ok <- File.mkdir_p(Path.dirname(path)),
+           :ok <- File.write(path, status <> "\n") do
+        :ok
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[extensions] could not write boot marker #{path}: #{inspect(reason)}")
+
+        :ok
+    end
   end
 end

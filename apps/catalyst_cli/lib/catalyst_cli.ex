@@ -85,8 +85,18 @@ defmodule CatalystCli do
   # dir, and a leftover cli_shout.ex would be loaded by every later (GUI) boot.
   defp cleanup_selftest(path) do
     Catalyst.Extensions.uninstall("cli_shout")
-    File.rm(path)
-    IO.puts("cleaned up: removed the cli_shout selftest extension")
+
+    case File.rm(path) do
+      :ok ->
+        IO.puts("cleaned up: removed the cli_shout selftest extension")
+
+      {:error, :enoent} ->
+        IO.puts("cleanup complete: the cli_shout selftest extension was already absent")
+
+      {:error, reason} ->
+        IO.puts("cleanup warning: could not remove #{path}: #{:file.format_error(reason)}")
+    end
+
     :ok
   rescue
     _ -> :ok

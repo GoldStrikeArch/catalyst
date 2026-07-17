@@ -9,8 +9,9 @@ defmodule Catalyst.Tools.Read do
   @impl true
   def description,
     do:
-      "Read a file's contents. Optional 1-indexed `offset` and `limit` select a line range. " <>
-        "Output is truncated to 2000 lines or 50KB."
+      "Read a file's contents. Supports text files and images (jpg, png, gif, webp) — " <>
+        "images are returned as attachments. Optional 1-indexed `offset` and `limit` " <>
+        "select a line range. Output is truncated to 2000 lines or 50KB."
 
   @impl true
   def parameters do
@@ -21,8 +22,16 @@ defmodule Catalyst.Tools.Read do
           "type" => "string",
           "description" => "File path (relative to cwd or absolute)"
         },
-        "offset" => %{"type" => "integer", "description" => "1-indexed start line"},
-        "limit" => %{"type" => "integer", "description" => "Maximum lines to read"}
+        "offset" => %{
+          "type" => "integer",
+          "description" => "1-indexed start line",
+          "minimum" => 1
+        },
+        "limit" => %{
+          "type" => "integer",
+          "description" => "Maximum lines to read",
+          "minimum" => 1
+        }
       },
       "required" => ["path"]
     }
@@ -34,18 +43,63 @@ defmodule Catalyst.Tools.Read do
   @max_in_memory 16 * 1024 * 1024
   @stream_chunk_size 64 * 1024
 
+  # Images above this raw size are described, not attached (no resizing
+  # support — PI resizes to 2000×2000; we cap instead).
+  @max_image_bytes 5 * 1024 * 1024
+
   @impl true
   def execute(%{"path" => path} = args, ctx) do
     abs = Paths.resolve(path, ctx.cwd)
     %File.Stat{size: size} = File.stat!(abs)
 
-    if binary_file?(abs) do
-      raise "#{path} appears to be a binary file (#{size} bytes); not returning its contents"
-    end
+    cond do
+      mime = image_mime_type(abs) ->
+        read_image(abs, size, mime)
 
-    case size <= @max_in_memory do
-      true -> read_whole(abs, args)
-      false -> read_streamed(abs, args, size)
+      binary_file?(abs) ->
+        raise "#{path} appears to be a binary file (#{size} bytes); not returning its contents"
+
+      size <= @max_in_memory ->
+        read_whole(abs, args)
+
+      true ->
+        read_streamed(abs, args, size)
+    end
+  end
+
+  # PI parity: images come back as an attachment (base64 content block) with a
+  # text note; oversized ones are described instead of inlined.
+  defp read_image(abs, size, mime) do
+    case size > @max_image_bytes do
+      true ->
+        result(
+          "Read image file [#{mime}]\n[Image omitted: #{size} bytes exceeds the " <>
+            "#{@max_image_bytes}-byte inline limit.]",
+          %{path: abs, mime_type: mime, bytes: size, omitted: true}
+        )
+
+      false ->
+        data = abs |> File.read!() |> Base.encode64()
+
+        %{
+          content: [
+            %Catalyst.Content.Text{text: "Read image file [#{mime}]"},
+            %Catalyst.Content.Image{data: data, mime_type: mime}
+          ],
+          details: %{path: abs, mime_type: mime, bytes: size},
+          terminate: false
+        }
+    end
+  end
+
+  # Magic-byte sniff for the image formats PI supports (jpg/png/gif/webp).
+  defp image_mime_type(abs) do
+    case File.open(abs, [:read, :binary], fn io -> IO.binread(io, 16) end) do
+      {:ok, <<0xFF, 0xD8, 0xFF, _rest::binary>>} -> "image/jpeg"
+      {:ok, <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A, _rest::binary>>} -> "image/png"
+      {:ok, <<"GIF8", _rest::binary>>} -> "image/gif"
+      {:ok, <<"RIFF", _size::binary-size(4), "WEBP", _rest::binary>>} -> "image/webp"
+      _other -> nil
     end
   end
 
@@ -63,8 +117,10 @@ defmodule Catalyst.Tools.Read do
         })
 
       false ->
-        text = lines |> slice(args["offset"], args["limit"]) |> Enum.join("\n")
-        {out, info} = Truncate.head(text)
+        requested_lines = requested_line_count(total, start, args["limit"])
+        shown_lines = min(requested_lines, Truncate.default_max_lines())
+        text = lines |> Enum.slice(start, shown_lines) |> Enum.join("\n")
+        {out, info} = text |> Truncate.head() |> include_unjoined_lines(requested_lines)
 
         # `truncation` describes the requested slice; `file_lines` is the whole
         # file (already in memory, so counting is cheap).
@@ -216,11 +272,21 @@ defmodule Catalyst.Tools.Read do
     |> Truncate.scrub_utf8()
   end
 
-  defp slice(lines, offset, limit) do
-    start = max((offset || 1) - 1, 0)
-    dropped = Enum.drop(lines, start)
-    if limit, do: Enum.take(dropped, limit), else: dropped
+  defp requested_line_count(total, start, nil), do: total - start
+  defp requested_line_count(total, start, limit), do: min(total - start, limit)
+
+  defp include_unjoined_lines({out, info}, requested_lines)
+       when requested_lines > info.total_lines do
+    by =
+      case info.truncated_by do
+        :bytes -> :bytes
+        _ -> :lines
+      end
+
+    {out, %{info | truncated: true, truncated_by: by, total_lines: requested_lines}}
   end
+
+  defp include_unjoined_lines(result, _requested_lines), do: result
 
   # Null byte in the first 8KB — the same heuristic git/grep use. Reads only
   # the sniff window, never the whole file.

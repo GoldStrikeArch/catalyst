@@ -65,6 +65,12 @@ defmodule CatalystWeb.Application do
 
       {:ok, %{failed: failed}} ->
         Logger.warning("extension reload after UI wiring: #{length(failed)} file(s) failed")
+
+      {:error, reason} ->
+        Logger.warning(
+          "extension reload after UI wiring failed: " <>
+            Catalyst.Extensions.format_error(reason)
+        )
     end
   rescue
     e -> Logger.warning("extension reload after UI wiring failed: #{Exception.message(e)}")

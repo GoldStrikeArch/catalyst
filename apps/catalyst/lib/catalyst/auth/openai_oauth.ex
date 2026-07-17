@@ -23,9 +23,10 @@ defmodule Catalyst.Auth.OpenAIOAuth do
   @spec provider_id() :: String.t()
   def provider_id, do: @provider_id
 
-  @doc "The localhost port the redirect URI points at."
+  @doc "The localhost port the redirect URI points at (test-overridable)."
   @spec callback_port() :: :inet.port_number()
-  def callback_port, do: @callback_port
+  def callback_port,
+    do: Application.get_env(:catalyst, :oauth_callback_port, @callback_port)
 
   @doc "Build the browser authorization URL for a PKCE challenge + state."
   @spec authorize_url(String.t(), String.t(), String.t()) :: String.t()

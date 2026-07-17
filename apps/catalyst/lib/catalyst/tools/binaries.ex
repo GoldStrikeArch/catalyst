@@ -9,6 +9,8 @@ defmodule Catalyst.Tools.Binaries do
   raises with an install hint.
   """
 
+  alias Catalyst.Paths
+
   @tools %{
     rg: %{exe: "rg", brew: "ripgrep", repo: "BurntSushi/ripgrep"},
     fd: %{exe: "fd", brew: "fd", repo: "sharkdp/fd"},
@@ -60,20 +62,32 @@ defmodule Catalyst.Tools.Binaries do
 
   # Resolution order: ~/.catalyst/bin, the bundled priv/bin (shipped in the .app),
   # $PATH, then common Homebrew locations (a GUI .app inherits a minimal PATH that
-  # usually excludes /opt/homebrew/bin and /usr/local/bin).
+  # usually excludes /opt/homebrew/bin and /usr/local/bin). An empty dir (no priv
+  # dir) is skipped — Path.join("", exe) would "find" a same-named file in the
+  # BEAM's cwd — and candidates must actually be executable, not just present.
   defp discover(exe) do
     bundled =
-      [bin_dir(), bundled_dir()] |> Enum.map(&Path.join(&1, exe)) |> Enum.find(&File.exists?/1)
+      [bin_dir(), bundled_dir()]
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&Path.join(&1, exe))
+      |> Enum.find(&executable?/1)
 
     bundled || System.find_executable(exe) ||
       ["/opt/homebrew/bin", "/usr/local/bin"]
       |> Enum.map(&Path.join(&1, exe))
-      |> Enum.find(&File.exists?/1)
+      |> Enum.find(&executable?/1)
+  end
+
+  defp executable?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      _missing_or_not_regular -> false
+    end
   end
 
   @doc "Directory for on-demand downloaded binaries."
   @spec bin_dir() :: String.t()
-  def bin_dir, do: Path.expand("~/.catalyst/bin")
+  def bin_dir, do: Paths.join("bin")
 
   @doc """
   Fast-tool binaries bundled into the release (`priv/bin`). Returns `""` when

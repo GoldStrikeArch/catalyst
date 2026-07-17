@@ -283,7 +283,10 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     @impl true
     def handle_in({payload, opcode: :text}, state) do
       %{"type" => "response.create"} = Jason.decode!(payload)
-      frame = {:text, Jason.encode!(%{"type" => "response.created", "response" => %{"id" => "r"}})}
+
+      frame =
+        {:text, Jason.encode!(%{"type" => "response.created", "response" => %{"id" => "r"}})}
+
       {:stop, :normal, 1000, [frame], state}
     end
 
@@ -581,10 +584,37 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
 
     @impl true
     def handle_in({payload, opcode: :text}, state) do
-      send(state.test, {:ws_request, Jason.decode!(payload)})
+      request = Jason.decode!(payload)
+      send(state.test, {:ws_request, request})
       turn = state.turn + 1
 
-      frames = [
+      frames = frames(request, turn)
+
+      {:push, frames, %{state | turn: turn}}
+    end
+
+    @impl true
+    def handle_info(_msg, state), do: {:ok, state}
+
+    @impl true
+    def terminate(_reason, _state), do: :ok
+
+    defp frames(%{"generate" => false, "instructions" => "fail warmup"}, turn) do
+      [
+        text(%{"type" => "response.created", "response" => %{"id" => "resp_#{turn}"}}),
+        text(%{
+          "type" => "response.failed",
+          "response" => %{
+            "id" => "resp_#{turn}",
+            "status" => "failed",
+            "error" => %{"message" => "warmup rejected"}
+          }
+        })
+      ]
+    end
+
+    defp frames(_request, turn) do
+      [
         text(%{"type" => "response.created", "response" => %{"id" => "resp_#{turn}"}}),
         text(%{
           "type" => "response.output_item.added",
@@ -604,15 +634,7 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
           "response" => %{"id" => "resp_#{turn}", "status" => "completed"}
         })
       ]
-
-      {:push, frames, %{state | turn: turn}}
     end
-
-    @impl true
-    def handle_info(_msg, state), do: {:ok, state}
-
-    @impl true
-    def terminate(_reason, _state), do: :ok
 
     defp text(map), do: {:text, Jason.encode!(map)}
   end
@@ -645,13 +667,14 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
 
     on_exit(fn -> TokenStore.delete("openai-codex") end)
 
-    {:ok, server} =
-      Bandit.start_link(
-        plug: {PrivatePlug, {ContinuationRouter, self()}},
-        scheme: :http,
-        port: 0,
-        ip: {127, 0, 0, 1},
-        startup_log: false
+    server =
+      start_supervised!(
+        {Bandit,
+         plug: {PrivatePlug, {ContinuationRouter, self()}},
+         scheme: :http,
+         port: 0,
+         ip: {127, 0, 0, 1},
+         startup_log: false}
       )
 
     {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
@@ -705,6 +728,158 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     assert_receive {:ws_request, frame3}
     refute Map.has_key?(frame3, "previous_response_id")
     assert length(frame3["input"]) == 5
+  end
+
+  test "the connection and continuation survive across runs (different processes)" do
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {PrivatePlug, {ContinuationRouter, self()}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    sink = fn _ -> :ok end
+    opts = [transport: :websocket, session_id: "xrun-test"]
+
+    # Run 1 (its own task process, like a real run).
+    ctx1 = %Context{system_prompt: "sys", messages: [Message.user("hi")], tools: []}
+
+    {:ok, a1} =
+      Task.async(fn -> OpenAICodex.Provider.stream(model, ctx1, opts, sink) end)
+      |> Task.await()
+
+    assert_receive {:ws_request, frame1}
+    refute Map.has_key?(frame1, "previous_response_id")
+
+    # Run 2 in a DIFFERENT process: the ConnCache hands over the same socket
+    # and continuation — the follow-up is a delta chained to run 1's response.
+    ctx2 = %Context{
+      system_prompt: "sys",
+      messages: ctx1.messages ++ [a1, Message.user("second run")],
+      tools: []
+    }
+
+    {:ok, a2} =
+      Task.async(fn -> OpenAICodex.Provider.stream(model, ctx2, opts, sink) end)
+      |> Task.await()
+
+    assert Content.text_of(a2.content) == "answer 2"
+
+    assert_receive {:ws_request, frame2}
+    assert frame2["previous_response_id"] == "resp_1"
+    assert [%{"role" => "user", "content" => [%{"text" => "second run"} | _]}] = frame2["input"]
+
+    Catalyst.LLM.OpenAICodex.ConnCache.drop("xrun-test")
+  end
+
+  test "prewarm (generate: false) lets the FIRST turn ride a delta upload" do
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {PrivatePlug, {ContinuationRouter, self()}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    opts = [transport: :websocket, session_id: "warm-test"]
+
+    # Prewarm with the empty transcript (what a fresh session sends).
+    warm_ctx = %Context{system_prompt: "sys", messages: [], tools: []}
+    assert :ok = OpenAICodex.Provider.prewarm(model, warm_ctx, opts)
+
+    assert_receive {:ws_request, warm_frame}
+    assert warm_frame["generate"] == false
+    assert warm_frame["input"] == []
+
+    # A second prewarm is a no-op — the connection is already cached.
+    assert :ok = OpenAICodex.Provider.prewarm(model, warm_ctx, opts)
+    refute_receive {:ws_request, _}, 100
+
+    # Turn 1 rides the prewarmed continuation: delta with ONLY the user message.
+    ctx1 = %Context{system_prompt: "sys", messages: [Message.user("hi")], tools: []}
+
+    {:ok, a1} =
+      Task.async(fn -> OpenAICodex.Provider.stream(model, ctx1, opts, fn _ -> :ok end) end)
+      |> Task.await()
+
+    assert Content.text_of(a1.content) == "answer 2"
+
+    assert_receive {:ws_request, frame1}
+    assert frame1["previous_response_id"] == "resp_1"
+    refute Map.has_key?(frame1, "generate")
+    assert [%{"role" => "user", "content" => [%{"text" => "hi"} | _]}] = frame1["input"]
+
+    Catalyst.LLM.OpenAICodex.ConnCache.drop("warm-test")
+  end
+
+  test "a failed prewarm response is never cached as a continuation anchor" do
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    server =
+      start_supervised!(
+        {Bandit,
+         plug: {PrivatePlug, {ContinuationRouter, self()}},
+         scheme: :http,
+         port: 0,
+         ip: {127, 0, 0, 1},
+         startup_log: false}
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    opts = [transport: :websocket, session_id: "failed-warm-test"]
+    warm_ctx = %Context{system_prompt: "fail warmup", messages: [], tools: []}
+
+    assert :ok = OpenAICodex.Provider.prewarm(model, warm_ctx, opts)
+    assert_receive {:ws_request, %{"generate" => false}}
+
+    ctx = %Context{system_prompt: "fail warmup", messages: [Message.user("hi")], tools: []}
+    assert {:ok, assistant} = OpenAICodex.Provider.stream(model, ctx, opts, fn _ -> :ok end)
+    assert Content.text_of(assistant.content) == "answer 2"
+
+    assert_receive {:ws_request, frame}
+    refute Map.has_key?(frame, "previous_response_id")
+    assert length(frame["input"]) == 1
+
+    Catalyst.LLM.OpenAICodex.ConnCache.drop("failed-warm-test")
   end
 
   test "auto transport still falls back to SSE when the socket dies after bookkeeping-only events" do

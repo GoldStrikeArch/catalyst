@@ -42,17 +42,25 @@ defmodule Catalyst.SystemPrompt do
   @spec get() :: String.t()
   def get do
     case File.read(path()) do
-      {:ok, text} -> if String.trim(text) == "", do: default(), else: text
-      {:error, _} -> default()
+      {:ok, text} ->
+        case String.trim(text) do
+          "" -> default()
+          _ -> text
+        end
+
+      {:error, _} ->
+        default()
     end
   end
 
   @doc "The built-in default prompt."
+  @spec default() :: String.t()
   def default, do: @default
 
   @doc "Path of the override file (`~/.catalyst/system_prompt.md`; test-overridable)."
+  @spec path() :: Path.t()
   def path do
     Application.get_env(:catalyst, :system_prompt_path) ||
-      Path.expand("~/.catalyst/system_prompt.md")
+      Catalyst.Paths.system_prompt()
   end
 end

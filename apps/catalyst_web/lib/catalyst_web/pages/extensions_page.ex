@@ -89,7 +89,11 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     <main class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
       <div :if={@ext_panel} class="mx-auto flex max-w-5xl flex-col gap-5">
         <.panel_header panel={@ext_panel} action={@ext_action} />
-        <.safe_mode_card :if={@ext_panel.boot_status != :ok} panel={@ext_panel} action={@ext_action} />
+        <.boot_problem_card
+          :if={@ext_panel.boot_status != :ok}
+          panel={@ext_panel}
+          action={@ext_action}
+        />
         <.loaded_extensions panel={@ext_panel} action={@ext_action} />
         <.disabled_extensions :if={@ext_panel.disabled != []} panel={@ext_panel} action={@ext_action} />
         <.registries panel={@ext_panel} />
@@ -151,12 +155,12 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     """
   end
 
-  defp safe_mode_card(assigns) do
+  defp boot_problem_card(assigns) do
     ~H"""
     <div class="rounded-2xl border border-amber-300/60 bg-amber-50/90 px-4 py-3 text-sm text-amber-900 shadow-sm dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200">
-      <p class="font-semibold">⚠ Safe mode — extensions were not loaded</p>
+      <p class="font-semibold">⚠ {boot_problem_title(@panel.boot_status)}</p>
       <p class="mt-1 text-xs leading-5">
-        {safe_mode_reason(@panel.boot_status)} Fix or disable the offending file below
+        {boot_problem_reason(@panel.boot_status)} Fix or disable the offending file below
         (disabled extensions are skipped at boot), then load extensions again.
       </p>
       <button
@@ -171,13 +175,19 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     """
   end
 
-  defp safe_mode_reason({:safe_mode, :env}),
+  defp boot_problem_title({:load_failed, _reason}), do: "Extension boot load failed"
+  defp boot_problem_title(_status), do: "Safe mode — extensions were not loaded"
+
+  defp boot_problem_reason({:safe_mode, :env}),
     do: "CATALYST_SAFE_MODE is set, so loading was skipped on purpose."
 
-  defp safe_mode_reason({:safe_mode, :crash_detected}),
+  defp boot_problem_reason({:safe_mode, :crash_detected}),
     do: "The previous boot died while extensions were active, so this boot skipped them."
 
-  defp safe_mode_reason(_other), do: "Extension loading was skipped."
+  defp boot_problem_reason({:load_failed, reason}),
+    do: "The boot-time load returned an error: #{Extensions.format_error(reason)}."
+
+  defp boot_problem_reason(_other), do: "Extension loading was skipped."
 
   # ---- loaded / disabled ----------------------------------------------------------
 
@@ -213,6 +223,13 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
               no source file
             </span>
             <span
+              :if={ext.path && !ext.managed?}
+              class="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-white/10 dark:text-slate-300"
+              title="Loaded from outside the managed extensions directory; reload is available, but disable and rollback are not"
+            >
+              external source
+            </span>
+            <span
               :if={ext.processes > 0}
               class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200"
             >
@@ -232,7 +249,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
               Reload
             </button>
             <button
-              :if={ext.path && @panel.git?}
+              :if={ext.managed? && @panel.git?}
               class={pill_button_class()}
               phx-click="ext_rollback"
               phx-value-owner={ext.owner}
@@ -243,7 +260,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
               Roll back
             </button>
             <button
-              :if={ext.path}
+              :if={ext.managed?}
               class={danger_pill_button_class()}
               phx-click="ext_disable"
               phx-value-owner={ext.owner}

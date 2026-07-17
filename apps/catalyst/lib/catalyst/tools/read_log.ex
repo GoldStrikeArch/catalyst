@@ -7,6 +7,7 @@ defmodule Catalyst.Tools.ReadLog do
   use Catalyst.Tools.Tool
 
   alias Catalyst.Debug
+  alias Catalyst.Tools.Truncate
 
   @impl true
   def name, do: "read_log"
@@ -25,6 +26,7 @@ defmodule Catalyst.Tools.ReadLog do
       "properties" => %{
         "lines" => %{
           "type" => "integer",
+          "minimum" => 1,
           "description" => "trailing lines to return (default 120)"
         }
       },
@@ -45,8 +47,9 @@ defmodule Catalyst.Tools.ReadLog do
 
         case File.read(path) do
           {:ok, content} ->
-            tail = content |> String.split("\n") |> Enum.take(-n) |> Enum.join("\n")
-            result(tail, %{path: path})
+            requested = content |> String.split("\n") |> Enum.take(-n) |> Enum.join("\n")
+            {tail, info} = Truncate.tail_notice(requested)
+            result(tail, %{path: path, truncation: info})
 
           {:error, _} ->
             result("(no debug log yet at #{path})")

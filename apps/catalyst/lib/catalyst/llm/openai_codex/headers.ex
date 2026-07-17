@@ -40,6 +40,17 @@ defmodule Catalyst.LLM.OpenAICodex.Headers do
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
   end
 
+  @doc "Return the first case-insensitive response-header value, or `nil`."
+  @spec get([{String.t(), String.t()}], String.t()) :: String.t() | nil
+  def get(headers, name) do
+    Enum.find_value(headers, fn {key, value} ->
+      case String.downcase(key) == String.downcase(name) do
+        true -> value
+        false -> nil
+      end
+    end)
+  end
+
   defp user_agent do
     arch = :erlang.system_info(:system_architecture) |> to_string()
     "catalyst (#{arch})"

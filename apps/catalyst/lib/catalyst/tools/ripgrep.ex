@@ -39,8 +39,18 @@ defmodule Catalyst.Tools.Ripgrep do
           "type" => "boolean",
           "description" => "Treat pattern as a literal string (default: false)"
         },
-        "context" => %{"type" => "integer", "description" => "Lines of context around each match"},
-        "limit" => %{"type" => "integer", "description" => "Max matches to return (default: 100)"}
+        "context" => %{
+          "type" => "integer",
+          "description" => "Lines of context around each match",
+          "minimum" => 0,
+          "maximum" => 100
+        },
+        "limit" => %{
+          "type" => "integer",
+          "description" => "Max matches to return (default: 100)",
+          "minimum" => 1,
+          "maximum" => 10_000
+        }
       },
       "required" => ["pattern"]
     }

@@ -17,6 +17,7 @@ defmodule Catalyst.LLM.Registry do
   alias Catalyst.LLM.ProviderConfig
 
   @table :catalyst_llm_providers
+  @host_owner :host
 
   @builtin %{
     "faux" => Catalyst.LLM.Faux,
@@ -66,7 +67,8 @@ defmodule Catalyst.LLM.Registry do
   Register (or replace) a provider under `api`. Accepts a `%ProviderConfig{}` or a
   bare provider module. `opts[:owner]` tags it for purge-on-reload.
   """
-  @spec register_provider(String.t(), ProviderConfig.t() | module(), keyword()) :: :ok
+  @spec register_provider(String.t(), ProviderConfig.t() | module(), keyword()) ::
+          :ok | {:error, term()}
   def register_provider(api, config, opts \\ [])
 
   def register_provider(api, %ProviderConfig{} = config, opts) when is_binary(api),
@@ -91,23 +93,47 @@ defmodule Catalyst.LLM.Registry do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
     Enum.each(seed_map(), fn {api, cfg} -> :ets.insert(@table, {api, cfg}) end)
     wire()
-    {:ok, %{contrib: %{}}}
+    {:ok, %{contrib: %{}, owners: %{}}}
   end
 
   @impl true
   def handle_call({:register, api, config, opts}, _from, state) do
-    :ets.insert(@table, {api, config})
-    {:reply, :ok, track(api, opts[:owner], state)}
+    owner = normalize_owner(opts[:owner])
+
+    case Map.get(state.owners, api) do
+      nil ->
+        :ets.insert(@table, {api, config})
+        {:reply, :ok, track(api, owner, state)}
+
+      ^owner ->
+        :ets.insert(@table, {api, config})
+        {:reply, :ok, track(api, owner, state)}
+
+      existing_owner ->
+        error = {:provider_owner_collision, api, existing_owner, owner}
+        {:reply, {:error, error}, state}
+    end
   end
 
   def handle_call({:unregister, api}, _from, state) do
     drop(api)
-    {:reply, :ok, state}
+    {:reply, :ok, detach(api, state)}
   end
 
   def handle_call({:unregister_owner, owner}, _from, state) do
-    state.contrib |> Map.get(owner, MapSet.new()) |> Enum.each(&drop/1)
-    {:reply, :ok, %{state | contrib: Map.delete(state.contrib, owner)}}
+    apis = Map.get(state.contrib, owner, MapSet.new())
+
+    Enum.each(apis, fn api ->
+      case Map.get(state.owners, api) do
+        ^owner -> drop(api)
+        _other -> :ok
+      end
+    end)
+
+    owners =
+      Map.reject(state.owners, fn {api, api_owner} -> api_owner == owner and api in apis end)
+
+    {:reply, :ok, %{state | contrib: Map.delete(state.contrib, owner), owners: owners}}
   end
 
   # ---- internals ------------------------------------------------------------
@@ -131,12 +157,29 @@ defmodule Catalyst.LLM.Registry do
     end
   end
 
-  defp track(_api, nil, state), do: state
+  defp track(api, @host_owner, state) do
+    state = detach(api, state)
+    put_in(state.owners[api], @host_owner)
+  end
 
   defp track(api, owner, state) do
+    state = detach(api, state)
     apis = Map.get(state.contrib, owner, MapSet.new())
-    put_in(state.contrib[owner], MapSet.put(apis, api))
+
+    state
+    |> put_in([:contrib, owner], MapSet.put(apis, api))
+    |> put_in([:owners, api], owner)
   end
+
+  defp detach(api, state) do
+    contrib =
+      Map.new(state.contrib, fn {owner, apis} -> {owner, MapSet.delete(apis, api)} end)
+
+    %{state | contrib: contrib, owners: Map.delete(state.owners, api)}
+  end
+
+  defp normalize_owner(nil), do: @host_owner
+  defp normalize_owner(owner), do: owner
 
   defp seed_map do
     builtins =

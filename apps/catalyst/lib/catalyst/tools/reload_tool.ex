@@ -23,8 +23,13 @@ defmodule Catalyst.Tools.ReloadTool do
 
   @impl true
   def execute(_args, _ctx) do
-    {:ok, %{loaded: loaded, failed: failed}} = Extensions.load_all()
+    case Extensions.load_all() do
+      {:ok, load_result} -> format_result(load_result)
+      {:error, reason} -> raise "Reload failed: " <> Extensions.format_error(reason)
+    end
+  end
 
+  defp format_result(%{loaded: loaded, failed: failed}) do
     case {loaded, failed} do
       {[], [_ | _]} ->
         raise "Reload failed — no extension file loaded.\n" <> format_failures(failed)
@@ -34,8 +39,12 @@ defmodule Catalyst.Tools.ReloadTool do
 
         result(
           "Reloaded #{length(loaded)} file(s). Tools: #{Enum.join(tools, ", ")}" <>
-            failures_section(failed),
-          %{files: length(loaded), failed: length(failed)}
+            failures_section(failed) <> warnings_section(loaded),
+          %{
+            files: length(loaded),
+            failed: length(failed),
+            warnings: Enum.count(loaded, &is_binary(&1[:warning]))
+          }
         )
     end
   end
@@ -44,6 +53,22 @@ defmodule Catalyst.Tools.ReloadTool do
 
   defp failures_section(failed),
     do: "\n#{length(failed)} file(s) FAILED to load:\n" <> format_failures(failed)
+
+  defp warnings_section(loaded) do
+    warnings =
+      for summary <- loaded,
+          warning = summary[:warning],
+          is_binary(warning),
+          do: "  - #{summary.owner}: #{warning}"
+
+    case warnings do
+      [] ->
+        ""
+
+      warnings ->
+        "\n#{length(warnings)} file(s) loaded with WARNINGS:\n" <> Enum.join(warnings, "\n")
+    end
+  end
 
   defp format_failures(failed) do
     Enum.map_join(failed, "\n", fn {path, reason} ->

@@ -31,6 +31,12 @@ defmodule Catalyst.Extension do
   unchanged; their tool modules are auto-registered.
   """
 
+  require Logger
+
+  alias Catalyst.Tasks
+
+  @metadata_timeout 1_000
+
   @callback setup(api :: Catalyst.ExtensionAPI.t()) :: :ok | {:error, term()}
 
   @doc """
@@ -62,13 +68,31 @@ defmodule Catalyst.Extension do
   end
 
   defp safe_metadata(mod) do
-    case mod.metadata() do
-      %{} = meta -> meta
-      _other -> %{}
+    task = Tasks.async(fn -> mod.metadata() end)
+
+    case Tasks.await(task, metadata_timeout()) do
+      {:ok, %{} = metadata} ->
+        metadata
+
+      {:ok, other} ->
+        Logger.warning("[extensions] #{inspect(mod)}.metadata/0 returned #{inspect(other)}")
+        %{}
+
+      {:exit, reason} ->
+        Logger.warning("[extensions] #{inspect(mod)}.metadata/0 exited: #{inspect(reason)}")
+        %{}
+
+      :timeout ->
+        Logger.warning("[extensions] #{inspect(mod)}.metadata/0 timed out")
+        %{}
     end
   rescue
     _ -> %{}
   catch
     _kind, _reason -> %{}
+  end
+
+  defp metadata_timeout do
+    Application.get_env(:catalyst, :extension_metadata_timeout, @metadata_timeout)
   end
 end

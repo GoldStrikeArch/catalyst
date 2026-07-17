@@ -1,7 +1,7 @@
 defmodule Catalyst.Tools.Sd do
   @moduledoc "Find-and-replace in a file via sd (`replace` tool). In-place; regex or string mode."
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.{Binaries, Diff, Exec, Paths, Truncate}
+  alias Catalyst.Tools.{Binaries, Diff, Exec, Paths}
 
   @impl true
   def execution_mode, do: :sequential
@@ -39,7 +39,13 @@ defmodule Catalyst.Tools.Sd do
   def execute(%{"pattern" => pattern, "replacement" => replacement, "path" => path} = args, ctx) do
     sd = Binaries.path!(:sd)
     abs = Paths.resolve(path, ctx.cwd)
-    flags = if args["string_mode"], do: ["--string-mode"], else: []
+
+    flags =
+      case args["string_mode"] do
+        true -> ["--string-mode"]
+        _ -> []
+      end
+
     sd_args = flags ++ ["--", pattern, replacement, abs]
     original = File.read(abs)
 
@@ -68,7 +74,11 @@ defmodule Catalyst.Tools.Sd do
   end
 
   defp describe({:error, _unreadable_before}, abs, pattern) do
-    result("Replaced occurrences of #{inspect(pattern)} in #{abs}", %{path: abs, diff: ""})
+    result(
+      "Replacement command completed for #{inspect(pattern)} in #{abs}, but the original " <>
+        "content was unreadable, so whether anything changed is unknown.",
+      %{path: abs, diff: "", matched: :unknown}
+    )
   end
 
   # sd edits in place, so diff the pre-read contents against the file after.
@@ -77,10 +87,7 @@ defmodule Catalyst.Tools.Sd do
   defp diff_against({:ok, original}, abs) do
     case File.read(abs) do
       {:ok, updated} ->
-        {diff, info} =
-          original |> Diff.unified(updated) |> Truncate.scrub_utf8() |> Truncate.head()
-
-        Truncate.notice(diff, info, :head)
+        Diff.rendered(original, updated)
 
       _ ->
         ""

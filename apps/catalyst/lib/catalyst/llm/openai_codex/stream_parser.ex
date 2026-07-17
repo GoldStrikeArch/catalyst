@@ -14,6 +14,8 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
 
   defstruct blocks: [],
             current: nil,
+            items: %{},
+            next_item_seq: 0,
             response_id: nil,
             usage: %Usage{},
             stop_reason: :stop,
@@ -24,7 +26,9 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
 
   @type t :: %__MODULE__{
           blocks: [Content.t()],
-          current: nil | {:reasoning, map()} | {:text, map()} | {:tool, map()},
+          current: term() | nil,
+          items: %{optional(term()) => map()},
+          next_item_seq: non_neg_integer(),
           response_id: String.t() | nil,
           usage: Usage.t(),
           stop_reason: Message.Assistant.stop_reason(),
@@ -46,24 +50,26 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp do_handle("response.created", ev, s, _sink),
     do: %{s | response_id: get_in(ev, ["response", "id"]) || s.response_id}
 
-  defp do_handle("response.output_item.added", %{"item" => item}, s, sink) do
+  defp do_handle("response.output_item.added", %{"item" => item} = event, s, sink) do
+    item = Map.put_new(item, "output_index", event["output_index"])
+
     case item["type"] do
       "reasoning" ->
-        %{s | current: {:reasoning, %{thinking: []}}}
+        put_item(s, item, :reasoning, %{thinking: []})
 
       "message" ->
         sink.(%Event.TextStart{})
-        %{s | current: {:text, %{text: [], id: item["id"]}}}
+        put_item(s, item, :text, %{text: []})
 
       "function_call" ->
         id = "#{item["call_id"]}|#{item["id"]}"
         sink.(%Event.ToolCallStart{id: id, name: item["name"]})
 
-        %{
-          s
-          | current:
-              {:tool, %{id: id, name: item["name"], partial: chunks(item["arguments"] || "")}}
-        }
+        put_item(s, item, :tool, %{
+          id: id,
+          name: item["name"],
+          partial: chunks(item["arguments"] || "")
+        })
 
       _ ->
         s
@@ -78,79 +84,78 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
               "response.reasoning_summary_text.delta"
             ] do
     case s.current do
-      {:reasoning, r} ->
+      key when not is_nil(key) ->
         delta = ev["delta"] || ""
-        sink.(%Event.ThinkingDelta{delta: delta})
-        %{s | current: {:reasoning, %{r | thinking: add_chunk(r.thinking, delta)}}}
 
-      _ ->
-        s
+        update_item(s, ev, key, :reasoning, fn item ->
+          sink.(%Event.ThinkingDelta{delta: delta})
+          %{item | thinking: add_chunk(item.thinking, delta)}
+        end)
+
+      nil ->
+        update_item(s, ev, nil, :reasoning, fn item ->
+          delta = ev["delta"] || ""
+          sink.(%Event.ThinkingDelta{delta: delta})
+          %{item | thinking: add_chunk(item.thinking, delta)}
+        end)
     end
   end
 
   defp do_handle("response.output_text.delta", ev, s, sink) do
-    case s.current do
-      {:text, t} ->
-        delta = ev["delta"] || ""
-        sink.(%Event.TextDelta{delta: delta})
-        %{s | current: {:text, %{t | text: add_chunk(t.text, delta)}}}
+    delta = ev["delta"] || ""
 
-      _ ->
-        s
-    end
+    update_item(s, ev, s.current, :text, fn item ->
+      sink.(%Event.TextDelta{delta: delta})
+      %{item | text: add_chunk(item.text, delta)}
+    end)
   end
 
   defp do_handle("response.function_call_arguments.delta", ev, s, sink) do
-    case s.current do
-      {:tool, t} ->
-        delta = ev["delta"] || ""
-        sink.(%Event.ToolCallDelta{id: t.id, delta: delta})
-        %{s | current: {:tool, %{t | partial: add_chunk(t.partial, delta)}}}
+    delta = ev["delta"] || ""
 
-      _ ->
-        s
-    end
+    update_item(s, ev, s.current, :tool, fn item ->
+      sink.(%Event.ToolCallDelta{id: item.id, delta: delta})
+      %{item | partial: add_chunk(item.partial, delta)}
+    end)
   end
 
   defp do_handle("response.function_call_arguments.done", ev, s, _sink) do
-    case s.current do
-      {:tool, t} ->
-        %{s | current: {:tool, %{t | partial: replace_chunks(t.partial, ev["arguments"])}}}
-
-      _ ->
-        s
-    end
+    update_item(s, ev, s.current, :tool, fn item ->
+      %{item | partial: replace_chunks(item.partial, ev["arguments"])}
+    end)
   end
 
   # ---- item done ------------------------------------------------------------
 
-  defp do_handle("response.output_item.done", %{"item" => item}, s, sink) do
+  defp do_handle("response.output_item.done", %{"item" => item} = event, s, sink) do
+    item = Map.put_new(item, "output_index", event["output_index"])
+
     case item["type"] do
       "reasoning" ->
         text = reasoning_text(item, s)
         block = %Content.Thinking{thinking: text, signature: Jason.encode!(item)}
-        %{s | blocks: [block | s.blocks], current: nil}
+        complete_item(s, item, block)
 
       "message" ->
         # The done item carries the COMPLETE text — authoritative over the
         # accumulated deltas (a dropped delta frame would otherwise silently
         # truncate the message).
-        text = message_text(item) |> default(current_text(s) || "")
+        text = message_text(item) |> default(current_text(s, item) || "")
         sink.(%Event.TextEnd{})
-        %{s | blocks: [%Content.Text{text: text} | s.blocks], current: nil}
+        complete_item(s, item, %Content.Text{text: text})
 
       "function_call" ->
         {id, name, partial} = current_tool(s, item)
         # Same authority rule: the done item's full `arguments` string beats
         # the accumulated deltas (dropped frame ⇒ corrupt/empty args).
-        args = decode_args(item["arguments"], partial)
-        sink.(%Event.ToolCallEnd{id: id, name: name, arguments: args})
+        case decode_args(item["arguments"], partial) do
+          {:ok, args} ->
+            sink.(%Event.ToolCallEnd{id: id, name: name, arguments: args})
+            complete_item(s, item, %Content.ToolCall{id: id, name: name, arguments: args})
 
-        %{
-          s
-          | blocks: [%Content.ToolCall{id: id, name: name, arguments: args} | s.blocks],
-            current: nil
-        }
+          {:error, reason} ->
+            invalidate_item(s, item, "invalid tool arguments for #{name}: #{reason}")
+        end
 
       _ ->
         s
@@ -162,7 +167,7 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp do_handle("response.completed", %{"response" => resp}, s, _sink) do
     usage = usage_from(resp["usage"])
     stop = stop_reason(resp["status"])
-    blocks = s.blocks
+    blocks = output_blocks(s)
 
     stop =
       cond do
@@ -203,8 +208,12 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
     do: %{s | error: "Error #{ev["code"]}: #{ev["message"]}", stop_reason: :error, done: true}
 
   defp do_handle("response.failed", %{"response" => resp}, s, _sink) do
-    err = resp["error"]
-    msg = if err, do: "#{err["code"] || "unknown"}: #{err["message"]}", else: "response failed"
+    msg =
+      case resp["error"] do
+        %{} = error -> "#{error["code"] || "unknown"}: #{error["message"]}"
+        _ -> "response failed"
+      end
+
     %{s | error: msg, stop_reason: :error, done: true}
   end
 
@@ -214,11 +223,13 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   @spec finalize(t(), Catalyst.Model.t()) :: Message.Assistant.t()
   def finalize(%__MODULE__{} = s, model) do
     s = s |> flush_current() |> mark_truncated()
+    blocks = output_blocks(s)
 
     content =
-      if s.error,
-        do: Enum.reverse([%Content.Text{text: s.error} | s.blocks]),
-        else: Enum.reverse(s.blocks)
+      case s.error do
+        nil -> blocks
+        error -> blocks ++ [%Content.Text{text: error}]
+      end
 
     %Message.Assistant{
       content: content,
@@ -233,26 +244,32 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
     }
   end
 
-  # Keep partially-streamed text/reasoning the UI already rendered. A partial
-  # tool call is dropped instead: the loop executes any ToolCall block it sees,
-  # and half-received arguments must not run.
-  defp flush_current(%{current: nil} = s), do: s
+  # Keep every partially-streamed text/reasoning item the UI already rendered.
+  # Partial tool calls are dropped instead: the loop executes any ToolCall block
+  # it sees, and half-received arguments must never run.
+  defp flush_current(s) do
+    s.items
+    |> Enum.sort_by(fn {_key, item} -> {item.output_index, item.seq} end)
+    |> Enum.reduce(%{s | current: nil}, fn
+      {key, %{status: :open, kind: :text} = item}, acc ->
+        put_completed(acc, key, %Content.Text{text: chunks_to_binary(item.text)})
 
-  defp flush_current(%{current: {:text, t}} = s),
-    do: %{s | blocks: [%Content.Text{text: chunks_to_binary(t.text)} | s.blocks], current: nil}
+      {key, %{status: :open, kind: :reasoning} = item}, acc ->
+        # A partial reasoning item has no encrypted_content; replaying a made-up
+        # signature risks a 400, so keep only its visible text.
+        block = %Content.Thinking{thinking: chunks_to_binary(item.thinking), signature: nil}
+        put_completed(acc, key, block)
 
-  # A mid-stream reasoning item was never completed, so its `output_item.added`
-  # payload lacks `encrypted_content`; replaying it next turn risks a 400. Keep
-  # the partial thinking text for the UI but emit no signature — Request skips
-  # nil-signature thinking blocks on replay.
-  defp flush_current(%{current: {:reasoning, r}} = s) do
-    block = %Content.Thinking{thinking: chunks_to_binary(r.thinking), signature: nil}
-    %{s | blocks: [block | s.blocks], current: nil}
-  end
+      {key, %{status: :open, kind: :tool} = item}, acc ->
+        err = "stream ended mid tool call (#{item.name}); the call was discarded"
+        stop_reason = preserve_terminal_reason(acc.stop_reason)
 
-  defp flush_current(%{current: {:tool, t}} = s) do
-    err = "stream ended mid tool call (#{t.name}); the call was discarded"
-    %{s | current: nil, error: s.error || err, stop_reason: :error}
+        acc = put_invalid(acc, key)
+        %{acc | error: acc.error || err, stop_reason: stop_reason}
+
+      _item, acc ->
+        acc
+    end)
   end
 
   # No terminal event seen (connection dropped mid-stream): the turn must not
@@ -264,16 +281,133 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
 
   # ---- helpers --------------------------------------------------------------
 
-  defp current_text(%{current: {:text, t}}), do: chunks_to_binary(t.text)
-  defp current_text(_), do: nil
+  defp put_item(s, wire_item, kind, data) do
+    key = item_key(wire_item, s.next_item_seq)
 
-  defp current_tool(%{current: {:tool, t}}, _item),
-    do: {t.id, t.name, chunks_to_binary(t.partial)}
+    item =
+      data
+      |> Map.merge(%{
+        kind: kind,
+        status: :open,
+        wire_id: wire_item["id"],
+        output_index: wire_item["output_index"] || s.next_item_seq,
+        seq: s.next_item_seq
+      })
 
-  defp current_tool(_, item),
-    do: {"#{item["call_id"]}|#{item["id"]}", item["name"], item["arguments"] || "{}"}
+    %{
+      s
+      | current: key,
+        items: Map.put(s.items, key, item),
+        next_item_seq: s.next_item_seq + 1
+    }
+  end
 
-  defp default(nil, fallback), do: fallback
+  defp update_item(s, event, fallback_key, kind, fun) do
+    case locate_item(s, event, fallback_key, kind) do
+      {:ok, key, item} -> %{s | items: Map.put(s.items, key, fun.(item))}
+      :error -> s
+    end
+  end
+
+  defp locate_item(s, event, fallback_key, kind) do
+    key = event_item_key(s, event) || fallback_key
+
+    case Map.fetch(s.items, key) do
+      {:ok, %{kind: ^kind} = item} -> {:ok, key, item}
+      _ -> :error
+    end
+  end
+
+  defp event_item_key(s, event) do
+    id = event["item_id"] || get_in(event, ["item", "id"])
+    output_index = event["output_index"] || get_in(event, ["item", "output_index"])
+
+    cond do
+      is_binary(id) and Map.has_key?(s.items, {:id, id}) -> {:id, id}
+      is_integer(output_index) -> find_by_output_index(s, output_index)
+      true -> nil
+    end
+  end
+
+  defp find_by_output_index(s, output_index) do
+    Enum.find_value(s.items, fn {key, item} ->
+      case item.output_index == output_index do
+        true -> key
+        false -> nil
+      end
+    end)
+  end
+
+  defp item_key(%{"id" => id}, _seq) when is_binary(id), do: {:id, id}
+  defp item_key(%{"output_index" => index}, _seq) when is_integer(index), do: {:index, index}
+  defp item_key(_item, seq), do: {:seq, seq}
+
+  defp complete_item(s, wire_item, block) do
+    case event_item_key(s, %{"item" => wire_item}) || s.current do
+      nil ->
+        %{s | blocks: [block | s.blocks]}
+
+      key ->
+        s
+        |> put_completed(key, block)
+        |> clear_current(key)
+    end
+  end
+
+  defp invalidate_item(s, wire_item, reason) do
+    key = event_item_key(s, %{"item" => wire_item}) || s.current
+
+    s =
+      case key do
+        nil -> s
+        key -> s |> put_invalid(key) |> clear_current(key)
+      end
+
+    %{s | error: s.error || reason, stop_reason: :error}
+  end
+
+  defp put_completed(s, key, block) do
+    update_in(s.items[key], fn
+      nil -> nil
+      item -> Map.merge(item, %{status: :done, block: block})
+    end)
+  end
+
+  defp put_invalid(s, key) do
+    update_in(s.items[key], fn
+      nil -> nil
+      item -> Map.put(item, :status, :invalid)
+    end)
+  end
+
+  defp clear_current(%{current: key} = s, key), do: %{s | current: nil}
+  defp clear_current(s, _key), do: s
+
+  defp output_blocks(s) do
+    item_blocks =
+      s.items
+      |> Map.values()
+      |> Enum.filter(&match?(%{status: :done, block: _}, &1))
+      |> Enum.sort_by(&{&1.output_index, &1.seq})
+      |> Enum.map(& &1.block)
+
+    Enum.reverse(s.blocks) ++ item_blocks
+  end
+
+  defp current_text(s, item) do
+    case locate_item(s, %{"item" => item}, s.current, :text) do
+      {:ok, _key, text_item} -> chunks_to_binary(text_item.text)
+      :error -> nil
+    end
+  end
+
+  defp current_tool(s, item) do
+    case locate_item(s, %{"item" => item}, s.current, :tool) do
+      {:ok, _key, tool} -> {tool.id, tool.name, chunks_to_binary(tool.partial)}
+      :error -> {"#{item["call_id"]}|#{item["id"]}", item["name"], item["arguments"] || "{}"}
+    end
+  end
+
   defp default("", fallback), do: fallback
   defp default(value, _fallback), do: value
 
@@ -289,12 +423,16 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
     cond do
       summary != "" -> summary
       content != "" -> content
-      true -> reasoning_partial(s)
+      true -> reasoning_partial(s, item)
     end
   end
 
-  defp reasoning_partial(%{current: {:reasoning, r}}), do: chunks_to_binary(r.thinking)
-  defp reasoning_partial(_), do: ""
+  defp reasoning_partial(s, item) do
+    case locate_item(s, %{"item" => item}, s.current, :reasoning) do
+      {:ok, _key, reasoning} -> chunks_to_binary(reasoning.thinking)
+      :error -> ""
+    end
+  end
 
   defp chunks(""), do: []
   defp chunks(binary) when is_binary(binary), do: [binary]
@@ -311,13 +449,21 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   end
 
   defp decode_args(partial, fallback) do
-    json = if is_binary(partial) and partial != "", do: partial, else: fallback || "{}"
+    json =
+      case is_binary(partial) and partial != "" do
+        true -> partial
+        false -> fallback || "{}"
+      end
 
     case Jason.decode(json) do
-      {:ok, map} when is_map(map) -> map
-      _ -> %{}
+      {:ok, map} when is_map(map) -> {:ok, map}
+      {:ok, other} -> {:error, "expected a JSON object, got #{inspect(other)}"}
+      {:error, error} -> {:error, Exception.message(error)}
     end
   end
+
+  defp preserve_terminal_reason(reason) when reason in [:aborted, :length], do: reason
+  defp preserve_terminal_reason(_reason), do: :error
 
   defp usage_from(nil), do: %Usage{}
 
@@ -336,6 +482,6 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp stop_reason("completed"), do: :stop
   defp stop_reason("incomplete"), do: :length
   defp stop_reason("failed"), do: :error
-  defp stop_reason("cancelled"), do: :error
+  defp stop_reason("cancelled"), do: :aborted
   defp stop_reason(_), do: :stop
 end

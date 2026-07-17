@@ -145,7 +145,14 @@ defmodule CatalystWeb.UI.Registry do
 
   ## purge
 
-  @doc "Remove every UI contribution made by `owner`."
+  @doc """
+  Remove every UI contribution made by `owner`.
+
+  Pages and commands are last-write-wins per key, so an owner's registration may
+  have displaced a seeded built-in (e.g. a replacement `"chat"` page). Any
+  built-in left without an entry after the purge is restored, keeping overrides
+  of built-ins as reversible as plain additions.
+  """
   @spec unregister_owner(term()) :: :ok
   def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
 
@@ -212,6 +219,7 @@ defmodule CatalystWeb.UI.Registry do
       if Map.get(entry, :owner) == owner, do: :ets.delete_object(@table, obj)
     end)
 
+    reseed_displaced_builtins()
     {:reply, :ok, state}
   end
 
@@ -219,31 +227,45 @@ defmodule CatalystWeb.UI.Registry do
 
   defp bump(state), do: %{state | seq: state.seq + 1}
 
-  defp seed_builtin_pages do
-    builtins = [
+  defp builtin_pages do
+    [
       %{path: "chat", mod: CatalystWeb.Pages.ChatPage, label: "Chat"},
       %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"}
     ]
-
-    Enum.each(builtins, fn page ->
-      entry = Map.merge(page, %{fun: :render, owner: nil, seq: 0})
-      :ets.insert(@table, {{:page, page.path}, entry})
-    end)
+    |> Enum.map(&Map.merge(&1, %{fun: :render, owner: nil, seq: 0}))
   end
 
   # Built-in chat commands live in the same registry extensions write to
   # (dogfooding it, and making them introspectable/overridable): `ShellLive`
   # dispatches every "/name [arg]" message through `fetch_command/1`.
-  defp seed_builtin_commands do
-    entry = %{
-      name: "cd",
-      owner: nil,
-      handler: &CatalystWeb.ShellLive.command_cd/2,
-      label: "/cd <path> — change the session working directory",
-      seq: 0
-    }
+  defp builtin_commands do
+    [
+      %{
+        name: "cd",
+        owner: nil,
+        handler: &CatalystWeb.ShellLive.command_cd/2,
+        label: "/cd <path> — change the session working directory",
+        seq: 0
+      }
+    ]
+  end
 
-    :ets.insert(@table, {{:command, "cd"}, entry})
+  defp seed_builtin_pages,
+    do: Enum.each(builtin_pages(), &:ets.insert(@table, {{:page, &1.path}, &1}))
+
+  defp seed_builtin_commands,
+    do: Enum.each(builtin_commands(), &:ets.insert(@table, {{:command, &1.name}, &1}))
+
+  defp reseed_displaced_builtins do
+    Enum.each(builtin_pages(), fn page ->
+      if :ets.lookup(@table, {:page, page.path}) == [],
+        do: :ets.insert(@table, {{:page, page.path}, page})
+    end)
+
+    Enum.each(builtin_commands(), fn cmd ->
+      if :ets.lookup(@table, {:command, cmd.name}) == [],
+        do: :ets.insert(@table, {{:command, cmd.name}, cmd})
+    end)
   end
 
   defp wire do

@@ -86,6 +86,27 @@ defmodule Catalyst.Agent.LoopHooksTest do
     refute File.exists?(Path.join(tmp, "a.txt"))
   end
 
+  test "before_tool_call safely formats a non-string block reason", %{tmp: tmp, owner: owner} do
+    Hooks.register(
+      :before_tool_call,
+      fn ctx ->
+        case ctx.cwd do
+          ^tmp -> {:block, %{reason: :denied}}
+          _other -> :cont
+        end
+      end,
+      owner: owner
+    )
+
+    {msgs, _events} =
+      run([{:tool, "write", %{"path" => "blocked.txt", "content" => "no"}}], "go", tmp)
+
+    result = Enum.find(msgs, &match?(%Message.ToolResult{tool_name: "write"}, &1))
+    assert result.is_error
+    assert Content.text_of(result.content) == "%{reason: :denied}"
+    refute File.exists?(Path.join(tmp, "blocked.txt"))
+  end
+
   test "after_tool_call can override a tool result", %{tmp: tmp, owner: owner} do
     File.write!(Path.join(tmp, "x.txt"), "original")
 

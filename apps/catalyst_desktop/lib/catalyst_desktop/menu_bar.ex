@@ -31,11 +31,13 @@ defmodule CatalystDesktop.MenuBar do
   def handle_info(_msg, menu), do: {:noreply, menu}
 
   # A plain string, deliberately NOT ~H (despite the callback's Rendered.t()
-  # spec — Desktop.Menu.Parser.parse/1 takes binaries directly): the dev
+  # spec — Desktop.Menu.Parser.parse/1 explicitly takes binaries): the dev
   # config's debug_heex_annotations/debug_attributes wrap every HEEx template
   # in comment markers and data-phx-loc attributes, and the parser requires
   # <menubar> as the literal root token, so the annotated output fails to
-  # parse and the menu comes up empty.
+  # parse and the menu comes up empty. Suppress only this upstream callback
+  # contract mismatch while retaining the runtime format its parser supports.
+  @dialyzer {:nowarn_function, render: 1}
   @impl true
   def render(_assigns) do
     """

@@ -19,4 +19,8 @@ defmodule Catalyst.LLM.Provider do
               opts :: keyword(),
               sink :: sink()
             ) :: {:ok, Catalyst.Message.Assistant.t()} | {:error, term()}
+
+  @callback cleanup_session(session_id :: String.t()) :: :ok
+
+  @optional_callbacks cleanup_session: 1
 end

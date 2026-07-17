@@ -11,9 +11,12 @@ defmodule Catalyst.Auth.TokenStore do
   use GenServer
   require Logger
 
+  alias Catalyst.Tasks
   alias Catalyst.Auth.OpenAIOAuth
+  alias Catalyst.Files.AtomicWrite
 
   @skew_ms 60_000
+  @refresh_timeout_ms 30_000
 
   @typedoc "What `get_access_token/1` serves to callers."
   @type token :: %{access: String.t(), account_id: String.t() | nil}
@@ -83,10 +86,9 @@ defmodule Catalyst.Auth.TokenStore do
         {:reply, {:error, :not_logged_in}, state}
 
       creds ->
-        if fresh?(creds) do
-          {:reply, {:ok, public(creds)}, state}
-        else
-          {:noreply, start_or_join_refresh(provider, creds, from, state)}
+        case fresh?(creds) do
+          true -> {:reply, {:ok, public(creds)}, state}
+          false -> {:noreply, start_or_join_refresh(provider, creds, from, state)}
         end
     end
   end
@@ -124,22 +126,54 @@ defmodule Catalyst.Auth.TokenStore do
   @impl true
   def handle_info({ref, result}, state) when is_reference(ref) do
     case pop_refresh(state, ref) do
-      nil ->
+      :error ->
         {:noreply, state}
 
-      {provider, waiters, state} ->
-        Process.demonitor(ref, [:flush])
-        {:noreply, apply_refresh(provider, result, waiters, state)}
+      {:ok, provider, inflight, state} ->
+        finish_refresh(inflight)
+        {:noreply, apply_refresh(provider, result, inflight.waiters, state)}
     end
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case pop_refresh(state, ref) do
-      nil ->
+      :error ->
         {:noreply, state}
 
-      {_provider, waiters, state} ->
-        Enum.each(waiters, &GenServer.reply(&1, {:error, {:refresh_failed, reason}}))
+      {:ok, _provider, inflight, state} ->
+        cancel_timer(inflight)
+
+        Enum.each(
+          inflight.waiters,
+          &GenServer.reply(&1, {:error, {:refresh_failed, reason}})
+        )
+
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:refresh_timeout, provider, ref}, state) do
+    case state.refreshing[provider] do
+      %{task: %Task{ref: ^ref}} = inflight ->
+        state = %{state | refreshing: Map.delete(state.refreshing, provider)}
+
+        # The timer can be dequeued just before an already-completed Task
+        # reply. Task.shutdown/2 checks the mailbox, so preserve that result
+        # instead of throwing away rotated credentials at the boundary.
+        case stop_refresh(inflight) do
+          {:ok, result} ->
+            {:noreply, apply_refresh(provider, result, inflight.waiters, state)}
+
+          _not_completed ->
+            Enum.each(
+              inflight.waiters,
+              &GenServer.reply(&1, {:error, {:refresh_failed, :timeout}})
+            )
+
+            {:noreply, state}
+        end
+
+      _missing_or_superseded ->
         {:noreply, state}
     end
   end
@@ -158,12 +192,16 @@ defmodule Catalyst.Auth.TokenStore do
       nil ->
         refresh = refresh_fun()
 
-        task =
-          Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-            refresh.(creds["refresh"])
-          end)
+        task = Tasks.async(fn -> refresh.(creds["refresh"]) end)
 
-        put_in(state.refreshing[provider], %{ref: task.ref, waiters: [from]})
+        timer =
+          Process.send_after(
+            self(),
+            {:refresh_timeout, provider, task.ref},
+            refresh_timeout()
+          )
+
+        put_in(state.refreshing[provider], %{task: task, timer: timer, waiters: [from]})
     end
   end
 
@@ -181,7 +219,8 @@ defmodule Catalyst.Auth.TokenStore do
       {nil, _refreshing} ->
         state
 
-      {%{waiters: waiters}, refreshing} ->
+      {%{waiters: waiters} = inflight, refreshing} ->
+        stop_refresh(inflight)
         Enum.each(waiters, &GenServer.reply(&1, {:ok, public(creds)}))
         %{state | refreshing: refreshing}
     end
@@ -195,31 +234,53 @@ defmodule Catalyst.Auth.TokenStore do
       {nil, _refreshing} ->
         state
 
-      {%{waiters: waiters}, refreshing} ->
+      {%{waiters: waiters} = inflight, refreshing} ->
+        stop_refresh(inflight)
         Enum.each(waiters, &GenServer.reply(&1, {:error, reason}))
         %{state | refreshing: refreshing}
     end
   end
 
   defp pop_refresh(state, ref) do
-    case Enum.find(state.refreshing, fn {_p, %{ref: r}} -> r == ref end) do
+    case Enum.find(state.refreshing, fn {_provider, %{task: task}} -> task.ref == ref end) do
       nil ->
-        nil
+        :error
 
-      {provider, %{waiters: waiters}} ->
-        {provider, waiters, %{state | refreshing: Map.delete(state.refreshing, provider)}}
+      {provider, inflight} ->
+        {:ok, provider, inflight, %{state | refreshing: Map.delete(state.refreshing, provider)}}
     end
   end
+
+  defp finish_refresh(%{task: task} = inflight) do
+    cancel_timer(inflight)
+    Process.demonitor(task.ref, [:flush])
+    :ok
+  end
+
+  defp stop_refresh(%{task: task} = inflight) do
+    cancel_timer(inflight)
+    Task.shutdown(task, :brutal_kill)
+  end
+
+  defp cancel_timer(%{timer: timer}) do
+    Process.cancel_timer(timer)
+    :ok
+  end
+
+  defp refresh_timeout,
+    do: Application.get_env(:catalyst, :oauth_refresh_timeout, @refresh_timeout_ms)
 
   defp apply_refresh(provider, {:ok, new_creds}, waiters, state) do
     # Keep the stored account id when the refreshed token lacks the claim
     # (credentials_from always sets the key, possibly to nil).
     new_creds =
-      if new_creds["account_id"] do
-        new_creds
-      else
-        old = Map.get(state.creds, provider) || %{}
-        Map.put(new_creds, "account_id", old["account_id"])
+      case new_creds["account_id"] do
+        account_id when is_binary(account_id) ->
+          new_creds
+
+        _missing ->
+          old = Map.get(state.creds, provider) || %{}
+          Map.put(new_creds, "account_id", old["account_id"])
       end
 
     creds = Map.put(state.creds, provider, new_creds)
@@ -264,18 +325,15 @@ defmodule Catalyst.Auth.TokenStore do
   defp persist(creds) do
     path = auth_path()
     dir = Path.dirname(path)
-    tmp = path <> ".tmp"
 
     result =
       with {:ok, json} <- Jason.encode(creds),
            :ok <- File.mkdir_p(dir),
            _ = File.chmod(dir, 0o700),
-           # Restrict the temp file BEFORE writing token material into it, then
-           # atomically swap it in (rename preserves the mode).
-           :ok <- File.touch(tmp),
-           :ok <- File.chmod(tmp, 0o600),
-           :ok <- File.write(tmp, json) do
-        File.rename(tmp, path)
+           # AtomicWrite applies the mode to the empty temp file before token
+           # bytes are written, syncs it, then renames it into place.
+           :ok <- AtomicWrite.write(path, json, mode: 0o600) do
+        :ok
       end
 
     with {:error, reason} <- result do
@@ -289,6 +347,6 @@ defmodule Catalyst.Auth.TokenStore do
   end
 
   defp auth_path do
-    Application.get_env(:catalyst, :auth_path) || Path.expand("~/.catalyst/auth.json")
+    Application.get_env(:catalyst, :auth_path) || Catalyst.Paths.auth()
   end
 end

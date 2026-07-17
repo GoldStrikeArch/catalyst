@@ -59,10 +59,9 @@ defmodule Catalyst.Tools.Exec do
 
     case collect(path, args, opts) do
       {:ok, %{out: out, status: status} = res} ->
-        if status in ok_statuses do
-          res
-        else
-          raise "#{label} error (status #{status}): #{String.slice(out, 0, 200)}"
+        case status in ok_statuses do
+          true -> res
+          false -> raise "#{label} error (status #{status}): #{String.slice(out, 0, 200)}"
         end
 
       {:error, reason} ->

@@ -83,7 +83,7 @@ defmodule Catalyst.Session.ServerTest do
     assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
 
     Manager.stop(id)
-    wait_until(fn -> Manager.whereis(id) == nil end)
+    wait_until(fn -> Manager.whereis(id) == :error end)
 
     {:ok, %{pid: pid2}} =
       Manager.start_session(
@@ -105,6 +105,86 @@ defmodule Catalyst.Session.ServerTest do
       tries == 0 -> flunk("condition never became true")
       true -> Process.sleep(10) && wait_until(fun, tries - 1)
     end
+  end
+
+  test "a resumed session keeps its configured model and thinking level", %{
+    tmp: tmp,
+    model: model
+  } do
+    {id, pid} = start(tmp, model, [{:text, "ok"}])
+
+    switched = %Model{id: "faux-turbo", api: "faux", provider: "faux", input: [:text]}
+    :ok = Server.configure(pid, model: switched, opts: [reasoning_effort: "high"])
+
+    Manager.stop(id)
+    wait_until(fn -> Manager.whereis(id) == :error end)
+
+    # Restarted with the ORIGINAL model in opts: the persisted
+    # model_change/thinking_level_change entries must win.
+    {:ok, %{pid: pid2}} =
+      Manager.start_session(
+        id: id,
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        opts: [script: [{:text, "ok"}]]
+      )
+
+    snap = Server.state(pid2)
+    assert snap.model.id == "faux-turbo"
+    assert Keyword.get(snap.opts, :reasoning_effort) == "high"
+  end
+
+  test "cleared model and thinking level stay cleared after restart", %{
+    tmp: tmp,
+    model: model
+  } do
+    {id, pid} = start(tmp, model, [{:text, "ok"}])
+
+    switched = %Model{id: "faux-turbo", api: "faux", provider: "faux"}
+    :ok = Server.configure(pid, model: switched, opts: [reasoning_effort: "high"])
+    :ok = Server.configure(pid, model: nil, opts: [reasoning_effort: nil])
+
+    Manager.stop(id)
+    wait_until(fn -> Manager.whereis(id) == :error end)
+
+    {:ok, %{pid: pid2}} =
+      Manager.start_session(
+        id: id,
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        opts: [script: [{:text, "ok"}], reasoning_effort: "medium"]
+      )
+
+    snap = Server.state(pid2)
+    assert snap.model == nil
+    refute Keyword.has_key?(snap.opts, :reasoning_effort)
+  end
+
+  test "manager rejects unsafe session ids before starting a server", %{tmp: tmp} do
+    for id <- ["../escape", "nested/id", "", :not_a_string] do
+      assert {:error, {:invalid_session_id, ^id}} = Manager.start_session(id: id, cwd: tmp)
+    end
+
+    assert :error = Manager.whereis("../escape")
+  end
+
+  test "nested opts cannot replace the validated session id", %{tmp: tmp, model: model} do
+    {:ok, %{id: id, pid: pid}} =
+      Manager.start_session(
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        opts: [session_id: "../../outside", script: [{:text, "ok"}]]
+      )
+
+    snapshot = Server.state(pid)
+    refute Keyword.has_key?(snapshot.opts, :session_id)
+    assert Path.basename(snapshot.store_path) == "#{id}.jsonl"
+
+    assert :ok = Server.configure(pid, opts: [session_id: "../still-outside"])
+    refute Keyword.has_key?(Server.state(pid).opts, :session_id)
   end
 
   test "abort kills the run and synthesizes an aborted turn", %{tmp: tmp, model: model} do
@@ -168,7 +248,7 @@ defmodule Catalyst.Session.ServerTest do
     assert_receive {:agent_event, _, %Event.ToolExecutionStart{}}, 5000
 
     Manager.stop(id)
-    wait_until(fn -> Manager.whereis(id) == nil end)
+    wait_until(fn -> Manager.whereis(id) == :error end)
 
     {:ok, %{pid: pid2}} =
       Manager.start_session(
@@ -220,7 +300,7 @@ defmodule Catalyst.Session.ServerTest do
 
     # The reset marker persists: a restart with the same id stays cleared.
     Manager.stop(id)
-    wait_until(fn -> Manager.whereis(id) == nil end)
+    wait_until(fn -> Manager.whereis(id) == :error end)
 
     {:ok, %{pid: pid2}} =
       Manager.start_session(

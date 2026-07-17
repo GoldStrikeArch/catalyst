@@ -55,15 +55,19 @@ defmodule Catalyst.Tools.DevelopTool do
       {:ok, %{tools: [], path: path}} ->
         raise "Compiled #{path} but found no tool module. Did you `use Catalyst.Tools.Tool` and implement name/0, parameters/0, execute/2?"
 
-      {:ok, %{tools: tool_names, path: path}} ->
+      {:ok, %{tools: tool_names} = summary} ->
         result(
-          "Created and loaded #{length(tool_names)} tool(s): #{Enum.join(tool_names, ", ")}. " <>
-            "They are available to call now (next turn).",
-          %{path: path, tools: tool_names}
+          ("Created and loaded #{length(tool_names)} tool(s): #{Enum.join(tool_names, ", ")}. " <>
+             "They are available to call now (next turn).")
+          |> append_warning(summary[:warning]),
+          Map.take(summary, [:path, :tools, :warning])
         )
 
       {:error, reason} ->
         raise "Failed to create the new tool: #{Catalyst.Extensions.format_error(reason)}"
     end
   end
+
+  defp append_warning(text, nil), do: text
+  defp append_warning(text, warning), do: text <> " Warning: #{warning}"
 end

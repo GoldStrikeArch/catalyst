@@ -16,45 +16,9 @@ defmodule Catalyst.Session.Server do
   use GenServer
 
   alias Catalyst.Agent.{Event, Loop}
-  alias Catalyst.Message
+  alias Catalyst.{Message, Tasks}
   alias Catalyst.Session.{Manager, Reducer, RunConfig, Snapshot, Store}
-
-  defmodule State do
-    @moduledoc false
-    defstruct [
-      :id,
-      :cwd,
-      :system_prompt,
-      :model,
-      :provider,
-      :tools,
-      :opts,
-      :store,
-      :run,
-      # Ref identifying the CURRENT run; events from killed/finished runs that
-      # are still buffered in the mailbox carry a stale ref and are dropped.
-      :run_ref,
-      # Whether the current run's AgentEnd was folded/broadcast — lets abort
-      # tell "run finished cleanly" from "its tail events got dropped".
-      agent_ended: false,
-      # Transcript, stored NEWEST-FIRST so per-event appends are O(1); reversed
-      # at the boundaries (Snapshot.of/1, start_run's loop context).
-      messages: [],
-      streaming_message: nil,
-      # Streamed deltas of the in-flight assistant message, accumulated as
-      # iodata so a reattaching UI can rebuild the partial bubble (Snapshot).
-      streaming_text: [],
-      streaming_thinking: [],
-      pending_tool_calls: MapSet.new(),
-      error_message: nil,
-      steering: :queue.new(),
-      follow_up: :queue.new(),
-      # Messages handed to the run via drain_steering/drain_follow_up but not
-      # yet folded back as MessageEnd events — re-queued if the run dies, so an
-      # abort can't swallow a user's steering message. `{:steering | :follow_up, msg}`.
-      in_flight: []
-    ]
-  end
+  alias Catalyst.Session.Server.State
 
   # ---- public API -----------------------------------------------------------
 
@@ -135,26 +99,40 @@ defmodule Catalyst.Session.Server do
       # Default to the live extension set (built-ins + runtime-loaded tools),
       # resolved per turn by the loop. Pass an explicit list to pin tools.
       tools: Keyword.get(opts, :tools, :extensions),
-      opts: Keyword.get(opts, :opts, []),
-      store: store,
-      # Resume the persisted transcript so a crash-restart (or reattach to a
-      # known id) doesn't lose the conversation. Stored newest-first.
-      messages: store.path |> Store.load() |> Enum.reverse()
+      opts: opts |> Keyword.get(:opts, []) |> normalize_session_opts(),
+      store: store
     }
+
+    {:ok, state, {:continue, :load_state}}
+  end
+
+  @impl true
+  def handle_continue(:load_state, %State{} = state) do
+    # One disk fold restores both the transcript and the independent session
+    # settings. Persisted changes win over caller defaults, including explicit
+    # nil tombstones used to clear a previously selected model/effort.
+    loaded = Store.load_state(state.store.path)
 
     # The previous incarnation may have died mid-run (graceful stop, VM crash)
     # after persisting an assistant message whose tool calls never got results.
-    # handle_failure/2 only covers failures within one process lifetime, so
-    # repair at load time — a dangling tool call is rejected by the provider on
-    # every subsequent request, bricking the session.
-    state = repair_transcript(state)
+    # Repair before the server handles mailbox messages so the next provider
+    # request cannot observe dangling tool calls.
+    state =
+      state
+      |> restore_persisted(loaded)
+      |> repair_transcript()
 
-    Catalyst.Debug.mark_latest(id)
-    {:ok, state}
+    Catalyst.Debug.mark_latest(state.id)
+    # Fire-and-forget provider warmup (the Codex ws prewarm): the first turn
+    # can then ride a delta upload. RunConfig decides (hot-swappable) and the
+    # work runs in a supervised task — it never blocks or fails the session.
+    {:noreply, start_prewarm(state)}
   end
 
   @impl true
   def handle_call({:prompt, msg}, _from, %State{run: nil} = state) do
+    state = stop_prewarm(state)
+
     case start_run(state, [msg]) do
       {:ok, state} -> {:reply, :ok, state}
       {:error, _reason} = err -> {:reply, err, state}
@@ -164,6 +142,8 @@ defmodule Catalyst.Session.Server do
   def handle_call({:prompt, _msg}, _from, state), do: {:reply, {:error, :busy}, state}
 
   def handle_call(:continue, _from, %State{run: nil} = state) do
+    state = stop_prewarm(state)
+
     case start_run(state, []) do
       {:ok, state} -> {:reply, :ok, state}
       {:error, _reason} = err -> {:reply, err, state}
@@ -198,14 +178,22 @@ defmodule Catalyst.Session.Server do
   def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
 
   def handle_call({:configure, changes}, _from, %State{} = state) do
-    state = %State{
+    new_state = %State{
       state
       | model: Keyword.get(changes, :model, state.model),
         provider: Keyword.get(changes, :provider, state.provider),
-        opts: merge_opts(state.opts, Keyword.get(changes, :opts, []))
+        opts:
+          state.opts
+          |> merge_opts(Keyword.get(changes, :opts, []))
+          |> normalize_session_opts()
     }
 
-    {:reply, :ok, state}
+    persist_settings_changes(state, new_state)
+
+    # Changed model/options invalidate any prewarmed continuation's body
+    # probe. Cancel the previous warmup before starting its replacement so it
+    # cannot land stale state after the new configuration wins.
+    {:reply, :ok, restart_prewarm(new_state)}
   end
 
   @impl true
@@ -294,6 +282,12 @@ defmodule Catalyst.Session.Server do
     {:noreply, %{state | run: nil, run_ref: nil}}
   end
 
+  def handle_info(
+        {:DOWN, ref, :process, _pid, _reason},
+        %State{prewarm: {_prewarm_pid, ref}} = state
+      ),
+      do: {:noreply, %{state | prewarm: nil}}
+
   def handle_info({:DOWN, ref, :process, _pid, :normal}, %State{run: %Task{ref: ref}} = state),
     do: {:noreply, %{state | run: nil, run_ref: nil}}
 
@@ -303,14 +297,42 @@ defmodule Catalyst.Session.Server do
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %State{run: %Task{} = task}) do
-    shutdown_run(task)
+  def terminate(_reason, %State{} = state) do
+    _state = stop_prewarm(state)
+    shutdown_terminating_run(state.run)
+    RunConfig.cleanup_session(state)
     :ok
   end
 
-  def terminate(_reason, _state), do: :ok
-
   # ---- internals ------------------------------------------------------------
+
+  defp shutdown_terminating_run(%Task{} = task), do: shutdown_run(task)
+  defp shutdown_terminating_run(_no_run), do: :ok
+
+  defp start_prewarm(%State{} = state) do
+    case RunConfig.start_prewarm(state) do
+      {:ok, pid} -> %{state | prewarm: {pid, Process.monitor(pid)}}
+      _not_started -> %{state | prewarm: nil}
+    end
+  end
+
+  defp restart_prewarm(%State{run: nil} = state),
+    do: state |> stop_prewarm() |> start_prewarm()
+
+  defp restart_prewarm(%State{} = state), do: stop_prewarm(state)
+
+  defp stop_prewarm(%State{prewarm: nil} = state), do: state
+
+  defp stop_prewarm(%State{prewarm: {pid, ref}} = state) do
+    Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    end
+
+    RunConfig.cleanup_session(state)
+    %{state | prewarm: nil}
+  end
 
   defp start_run(state, prompts) do
     server = self()
@@ -330,10 +352,7 @@ defmodule Catalyst.Session.Server do
         loop = Map.get(config, :loop, Loop)
         emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
 
-        task =
-          Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-            loop.run(prompts, context, config, emit)
-          end)
+        task = Tasks.async(fn -> loop.run(prompts, context, config, emit) end)
 
         {:ok, %{state | run: task, run_ref: run_ref, agent_ended: false, error_message: nil}}
 
@@ -349,12 +368,34 @@ defmodule Catalyst.Session.Server do
     end)
   end
 
+  defp normalize_session_opts(opts), do: Keyword.delete(opts, :session_id)
+
+  defp restore_persisted(%State{} = state, loaded) do
+    %State{
+      state
+      | model: restore_model(state.model, loaded),
+        opts: restore_thinking_level(state.opts, loaded),
+        messages: Enum.reverse(loaded.messages)
+    }
+  end
+
+  defp restore_model(_default, %{model_set?: true, model: model}), do: model
+  defp restore_model(default, _settings), do: default
+
+  defp restore_thinking_level(opts, %{thinking_level_set?: true, thinking_level: nil}),
+    do: Keyword.delete(opts, :reasoning_effort)
+
+  defp restore_thinking_level(opts, %{thinking_level_set?: true, thinking_level: level}),
+    do: Keyword.put(opts, :reasoning_effort, level)
+
+  defp restore_thinking_level(opts, _settings), do: opts
+
   defp persist(state, %Event.MessageEnd{message: m}), do: Store.append_message(state.store, m)
   defp persist(_state, _event), do: :ok
 
   # Synthesize and persist error ToolResults for tool calls left dangling by a
-  # previous incarnation. No broadcast: this runs in init, before any
-  # subscriber can have folded an inconsistent view.
+  # previous incarnation. No broadcast: this runs in handle_continue before
+  # the server processes mailbox messages.
   defp repair_transcript(state) do
     case Reducer.aborted_tool_results(state, :interrupted) do
       [] ->
@@ -437,4 +478,24 @@ defmodule Catalyst.Session.Server do
   defp normalize(%Message.User{} = m), do: m
   defp normalize(text) when is_binary(text), do: Message.user(text)
   defp normalize(content) when is_list(content), do: Message.user(content)
+
+  # PI's model_change / thinking_level_change session entries: persist setting
+  # switches so a resumed session keeps them (handle_continue folds them back).
+  defp persist_settings_changes(old, new) do
+    case new.model != old.model and
+           (is_nil(new.model) or match?(%Catalyst.Model{}, new.model)) do
+      true -> Store.append_model_change(new.store, new.model)
+      false -> :ok
+    end
+
+    old_level = Keyword.get(old.opts, :reasoning_effort)
+    new_level = Keyword.get(new.opts, :reasoning_effort)
+
+    case new_level != old_level and (is_nil(new_level) or is_binary(new_level)) do
+      true -> Store.append_thinking_level_change(new.store, new_level)
+      false -> :ok
+    end
+
+    :ok
+  end
 end

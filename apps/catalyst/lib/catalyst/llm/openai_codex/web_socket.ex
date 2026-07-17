@@ -13,15 +13,17 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
     * server pings are answered with pongs; a close before the terminal event
       is an error.
 
-  The connection struct is plain data owned by the calling process (the agent
-  loop's run task) — when that process dies, the socket dies with it, so a
-  cached connection can never leak past its run. `request/4` is a fold: each
-  decoded event map is fed to the caller's reducer (which feeds
+  The connection struct is plain data owned by one process at a time. During a
+  request that is the agent-loop run task; between requests ownership may move
+  to the bounded `ConnCache`. `request/4` is a fold: each decoded event map is
+  fed to the caller's reducer (which feeds
   `Catalyst.LLM.OpenAICodex.StreamParser`), and the final accumulator comes
   back with the result, success or failure, along with how many decoded events
   reached the reducer (diagnostic — the caller judges retry/fallback safety by
   what reached its own sink, since bookkeeping events never do).
   """
+
+  alias Catalyst.LLM.OpenAICodex.BoundedBuffer
 
   @upgrade_timeout 15_000
   @idle_timeout 600_000
@@ -31,15 +33,29 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   @terminal ~w(response.completed response.done response.incomplete
                response.failed response.cancelled error)
 
-  defstruct [:conn, :websocket, :ref]
+  defstruct [:conn, :websocket, :ref, resp_headers: []]
 
   @type t :: %__MODULE__{
           conn: Mint.HTTP.t(),
           websocket: Mint.WebSocket.t(),
-          ref: Mint.Types.request_ref()
+          ref: Mint.Types.request_ref(),
+          # The 101 upgrade response headers (e.g. x-models-etag).
+          resp_headers: [{String.t(), String.t()}]
         }
 
   @type reducer :: (map(), acc :: term() -> acc :: term())
+
+  @doc "Guard matching TCP/SSL messages that may belong to a Mint connection."
+  defguard socket_message?(message)
+           when is_tuple(message) and tuple_size(message) > 0 and
+                  elem(message, 0) in [
+                    :tcp,
+                    :ssl,
+                    :tcp_closed,
+                    :ssl_closed,
+                    :tcp_error,
+                    :ssl_error
+                  ]
 
   # ---- connect ----------------------------------------------------------------
 
@@ -53,17 +69,22 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
           {:ok, t()} | {:error, term()}
   def connect(url, headers, opts \\ []) do
     uri = URI.parse(url)
-    {http_scheme, ws_scheme} = schemes(uri.scheme)
     path = (uri.path || "/") <> query_suffix(uri.query)
     timeout = Keyword.get(opts, :timeout, @upgrade_timeout)
 
-    with {:ok, conn} <-
+    with {:ok, http_scheme, ws_scheme} <- schemes(uri),
+         {:ok, conn} <-
            Mint.HTTP.connect(http_scheme, uri.host, uri.port,
              protocols: [:http1],
              transport_opts: [timeout: timeout]
            ),
          {:ok, conn, ref} <- Mint.WebSocket.upgrade(ws_scheme, conn, path, headers) do
-      await_upgrade(%{conn: conn, ref: ref, status: nil, headers: [], body: ""}, timeout)
+      deadline = monotonic_ms() + timeout
+
+      await_upgrade(
+        %{conn: conn, ref: ref, status: nil, headers: [], body: BoundedBuffer.new()},
+        deadline
+      )
     else
       {:error, reason} ->
         {:error, reason}
@@ -74,26 +95,44 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
     end
   end
 
-  defp schemes("wss"), do: {:https, :wss}
-  defp schemes("https"), do: {:https, :wss}
-  defp schemes("ws"), do: {:http, :ws}
-  defp schemes(_http), do: {:http, :ws}
+  defp schemes(%URI{scheme: "wss", host: host}) when is_binary(host) and host != "",
+    do: {:ok, :https, :wss}
+
+  defp schemes(%URI{scheme: "https", host: host}) when is_binary(host) and host != "",
+    do: {:ok, :https, :wss}
+
+  defp schemes(%URI{scheme: "ws", host: host}) when is_binary(host) and host != "",
+    do: {:ok, :http, :ws}
+
+  defp schemes(%URI{scheme: "http", host: host}) when is_binary(host) and host != "",
+    do: {:ok, :http, :ws}
+
+  defp schemes(%URI{scheme: scheme}), do: {:error, {:invalid_websocket_url_scheme, scheme}}
 
   defp query_suffix(nil), do: ""
   defp query_suffix(query), do: "?" <> query
 
   # Collect the upgrade response (101 → websocket; anything else → error with
   # the response body, so a 401 can drive the token-refresh retry).
-  defp await_upgrade(%{conn: conn} = acc, timeout) do
+  defp await_upgrade(%{conn: conn} = acc, deadline) do
+    remaining = deadline - monotonic_ms()
+
+    case remaining > 0 do
+      true -> receive_upgrade(acc, deadline, remaining)
+      false -> upgrade_timeout(conn)
+    end
+  end
+
+  defp receive_upgrade(%{conn: conn} = acc, deadline, remaining) do
     receive do
-      msg when elem(msg, 0) in [:tcp, :ssl, :tcp_closed, :ssl_closed, :tcp_error, :ssl_error] ->
+      msg when socket_message?(msg) ->
         case Mint.WebSocket.stream(conn, msg) do
           {:ok, conn, entries} ->
             acc = %{acc | conn: conn}
 
             case Enum.reduce(entries, acc, &upgrade_entry/2) do
               %{done: true} = acc -> finish_upgrade(acc)
-              acc -> await_upgrade(acc, timeout)
+              acc -> await_upgrade(acc, deadline)
             end
 
           {:error, conn, reason, _entries} ->
@@ -101,13 +140,17 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
             {:error, reason}
 
           :unknown ->
-            await_upgrade(acc, timeout)
+            await_upgrade(acc, deadline)
         end
     after
-      timeout ->
-        close_silently(conn)
-        {:error, :upgrade_timeout}
+      remaining ->
+        upgrade_timeout(conn)
     end
+  end
+
+  defp upgrade_timeout(conn) do
+    close_silently(conn)
+    {:error, :upgrade_timeout}
   end
 
   defp upgrade_entry({:status, ref, status}, %{ref: ref} = acc), do: Map.put(acc, :status, status)
@@ -115,14 +158,17 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   defp upgrade_entry({:headers, ref, headers}, %{ref: ref} = acc),
     do: %{acc | headers: acc.headers ++ headers}
 
-  defp upgrade_entry({:data, ref, data}, %{ref: ref} = acc), do: %{acc | body: acc.body <> data}
+  defp upgrade_entry({:data, ref, data}, %{ref: ref} = acc),
+    do: %{acc | body: BoundedBuffer.append(acc.body, data)}
+
   defp upgrade_entry({:done, ref}, %{ref: ref} = acc), do: Map.put(acc, :done, true)
   defp upgrade_entry(_entry, acc), do: acc
 
   defp finish_upgrade(%{status: 101} = acc) do
-    case Mint.WebSocket.new(acc.conn, acc.ref, acc.status, acc.headers) do
+    case new_websocket(acc.conn, acc.ref, acc.status, acc.headers) do
       {:ok, conn, websocket} ->
-        {:ok, %__MODULE__{conn: conn, websocket: websocket, ref: acc.ref}}
+        {:ok,
+         %__MODULE__{conn: conn, websocket: websocket, ref: acc.ref, resp_headers: acc.headers}}
 
       {:error, conn, reason} ->
         close_silently(conn)
@@ -132,7 +178,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
 
   defp finish_upgrade(acc) do
     close_silently(acc.conn)
-    {:error, {:upgrade, acc.status, acc.body}}
+    {:error, {:upgrade, acc.status, BoundedBuffer.to_binary(acc.body)}}
   end
 
   # ---- request ----------------------------------------------------------------
@@ -145,11 +191,11 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   (diagnostic; whether an `:auto` caller may still fall back to SSE is judged
   by what reached its sink, not this count).
   """
-  @spec request(t(), map(), term(), reducer(), keyword()) ::
+  @spec request(t(), map() | binary(), term(), reducer(), keyword()) ::
           {:ok, t(), term()} | {:error, term(), term(), non_neg_integer()}
   def request(%__MODULE__{} = ws, body, acc, reducer, opts \\ []) do
     idle_timeout = Keyword.get(opts, :idle_timeout, @idle_timeout)
-    frame = Jason.encode!(Map.put(body, "type", "response.create"))
+    frame = encode_request(body)
 
     # Pings (or a close) may have queued up while the connection idled between
     # turns; answering/diagnosing them BEFORE sending avoids writing into a
@@ -158,13 +204,41 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
          {:ok, ws} <- send_frame(ws, {:text, frame}) do
       recv_loop(%{ws: ws, acc: acc, reducer: reducer, emitted: 0, done: false}, idle_timeout)
     else
-      {:error, reason} -> {:error, reason, acc, 0}
+      {:error, reason} ->
+        close_silently(ws.conn)
+        {:error, reason, acc, 0}
     end
   end
 
   @doc "Whether the underlying connection is still open."
   @spec open?(t()) :: boolean()
   def open?(%__MODULE__{conn: conn}), do: Mint.HTTP.open?(conn)
+
+  @doc """
+  Process one raw socket message for an IDLE connection (between requests):
+  answers pings, ignores pongs/stray data, reports closes/errors. `:unknown`
+  when the message does not belong to this connection — the caller (the
+  connection cache) tries its other entries.
+  """
+  @spec handle_idle(t(), term()) :: {:ok, t()} | {:closed, term()} | :unknown
+  def handle_idle(%__MODULE__{} = ws, msg) do
+    case Mint.WebSocket.stream(ws.conn, msg) do
+      :unknown ->
+        :unknown
+
+      {:ok, conn, entries} ->
+        state = idle_state(%{ws | conn: conn})
+
+        case handle_entries(state, entries) do
+          {:cont, state} -> {:ok, state.ws}
+          {:halt, {:error, reason, _acc, _emitted}} -> {:closed, reason}
+        end
+
+      {:error, conn, reason, _entries} ->
+        close_silently(conn)
+        {:closed, reason}
+    end
+  end
 
   @doc "Best-effort close (a close frame, then the socket)."
   @spec close(t()) :: :ok
@@ -183,7 +257,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
 
   defp recv_loop(state, idle_timeout) do
     receive do
-      msg when elem(msg, 0) in [:tcp, :ssl, :tcp_closed, :ssl_closed, :tcp_error, :ssl_error] ->
+      msg when socket_message?(msg) ->
         case handle_socket_message(state, msg) do
           {:cont, state} -> recv_loop(state, idle_timeout)
           {:halt, result} -> result
@@ -208,23 +282,28 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   end
 
   defp handle_entries(state, entries) do
-    Enum.reduce_while(entries, {:cont, state}, fn
-      {:data, ref, data}, {:cont, state} when ref == state.ws.ref ->
+    entries
+    |> Enum.reduce_while(state, fn
+      {:data, ref, data}, state when ref == state.ws.ref ->
         case decode_frames(state, data) do
-          {:cont, _state} = cont -> {:cont, cont}
-          {:halt, _result} = halt -> {:halt, halt}
+          {:cont, state} -> {:cont, state}
+          {:halt, result} -> {:halt, {:halt, result}}
         end
 
-      {:done, _ref}, {:cont, state} ->
+      {:done, _ref}, state ->
         # The server finished the HTTP/1 stream (connection closing).
         case state.done do
-          true -> {:cont, {:cont, state}}
+          true -> {:cont, state}
           false -> {:halt, {:halt, fail(state, :closed)}}
         end
 
-      _entry, acc ->
-        {:cont, acc}
+      _entry, state ->
+        {:cont, state}
     end)
+    |> case do
+      {:halt, result} -> {:halt, result}
+      state -> {:cont, state}
+    end
   end
 
   defp decode_frames(state, data) do
@@ -277,6 +356,9 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   defp handle_frame(state, {:close, code, reason}),
     do: {:halt, fail(state, {:ws_closed, code, reason})}
 
+  defp handle_frame(state, {:error, reason}),
+    do: {:halt, fail(state, {:frame_decode_error, reason})}
+
   defp handle_frame(state, _other), do: {:cont, state}
 
   defp normalize_event("response.done", event), do: Map.put(event, "type", "response.completed")
@@ -290,12 +372,18 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   defp send_frame(%__MODULE__{} = ws, frame) do
     with {:ok, websocket, data} <- Mint.WebSocket.encode(ws.websocket, frame),
          ws = %{ws | websocket: websocket},
-         {:ok, conn} <- Mint.WebSocket.stream_request_body(ws.conn, ws.ref, data) do
+         {:ok, conn} <- stream_request_body(ws.conn, ws.ref, data) do
       {:ok, %{ws | conn: conn}}
     else
-      {:error, %Mint.WebSocket{}, reason} -> {:error, reason}
-      {:error, _conn, reason} -> {:error, reason}
+      {:error, _state, reason} -> {:error, reason}
     end
+  end
+
+  defp stream_request_body(conn, ref, data) do
+    Mint.WebSocket.stream_request_body(conn, ref, data)
+  rescue
+    exception in FunctionClauseError ->
+      {:error, conn, {:invalid_connection_state, Exception.message(exception)}}
   end
 
   # Process queued socket messages from the idle period between turns:
@@ -304,13 +392,12 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   # connection.
   defp drain_idle(%__MODULE__{} = ws) do
     receive do
-      msg when elem(msg, 0) in [:tcp, :ssl, :tcp_closed, :ssl_closed, :tcp_error, :ssl_error] ->
-        state = %{ws: ws, acc: nil, reducer: fn _ev, acc -> acc end, emitted: 0, done: false}
+      msg when socket_message?(msg) ->
+        state = idle_state(ws)
 
         case handle_socket_message(state, msg) do
           {:cont, state} -> drain_idle(state.ws)
           {:halt, {:error, reason, _acc, _emitted}} -> {:error, reason}
-          {:halt, {:ok, ws, _acc}} -> drain_idle(ws)
         end
     after
       0 -> {:ok, ws}
@@ -319,6 +406,23 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
 
   defp put_conn(state, conn), do: %{state | ws: %{state.ws | conn: conn}}
   defp put_websocket(state, websocket), do: %{state | ws: %{state.ws | websocket: websocket}}
+
+  defp idle_state(ws) do
+    %{ws: ws, acc: nil, reducer: fn _event, acc -> acc end, emitted: 0, done: false}
+  end
+
+  defp encode_request(frame) when is_binary(frame), do: frame
+  defp encode_request(body), do: body |> Map.put("type", "response.create") |> Jason.encode!()
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  # `mint_web_socket` 1.0.5's inferred success type for new/4 collapses to its
+  # error branch under Dialyzer even though its public contract and runtime both
+  # return {:ok, conn, websocket}. Calling through apply/3 keeps this upstream
+  # success-typing defect from making connect/3 look like it can never succeed.
+  defp new_websocket(conn, ref, status, headers) do
+    apply(Mint.WebSocket, :new, [conn, ref, status, headers])
+  end
 
   defp close_silently(conn) do
     Mint.HTTP.close(conn)

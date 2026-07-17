@@ -12,6 +12,24 @@ defmodule Catalyst.Tools.Diff do
   # entirely rather than stalling the agent loop on big generated files.
   @max_input_lines 4000
 
+  alias Catalyst.Tools.Truncate
+
+  @doc """
+  Render a transcript-safe diff for a tool result.
+
+  Invalid UTF-8 is scrubbed because tool results are later JSON-encoded, and
+  the rendered diff is bounded with an in-band notice so large edits cannot
+  consume the transcript budget silently.
+  """
+  @spec rendered(binary(), binary()) :: String.t()
+  def rendered(old, new) do
+    old
+    |> unified(new)
+    |> Truncate.scrub_utf8()
+    |> Truncate.head_notice()
+    |> elem(0)
+  end
+
   @doc """
   Unified diff of `old` → `new` (`""` when equal). `opts`: `:max_lines` caps the
   output (default #{@default_max_lines}) with a truncation note.

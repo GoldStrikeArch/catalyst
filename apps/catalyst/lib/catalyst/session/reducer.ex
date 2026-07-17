@@ -13,6 +13,7 @@ defmodule Catalyst.Session.Reducer do
   alias Catalyst.LLM
 
   @doc "Fold one agent event into the session state. `state.messages` is newest-first."
+  @spec reduce(struct(), map()) :: map()
   def reduce(%Event.MessageEnd{message: m}, state) do
     %{
       state
@@ -69,6 +70,7 @@ defmodule Catalyst.Session.Reducer do
   transcript that has a tool call with no output, so every subsequent request
   for the session would fail — these results keep the transcript replayable.
   """
+  @spec aborted_tool_results(map(), term()) :: [Message.ToolResult.t()]
   def aborted_tool_results(state, reason) do
     text =
       case reason do
@@ -110,6 +112,7 @@ defmodule Catalyst.Session.Reducer do
   defp collect_orphans(_other, _seen), do: []
 
   @doc "Build the synthesized assistant message for a run failure/abort."
+  @spec failure_message(map(), term()) :: Message.Assistant.t()
   def failure_message(state, reason) do
     {text, stop} =
       case reason do

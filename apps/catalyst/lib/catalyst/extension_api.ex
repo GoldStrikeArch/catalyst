@@ -16,13 +16,18 @@ defmodule Catalyst.ExtensionAPI do
 
   require Logger
 
-  defstruct [:owner, :source_path]
+  defstruct [:owner, :source_path, :load_ref]
 
-  @type t :: %__MODULE__{owner: String.t() | nil, source_path: String.t() | nil}
+  @type t :: %__MODULE__{
+          owner: String.t() | nil,
+          source_path: String.t() | nil,
+          load_ref: reference() | nil
+        }
 
   @doc "Build an API handle for `owner` (the extension id) and its source file."
-  @spec new(String.t() | nil, String.t() | nil) :: t()
-  def new(owner, source_path \\ nil), do: %__MODULE__{owner: owner, source_path: source_path}
+  @spec new(String.t() | nil, String.t() | nil, reference() | nil) :: t()
+  def new(owner, source_path \\ nil, load_ref \\ nil),
+    do: %__MODULE__{owner: owner, source_path: source_path, load_ref: load_ref}
 
   # ---- kind wiring (called by subsystems at boot) ---------------------------
 
@@ -94,11 +99,17 @@ defmodule Catalyst.ExtensionAPI do
 
   @doc "Register a tool module (owner-tagged)."
   @spec register_tool(t(), module()) :: term()
-  def register_tool(api, module), do: dispatch(api, :tool, [module])
+  def register_tool(api, module) do
+    result = dispatch(api, :tool, [module])
+    remember_owner_collision(api, result)
+  end
 
   @doc "Register an LLM provider under `name`."
   @spec register_provider(t(), String.t(), term()) :: term()
-  def register_provider(api, name, config), do: dispatch(api, :provider, [name, config])
+  def register_provider(api, name, config) do
+    result = dispatch(api, :provider, [name, config])
+    remember_owner_collision(api, result)
+  end
 
   @doc "Register a loop hook at `point` (e.g. `:before_tool_call`)."
   @spec register_hook(t(), atom(), function(), keyword()) :: term()
@@ -140,4 +151,31 @@ defmodule Catalyst.ExtensionAPI do
       handler -> apply(handler, [api | args])
     end
   end
+
+  defp remember_owner_collision(
+         api,
+         {:error, {:tool_owner_collision, _name, _existing, _attempted} = reason} = error
+       ) do
+    record_owner_collision(api, reason)
+    error
+  end
+
+  defp remember_owner_collision(
+         api,
+         {:error, {:provider_owner_collision, _api, _existing, _attempted} = reason} = error
+       ) do
+    record_owner_collision(api, reason)
+    error
+  end
+
+  defp remember_owner_collision(_api, result), do: result
+
+  defp record_owner_collision(api, reason) do
+    record_load_collision(api.load_ref, reason)
+  end
+
+  defp record_load_collision(nil, _reason), do: :ok
+
+  defp record_load_collision(load_ref, reason),
+    do: Catalyst.Extensions.record_setup_collision(load_ref, reason)
 end

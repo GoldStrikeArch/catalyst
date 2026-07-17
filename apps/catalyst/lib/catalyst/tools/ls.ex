@@ -22,7 +22,12 @@ defmodule Catalyst.Tools.Ls do
           "type" => "string",
           "description" => "Directory to list (default: current directory)"
         },
-        "limit" => %{"type" => "integer", "description" => "Maximum entries (default: 500)"}
+        "limit" => %{
+          "type" => "integer",
+          "description" => "Maximum entries (default: 500)",
+          "minimum" => 1,
+          "maximum" => 10_000
+        }
       },
       "required" => []
     }
@@ -33,16 +38,19 @@ defmodule Catalyst.Tools.Ls do
     abs = Paths.resolve(args["path"] || ".", ctx.cwd)
     limit = args["limit"] || @default_limit
 
-    entries =
+    names =
       abs
       |> File.ls!()
       |> Enum.sort_by(&String.downcase/1)
+
+    limited? = length(names) > limit
+
+    shown =
+      names
+      |> Enum.take(limit)
       |> Enum.map(fn name ->
         if File.dir?(Path.join(abs, name)), do: name <> "/", else: name
       end)
-
-    shown = Enum.take(entries, limit)
-    limited? = length(entries) > limit
 
     {text, info} =
       shown
@@ -50,7 +58,7 @@ defmodule Catalyst.Tools.Ls do
       |> Truncate.listing(
         limited?: limited?,
         limit: limit,
-        total: length(entries),
+        total: length(names),
         noun: "entries"
       )
 

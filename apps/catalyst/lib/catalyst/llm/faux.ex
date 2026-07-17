@@ -20,6 +20,12 @@ defmodule Catalyst.LLM.Faux do
   alias Catalyst.LLM.Event
 
   @impl true
+  @spec stream(
+          Catalyst.Model.t(),
+          Catalyst.LLM.Context.t(),
+          keyword(),
+          Catalyst.LLM.Provider.sink()
+        ) :: {:ok, Message.Assistant.t()} | {:error, term()}
   def stream(model, context, opts, sink) do
     script = Keyword.get(opts, :script, [])
     turn = Enum.count(context.messages, &match?(%Message.Assistant{}, &1))

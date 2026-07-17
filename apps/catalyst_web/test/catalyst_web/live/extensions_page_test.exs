@@ -121,6 +121,32 @@ defmodule CatalystWeb.ExtensionsPageTest do
     assert File.exists?(path)
   end
 
+  test "an external source is shown as reload-only", %{conn: conn} do
+    external_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "catalyst_panel_external_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(external_dir)
+    path = Path.join(external_dir, "external_panel.ex")
+    File.write!(path, @probe_source)
+    assert {:ok, _summary} = Extensions.load_file(path)
+
+    on_exit(fn ->
+      Extensions.uninstall("external_panel")
+      File.rm_rf!(external_dir)
+    end)
+
+    {:ok, view, _html} = live(conn, "/extensions")
+    card = ~s([data-ext-owner="external_panel"])
+
+    assert has_element?(view, card, "external source")
+    assert has_element?(view, card <> " button", "Reload")
+    refute has_element?(view, card <> " button", "Disable")
+    refute has_element?(view, card <> " button", "Roll back")
+  end
+
   test "reload all reports its result in a flash", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/extensions")
 

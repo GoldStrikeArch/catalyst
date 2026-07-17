@@ -17,24 +17,33 @@ defmodule Catalyst.Hooks do
       `({context, config}, ctx) -> {:ok, {context, config}}`)
     * `:should_stop_after_turn` — force the loop to stop (decision, `(ctx) -> true | :cont`)
 
-  Plus a fire-and-forget observer channel (`on/3` + `notify/1`) for every
-  `Catalyst.Agent.Event`.
+  Plus a fire-and-forget observer channel (`on/2` + `notify/2`) for every
+  `Catalyst.Agent.Event`. Event observers are dispatched asynchronously in a
+  bounded per-session queue; they cannot delay token streaming or other loop
+  work. Decision and filter hooks remain synchronous because their return
+  values control the current run.
 
   Handlers are stored in an ETS bag (like `Catalyst.Extensions`), tagged with an
   `owner` so a reloaded extension can revoke its prior handlers (`unregister/1`).
   The table is owned by `Catalyst.Hooks.TableOwner`, not by this server, so a
   crash here cannot destroy the registered handlers (which nothing would
   re-register — `before_tool_call` gates would silently fail open). The hot path
-  (`run_filter/3`, `run_decision/2`, `notify/1`) reads ETS directly and never
-  calls the GenServer, so it works even if this process is down (an absent table
-  just yields no handlers). **Every handler runs in its own supervised task
-  under a deadline (`:hook_handler_timeout`, default 10s): a crashing, throwing,
-  or hanging hook is logged and skipped — it can never take down or wedge a
-  run.**
+  (`run_filter/3`, `run_decision/2`, `notify/2`) reads ETS directly. **Every
+  handler runs in an isolated supervised process under a deadline
+  (`:hook_handler_timeout`, default 10s): a crashing, throwing, or hanging hook
+  is logged and skipped — it can never take down or wedge a run.** Synchronous
+  decision/filter hooks use awaitable tasks. Observer callbacks use a single
+  dispatcher-managed task each, with no nested per-event task. Observer
+  admission is capped by `:hook_observer_queue_limit` (default 256 accepted
+  events per session); overload drops stream updates but preserves structural
+  lifecycle events.
   """
 
   use GenServer
   require Logger
+
+  alias Catalyst.Hooks.ObserverDispatcher
+  alias Catalyst.Tasks
 
   @table :catalyst_hooks
   @handler_timeout_ms 10_000
@@ -47,11 +56,24 @@ defmodule Catalyst.Hooks do
     :event
   ]
 
+  @type point :: atom()
+  @type handler_entry :: %{
+          point: point(),
+          id: term(),
+          owner: term(),
+          priority: integer(),
+          seq: non_neg_integer(),
+          fun: function()
+        }
+
   @doc "The known hook points."
+  @spec points() :: [point()]
   def points, do: @points
 
   # ---- API ------------------------------------------------------------------
 
+  @doc "Start the singleton hook registry."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc """
@@ -59,20 +81,25 @@ defmodule Catalyst.Hooks do
   moduledoc). `opts`: `:owner` (for `unregister/1`), `:id` (display), `:priority`
   (lower runs first, default 100).
   """
+  @spec register(point(), function(), keyword()) :: :ok
   def register(point, fun, opts \\ []) when is_atom(point) and is_function(fun) do
     GenServer.call(__MODULE__, {:register, point, fun, opts})
   end
 
-  @doc "Register an event observer (`fun.(event) -> any`). `:any` or omit to see all events."
+  @doc "Register an event observer (`fun.(event) -> any`) for every agent event."
+  @spec on((term() -> term()), keyword()) :: :ok
   def on(fun, opts \\ []) when is_function(fun, 1), do: register(:event, fun, opts)
 
   @doc "Remove every handler registered by `owner` across all points."
+  @spec unregister(term()) :: :ok
   def unregister(owner), do: GenServer.call(__MODULE__, {:unregister, owner})
 
   @doc "Drop all handlers (test helper)."
+  @spec clear() :: :ok
   def clear, do: GenServer.call(__MODULE__, :clear)
 
   @doc "Handlers registered at `point`, ordered by priority then registration order."
+  @spec handlers(point()) :: [handler_entry()]
   def handlers(point) do
     @table
     |> :ets.lookup(point)
@@ -92,6 +119,7 @@ defmodule Catalyst.Hooks do
   expected) is logged and skipped instead of poisoning the fold and crashing
   the run when the caller destructures the result.
   """
+  @spec run_filter(point(), term(), term(), (term() -> boolean())) :: term()
   def run_filter(point, value, ctx, valid? \\ fn _ -> true end) do
     Enum.reduce(handlers(point), value, fn entry, acc ->
       case safe(entry, fn -> entry.fun.(acc, ctx) end) do
@@ -115,6 +143,7 @@ defmodule Catalyst.Hooks do
   end
 
   @doc "First non-abstaining decision from a handler at `point`, else `:none` (handler: `(ctx) -> decision | :cont`)."
+  @spec run_decision(point(), term()) :: term() | :none
   def run_decision(point, ctx) do
     Enum.reduce_while(handlers(point), :none, fn entry, _ ->
       case safe(entry, fn -> entry.fun.(ctx) end) do
@@ -126,23 +155,58 @@ defmodule Catalyst.Hooks do
 
   # Convenience wrappers used by Catalyst.Agent.Loop / ToolRunner.
 
+  @doc "Synchronously fold the request message list through context-transform hooks."
+  @spec transform_context([term()], term()) :: [term()]
   def transform_context(messages, ctx),
     do: run_filter(:transform_context, messages, ctx, &is_list/1)
 
+  @doc "Synchronously ask tool-call gates for the first blocking decision."
+  @spec before_tool_call(term()) :: term() | :none
   def before_tool_call(ctx), do: run_decision(:before_tool_call, ctx)
 
+  @doc "Synchronously fold a tool result through result-transform hooks."
+  @spec after_tool_call({term(), term(), boolean(), boolean()}, term()) ::
+          {term(), term(), boolean(), boolean()}
   def after_tool_call(result_tuple, ctx),
-    do: run_filter(:after_tool_call, result_tuple, ctx, &match?({_, _, _, _}, &1))
+    do: run_filter(:after_tool_call, result_tuple, ctx, &valid_tool_result?/1)
 
+  @doc "Synchronously fold context/config through next-turn preparation hooks."
+  @spec prepare_next_turn(map(), map(), term()) :: {map(), map()}
   def prepare_next_turn(context, config, ctx),
     do: run_filter(:prepare_next_turn, {context, config}, ctx, &match?({%{}, %{}}, &1))
 
+  @doc "Whether a synchronous stop hook requests termination after this turn."
+  @spec should_stop?(term()) :: boolean()
   def should_stop?(ctx), do: run_decision(:should_stop_after_turn, ctx) == true
 
-  @doc "Notify every event observer (isolated; errors logged)."
-  def notify(event) do
-    Enum.each(handlers(:event), fn entry -> safe(entry, fn -> entry.fun.(event) end) end)
-    :ok
+  defp valid_tool_result?({_content, _details, error?, terminate?}),
+    do: is_boolean(error?) and is_boolean(terminate?)
+
+  defp valid_tool_result?(_result), do: false
+
+  @doc """
+  Queue an event for asynchronous observer delivery under `session_key`.
+
+  Returns promptly after bounded admission. When that session already has the
+  configured maximum accepted work, stream updates return
+  `{:dropped, :queue_full}`. Structural events replace an older queued update
+  or wait for capacity, preserving lifecycle completion. Omitting the key
+  groups events by the calling process, which preserves ordering for direct
+  loop/test callers.
+  """
+  @spec notify(term()) :: ObserverDispatcher.enqueue_result()
+  def notify(event), do: notify(event, self())
+
+  @doc "Queue an event under an explicit session key; see `notify/1`."
+  @spec notify(term(), term()) :: ObserverDispatcher.enqueue_result()
+  def notify(event, session_key) do
+    ObserverDispatcher.enqueue(session_key || self(), event, handlers(:event))
+  end
+
+  @doc "Wait until every accepted observer event for `session_key` is complete."
+  @spec await_observers(term(), timeout()) :: :ok
+  def await_observers(session_key \\ self(), timeout \\ 5_000) do
+    ObserverDispatcher.await_idle(session_key, timeout)
   end
 
   # ---- callbacks ------------------------------------------------------------
@@ -152,8 +216,9 @@ defmodule Catalyst.Hooks do
     # The table is normally created (and owned) by Catalyst.Hooks.TableOwner,
     # started just before this server, so handlers survive a crash here.
     # Creating it ourselves is a fallback for tests that start Hooks standalone.
-    if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
+    case :ets.whereis(@table) do
+      :undefined -> :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
+      _table -> :ok
     end
 
     # Resume the seq counter past any surviving entries, or a restart would
@@ -188,7 +253,10 @@ defmodule Catalyst.Hooks do
     @table
     |> :ets.tab2list()
     |> Enum.each(fn {_point, entry} = obj ->
-      if entry.owner == owner, do: :ets.delete_object(@table, obj)
+      case entry.owner == owner do
+        true -> :ets.delete_object(@table, obj)
+        false -> :ok
+      end
     end)
 
     {:reply, :ok, state}
@@ -209,9 +277,9 @@ defmodule Catalyst.Hooks do
   # path without a deadline (compile and setup have one). The task copies the
   # closed-over value/ctx; that cost is only paid when handlers are registered.
   defp safe(entry, thunk) do
-    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, thunk)
+    task = Tasks.async(thunk)
 
-    case Task.yield(task, handler_timeout()) || Task.shutdown(task, :brutal_kill) do
+    case Tasks.await(task, handler_timeout()) do
       {:ok, value} ->
         {:hook_ok, value}
 
@@ -226,7 +294,7 @@ defmodule Catalyst.Hooks do
         Logger.warning("[hooks] #{entry.point}/#{entry.id} exited: #{inspect(reason)}")
         :hook_skip
 
-      nil ->
+      :timeout ->
         Logger.warning(
           "[hooks] #{entry.point}/#{entry.id} timed out after #{handler_timeout()}ms — " <>
             "killed and skipped"

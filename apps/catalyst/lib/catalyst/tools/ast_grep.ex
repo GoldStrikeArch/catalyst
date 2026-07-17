@@ -75,12 +75,17 @@ defmodule Catalyst.Tools.AstGrep do
 
     capped? = Map.get(res, :truncated, false)
     matches = parse_matches(res.out)
-    text = if matches == [], do: "No matches.", else: Enum.join(matches, "\n")
-    {body, info} = Truncate.head(text)
+
+    text =
+      case matches do
+        [] -> "No matches."
+        matches -> Enum.join(matches, "\n")
+      end
+
+    {body, info} = Truncate.head_notice(text)
 
     body =
       body
-      |> Truncate.notice(info, :head)
       |> Exec.append_capped_notice(capped?, @max_output_bytes, "narrow the pattern or path")
 
     result(body, %{

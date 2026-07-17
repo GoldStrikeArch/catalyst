@@ -63,6 +63,41 @@ defmodule Catalyst.LLM.RegistryTest do
     assert {:ok, Catalyst.LLM.Faux} = Registry.fetch("faux")
   end
 
+  test "extension owners cannot replace each other's provider and purge is owner-safe" do
+    on_exit(fn ->
+      Registry.unregister_owner("provider_owner_a")
+      Registry.unregister_owner("provider_owner_b")
+      Registry.unregister_provider("faux")
+    end)
+
+    assert :ok = Registry.register_provider("faux", EchoProvider, owner: "provider_owner_a")
+
+    assert {:error, {:provider_owner_collision, "faux", "provider_owner_a", "provider_owner_b"}} =
+             Registry.register_provider("faux", Catalyst.LLM.Demo, owner: "provider_owner_b")
+
+    assert {:ok, EchoProvider} = Registry.fetch("faux")
+
+    :ok = Registry.unregister_owner("provider_owner_b")
+    assert {:ok, EchoProvider} = Registry.fetch("faux")
+
+    :ok = Registry.unregister_owner("provider_owner_a")
+    assert {:ok, Catalyst.LLM.Faux} = Registry.fetch("faux")
+  end
+
+  test "an ownerless host registration cannot detach an extension-owned provider" do
+    on_exit(fn -> Registry.unregister_provider("owned-api") end)
+
+    assert :ok =
+             Registry.register_provider("owned-api", EchoProvider, owner: "provider_extension")
+
+    assert {:error, {:provider_owner_collision, "owned-api", "provider_extension", :host}} =
+             Registry.register_provider("owned-api", Catalyst.LLM.Demo)
+
+    assert {:ok, EchoProvider} = Registry.fetch("owned-api")
+    assert :ok = Registry.unregister_owner("provider_extension")
+    assert {:error, {:unknown_api, "owned-api"}} = Registry.fetch("owned-api")
+  end
+
   test "a session resolves its provider by api name from the registry" do
     Registry.register_provider("echo", EchoProvider)
 

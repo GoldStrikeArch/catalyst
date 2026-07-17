@@ -4,6 +4,10 @@ defmodule Catalyst.Tools.Fd do
   alias Catalyst.Tools.{Binaries, Exec, Paths, Truncate}
 
   @default_limit 1000
+  @max_limit 10_000
+  # Belt to --max-results' suspenders: a huge single line (or an fd flag
+  # regression) can't accumulate unbounded output.
+  @max_output_bytes 8 * 1024 * 1024
 
   @impl true
   def name, do: "find"
@@ -22,7 +26,12 @@ defmodule Catalyst.Tools.Fd do
           "description" => "Glob pattern, e.g. '*.ex' or '**/*.json'"
         },
         "path" => %{"type" => "string", "description" => "Directory to search (default: cwd)"},
-        "limit" => %{"type" => "integer", "description" => "Max results (default: 1000)"}
+        "limit" => %{
+          "type" => "integer",
+          "description" => "Max results (default: 1000)",
+          "minimum" => 1,
+          "maximum" => @max_limit
+        }
       },
       "required" => ["pattern"]
     }
@@ -52,7 +61,11 @@ defmodule Catalyst.Tools.Fd do
         target
       ]
 
-    case Exec.collect!("fd", fd, fd_args, cwd: ctx.cwd, ok_statuses: [0, 1]) do
+    case Exec.collect!("fd", fd, fd_args,
+           cwd: ctx.cwd,
+           ok_statuses: [0, 1],
+           max_output_bytes: @max_output_bytes
+         ) do
       # fd exits 0 on a clean run (even with zero matches) — unlike rg,
       # where 1 means "no matches".
       %{out: out, status: 0} ->

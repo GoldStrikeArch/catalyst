@@ -31,6 +31,13 @@ defmodule Catalyst.Tools.Truncate do
     truncate(content, opts, :head)
   end
 
+  @doc "Keep the bounded head and append a visible truncation notice when needed."
+  @spec head_notice(String.t(), keyword()) :: {String.t(), info()}
+  def head_notice(content, opts \\ []) when is_binary(content) do
+    {text, info} = head(content, opts)
+    {notice(text, info, :head), info}
+  end
+
   @doc """
   Replace invalid UTF-8 bytes with the replacement character (U+FFFD).
 
@@ -40,12 +47,15 @@ defmodule Catalyst.Tools.Truncate do
   """
   @spec scrub_utf8(binary()) :: String.t()
   def scrub_utf8(bin) when is_binary(bin) do
-    if String.valid?(bin), do: bin, else: do_scrub(bin, [])
+    case String.valid?(bin) do
+      true -> bin
+      false -> do_scrub(bin, [])
+    end
   end
 
-  defp do_scrub(<<c::utf8, rest::binary>>, acc), do: do_scrub(rest, [acc, <<c::utf8>>])
-  defp do_scrub(<<_byte, rest::binary>>, acc), do: do_scrub(rest, [acc, "�"])
-  defp do_scrub(<<>>, acc), do: IO.iodata_to_binary(acc)
+  defp do_scrub(<<c::utf8, rest::binary>>, acc), do: do_scrub(rest, [<<c::utf8>> | acc])
+  defp do_scrub(<<_byte, rest::binary>>, acc), do: do_scrub(rest, ["�" | acc])
+  defp do_scrub(<<>>, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
   @doc """
   Append (head) or prepend (tail) an in-text truncation notice so the model
@@ -70,6 +80,13 @@ defmodule Catalyst.Tools.Truncate do
   @spec tail(String.t(), keyword()) :: {String.t(), info()}
   def tail(content, opts \\ []) when is_binary(content) do
     truncate(content, opts, :tail)
+  end
+
+  @doc "Keep the bounded tail and prepend a visible truncation notice when needed."
+  @spec tail_notice(String.t(), keyword()) :: {String.t(), info()}
+  def tail_notice(content, opts \\ []) when is_binary(content) do
+    {text, info} = tail(content, opts)
+    {notice(text, info, :tail), info}
   end
 
   @doc """
@@ -110,6 +127,7 @@ defmodule Catalyst.Tools.Truncate do
   defp truncate(content, opts, side) do
     max_lines = Keyword.get(opts, :max_lines, @default_max_lines)
     max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)
+    content = scrub_utf8(content)
 
     lines = split_lines(content)
     total_lines = length(lines)
@@ -182,18 +200,16 @@ defmodule Catalyst.Tools.Truncate do
   end
 
   defp trim_invalid_trailing(bin) do
-    if String.valid?(bin) do
-      bin
-    else
-      trim_invalid_trailing(binary_part(bin, 0, byte_size(bin) - 1))
+    case String.valid?(bin) do
+      true -> bin
+      false -> trim_invalid_trailing(binary_part(bin, 0, byte_size(bin) - 1))
     end
   end
 
   defp trim_invalid_leading(bin) do
-    if String.valid?(bin) do
-      bin
-    else
-      trim_invalid_leading(binary_part(bin, 1, byte_size(bin) - 1))
+    case String.valid?(bin) do
+      true -> bin
+      false -> trim_invalid_leading(binary_part(bin, 1, byte_size(bin) - 1))
     end
   end
 end

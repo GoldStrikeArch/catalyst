@@ -265,6 +265,71 @@ defmodule Catalyst.ToolsTest do
     assert out =~ "a�b"
   end
 
+  test "edit falls back to fuzzy matching (trailing whitespace, smart punctuation)", %{
+    ctx: ctx
+  } do
+    # Trailing spaces and a smart quote in the file; the model supplies clean text.
+    Write.execute(
+      %{"path" => "fuzzy.txt", "content" => "hello world  \nit’s fine \nlast line\n"},
+      ctx
+    )
+
+    res =
+      Edit.execute(
+        %{
+          "path" => "fuzzy.txt",
+          "edits" => [%{"oldText" => "hello world\nit's fine", "newText" => "greetings\nit's ok"}]
+        },
+        ctx
+      )
+
+    assert res.details.fuzzy
+    assert res.content |> hd() |> Map.get(:text) =~ "fuzzy match"
+    assert text(Read.execute(%{"path" => "fuzzy.txt"}, ctx)) =~ "greetings\nit's ok"
+  end
+
+  test "edit still fails cleanly when even fuzzy matching finds nothing", %{ctx: ctx} do
+    Write.execute(%{"path" => "nofuzz.txt", "content" => "alpha beta\n"}, ctx)
+
+    assert_raise RuntimeError, ~r/not found \(even with fuzzy matching\)/, fn ->
+      Edit.execute(
+        %{"path" => "nofuzz.txt", "edits" => [%{"oldText" => "gamma", "newText" => "x"}]},
+        ctx
+      )
+    end
+  end
+
+  test "exact edits do not normalize the rest of the file", %{ctx: ctx} do
+    Write.execute(%{"path" => "exact.txt", "content" => "keep’me\nchange this\n"}, ctx)
+
+    res =
+      Edit.execute(
+        %{"path" => "exact.txt", "edits" => [%{"oldText" => "change this", "newText" => "done"}]},
+        ctx
+      )
+
+    refute res.details.fuzzy
+    # The smart quote elsewhere in the file is untouched.
+    assert text(Read.execute(%{"path" => "exact.txt"}, ctx)) =~ "keep’me"
+  end
+
+  # 1x1 red-pixel PNG.
+  @png_bytes Base.decode64!(
+               "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+             )
+
+  test "read returns an image file as an attachment content block", %{tmp: tmp, ctx: ctx} do
+    File.write!(Path.join(tmp, "pixel.png"), @png_bytes)
+
+    res = Read.execute(%{"path" => "pixel.png"}, ctx)
+
+    assert [%Catalyst.Content.Text{text: note}, %Catalyst.Content.Image{} = img] = res.content
+    assert note =~ "image/png"
+    assert img.mime_type == "image/png"
+    assert Base.decode64!(img.data) == @png_bytes
+    assert res.details.mime_type == "image/png"
+  end
+
   test "bash streams a throttled partial-output tail through ctx.report", %{tmp: tmp} do
     parent = self()
     ctx = %{cwd: tmp, call_id: "t", report: fn partial -> send(parent, {:partial, partial}) end}

@@ -1,14 +1,84 @@
-This is a web application written using the Phoenix web framework.
+# Agent Coding Guidelines — Catalyst
 
-## Project guidelines
+Catalyst is an Elixir/OTP umbrella implementing a coding-agent harness with a desktop GUI. This file is the operational contract for agents making code changes; the broader delivery plan lives in `../plan.md` and the design in `../architecture.md` (one level above this repo checkout).
 
-- Use `mix precommit` alias when you are done with all changes and fix any pending issues
+The apps:
+
+- `apps/catalyst` — headless agent core: agent loop, sessions, tools, permissions, model providers
+- `apps/catalyst_web` — Phoenix LiveView web UI
+- `apps/catalyst_desktop` — native desktop shell (elixir-desktop/wx) wrapping `catalyst_web`
+- `apps/catalyst_cli` — headless CLI (Burrito-packaged release)
+
+## Project workflow
+
+- Use `mix precommit` alias when you are done with all changes and fix any pending issues (it compiles with warnings-as-errors, checks unused deps, formats, and runs tests)
+- Don't forget to run `mix dialyzer`
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
+
+## Elixir Style
+
+- Prefer small, pure functions. Most functions should be 1-8 lines and do one thing.
+- Keep side effects at the edges: file IO, shell execution, model calls, process messaging, persistence, and event emission should call pure helpers for decisions.
+- Prefer explicit data shapes: structs for stable internal state, typed maps for boundary payloads, keyword lists for options.
+- Use cohesive modules. A module should own one concept, such as sessions, events, tools, permissions, file locks, parsing, rendering, or persistence.
+
+## Pattern Matching and Pipes
+
+- Prefer pattern matching, guards, and multi-clause functions when they make distinct states explicit.
+- Always prefer `|>` pipe operator when you have a A then B then C type of logic
+- Use `case`, `cond` instead of `if` and `else`
+- Use `with` for happy paths with consistent `{:ok, value}` / `{:error, reason}` shapes. Keep `else` small and normalize errors near their source.
+- Do not use `nil` as an error signal. Use `:error`, `{:error, reason}`, or `{:ok, value}`.
+- One-step pipes are fine when they keep the domain object in focus, but direct calls are also fine when they read better.
+
+## Errors and OTP
+
+- Validate external input at boundaries and convert it into internal shapes before passing it deeper.
+- Return tagged tuples for expected failures: invalid input, missing files, denied permissions, command failures, model errors, validation failures, and timeouts.
+- Let unexpected invariant violations crash the current process. OTP supervision should recover processes; code should not hide corrupted state.
+- Embrace Elixir's "let it crash" philosophy for unexpected faults inside supervised processes. Do not add defensive error handling everywhere just to keep a process alive; isolate failures with supervision trees and restart strategies.
+- Avoid broad `try`/`rescue`. Rescue only at boundaries where exceptions can be converted into structured errors.
+- Keep GenServer callbacks short. Start supervised work, update state, and return quickly.
+- Run blocking IO and CPU-heavy work in supervised tasks or external OS processes.
+
+## Docs, Types, and Tests
+
+- Public modules need `@moduledoc`; public functions, callbacks, behaviours, and protocols need `@doc` unless explicitly hidden with `@doc false`.
+- Add doctests for public examples and complex transformations when an executable example clarifies the contract.
+- Use `@spec` for public functions, callbacks, behaviour implementations, and complex private functions.
+- Document side effects, process ownership, timeouts, cancellation behavior, and error tuple shapes.
+- Add focused ExUnit tests for new behavior and regression tests for fixes when practical.
+
+## Performance Defaults
+
+- Write clear idiomatic code first, then measure hot paths before rewriting.
+- Avoid `list ++ [item]` in loops. Build lists with `[item | acc]` and reverse once.
+- Use maps or `MapSet` for repeated membership checks over non-trivial collections.
+- Use `:queue` for growing FIFO queues and ETS only for large shared read-heavy tables that justify it.
+- Use binary pattern matching for binary/string protocol parsing and hot binary traversal. Use `::utf8` when matching codepoints rather than bytes.
+- Use iodata for incremental output and convert with `IO.iodata_to_binary/1` only at boundaries.
+- Never create atoms dynamically from external input. Map strings to known atoms explicitly or use `String.to_existing_atom/1` only when the atom set is controlled.
+- Prefer external workers over NIFs for Tree-sitter and untrusted execution. A NIF crash can take down the VM.
+
+## Final Review
+
+Before finishing, check:
+
+1. Is the public contract documented?
+2. Are expected failures tagged values?
+3. Are pattern matching and pipes helping readability rather than being used only for style?
+4. Are obvious allocation traps avoided in hot paths?
+5. Are long-running or risky operations isolated from coordinator processes?
+6. Did focused tests and formatting run, or is the reason recorded?
+
+## Phoenix and web guidelines
+
+The sections below apply to `apps/catalyst_web` (and `apps/catalyst_desktop`, which embeds it).
 
 ### Phoenix v1.8 guidelines
 
 - **Always** begin your LiveView templates with `<Layouts.app flash={@flash} ...>` which wraps all inner content
-- The `MyAppWeb.Layouts` module is aliased in the `my_app_web.ex` file, so you can use it without needing to alias it again
+- The `CatalystWeb.Layouts` module is aliased in the `catalyst_web.ex` file, so you can use it without needing to alias it again
 - Anytime you run into errors with no `current_scope` assign:
   - You failed to follow the Authenticated Routes guidelines, or you failed to pass `current_scope` to `<Layouts.app>`
   - **Always** fix the `current_scope` error by moving your routes to the proper `live_session` and ensure you pass `current_scope` as needed
@@ -26,7 +96,7 @@ custom classes must fully style the input
       @import "tailwindcss" source(none);
       @source "../css";
       @source "../js";
-      @source "../../lib/my_app_web";
+      @source "../../lib/catalyst_web";
 
 - **Always use and maintain this import syntax** in the app.css file for projects generated with `phx.new`
 - **Never** use `@apply` when writing raw css
@@ -77,7 +147,7 @@ custom classes must fully style the input
           assign(socket, :val, val)
         end
 
-- **Never** nest multiple modules in the same file as it can cause cyclic dependencies and compilation errors
+- **Never** nest multiple modules in the same file as it can cause cyclic dependencies and compilation errors; struct-only event/message/content families are the deliberate exception
 - **Never** use map access syntax (`changeset[:field]`) on structs as they do not implement the Access behaviour by default. For regular structs, you **must** access the fields directly, such as `my_struct.field` or use higher level APIs that are available on the struct if they exist, `Ecto.Changeset.get_field/2` for changesets
 - Elixir's standard library has everything necessary for date and time manipulation. Familiarize yourself with the common `Time`, `Date`, `DateTime`, and `Calendar` interfaces by accessing their documentation as necessary. **Never** install additional dependencies unless asked or for date/time parsing (which you can use the `date_time_parser` package)
 - Don't use `String.to_atom/1` on user input (memory leak risk)
