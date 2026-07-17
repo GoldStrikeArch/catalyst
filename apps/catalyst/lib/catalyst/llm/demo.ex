@@ -104,7 +104,11 @@ defmodule Catalyst.LLM.Demo do
   end
 
   defp tool_call(name, args),
-    do: %Content.ToolCall{id: "demo_#{System.unique_integer([:positive])}", name: name, arguments: args}
+    do: %Content.ToolCall{
+      id: "demo_#{System.unique_integer([:positive])}",
+      name: name,
+      arguments: args
+    }
 
   defp emit(assistant, sink) do
     sink.(%Event.Start{partial: assistant})

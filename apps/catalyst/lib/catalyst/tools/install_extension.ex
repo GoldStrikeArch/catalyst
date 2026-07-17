@@ -35,8 +35,14 @@ defmodule Catalyst.Tools.InstallExtension do
     %{
       "type" => "object",
       "properties" => %{
-        "name" => %{"type" => "string", "description" => "extension file name (e.g. 'approval_gate')"},
-        "source" => %{"type" => "string", "description" => "full Elixir source for the extension file"}
+        "name" => %{
+          "type" => "string",
+          "description" => "extension file name (e.g. 'approval_gate')"
+        },
+        "source" => %{
+          "type" => "string",
+          "description" => "full Elixir source for the extension file"
+        }
       },
       "required" => ["name", "source"]
     }

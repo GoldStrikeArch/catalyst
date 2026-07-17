@@ -66,7 +66,11 @@ defmodule Catalyst.Auth.OpenAIOAuth do
     end
   end
 
-  defp credentials_from(%{"access_token" => access, "refresh_token" => refresh, "expires_in" => expires_in})
+  defp credentials_from(%{
+         "access_token" => access,
+         "refresh_token" => refresh,
+         "expires_in" => expires_in
+       })
        when is_binary(access) and is_binary(refresh) and is_integer(expires_in) do
     {:ok,
      %{

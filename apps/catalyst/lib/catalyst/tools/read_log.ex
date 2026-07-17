@@ -23,7 +23,10 @@ defmodule Catalyst.Tools.ReadLog do
     %{
       "type" => "object",
       "properties" => %{
-        "lines" => %{"type" => "integer", "description" => "trailing lines to return (default 120)"}
+        "lines" => %{
+          "type" => "integer",
+          "description" => "trailing lines to return (default 120)"
+        }
       },
       "required" => []
     }

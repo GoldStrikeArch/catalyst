@@ -52,7 +52,10 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   # ---- deltas ---------------------------------------------------------------
 
   defp do_handle(reason_delta, ev, s, sink)
-       when reason_delta in ["response.reasoning_text.delta", "response.reasoning_summary_text.delta"] do
+       when reason_delta in [
+              "response.reasoning_text.delta",
+              "response.reasoning_summary_text.delta"
+            ] do
     case s.current do
       {:reasoning, r} ->
         delta = ev["delta"] || ""
@@ -113,7 +116,12 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
         {id, name, partial} = current_tool(s, item)
         args = decode_args(partial, item["arguments"])
         sink.(%Event.ToolCallEnd{id: id, name: name, arguments: args})
-        %{s | blocks: [%Content.ToolCall{id: id, name: name, arguments: args} | s.blocks], current: nil}
+
+        %{
+          s
+          | blocks: [%Content.ToolCall{id: id, name: name, arguments: args} | s.blocks],
+            current: nil
+        }
 
       _ ->
         s
@@ -126,7 +134,12 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
     usage = usage_from(resp["usage"])
     stop = stop_reason(resp["status"])
     blocks = s.blocks
-    stop = if stop == :stop and Enum.any?(blocks, &match?(%Content.ToolCall{}, &1)), do: :tool_use, else: stop
+
+    stop =
+      if stop == :stop and Enum.any?(blocks, &match?(%Content.ToolCall{}, &1)),
+        do: :tool_use,
+        else: stop
+
     %{s | usage: usage, stop_reason: stop, response_id: resp["id"] || s.response_id}
   end
 
@@ -167,7 +180,9 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   defp current_text(_), do: nil
 
   defp current_tool(%{current: {:tool, t}}, _item), do: {t.id, t.name, t.partial}
-  defp current_tool(_, item), do: {"#{item["call_id"]}|#{item["id"]}", item["name"], item["arguments"] || "{}"}
+
+  defp current_tool(_, item),
+    do: {"#{item["call_id"]}|#{item["id"]}", item["name"], item["arguments"] || "{}"}
 
   defp default(nil, fallback), do: fallback
   defp default("", fallback), do: fallback

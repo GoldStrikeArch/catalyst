@@ -41,7 +41,10 @@ defmodule Catalyst.AuthTest do
 
     assert :ok = TokenStore.put("test-provider", creds)
     assert TokenStore.logged_in?("test-provider")
-    assert {:ok, %{access: "tok_abc", account_id: "acct_42"}} = TokenStore.get_access_token("test-provider")
+
+    assert {:ok, %{access: "tok_abc", account_id: "acct_42"}} =
+             TokenStore.get_access_token("test-provider")
+
     assert {:error, :not_logged_in} = TokenStore.get_access_token("nope-provider")
   end
 end

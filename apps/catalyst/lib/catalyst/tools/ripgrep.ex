@@ -19,11 +19,23 @@ defmodule Catalyst.Tools.Ripgrep do
     %{
       "type" => "object",
       "properties" => %{
-        "pattern" => %{"type" => "string", "description" => "Regex (or literal, with `literal: true`) to search for"},
-        "path" => %{"type" => "string", "description" => "Directory or file to search (default: cwd)"},
+        "pattern" => %{
+          "type" => "string",
+          "description" => "Regex (or literal, with `literal: true`) to search for"
+        },
+        "path" => %{
+          "type" => "string",
+          "description" => "Directory or file to search (default: cwd)"
+        },
         "glob" => %{"type" => "string", "description" => "Filter files by glob, e.g. '*.ex'"},
-        "ignoreCase" => %{"type" => "boolean", "description" => "Case-insensitive (default: false)"},
-        "literal" => %{"type" => "boolean", "description" => "Treat pattern as a literal string (default: false)"},
+        "ignoreCase" => %{
+          "type" => "boolean",
+          "description" => "Case-insensitive (default: false)"
+        },
+        "literal" => %{
+          "type" => "boolean",
+          "description" => "Treat pattern as a literal string (default: false)"
+        },
         "context" => %{"type" => "integer", "description" => "Lines of context around each match"},
         "limit" => %{"type" => "integer", "description" => "Max matches to return (default: 100)"}
       },
@@ -49,7 +61,12 @@ defmodule Catalyst.Tools.Ripgrep do
         shown = Enum.take(matches, limit)
         text = if shown == [], do: "No matches.", else: Enum.join(shown, "\n")
         {body, info} = Truncate.head(text)
-        result(body, %{match_count: length(shown), match_limit_reached: limited?, truncation: info})
+
+        result(body, %{
+          match_count: length(shown),
+          match_limit_reached: limited?,
+          truncation: info
+        })
 
       {:ok, %{out: out, status: status}} ->
         raise "ripgrep error (status #{status}): #{String.slice(out, 0, 200)}"

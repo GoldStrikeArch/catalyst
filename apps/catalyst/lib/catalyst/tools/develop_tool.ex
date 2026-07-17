@@ -32,7 +32,10 @@ defmodule Catalyst.Tools.DevelopTool do
     %{
       "type" => "object",
       "properties" => %{
-        "name" => %{"type" => "string", "description" => "Short identifier for the extension file (e.g. 'word_count')"},
+        "name" => %{
+          "type" => "string",
+          "description" => "Short identifier for the extension file (e.g. 'word_count')"
+        },
         "source" => %{
           "type" => "string",
           "description" =>

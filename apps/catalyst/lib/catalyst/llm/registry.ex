@@ -37,8 +37,11 @@ defmodule Catalyst.LLM.Registry do
 
   def fetch!(api) do
     case fetch(api) do
-      {:ok, module} -> module
-      {:error, reason} -> raise ArgumentError, "no LLM provider for api #{inspect(api)}: #{inspect(reason)}"
+      {:ok, module} ->
+        module
+
+      {:error, reason} ->
+        raise ArgumentError, "no LLM provider for api #{inspect(api)}: #{inspect(reason)}"
     end
   end
 
@@ -65,7 +68,8 @@ defmodule Catalyst.LLM.Registry do
     do: register_provider(api, %ProviderConfig{module: module}, opts)
 
   @doc "Remove a provider (restoring a built-in/config one if it was shadowed)."
-  def unregister_provider(api) when is_binary(api), do: GenServer.call(__MODULE__, {:unregister, api})
+  def unregister_provider(api) when is_binary(api),
+    do: GenServer.call(__MODULE__, {:unregister, api})
 
   @doc "Remove every provider registered by `owner` (extension purge hook)."
   def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
@@ -125,7 +129,8 @@ defmodule Catalyst.LLM.Registry do
   end
 
   defp seed_map do
-    builtins = Map.new(@builtin, fn {api, mod} -> {api, %ProviderConfig{module: mod, name: api}} end)
+    builtins =
+      Map.new(@builtin, fn {api, mod} -> {api, %ProviderConfig{module: mod, name: api}} end)
 
     overrides =
       :catalyst

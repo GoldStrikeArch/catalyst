@@ -27,7 +27,8 @@ defmodule Catalyst.Agent.LoopTest do
     {:ok, agent} = Agent.start_link(fn -> [] end)
     emit = fn ev -> Agent.update(agent, &[ev | &1]) end
 
-    {:ok, msgs, _ctx} = Loop.run([Message.user(prompt)], %{system_prompt: nil, messages: []}, config, emit)
+    {:ok, msgs, _ctx} =
+      Loop.run([Message.user(prompt)], %{system_prompt: nil, messages: []}, config, emit)
 
     events = Agent.get(agent, & &1) |> Enum.reverse()
     Agent.stop(agent)
@@ -73,6 +74,7 @@ defmodule Catalyst.Agent.LoopTest do
 
     tool_result = Enum.find(msgs, &match?(%Message.ToolResult{}, &1))
     assert tool_result.is_error
+
     assert Content.text_of(tool_result.content) =~ "no such file" or
              Content.text_of(tool_result.content) =~ "missing.txt"
 

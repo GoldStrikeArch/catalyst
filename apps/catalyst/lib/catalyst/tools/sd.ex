@@ -20,10 +20,16 @@ defmodule Catalyst.Tools.Sd do
     %{
       "type" => "object",
       "properties" => %{
-        "pattern" => %{"type" => "string", "description" => "Find pattern (regex, or literal with string_mode)"},
+        "pattern" => %{
+          "type" => "string",
+          "description" => "Find pattern (regex, or literal with string_mode)"
+        },
         "replacement" => %{"type" => "string", "description" => "Replacement text"},
         "path" => %{"type" => "string", "description" => "File to edit in place"},
-        "string_mode" => %{"type" => "boolean", "description" => "Treat pattern as a literal string (default: false)"}
+        "string_mode" => %{
+          "type" => "boolean",
+          "description" => "Treat pattern as a literal string (default: false)"
+        }
       },
       "required" => ["pattern", "replacement", "path"]
     }

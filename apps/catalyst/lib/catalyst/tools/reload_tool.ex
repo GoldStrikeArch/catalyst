@@ -24,6 +24,9 @@ defmodule Catalyst.Tools.ReloadTool do
   def execute(_args, _ctx) do
     {:ok, summaries} = Extensions.load_all()
     tools = Enum.flat_map(summaries, & &1.tools)
-    result("Reloaded #{length(summaries)} file(s). Tools: #{Enum.join(tools, ", ")}", %{files: length(summaries)})
+
+    result("Reloaded #{length(summaries)} file(s). Tools: #{Enum.join(tools, ", ")}", %{
+      files: length(summaries)
+    })
   end
 end

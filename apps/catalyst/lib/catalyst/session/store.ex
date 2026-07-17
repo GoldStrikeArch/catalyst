@@ -13,7 +13,8 @@ defmodule Catalyst.Session.Store do
   @type handle :: %{id: String.t(), path: String.t(), cwd: String.t()}
 
   @doc "Root directory for all session logs (override with `config :catalyst, :sessions_root`)."
-  def root, do: Application.get_env(:catalyst, :sessions_root) || Path.expand("~/.catalyst/sessions")
+  def root,
+    do: Application.get_env(:catalyst, :sessions_root) || Path.expand("~/.catalyst/sessions")
 
   @doc "Create a new session file with a header line; returns its handle."
   @spec new(String.t(), keyword()) :: handle()
@@ -23,7 +24,14 @@ defmodule Catalyst.Session.Store do
     File.mkdir_p!(dir)
     path = Path.join(dir, id <> ".jsonl")
 
-    header = %{"type" => "session", "version" => 1, "id" => id, "cwd" => cwd, "timestamp" => now()}
+    header = %{
+      "type" => "session",
+      "version" => 1,
+      "id" => id,
+      "cwd" => cwd,
+      "timestamp" => now()
+    }
+
     File.write!(path, line(header))
 
     %{id: id, path: path, cwd: cwd}
@@ -81,7 +89,12 @@ defmodule Catalyst.Session.Store do
   defp encode_block(%Content.Text{text: t}), do: %{"type" => "text", "text" => t}
 
   defp encode_block(%Content.Thinking{} = b),
-    do: %{"type" => "thinking", "thinking" => b.thinking, "signature" => b.signature, "redacted" => b.redacted}
+    do: %{
+      "type" => "thinking",
+      "thinking" => b.thinking,
+      "signature" => b.signature,
+      "redacted" => b.redacted
+    }
 
   defp encode_block(%Content.Image{data: d, mime_type: mt}),
     do: %{"type" => "image", "data" => d, "mimeType" => mt}
@@ -142,7 +155,11 @@ defmodule Catalyst.Session.Store do
   defp decode_block(%{"type" => "text", "text" => t}), do: %Content.Text{text: t}
 
   defp decode_block(%{"type" => "thinking"} = b),
-    do: %Content.Thinking{thinking: b["thinking"], signature: b["signature"], redacted: b["redacted"] || false}
+    do: %Content.Thinking{
+      thinking: b["thinking"],
+      signature: b["signature"],
+      redacted: b["redacted"] || false
+    }
 
   defp decode_block(%{"type" => "image"} = b),
     do: %Content.Image{data: b["data"], mime_type: b["mimeType"]}
@@ -156,6 +173,9 @@ defmodule Catalyst.Session.Store do
   # ---- helpers --------------------------------------------------------------
 
   defp gen_id, do: Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
-  defp cwd_hash(cwd), do: :sha256 |> :crypto.hash(cwd) |> Base.encode16(case: :lower) |> binary_part(0, 16)
+
+  defp cwd_hash(cwd),
+    do: :sha256 |> :crypto.hash(cwd) |> Base.encode16(case: :lower) |> binary_part(0, 16)
+
   defp now, do: System.system_time(:millisecond)
 end

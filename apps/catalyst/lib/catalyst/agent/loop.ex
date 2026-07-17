@@ -33,7 +33,10 @@ defmodule Catalyst.Agent.Loop do
   @doc "Run the loop for the given prompts. Returns `{:ok, new_messages, final_context}`."
   def run(prompts, context, config, emit) do
     # Every event is also offered to registered observers (Hooks `on/1`), isolated.
-    emit = fn ev -> Hooks.notify(ev); emit.(ev) end
+    emit = fn ev ->
+      Hooks.notify(ev)
+      emit.(ev)
+    end
 
     emit.(%Event.AgentStart{})
 
@@ -150,7 +153,12 @@ defmodule Catalyst.Agent.Loop do
   end
 
   defp empty_assistant(model) do
-    %Message.Assistant{content: [], model: model && model.id, stop_reason: :stop, timestamp: Message.now()}
+    %Message.Assistant{
+      content: [],
+      model: model && model.id,
+      stop_reason: :stop,
+      timestamp: Message.now()
+    }
   end
 
   defp drain(nil), do: []

@@ -77,7 +77,8 @@ defmodule Catalyst.Extensions do
   def uninstall(owner), do: GenServer.call(__MODULE__, {:uninstall, owner})
 
   @doc "Directory holding extension source files."
-  def dir, do: Application.get_env(:catalyst, :extensions_dir) || Path.expand("~/.catalyst/extensions")
+  def dir,
+    do: Application.get_env(:catalyst, :extensions_dir) || Path.expand("~/.catalyst/extensions")
 
   @doc "Resolve a session's `tools` setting into a concrete module list (per turn)."
   def resolve(tools) when is_list(tools), do: tools
@@ -145,7 +146,9 @@ defmodule Catalyst.Extensions do
   # Wire the extension kinds that core can back, and the hooks owner-purger.
   # Provider (E3) and UI (E5) kinds/purgers are wired by their own subsystems.
   defp wire_core_kinds do
-    ExtensionAPI.register_kind(:tool, fn api, module -> register_tool(module, owner: api.owner) end)
+    ExtensionAPI.register_kind(:tool, fn api, module ->
+      register_tool(module, owner: api.owner)
+    end)
 
     ExtensionAPI.register_kind(:hook, fn api, point, fun, opts ->
       Hooks.register(point, fun, Keyword.put_new(opts, :owner, api.owner))
@@ -215,7 +218,10 @@ defmodule Catalyst.Extensions do
       try do
         mod.setup(api)
       rescue
-        e -> Logger.warning("[extensions] #{owner}: #{inspect(mod)}.setup/1 raised: #{Exception.message(e)}")
+        e ->
+          Logger.warning(
+            "[extensions] #{owner}: #{inspect(mod)}.setup/1 raised: #{Exception.message(e)}"
+          )
       end
     end)
 

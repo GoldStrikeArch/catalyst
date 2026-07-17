@@ -10,6 +10,7 @@ defmodule Catalyst.Umbrella.MixProject do
       aliases: aliases(),
       releases: releases(),
       package: package(),
+      dialyzer: dialyzer(),
       listeners: [Phoenix.CodeReloader]
     ]
   end
@@ -21,7 +22,8 @@ defmodule Catalyst.Umbrella.MixProject do
       name: "Catalyst",
       name_long: "Catalyst",
       description: "A coding agent for your desktop",
-      description_long: "Catalyst is an Elixir/OTP coding agent with a Phoenix LiveView desktop UI.",
+      description_long:
+        "Catalyst is an Elixir/OTP coding agent with a Phoenix LiveView desktop UI.",
       icon: "apps/catalyst_desktop/priv/icon.png",
       category_macos: "public.app-category.developer-tools",
       identifier: "dev.catalyst.app",
@@ -58,7 +60,13 @@ defmodule Catalyst.Umbrella.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [precommit: :test, dialyzer: :dev]
+    ]
+  end
+
+  defp dialyzer do
+    [
+      plt_add_apps: [:mix]
     ]
   end
 
@@ -153,7 +161,9 @@ defmodule Catalyst.Umbrella.MixProject do
       # Packaging the headless core into a self-contained binary.
       {:burrito, "~> 1.5"},
       # Packaging the wx GUI into a macOS .app/.dmg (bundles wxWidgets dylibs).
-      {:desktop_deployment, github: "elixir-desktop/deployment", runtime: false}
+      {:desktop_deployment, github: "elixir-desktop/deployment", runtime: false},
+      # Static analysis via `mix dialyzer`.
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 

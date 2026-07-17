@@ -5,6 +5,16 @@ defmodule CatalystWeb.Endpoint do
   # outside code-reloading) locks the packaged app down to the webview.
   use Desktop.Endpoint, otp_app: :catalyst_web
 
+  # Desktop.Endpoint 1.5 still generates a Ranch-specific dynamic-port lookup
+  # outside Phoenix 1.7. Phoenix 1.8 exposes server_info/1, which works with
+  # the configured Bandit adapter and avoids adding Cowboy/Ranch just for this.
+  defoverridable get_dynamic_port: 1
+
+  def get_dynamic_port(scheme) do
+    {:ok, {_ip, port}} = server_info(scheme)
+    port
+  end
+
   # In desktop mode the webview does not reliably persist cookies, so the
   # session is held in an ETS table (the `:session` table created in
   # CatalystWeb.Application before the endpoint starts).

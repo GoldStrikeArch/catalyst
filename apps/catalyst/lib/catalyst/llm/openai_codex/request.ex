@@ -69,15 +69,25 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
 
   defp convert_message(%Message.ToolResult{tool_call_id: id, content: content}) do
     {call_id, _item} = split_id(id)
-    [%{"type" => "function_call_output", "call_id" => call_id, "output" => Content.text_of(content)}]
+
+    [
+      %{
+        "type" => "function_call_output",
+        "call_id" => call_id,
+        "output" => Content.text_of(content)
+      }
+    ]
   end
 
   defp convert_message(_), do: []
 
   defp user_content(content) do
     Enum.map(content, fn
-      %Content.Text{text: t} -> %{"type" => "input_text", "text" => t}
-      %Content.Image{data: d, mime_type: mt} -> %{"type" => "input_image", "detail" => "auto", "image_url" => "data:#{mt};base64,#{d}"}
+      %Content.Text{text: t} ->
+        %{"type" => "input_text", "text" => t}
+
+      %Content.Image{data: d, mime_type: mt} ->
+        %{"type" => "input_image", "detail" => "auto", "image_url" => "data:#{mt};base64,#{d}"}
     end)
   end
 
@@ -105,7 +115,16 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
 
   defp assistant_block(%Content.ToolCall{id: id, name: name, arguments: args}) do
     {call_id, item_id} = split_id(id)
-    [%{"type" => "function_call", "id" => item_id, "call_id" => call_id, "name" => name, "arguments" => Jason.encode!(args)}]
+
+    [
+      %{
+        "type" => "function_call",
+        "id" => item_id,
+        "call_id" => call_id,
+        "name" => name,
+        "arguments" => Jason.encode!(args)
+      }
+    ]
   end
 
   defp assistant_block(_), do: []

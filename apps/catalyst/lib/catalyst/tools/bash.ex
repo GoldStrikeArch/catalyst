@@ -11,7 +11,8 @@ defmodule Catalyst.Tools.Bash do
 
   @impl true
   def description,
-    do: "Run a bash/sh command in the working directory. Output (stdout+stderr) is tail-truncated to 2000 lines / 50KB."
+    do:
+      "Run a bash/sh command in the working directory. Output (stdout+stderr) is tail-truncated to 2000 lines / 50KB."
 
   @impl true
   def parameters do

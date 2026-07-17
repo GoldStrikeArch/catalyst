@@ -21,12 +21,23 @@ defmodule CatalystWeb.ShellLiveTest do
 
   defp wait_render(view, sub, tries) do
     html = render(view)
-    if html =~ sub, do: html, else: (Process.sleep(50); wait_render(view, sub, tries - 1))
+
+    if html =~ sub,
+      do: html,
+      else:
+        (
+          Process.sleep(50)
+          wait_render(view, sub, tries - 1)
+        )
   end
 
   test "a runtime-registered page renders via the catch-all route", %{conn: conn} do
     on_exit(fn -> Registry.unregister_owner("e5_page") end)
-    Registry.register_page("settings", {SettingsPage, :render}, owner: "e5_page", label: "Settings")
+
+    Registry.register_page("settings", {SettingsPage, :render},
+      owner: "e5_page",
+      label: "Settings"
+    )
 
     {:ok, _view, html} = live(conn, "/settings")
     assert html =~ "SETTINGS-PAGE-CONTENT"

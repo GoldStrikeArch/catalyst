@@ -14,7 +14,12 @@ defmodule Catalyst.DebugTest do
   test "log writes lines and log_event formats events", %{sid: sid} do
     Debug.log(sid, "test", "hello world")
     Debug.log_event(sid, %Event.AgentStart{})
-    Debug.log_event(sid, %Event.ToolExecutionStart{call_id: "c", name: "read", args: %{"path" => "x"}})
+
+    Debug.log_event(sid, %Event.ToolExecutionStart{
+      call_id: "c",
+      name: "read",
+      args: %{"path" => "x"}
+    })
 
     content = File.read!(Debug.path(sid))
     assert content =~ "[test] hello world"
@@ -42,7 +47,9 @@ defmodule Catalyst.DebugTest do
   end
 
   test "read_log is graceful with no session id" do
-    res = ReadLog.execute(%{}, %{cwd: ".", call_id: "c", session_id: nil, report: fn _ -> :ok end})
+    res =
+      ReadLog.execute(%{}, %{cwd: ".", call_id: "c", session_id: nil, report: fn _ -> :ok end})
+
     assert Content.text_of(res.content) =~ "no session id"
   end
 end

@@ -77,7 +77,12 @@ defmodule Catalyst.ExtensionsTest do
     emit = fn ev -> Agent.update(collector, &[ev | &1]) end
 
     {:ok, messages, _ctx} =
-      Loop.run([Message.user("extend yourself")], %{system_prompt: nil, messages: []}, config, emit)
+      Loop.run(
+        [Message.user("extend yourself")],
+        %{system_prompt: nil, messages: []},
+        config,
+        emit
+      )
 
     Agent.stop(collector)
 

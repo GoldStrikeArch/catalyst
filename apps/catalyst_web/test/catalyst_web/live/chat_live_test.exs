@@ -7,7 +7,14 @@ defmodule CatalystWeb.ChatLiveTest do
 
   defp wait_render(view, sub, tries) do
     html = render(view)
-    if html =~ sub, do: html, else: (Process.sleep(50); wait_render(view, sub, tries - 1))
+
+    if html =~ sub,
+      do: html,
+      else:
+        (
+          Process.sleep(50)
+          wait_render(view, sub, tries - 1)
+        )
   end
 
   test "renders the chat shell with the Demo provider", %{conn: conn} do

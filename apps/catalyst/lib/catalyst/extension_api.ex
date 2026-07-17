@@ -61,7 +61,10 @@ defmodule Catalyst.ExtensionAPI do
   def register_hook(api, point, fun, opts \\ []), do: dispatch(api, :hook, [point, fun, opts])
   def on(api, fun, opts \\ []), do: dispatch(api, :event, [fun, opts])
   def register_renderer(api, kind, match, fun), do: dispatch(api, :renderer, [kind, match, fun])
-  def register_component(api, slot, fun, opts \\ []), do: dispatch(api, :component, [slot, fun, opts])
+
+  def register_component(api, slot, fun, opts \\ []),
+    do: dispatch(api, :component, [slot, fun, opts])
+
   def register_page(api, path, module, opts \\ []), do: dispatch(api, :page, [path, module, opts])
   def register_command(api, name, opts \\ []), do: dispatch(api, :command, [name, opts])
 

@@ -6,8 +6,7 @@ import Config
 # No static digesting: a local single-user webview needs no cache-busting, and
 # serving plain `app.js`/`app.css` lets the runtime asset rebuild (rebuild_assets)
 # overwrite the served files and take effect on the next reload.
-config :catalyst_web, CatalystWeb.Endpoint,
-  url: [host: "localhost"]
+config :catalyst_web, CatalystWeb.Endpoint, url: [host: "localhost"]
 
 # Open the native window when the packaged app boots.
 config :catalyst_desktop, start_window: true

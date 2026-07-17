@@ -13,7 +13,8 @@ defmodule CatalystWeb.Tools.ReconnectUi do
 
   @impl true
   def description,
-    do: "Reload connected windows to apply UI/render changes (hot-swapped pages/components/renderers)."
+    do:
+      "Reload connected windows to apply UI/render changes (hot-swapped pages/components/renderers)."
 
   @impl true
   def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}

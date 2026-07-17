@@ -25,14 +25,20 @@ defmodule Catalyst.Tools.Edit do
     %{
       "type" => "object",
       "properties" => %{
-        "path" => %{"type" => "string", "description" => "File path (relative to cwd or absolute)"},
+        "path" => %{
+          "type" => "string",
+          "description" => "File path (relative to cwd or absolute)"
+        },
         "edits" => %{
           "type" => "array",
           "description" => "List of replacements applied against the original file",
           "items" => %{
             "type" => "object",
             "properties" => %{
-              "oldText" => %{"type" => "string", "description" => "Exact text to find (must be unique)"},
+              "oldText" => %{
+                "type" => "string",
+                "description" => "Exact text to find (must be unique)"
+              },
               "newText" => %{"type" => "string", "description" => "Replacement text"}
             },
             "required" => ["oldText", "newText"]
@@ -70,9 +76,14 @@ defmodule Catalyst.Tools.Edit do
 
   defp apply_edit(content, old, new) do
     case count_occurrences(content, old) do
-      0 -> raise "edit failed: oldText not found: #{inspect(String.slice(old, 0, 60))}"
-      1 -> String.replace(content, old, new)
-      n -> raise "edit failed: oldText occurs #{n} times (must be unique): #{inspect(String.slice(old, 0, 60))}"
+      0 ->
+        raise "edit failed: oldText not found: #{inspect(String.slice(old, 0, 60))}"
+
+      1 ->
+        String.replace(content, old, new)
+
+      n ->
+        raise "edit failed: oldText occurs #{n} times (must be unique): #{inspect(String.slice(old, 0, 60))}"
     end
   end
 

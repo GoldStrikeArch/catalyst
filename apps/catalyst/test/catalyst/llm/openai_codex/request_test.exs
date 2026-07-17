@@ -41,7 +41,16 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
     input = body["input"]
 
     # user input_text
-    assert Enum.any?(input, &match?(%{"role" => "user", "content" => [%{"type" => "input_text", "text" => "rewrite it"}]}, &1))
+    assert Enum.any?(
+             input,
+             &match?(
+               %{
+                 "role" => "user",
+                 "content" => [%{"type" => "input_text", "text" => "rewrite it"}]
+               },
+               &1
+             )
+           )
 
     # reasoning item replayed verbatim (with encrypted_content)
     assert Enum.any?(input, &(&1 == reasoning_item))
@@ -54,7 +63,17 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
            end)
 
     # function_call_output keyed by the call_id only
-    assert Enum.any?(input, &match?(%{"type" => "function_call_output", "call_id" => "call_1", "output" => "match found"}, &1))
+    assert Enum.any?(
+             input,
+             &match?(
+               %{
+                 "type" => "function_call_output",
+                 "call_id" => "call_1",
+                 "output" => "match found"
+               },
+               &1
+             )
+           )
 
     # tools converted to function tools
     assert [%{"type" => "function", "name" => "grep", "strict" => nil}] = body["tools"]

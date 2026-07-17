@@ -52,7 +52,11 @@ defmodule Catalyst.LLM.Faux do
   end
 
   defp tool_call(name, args) do
-    %Content.ToolCall{id: "call_#{System.unique_integer([:positive])}", name: name, arguments: args}
+    %Content.ToolCall{
+      id: "call_#{System.unique_integer([:positive])}",
+      name: name,
+      arguments: args
+    }
   end
 
   defp emit_events(assistant, sink) do

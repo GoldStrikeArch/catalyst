@@ -61,7 +61,8 @@ defmodule Catalyst.Tools.Binaries do
   # $PATH, then common Homebrew locations (a GUI .app inherits a minimal PATH that
   # usually excludes /opt/homebrew/bin and /usr/local/bin).
   defp discover(exe) do
-    bundled = [bin_dir(), bundled_dir()] |> Enum.map(&Path.join(&1, exe)) |> Enum.find(&File.exists?/1)
+    bundled =
+      [bin_dir(), bundled_dir()] |> Enum.map(&Path.join(&1, exe)) |> Enum.find(&File.exists?/1)
 
     bundled || System.find_executable(exe) ||
       ["/opt/homebrew/bin", "/usr/local/bin"]

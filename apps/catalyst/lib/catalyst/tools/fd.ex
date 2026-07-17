@@ -9,14 +9,18 @@ defmodule Catalyst.Tools.Fd do
   def name, do: "find"
 
   @impl true
-  def description, do: "Find files by glob pattern with fd (respects .gitignore). Returns matching paths."
+  def description,
+    do: "Find files by glob pattern with fd (respects .gitignore). Returns matching paths."
 
   @impl true
   def parameters do
     %{
       "type" => "object",
       "properties" => %{
-        "pattern" => %{"type" => "string", "description" => "Glob pattern, e.g. '*.ex' or '**/*.json'"},
+        "pattern" => %{
+          "type" => "string",
+          "description" => "Glob pattern, e.g. '*.ex' or '**/*.json'"
+        },
         "path" => %{"type" => "string", "description" => "Directory to search (default: cwd)"},
         "limit" => %{"type" => "integer", "description" => "Max results (default: 1000)"}
       },
@@ -39,7 +43,12 @@ defmodule Catalyst.Tools.Fd do
         shown = Enum.take(results, limit)
         text = if shown == [], do: "No files found.", else: Enum.join(shown, "\n")
         {body, info} = Truncate.head(text)
-        result(body, %{result_count: length(shown), result_limit_reached: limited?, truncation: info})
+
+        result(body, %{
+          result_count: length(shown),
+          result_limit_reached: limited?,
+          truncation: info
+        })
 
       {:ok, %{out: out, status: status}} ->
         raise "fd error (status #{status}): #{String.slice(out, 0, 200)}"

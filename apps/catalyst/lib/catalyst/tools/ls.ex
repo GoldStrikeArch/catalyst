@@ -9,14 +9,19 @@ defmodule Catalyst.Tools.Ls do
   def name, do: "ls"
 
   @impl true
-  def description, do: "List directory entries (non-recursive), alphabetically; directories get a trailing slash."
+  def description,
+    do:
+      "List directory entries (non-recursive), alphabetically; directories get a trailing slash."
 
   @impl true
   def parameters do
     %{
       "type" => "object",
       "properties" => %{
-        "path" => %{"type" => "string", "description" => "Directory to list (default: current directory)"},
+        "path" => %{
+          "type" => "string",
+          "description" => "Directory to list (default: current directory)"
+        },
         "limit" => %{"type" => "integer", "description" => "Maximum entries (default: 500)"}
       },
       "required" => []

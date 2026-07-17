@@ -17,7 +17,10 @@ defmodule Catalyst.Tools.Read do
     %{
       "type" => "object",
       "properties" => %{
-        "path" => %{"type" => "string", "description" => "File path (relative to cwd or absolute)"},
+        "path" => %{
+          "type" => "string",
+          "description" => "File path (relative to cwd or absolute)"
+        },
         "offset" => %{"type" => "integer", "description" => "1-indexed start line"},
         "limit" => %{"type" => "integer", "description" => "Maximum lines to read"}
       },

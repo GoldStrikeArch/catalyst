@@ -54,7 +54,10 @@ defmodule Catalyst.Agent.LoopHooksTest do
 
     {:ok, agent} = Agent.start_link(fn -> [] end)
     emit = fn ev -> Agent.update(agent, &[ev | &1]) end
-    {:ok, msgs, _ctx} = Loop.run([Message.user(prompt)], %{system_prompt: nil, messages: []}, config, emit)
+
+    {:ok, msgs, _ctx} =
+      Loop.run([Message.user(prompt)], %{system_prompt: nil, messages: []}, config, emit)
+
     events = Agent.get(agent, & &1) |> Enum.reverse()
     Agent.stop(agent)
     {msgs, events}
@@ -63,7 +66,9 @@ defmodule Catalyst.Agent.LoopHooksTest do
   test "before_tool_call can block a tool (it never executes)", %{tmp: tmp, owner: owner} do
     Hooks.register(
       :before_tool_call,
-      fn ctx -> if ctx.cwd == tmp and ctx.name == "write", do: {:block, "denied by test"}, else: :cont end,
+      fn ctx ->
+        if ctx.cwd == tmp and ctx.name == "write", do: {:block, "denied by test"}, else: :cont
+      end,
       owner: owner
     )
 
@@ -123,7 +128,13 @@ defmodule Catalyst.Agent.LoopHooksTest do
 
     log =
       capture_log(fn ->
-        {msgs, _events} = run([{:tool, "write", %{"path" => "b.txt", "content" => "ok"}}, {:text, "done"}], "go", tmp)
+        {msgs, _events} =
+          run(
+            [{:tool, "write", %{"path" => "b.txt", "content" => "ok"}}, {:text, "done"}],
+            "go",
+            tmp
+          )
+
         # The hook crashed and was skipped, so the tool ran normally.
         assert File.read!(Path.join(tmp, "b.txt")) == "ok"
         assert Content.text_of(List.last(msgs).content) == "done"
@@ -152,7 +163,10 @@ defmodule Catalyst.Agent.LoopHooksTest do
     # Stopped after the first tool batch: no second write, no final text turn.
     assert File.exists?(Path.join(tmp, "c.txt"))
     refute File.exists?(Path.join(tmp, "d.txt"))
-    refute Enum.any?(msgs, fn m -> match?(%Message.Assistant{}, m) and Content.text_of(m.content) == "done" end)
+
+    refute Enum.any?(msgs, fn m ->
+             match?(%Message.Assistant{}, m) and Content.text_of(m.content) == "done"
+           end)
   end
 
   test "event observers receive loop events", %{tmp: tmp, owner: owner} do

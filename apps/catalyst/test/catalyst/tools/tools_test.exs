@@ -35,12 +35,21 @@ defmodule Catalyst.ToolsTest do
 
   test "edit replaces unique text and rejects ambiguous/missing", %{ctx: ctx} do
     Write.execute(%{"path" => "e.txt", "content" => "foo bar foo"}, ctx)
+
     assert_raise RuntimeError, ~r/unique/, fn ->
-      Edit.execute(%{"path" => "e.txt", "edits" => [%{"oldText" => "foo", "newText" => "X"}]}, ctx)
+      Edit.execute(
+        %{"path" => "e.txt", "edits" => [%{"oldText" => "foo", "newText" => "X"}]},
+        ctx
+      )
     end
 
     Write.execute(%{"path" => "e2.txt", "content" => "alpha beta"}, ctx)
-    Edit.execute(%{"path" => "e2.txt", "edits" => [%{"oldText" => "alpha", "newText" => "ALPHA"}]}, ctx)
+
+    Edit.execute(
+      %{"path" => "e2.txt", "edits" => [%{"oldText" => "alpha", "newText" => "ALPHA"}]},
+      ctx
+    )
+
     assert text(Read.execute(%{"path" => "e2.txt"}, ctx)) == "ALPHA beta"
   end
 
@@ -58,18 +67,38 @@ defmodule Catalyst.ToolsTest do
 
   test "replace (sd) edits in place", %{ctx: ctx} do
     Write.execute(%{"path" => "r.txt", "content" => "TODO and TODO"}, ctx)
-    Sd.execute(%{"pattern" => "TODO", "replacement" => "DONE", "path" => "r.txt", "string_mode" => true}, ctx)
+
+    Sd.execute(
+      %{"pattern" => "TODO", "replacement" => "DONE", "path" => "r.txt", "string_mode" => true},
+      ctx
+    )
+
     assert text(Read.execute(%{"path" => "r.txt"}, ctx)) == "DONE and DONE"
   end
 
   test "ast_grep searches and rewrites", %{ctx: ctx} do
-    Write.execute(%{"path" => "lib/g.ex", "content" => "defmodule G do\n  def h, do: IO.puts(\"hi\")\nend\n"}, ctx)
+    Write.execute(
+      %{"path" => "lib/g.ex", "content" => "defmodule G do\n  def h, do: IO.puts(\"hi\")\nend\n"},
+      ctx
+    )
 
-    search = text(AstGrep.execute(%{"pattern" => "IO.puts($A)", "lang" => "elixir", "path" => "lib/g.ex"}, ctx))
+    search =
+      text(
+        AstGrep.execute(
+          %{"pattern" => "IO.puts($A)", "lang" => "elixir", "path" => "lib/g.ex"},
+          ctx
+        )
+      )
+
     assert search =~ "lib/g.ex:2:"
 
     AstGrep.execute(
-      %{"pattern" => "IO.puts($A)", "rewrite" => "Logger.info($A)", "lang" => "elixir", "path" => "lib/g.ex"},
+      %{
+        "pattern" => "IO.puts($A)",
+        "rewrite" => "Logger.info($A)",
+        "lang" => "elixir",
+        "path" => "lib/g.ex"
+      },
       ctx
     )
 

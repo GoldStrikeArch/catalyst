@@ -76,7 +76,8 @@ defmodule Catalyst.Debug do
       else: bin
   end
 
-  def truncate(term, max), do: term |> inspect(limit: :infinity, printable_limit: max) |> truncate(max)
+  def truncate(term, max),
+    do: term |> inspect(limit: :infinity, printable_limit: max) |> truncate(max)
 
   # ---- event formatting -----------------------------------------------------
 
@@ -86,7 +87,9 @@ defmodule Catalyst.Debug do
   defp format_event(%Event.TurnEnd{}), do: "turn_end"
   defp format_event(%Event.MessageStart{message: m}), do: "message_start #{role(m)}"
   defp format_event(%Event.MessageEnd{message: m}), do: "message_end #{role(m)} #{summarize(m)}"
-  defp format_event(%Event.ToolExecutionStart{name: n, args: a}), do: "tool_start #{n} #{truncate(inspect(a), 800)}"
+
+  defp format_event(%Event.ToolExecutionStart{name: n, args: a}),
+    do: "tool_start #{n} #{truncate(inspect(a), 800)}"
 
   defp format_event(%Event.ToolExecutionEnd{name: n, is_error: err, result: r}),
     do: "tool_end #{n} error=#{err} #{truncate(Content.text_of(r.content), 800)}"
@@ -100,7 +103,8 @@ defmodule Catalyst.Debug do
   defp role(%Message.ToolResult{tool_name: n}), do: "tool_result(#{n})"
   defp role(_), do: "?"
 
-  defp summarize(%Message.ToolResult{} = m), do: "error=#{m.is_error} #{truncate(Content.text_of(m.content), 800)}"
+  defp summarize(%Message.ToolResult{} = m),
+    do: "error=#{m.is_error} #{truncate(Content.text_of(m.content), 800)}"
 
   defp summarize(%{} = m) do
     text = m |> Map.get(:content, []) |> Content.text_of()

@@ -63,7 +63,10 @@ defmodule Catalyst.Tools.SelfModTest do
 
     capture_log(fn ->
       assert %{content: _} =
-               InstallExtension.execute(%{"name" => "provinstall", "source" => @provider_ext}, ctx)
+               InstallExtension.execute(
+                 %{"name" => "provinstall", "source" => @provider_ext},
+                 ctx
+               )
     end)
 
     assert {:ok, Catalyst.Ext.MyProvider} = Registry.fetch("ext-echo")
@@ -73,7 +76,10 @@ defmodule Catalyst.Tools.SelfModTest do
   test "a broken install errors and leaves no file behind", %{ctx: ctx} do
     capture_log(fn ->
       assert_raise RuntimeError, fn ->
-        InstallExtension.execute(%{"name" => "brokeninstall", "source" => "defmodule X do def @@@ end"}, ctx)
+        InstallExtension.execute(
+          %{"name" => "brokeninstall", "source" => "defmodule X do def @@@ end"},
+          ctx
+        )
       end
     end)
 

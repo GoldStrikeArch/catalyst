@@ -52,7 +52,13 @@ defmodule Catalyst.Agent.ToolRunner do
     %{id: id, name: name, arguments: args} = tool_call
     emit.(%Event.ToolExecutionStart{call_id: id, name: name, args: args})
 
-    hook_ctx = %{name: name, args: args, call_id: id, cwd: config.cwd, assistant: Map.get(config, :assistant)}
+    hook_ctx = %{
+      name: name,
+      args: args,
+      call_id: id,
+      cwd: config.cwd,
+      assistant: Map.get(config, :assistant)
+    }
 
     raw =
       case Registry.fetch(config.tools, name) do

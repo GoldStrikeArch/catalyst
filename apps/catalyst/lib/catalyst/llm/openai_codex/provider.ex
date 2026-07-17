@@ -27,7 +27,11 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
         do_stream(model, context, opts, sink, token, account_id)
 
       {:error, reason} ->
-        {:ok, error_assistant(model, "not authenticated (#{inspect(reason)}). Run Catalyst.Auth.login_openai_codex/0.")}
+        {:ok,
+         error_assistant(
+           model,
+           "not authenticated (#{inspect(reason)}). Run Catalyst.Auth.login_openai_codex/0."
+         )}
     end
   end
 
@@ -35,24 +39,37 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
     url = resolve_url(model)
     session_id = opts[:session_id] || random_id()
     headers = Headers.build(token, account_id, session_id)
-    body = Request.build(model, context, Keyword.put(opts, :session_id, session_id)) |> Jason.encode!()
+
+    body =
+      Request.build(model, context, Keyword.put(opts, :session_id, session_id)) |> Jason.encode!()
 
     request = Finch.build(:post, url, headers, body)
 
     acc = %{status: nil, buffer: "", parser: StreamParser.new(), sink: sink, error_body: ""}
 
-    Debug.log(session_id, "codex.request", "POST #{url} model=#{model.id} bytes=#{byte_size(body)} body=#{Debug.truncate(body, 3_000)}")
+    Debug.log(
+      session_id,
+      "codex.request",
+      "POST #{url} model=#{model.id} bytes=#{byte_size(body)} body=#{Debug.truncate(body, 3_000)}"
+    )
 
     # `Finch.stream/5` returns `{:ok, acc}` on completion, or `{:error, exception,
     # partial_acc}` (a 3-tuple) on a transport failure — handle BOTH or a dropped
     # connection (e.g. `%Finch.TransportError{reason: :closed}`) crashes the run.
-    case Finch.stream(request, Catalyst.Finch, acc, &handle_chunk/2, receive_timeout: @receive_timeout) do
+    case Finch.stream(request, Catalyst.Finch, acc, &handle_chunk/2,
+           receive_timeout: @receive_timeout
+         ) do
       {:ok, %{status: 200, parser: parser}} ->
         Debug.log(session_id, "codex.response", "200 ok")
         {:ok, StreamParser.finalize(parser, model)}
 
       {:ok, %{status: status, error_body: body}} ->
-        Debug.log(session_id, "codex.response", "HTTP #{status} body=#{Debug.truncate(body, 1_500)}")
+        Debug.log(
+          session_id,
+          "codex.response",
+          "HTTP #{status} body=#{Debug.truncate(body, 1_500)}"
+        )
+
         {:ok, error_assistant(model, "HTTP #{status}: #{String.slice(body, 0, 600)}")}
 
       # Connection dropped after a 200 with partial data — keep what we parsed.
@@ -61,11 +78,12 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
         {:ok, StreamParser.finalize(parser, model)}
 
       {:error, reason, partial} ->
-        Debug.log(session_id, "codex.error", "transport error: #{inspect(reason)} (status=#{inspect(partial[:status])})")
-        {:ok, error_assistant(model, stream_error_message(reason))}
+        Debug.log(
+          session_id,
+          "codex.error",
+          "transport error: #{inspect(reason)} (status=#{inspect(partial[:status])})"
+        )
 
-      {:error, reason} ->
-        Debug.log(session_id, "codex.error", "stream error: #{inspect(reason)}")
         {:ok, error_assistant(model, stream_error_message(reason))}
     end
   end

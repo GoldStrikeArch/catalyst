@@ -21,15 +21,22 @@ defmodule Catalyst.LLM.SSE do
       frame
       |> String.split("\n")
       |> Enum.filter(&String.starts_with?(&1, "data:"))
-      |> Enum.map_join("\n", fn line -> line |> String.replace_prefix("data:", "") |> String.trim_leading() end)
+      |> Enum.map_join("\n", fn line ->
+        line |> String.replace_prefix("data:", "") |> String.trim_leading()
+      end)
 
     case payload do
-      "" -> []
-      "[DONE]" -> []
-      json -> case Jason.decode(json) do
-                 {:ok, map} -> [map]
-                 _ -> []
-               end
+      "" ->
+        []
+
+      "[DONE]" ->
+        []
+
+      json ->
+        case Jason.decode(json) do
+          {:ok, map} -> [map]
+          _ -> []
+        end
     end
   end
 end

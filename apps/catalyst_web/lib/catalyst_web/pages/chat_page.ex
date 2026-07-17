@@ -17,7 +17,9 @@ defmodule CatalystWeb.Pages.ChatPage do
         <p class="text-xs mt-1">cwd: {@cwd}</p>
       </div>
 
-      <%= for msg <- @messages do %>{MessageRenderer.render_message(%{msg: msg})}<% end %>
+      <%= for msg <- @messages do %>
+        {MessageRenderer.render_message(%{msg: msg})}
+      <% end %>
 
       <div :if={@streaming} class="chat chat-start">
         <div class="chat-bubble chat-bubble-neutral whitespace-pre-wrap">
@@ -32,7 +34,11 @@ defmodule CatalystWeb.Pages.ChatPage do
       </div>
     </div>
 
-    <form phx-submit="send" phx-change="typing" class="bg-base-100 border-t border-base-300 p-3 flex gap-2">
+    <form
+      phx-submit="send"
+      phx-change="typing"
+      class="bg-base-100 border-t border-base-300 p-3 flex gap-2"
+    >
       <input
         type="text"
         name="message"

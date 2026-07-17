@@ -41,7 +41,10 @@ defmodule CatalystWeb.UI.Registry do
 
   @doc "All registered pages (`%{path, label, ...}`), sorted by label."
   def list_pages do
-    @table |> :ets.match_object({{:page, :_}, :_}) |> Enum.map(&elem(&1, 1)) |> Enum.sort_by(& &1.label)
+    @table
+    |> :ets.match_object({{:page, :_}, :_})
+    |> Enum.map(&elem(&1, 1))
+    |> Enum.sort_by(& &1.label)
   rescue
     ArgumentError -> []
   end
@@ -111,7 +114,15 @@ defmodule CatalystWeb.UI.Registry do
     # last write wins per path
     :ets.match_delete(@table, {{:page, path}, :_})
 
-    entry = %{path: path, mod: mod, fun: fun, label: opts[:label] || page_label(path), owner: opts[:owner], seq: state.seq}
+    entry = %{
+      path: path,
+      mod: mod,
+      fun: fun,
+      label: opts[:label] || page_label(path),
+      owner: opts[:owner],
+      seq: state.seq
+    }
+
     :ets.insert(@table, {{:page, path}, entry})
     {:reply, :ok, bump(state)}
   end
@@ -130,7 +141,15 @@ defmodule CatalystWeb.UI.Registry do
 
   def handle_call({:register_command, name, opts}, _from, state) do
     :ets.match_delete(@table, {{:command, name}, :_})
-    entry = %{name: name, owner: opts[:owner], handler: opts[:handler], label: opts[:label] || name, seq: state.seq}
+
+    entry = %{
+      name: name,
+      owner: opts[:owner],
+      handler: opts[:handler],
+      label: opts[:label] || name,
+      seq: state.seq
+    }
+
     :ets.insert(@table, {{:command, name}, entry})
     {:reply, :ok, bump(state)}
   end
@@ -150,7 +169,15 @@ defmodule CatalystWeb.UI.Registry do
   defp bump(state), do: %{state | seq: state.seq + 1}
 
   defp seed_builtin_pages do
-    entry = %{path: "chat", mod: CatalystWeb.Pages.ChatPage, fun: :render, label: "Chat", owner: nil, seq: 0}
+    entry = %{
+      path: "chat",
+      mod: CatalystWeb.Pages.ChatPage,
+      fun: :render,
+      label: "Chat",
+      owner: nil,
+      seq: 0
+    }
+
     :ets.insert(@table, {{:page, "chat"}, entry})
   end
 

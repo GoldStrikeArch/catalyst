@@ -14,7 +14,12 @@ defmodule Catalyst.Session.ServerTest do
 
   defp start(tmp, model, script) do
     {:ok, %{id: id, pid: pid}} =
-      Manager.start_session(cwd: tmp, provider: Catalyst.LLM.Faux, model: model, opts: [script: script])
+      Manager.start_session(
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        opts: [script: script]
+      )
 
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
     {id, pid}
@@ -23,7 +28,13 @@ defmodule Catalyst.Session.ServerTest do
   defp wait_until(_fun, 0), do: flunk("condition not met in time")
 
   defp wait_until(fun, tries) do
-    if fun.(), do: :ok, else: (Process.sleep(50); wait_until(fun, tries - 1))
+    if fun.(),
+      do: :ok,
+      else:
+        (
+          Process.sleep(50)
+          wait_until(fun, tries - 1)
+        )
   end
 
   test "runs an end-to-end turn: transcript, events, JSONL persistence", %{tmp: tmp, model: model} do
@@ -32,7 +43,12 @@ defmodule Catalyst.Session.ServerTest do
     script = [
       {:tool, "read", %{"path" => "lib/g.ex"}},
       {:tool, "ast_grep",
-       %{"pattern" => "IO.puts($A)", "rewrite" => "Logger.info($A)", "lang" => "elixir", "path" => "lib/g.ex"}},
+       %{
+         "pattern" => "IO.puts($A)",
+         "rewrite" => "Logger.info($A)",
+         "lang" => "elixir",
+         "path" => "lib/g.ex"
+       }},
       {:text, "rewrote it"}
     ]
 

@@ -31,7 +31,9 @@ defmodule CatalystWeb.UI.MessageRenderer do
   defp message(%{msg: %Message.User{}} = assigns) do
     ~H"""
     <div class="chat chat-end">
-      <div class="chat-bubble chat-bubble-primary whitespace-pre-wrap">{Content.text_of(@msg.content)}</div>
+      <div class="chat-bubble chat-bubble-primary whitespace-pre-wrap">
+        {Content.text_of(@msg.content)}
+      </div>
     </div>
     """
   end
@@ -40,7 +42,9 @@ defmodule CatalystWeb.UI.MessageRenderer do
     ~H"""
     <div :if={@msg.content != []} class="chat chat-start">
       <div class="chat-bubble chat-bubble-neutral whitespace-pre-wrap">
-        <%= for b <- @msg.content do %>{render_block(%{block: b})}<% end %>
+        <%= for b <- @msg.content do %>
+          {render_block(%{block: b})}
+        <% end %>
       </div>
     </div>
     """

@@ -16,7 +16,8 @@ defmodule Catalyst.Tools.RollbackTool do
 
   @impl true
   def description,
-    do: "Undo the most recent extension change (git revert HEAD) and reload. Use to recover from a bad self-modification."
+    do:
+      "Undo the most recent extension change (git revert HEAD) and reload. Use to recover from a bad self-modification."
 
   @impl true
   def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}

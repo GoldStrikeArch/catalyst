@@ -106,7 +106,6 @@ defmodule CatalystWeb.ShellLive do
   def handle_event("new_session", _params, socket),
     do: {:noreply, start_session(socket, socket.assigns.provider)}
 
-
   def handle_event("set_provider", %{"provider" => "codex"}, socket) do
     if socket.assigns.logged_in do
       {:noreply, start_session(socket, :codex)}
@@ -173,7 +172,8 @@ defmodule CatalystWeb.ShellLive do
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   # Overridable so tests can stub the OAuth flow.
-  defp login_fun, do: Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)
+  defp login_fun,
+    do: Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)
 
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: inspect(reason)
@@ -181,11 +181,17 @@ defmodule CatalystWeb.ShellLive do
   defp apply_event(%Event.MessageStart{message: %Message.Assistant{}}, socket),
     do: assign(socket, streaming: %{text: "", thinking: ""})
 
-  defp apply_event(%Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{delta: d}}, socket),
-    do: update_streaming(socket, :text, d)
+  defp apply_event(
+         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{delta: d}},
+         socket
+       ),
+       do: update_streaming(socket, :text, d)
 
-  defp apply_event(%Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.ThinkingDelta{delta: d}}, socket),
-    do: update_streaming(socket, :thinking, d)
+  defp apply_event(
+         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.ThinkingDelta{delta: d}},
+         socket
+       ),
+       do: update_streaming(socket, :thinking, d)
 
   defp apply_event(%Event.MessageEnd{message: message}, socket) do
     streaming = if match?(%Message.Assistant{}, message), do: nil, else: socket.assigns.streaming
@@ -289,7 +295,10 @@ defmodule CatalystWeb.ShellLive do
             </.link>
           </nav>
 
-          <span class="text-xs text-base-content/50 font-mono ml-2 truncate max-w-xs" title="Working directory — change with /cd <path>">
+          <span
+            class="text-xs text-base-content/50 font-mono ml-2 truncate max-w-xs"
+            title="Working directory — change with /cd <path>"
+          >
             {@cwd}
           </span>
         </div>
@@ -311,7 +320,9 @@ defmodule CatalystWeb.ShellLive do
             >
               Codex ✓
             </button>
-            <button class="btn btn-xs btn-ghost" phx-click="logout" title="Sign out of ChatGPT">⏏</button>
+            <button class="btn btn-xs btn-ghost" phx-click="logout" title="Sign out of ChatGPT">
+              ⏏
+            </button>
           <% else %>
             <button :if={@login_state != :pending} class="btn btn-xs btn-secondary" phx-click="login">
               Sign in to ChatGPT
@@ -325,7 +336,7 @@ defmodule CatalystWeb.ShellLive do
         </div>
       </header>
 
-      <%= render_active_page(assigns) %>
+      {render_active_page(assigns)}
     </div>
     """
   end
@@ -341,7 +352,9 @@ defmodule CatalystWeb.ShellLive do
     assigns = assign(assigns, :__slot_funs__, UI.Registry.components(slot))
 
     ~H"""
-    <%= for fun <- @__slot_funs__ do %>{fun.(assigns)}<% end %>
+    <%= for fun <- @__slot_funs__ do %>
+      {fun.(assigns)}
+    <% end %>
     """
   end
 end

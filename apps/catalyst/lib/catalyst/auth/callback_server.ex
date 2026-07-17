@@ -86,11 +86,17 @@ defmodule Catalyst.Auth.CallbackServer do
     end
 
     defp success_html do
-      page("Signed in to Catalyst", "You're signed in. You can close this tab and return to the app.")
+      page(
+        "Signed in to Catalyst",
+        "You're signed in. You can close this tab and return to the app."
+      )
     end
 
     defp error_html(reason) do
-      page("Catalyst sign-in failed", "Sign-in failed: #{Plug.HTML.html_escape(to_string(reason))}.")
+      page(
+        "Catalyst sign-in failed",
+        "Sign-in failed: #{Plug.HTML.html_escape(to_string(reason))}."
+      )
     end
 
     defp page(title, body) do

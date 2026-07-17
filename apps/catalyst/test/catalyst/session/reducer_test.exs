@@ -21,8 +21,16 @@ defmodule Catalyst.Session.ReducerTest do
   end
 
   test "MessageEnd appends, persists, and clears streaming for an assistant", %{state: state} do
-    state = %{state | streaming_message: %Message.Assistant{content: [], timestamp: Message.now()}}
-    msg = %Message.Assistant{content: Content.text("hi"), stop_reason: :stop, timestamp: Message.now()}
+    state = %{
+      state
+      | streaming_message: %Message.Assistant{content: [], timestamp: Message.now()}
+    }
+
+    msg = %Message.Assistant{
+      content: Content.text("hi"),
+      stop_reason: :stop,
+      timestamp: Message.now()
+    }
 
     state = Reducer.reduce(%Event.MessageEnd{message: msg}, state)
 

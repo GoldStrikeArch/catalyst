@@ -26,10 +26,22 @@ defmodule Catalyst.Tools.AstGrep do
     %{
       "type" => "object",
       "properties" => %{
-        "pattern" => %{"type" => "string", "description" => "ast-grep pattern, with $VAR / $$$ metavariables"},
-        "lang" => %{"type" => "string", "description" => "Language id, e.g. 'elixir', 'rust', 'python', 'tsx'"},
-        "path" => %{"type" => "string", "description" => "File or directory to search (default: cwd)"},
-        "rewrite" => %{"type" => "string", "description" => "If set, rewrite matches to this (in place)"}
+        "pattern" => %{
+          "type" => "string",
+          "description" => "ast-grep pattern, with $VAR / $$$ metavariables"
+        },
+        "lang" => %{
+          "type" => "string",
+          "description" => "Language id, e.g. 'elixir', 'rust', 'python', 'tsx'"
+        },
+        "path" => %{
+          "type" => "string",
+          "description" => "File or directory to search (default: cwd)"
+        },
+        "rewrite" => %{
+          "type" => "string",
+          "description" => "If set, rewrite matches to this (in place)"
+        }
       },
       "required" => ["pattern", "lang"]
     }
