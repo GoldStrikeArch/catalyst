@@ -9,7 +9,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   require Logger
 
   alias Catalyst.{Content, Message}
-  alias CatalystWeb.UI.Registry
+  alias CatalystWeb.UI.{Markdown, Registry}
 
   @doc "Render a message: a registered `:message` renderer if one matches, else built-in."
   @spec render_message(map()) :: Phoenix.LiveView.Rendered.t()
@@ -97,7 +97,17 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   # ---- built-in block rendering ---------------------------------------------
 
-  defp block(%{block: %Content.Text{}} = assigns), do: ~H"{@block.text}"
+  defp block(%{block: %Content.Text{text: text}} = assigns) do
+    assigns = Map.put(assigns, :blocks, Markdown.parse(text))
+
+    ~H"""
+    <div class="space-y-2 text-sm leading-6 text-slate-700 dark:text-slate-100">
+      <%= for block <- @blocks do %>
+        <.formatted_block block={block} />
+      <% end %>
+    </div>
+    """
+  end
 
   defp block(%{block: %Content.Thinking{}} = assigns) do
     ~H"""
@@ -122,6 +132,155 @@ defmodule CatalystWeb.UI.MessageRenderer do
   end
 
   defp block(assigns), do: ~H""
+
+  # ---- formatted text rendering ---------------------------------------------
+
+  defp formatted_block(%{block: {:paragraph, inlines}} = assigns) do
+    assigns = Map.put(assigns, :inlines, inlines)
+
+    ~H"""
+    <p class="my-2 first:mt-0 last:mb-0">
+      <.formatted_inlines inlines={@inlines} />
+    </p>
+    """
+  end
+
+  defp formatted_block(%{block: {:heading, level, inlines}} = assigns) do
+    assigns =
+      assigns
+      |> Map.put(:level, level)
+      |> Map.put(:inlines, inlines)
+
+    ~H"""
+    <p class={["mt-4 first:mt-0 font-semibold text-slate-950 dark:text-white", heading_class(@level)]}>
+      <.formatted_inlines inlines={@inlines} />
+    </p>
+    """
+  end
+
+  defp formatted_block(%{block: {:ul, items}} = assigns) do
+    assigns = Map.put(assigns, :items, items)
+
+    ~H"""
+    <ul class="my-2 ml-5 list-disc space-y-1 marker:text-slate-400 dark:marker:text-slate-500">
+      <li :for={item <- @items}>
+        <.formatted_inlines inlines={item} />
+      </li>
+    </ul>
+    """
+  end
+
+  defp formatted_block(%{block: {:ol, items}} = assigns) do
+    assigns = Map.put(assigns, :items, items)
+
+    ~H"""
+    <ol class="my-2 ml-5 list-decimal space-y-1 marker:text-slate-400 dark:marker:text-slate-500">
+      <li :for={item <- @items}>
+        <.formatted_inlines inlines={item} />
+      </li>
+    </ol>
+    """
+  end
+
+  defp formatted_block(%{block: {:blockquote, blocks}} = assigns) do
+    assigns = Map.put(assigns, :blocks, blocks)
+
+    ~H"""
+    <blockquote class="my-3 border-l-2 border-indigo-300 pl-3 text-slate-600 dark:border-indigo-400/60 dark:text-slate-300">
+      <%= for block <- @blocks do %>
+        <.formatted_block block={block} />
+      <% end %>
+    </blockquote>
+    """
+  end
+
+  defp formatted_block(%{block: {:code, lang, code}} = assigns) do
+    assigns =
+      assigns
+      |> Map.put(:lang, lang)
+      |> Map.put(:code, code)
+
+    ~H"""
+    <div class="my-3 overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 text-slate-100 shadow-sm dark:border-white/10 dark:bg-black/40">
+      <div
+        :if={@lang}
+        class="border-b border-white/10 px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-wide text-slate-400"
+      >
+        {@lang}
+      </div>
+      <pre class="overflow-x-auto px-3 py-2 text-xs leading-5"><code>{@code}</code></pre>
+    </div>
+    """
+  end
+
+  defp formatted_block(%{block: :hr} = assigns) do
+    ~H"""
+    <hr class="my-4 border-slate-200 dark:border-white/10" />
+    """
+  end
+
+  defp formatted_inlines(assigns) do
+    ~H"""
+    <%= for inline <- @inlines do %>
+      <.formatted_inline inline={inline} />
+    <% end %>
+    """
+  end
+
+  defp formatted_inline(%{inline: {:text, text}} = assigns) do
+    assigns = Map.put(assigns, :text, text)
+
+    ~H"""
+    {@text}
+    """
+  end
+
+  defp formatted_inline(%{inline: {:code, code}} = assigns) do
+    assigns = Map.put(assigns, :code, code)
+
+    ~H"""
+    <code class="rounded-md bg-slate-100 px-1 py-0.5 font-mono text-[0.85em] text-slate-900 dark:bg-white/10 dark:text-slate-100">
+      {@code}
+    </code>
+    """
+  end
+
+  defp formatted_inline(%{inline: {:strong, inlines}} = assigns) do
+    assigns = Map.put(assigns, :inlines, inlines)
+
+    ~H"""
+    <strong class="font-semibold text-slate-950 dark:text-white">
+      <.formatted_inlines inlines={@inlines} />
+    </strong>
+    """
+  end
+
+  defp formatted_inline(%{inline: {:link, inlines, href}} = assigns) do
+    assigns =
+      assigns
+      |> Map.put(:inlines, inlines)
+      |> Map.put(:href, href)
+      |> Map.put(:safe_href?, Markdown.safe_href?(href))
+
+    ~H"""
+    <a
+      :if={@safe_href?}
+      href={@href}
+      target="_blank"
+      rel="noopener noreferrer"
+      class="font-medium text-indigo-600 underline decoration-indigo-300 underline-offset-2 transition hover:text-indigo-500 hover:decoration-indigo-500 dark:text-indigo-300 dark:decoration-indigo-400/50 dark:hover:text-indigo-200"
+    >
+      <.formatted_inlines inlines={@inlines} />
+    </a>
+    <span :if={!@safe_href?}>
+      <.formatted_inlines inlines={@inlines} />
+    </span>
+    """
+  end
+
+  defp heading_class(level) when level <= 1, do: "text-lg leading-7"
+  defp heading_class(2), do: "text-base leading-7"
+  defp heading_class(_level), do: "text-sm leading-6"
 
   # ---- helpers --------------------------------------------------------------
 
