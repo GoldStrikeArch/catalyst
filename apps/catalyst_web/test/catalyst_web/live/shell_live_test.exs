@@ -227,4 +227,24 @@ defmodule CatalystWeb.ShellLiveTest do
     # Nothing was sent to the agent.
     assert has_element?(view, "#chat-empty-state")
   end
+
+  test "/cd relative paths resolve from the active session cwd", %{conn: conn} do
+    root = Path.join(System.tmp_dir!(), "catalyst_cd_#{System.unique_integer([:positive])}")
+    parent = Path.join(root, "parent")
+    child = Path.join(parent, "child")
+
+    File.mkdir_p!(child)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view |> form("#chat-form", %{"message" => "/cd #{parent}"}) |> render_submit()
+    assert render(view) =~ parent
+
+    view |> form("#chat-form", %{"message" => "/cd child"}) |> render_submit()
+
+    html = render(view)
+    assert html =~ child
+    refute html =~ "Not a directory"
+  end
 end

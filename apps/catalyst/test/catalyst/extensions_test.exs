@@ -177,6 +177,67 @@ defmodule Catalyst.ExtensionsTest do
     assert Extensions.fetch("setup_only_tool") == :error
   end
 
+  @compile_hang_source ~S'''
+  send(:persistent_term.get({Catalyst.ExtensionsTest, :compile_parent}), :compile_started)
+  Process.sleep(:infinity)
+
+  defmodule Catalyst.Ext.CompileHang do
+    def marker, do: :never
+  end
+  '''
+
+  test "a hanging extension compile is timed out without blocking the registry GenServer" do
+    put_app_env(:extension_compile_timeout, 200)
+    :persistent_term.put({__MODULE__, :compile_parent}, self())
+
+    on_exit(fn ->
+      :persistent_term.erase({__MODULE__, :compile_parent})
+      Extensions.uninstall("compile_probe")
+    end)
+
+    path = write_ext("compile_hang", @compile_hang_source)
+    task = Task.async(fn -> Extensions.load_file(path) end)
+
+    assert_receive :compile_started, 1_000
+    assert {:ok, _} = Extensions.register_tool(SetupOnlyTool, owner: "compile_probe")
+    assert {:error, :timeout} = Task.await(task, 1_000)
+  end
+
+  @setup_hang_source ~S'''
+  defmodule Catalyst.Ext.HangingSetup do
+    use Catalyst.Extension
+    @impl true
+    def setup(_api) do
+      send(:persistent_term.get({Catalyst.ExtensionsTest, :setup_parent}), :setup_started)
+      Process.sleep(:infinity)
+    end
+  end
+  '''
+
+  test "a hanging extension setup is timed out without blocking the registry GenServer" do
+    put_app_env(:extension_setup_timeout, 200)
+    :persistent_term.put({__MODULE__, :setup_parent}, self())
+
+    on_exit(fn ->
+      :persistent_term.erase({__MODULE__, :setup_parent})
+      Extensions.uninstall("hanging_setup")
+      Extensions.uninstall("setup_probe")
+    end)
+
+    log =
+      capture_log(fn ->
+        path = write_ext("hanging_setup", @setup_hang_source)
+        task = Task.async(fn -> Extensions.load_file(path) end)
+
+        assert_receive :setup_started, 1_000
+        assert {:ok, _} = Extensions.register_tool(SetupOnlyTool, owner: "setup_probe")
+        assert {:ok, summary} = Task.await(task, 1_000)
+        assert summary.warning =~ "setup did not finish cleanly"
+      end)
+
+    assert log =~ "setup timed out"
+  end
+
   @ephemeral_source ~S'''
   defmodule Catalyst.Ext.EphemeralTool do
     use Catalyst.Tools.Tool
@@ -350,6 +411,15 @@ defmodule Catalyst.ExtensionsTest do
     {result, _io} = with_io(:stderr, fn -> Code.compile_string(source) end)
     result
   end
+
+  defp put_app_env(key, value) do
+    previous = Application.fetch_env(:catalyst, key)
+    Application.put_env(:catalyst, key, value)
+    on_exit(fn -> restore_app_env(key, previous) end)
+  end
+
+  defp restore_app_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
+  defp restore_app_env(key, :error), do: Application.delete_env(:catalyst, key)
 
   @partial_source ~S'''
   defmodule Catalyst.Ext.PartialFirst do

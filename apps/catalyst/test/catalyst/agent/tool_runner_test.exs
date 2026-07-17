@@ -35,6 +35,19 @@ defmodule Catalyst.Agent.ToolRunnerTest do
     def execute(_args, _ctx), do: result("ran anyway")
   end
 
+  defmodule TerminatingTool do
+    use Catalyst.Tools.Tool
+    @impl true
+    def name, do: "terminating_tool"
+    @impl true
+    def description, do: "returns terminate true"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+    @impl true
+    def execute(_args, _ctx),
+      do: %{content: Catalyst.Content.text("stop"), details: %{}, terminate: true}
+  end
+
   # Implements the duck-typed tool functions but NOT execution_mode/0 (an
   # optional callback whose default is only injected by `use Catalyst.Tools.Tool`).
   defmodule NoModeTool do
@@ -92,6 +105,19 @@ defmodule Catalyst.Agent.ToolRunnerTest do
 
     refute res.is_error
     assert Content.text_of(res.content) == "no mode"
+  end
+
+  test "a mixed batch terminates when any successful tool asks to terminate" do
+    calls = [
+      %{id: "c1", name: "terminating_tool", arguments: %{}},
+      %{id: "c2", name: "strict_tool", arguments: %{"text" => "hi"}}
+    ]
+
+    config = %{cwd: ".", tools: [TerminatingTool, StrictTool], opts: []}
+
+    {_results, terminate?} = ToolRunner.run_batch(calls, config, fn _event -> :ok end)
+
+    assert terminate?
   end
 
   test "resolved schemas are cached in :persistent_term keyed by the parameters hash" do

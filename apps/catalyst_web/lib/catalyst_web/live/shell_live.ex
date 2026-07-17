@@ -456,7 +456,7 @@ defmodule CatalystWeb.ShellLive do
 
   # Point the session at a different working directory and restart it there.
   defp set_cwd(socket, path) do
-    expanded = Path.expand(path)
+    expanded = Path.expand(path, socket.assigns.cwd)
 
     if File.dir?(expanded) do
       socket

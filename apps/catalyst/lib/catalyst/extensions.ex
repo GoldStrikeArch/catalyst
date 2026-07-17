@@ -30,9 +30,9 @@ defmodule Catalyst.Extensions do
   and not tracked by any owner); modules that pre-existed are left alone — for a
   reinstall over an existing file, `Catalyst.Extensions.Installer` re-loads the
   restored prior source so the VM runs the old definitions again. Once a file
-  compiles, its registration is committed even if a `setup/1` raises mid-way:
-  whatever it registered before raising stays registered (owner-tagged, so the
-  next reload or uninstall purges it cleanly).
+  compiles, its registration is committed even if a `setup/1` raises or times
+  out mid-way: whatever it registered before failing stays registered
+  (owner-tagged, so the next reload or uninstall purges it cleanly).
 
   Set `CATALYST_SAFE_MODE=1` (or `config :catalyst, :safe_mode, true`) to skip
   loading extensions at boot — only built-ins are seeded, so a bad extension can't
@@ -56,16 +56,17 @@ defmodule Catalyst.Extensions do
 
   @table :catalyst_tools
 
-  # Process-dictionary key (server process only) collecting tools registered
-  # from a setup/1 that is executing inside this GenServer — see wire_core_kinds.
-  @setup_tools {__MODULE__, :setup_tools}
+  @compile_timeout 30_000
+  @setup_timeout 30_000
+  @load_lock {__MODULE__, :load_lock}
 
   @typedoc "Per-file load summary. `:conflicts` is present only when this file redefines modules another loaded file also defines."
   @type summary :: %{
           required(:owner) => String.t(),
           required(:tools) => [String.t()],
           required(:extensions) => [module()],
-          optional(:conflicts) => [{String.t(), [module()]}]
+          optional(:conflicts) => [{String.t(), [module()]}],
+          optional(:warning) => String.t()
         }
 
   @typedoc "Result of a full directory load: per-file summaries plus per-file failures."
@@ -108,7 +109,7 @@ defmodule Catalyst.Extensions do
   its `setup/1` registers). Returns `{:ok, summary}` or `{:error, reason}`.
   """
   @spec load_file(Path.t()) :: {:ok, summary()} | {:error, term()}
-  def load_file(path), do: GenServer.call(__MODULE__, {:load_file, path}, 30_000)
+  def load_file(path), do: serialized_load(fn -> do_load_file(path) end)
 
   @doc """
   (Re)load all `*.ex` files in the extensions directory.
@@ -118,7 +119,20 @@ defmodule Catalyst.Extensions do
   only when `failed` is empty.
   """
   @spec load_all() :: {:ok, load_result()}
-  def load_all, do: GenServer.call(__MODULE__, :load_all, 60_000)
+  def load_all do
+    result = serialized_load(&do_load_all/0)
+
+    case result do
+      {:ok, %{failed: []}} ->
+        BootGuard.mark_ok()
+        put_boot_status(:ok)
+
+      _ ->
+        :ok
+    end
+
+    result
+  end
 
   @doc """
   Re-run the boot-time load after another app wires more extension kinds (the
@@ -131,7 +145,7 @@ defmodule Catalyst.Extensions do
   @spec reload_after_wiring() :: {:ok, load_result()} | {:skipped, term()}
   def reload_after_wiring do
     case boot_status() do
-      :ok -> GenServer.call(__MODULE__, :reload_after_wiring, 60_000)
+      :ok -> serialized_load(&do_load_all/0)
       status -> {:skipped, status}
     end
   end
@@ -198,15 +212,27 @@ defmodule Catalyst.Extensions do
 
   @impl true
   def handle_continue(:load_all, state) do
-    {_result, state} = do_load_all(state)
-    # If the app survives the stabilization window, this boot's extensions are
-    # considered safe; dying before the timer fires leaves the marker at
-    # "booting", which the next boot reads as crash-detected safe mode.
-    Process.send_after(self(), :mark_boot_ok, boot_stable_ms())
+    server = self()
+
+    {:ok, _pid} =
+      Task.Supervisor.start_child(Catalyst.TaskSupervisor, fn ->
+        _ = serialized_load(&do_load_all/0)
+        send(server, :boot_load_finished)
+      end)
+
     {:noreply, state}
   end
 
   @impl true
+  def handle_info(:boot_load_finished, state) do
+    # If the app survives the stabilization window after the boot load finished,
+    # this boot's extensions are considered safe. Dying before the timer fires
+    # leaves the marker at "booting", which the next boot reads as crash-detected
+    # safe mode.
+    Process.send_after(self(), :mark_boot_ok, boot_stable_ms())
+    {:noreply, state}
+  end
+
   def handle_info(:mark_boot_ok, state) do
     BootGuard.mark_ok()
     {:noreply, state}
@@ -218,33 +244,23 @@ defmodule Catalyst.Extensions do
     {:reply, result, state}
   end
 
-  def handle_call({:load_file, path}, _from, state) do
-    {result, state} = do_load_file(path, state)
-    {:reply, result, state}
+  def handle_call({:purge_gone, live_owners}, _from, state) do
+    state =
+      state.modules
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(live_owners, &1))
+      |> Enum.reduce(state, fn owner, st -> purge_owner(owner, st) end)
+
+    {:reply, :ok, state}
   end
 
-  def handle_call(:load_all, _from, state) do
-    {result, state} = do_load_all(state)
-    # An explicit reload means a human/agent is at the wheel: a fully clean
-    # pass clears crash-detected safe mode for the next boot. A pass with any
-    # failure must NOT — broken extensions would be re-armed at the next boot.
-    case result do
-      {:ok, %{failed: []}} ->
-        BootGuard.mark_ok()
-        put_boot_status(:ok)
-
-      _ ->
-        :ok
-    end
-
-    {:reply, result, state}
+  def handle_call({:purge_partial_compile, candidates, preloaded}, _from, state) do
+    purge_partial_compile(candidates, preloaded, state)
+    {:reply, :ok, state}
   end
 
-  # Same load as :load_all but for the automatic boot-time rewire: it must NOT
-  # mark boot OK — that would defeat crash-loop detection and end the
-  # stabilization window early. Only the explicit reload clears the guard.
-  def handle_call(:reload_after_wiring, _from, state) do
-    {result, state} = do_load_all(state)
+  def handle_call({:commit_load, owner, path, contribution}, _from, state) do
+    {result, state} = commit_load(owner, path, contribution, state)
     {:reply, result, state}
   end
 
@@ -262,21 +278,7 @@ defmodule Catalyst.Extensions do
   # Provider (E3) and UI (E5) kinds/purgers are wired by their own subsystems.
   defp wire_core_kinds do
     ExtensionAPI.register_kind(:tool, fn api, module ->
-      # setup/1 runs inside this GenServer, so a call to self would deadlock
-      # (and crash-loop the server on timeout): register inline in that case,
-      # stashing the module so do_load_file can fold it into owner tracking.
-      if self() == Process.whereis(__MODULE__) do
-        case insert(module) do
-          {:ok, _} = ok ->
-            Process.put(@setup_tools, [module | Process.get(@setup_tools, [])])
-            ok
-
-          err ->
-            err
-        end
-      else
-        register_tool(module, owner: api.owner)
-      end
+      register_tool(module, owner: api.owner)
     end)
 
     ExtensionAPI.register_kind(:hook, fn api, point, fun, opts ->
@@ -312,7 +314,11 @@ defmodule Catalyst.Extensions do
 
   # ---- loading --------------------------------------------------------------
 
-  defp do_load_all(state) do
+  # Keep boot load, post-web-wiring reload, explicit reload, and single-file
+  # loads ordered without putting compile/setup work back inside this GenServer.
+  defp serialized_load(fun), do: :global.trans(@load_lock, fun, [node()], :infinity)
+
+  defp do_load_all do
     # The extensions repo is ensured on the load path, NOT in init/1: git runs
     # with a deadline but can still take seconds, and a safe-mode boot (whose
     # whole point is "extensions can't brick startup") must never wait on it.
@@ -331,29 +337,24 @@ defmodule Catalyst.Extensions do
     # state.modules are file-backed: an owner registered purely via
     # `register_tool(mod, owner: "x")` has no file to be "gone" and is kept.
     live_owners = MapSet.new(paths, &ext_id/1)
+    :ok = GenServer.call(__MODULE__, {:purge_gone, live_owners}, 30_000)
 
-    state =
-      state.modules
-      |> Map.keys()
-      |> Enum.reject(&MapSet.member?(live_owners, &1))
-      |> Enum.reduce(state, fn owner, st -> purge_owner(owner, st) end)
+    {loaded, failed} =
+      Enum.reduce(paths, {[], []}, fn path, {ok, bad} ->
+        case do_load_file(path) do
+          {:ok, summary} ->
+            {[summary | ok], bad}
 
-    {loaded, failed, state} =
-      Enum.reduce(paths, {[], [], state}, fn path, {ok, bad, st} ->
-        case do_load_file(path, st) do
-          {{:ok, summary}, st} ->
-            {[summary | ok], bad, st}
-
-          {{:error, reason}, st} ->
+          {:error, reason} ->
             Logger.warning("[extensions] failed to load #{path}: #{inspect(reason)}")
-            {ok, [{path, reason} | bad], st}
+            {ok, [{path, reason} | bad]}
         end
       end)
 
-    {{:ok, %{loaded: Enum.reverse(loaded), failed: Enum.reverse(failed)}}, state}
+    {:ok, %{loaded: Enum.reverse(loaded), failed: Enum.reverse(failed)}}
   end
 
-  defp do_load_file(path, state) do
+  defp do_load_file(path) do
     owner = ext_id(path)
 
     # Code.compile_file/1 defines modules SEQUENTIALLY: a file whose first
@@ -367,13 +368,20 @@ defmodule Catalyst.Extensions do
     # Compile + classify FIRST, in their own failure domain: a broken file
     # fails here, before we touch any registry or tracking, so a failed reload
     # neither registers nor drops the prior version.
-    case compile_and_classify(path) do
+    case compile_and_classify_async(path) do
       {:ok, contribution} ->
-        commit_load(owner, path, contribution, state)
+        case GenServer.call(__MODULE__, {:commit_load, owner, path, contribution}, 30_000) do
+          {:ok, summary} ->
+            setup_status = run_setups_async(contribution.ext_mods, ExtensionAPI.new(owner, path))
+            {:ok, annotate_setup_status(summary, setup_status)}
+
+          {:error, _reason} = err ->
+            err
+        end
 
       {:error, reason} ->
-        purge_partial_compile(candidates, preloaded, state)
-        {{:error, reason}, state}
+        _ = GenServer.call(__MODULE__, {:purge_partial_compile, candidates, preloaded}, 30_000)
+        {:error, reason}
     end
   end
 
@@ -411,8 +419,8 @@ defmodule Catalyst.Extensions do
       _ -> []
     end
   rescue
-    # Arbitrary user source flows through here inside the GenServer; a walker
-    # edge case must degrade to "no candidates", never crash the server.
+    # Arbitrary user source flows through here; a walker edge case must degrade
+    # to "no candidates", never crash the caller.
     _ -> []
   end
 
@@ -479,13 +487,54 @@ defmodule Catalyst.Extensions do
     kind, reason -> {:error, {kind, reason}}
   end
 
+  defp compile_and_classify_async(path) do
+    task = async_task(fn -> compile_and_classify(path) end)
+
+    case await_task(task, compile_timeout()) do
+      {:ok, {:ok, contribution}} -> {:ok, contribution}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:exit, reason} -> {:error, {:exit, reason}}
+      :timeout -> {:error, :timeout}
+    end
+  end
+
+  defp async_task(fun) do
+    case Process.whereis(Catalyst.TaskSupervisor) do
+      nil -> Task.async(fun)
+      _pid -> Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fun)
+    end
+  end
+
+  defp await_task(task, timeout) do
+    case Task.yield(task, timeout) do
+      {:ok, value} ->
+        {:ok, value}
+
+      {:exit, reason} ->
+        {:exit, reason}
+
+      nil ->
+        case Task.shutdown(task, :brutal_kill) do
+          {:ok, value} -> {:ok, value}
+          {:exit, reason} -> {:exit, reason}
+          nil -> :timeout
+        end
+    end
+  end
+
+  defp compile_timeout,
+    do: Application.get_env(:catalyst, :extension_compile_timeout, @compile_timeout)
+
+  defp setup_timeout,
+    do: Application.get_env(:catalyst, :extension_setup_timeout, @setup_timeout)
+
   # Commit a compiled file: purge the prior version's side effects, apply the
   # new ones, and return the new tracking. The tracking is assembled BEFORE the
   # side effects run — Code.compile_file/1 already redefined the modules in the
   # VM, so even if a step below raises unexpectedly, the caller gets tracking
   # that claims them for this owner (never the stale pre-purge snapshot, which
   # would let registries and state tracking silently diverge).
-  defp commit_load(owner, path, contribution, state) do
+  defp commit_load(owner, _path, contribution, state) do
     %{modules: modules, ext_mods: ext_mods, tool_mods: tool_mods, tool_names: tool_names} =
       contribution
 
@@ -503,8 +552,6 @@ defmodule Catalyst.Extensions do
       # above and must survive the purge; ones it dropped are restored/removed.
       purge_owner_effects(owner, state, keep_modules: modules)
       Enum.each(tool_mods, &insert/1)
-      setup_tools = run_setups(ext_mods, ExtensionAPI.new(owner, path))
-      committed = Enum.reduce(setup_tools, committed, fn mod, st -> track(mod, owner, st) end)
       {{:ok, build_summary(owner, tool_names, ext_mods, conflicts)}, committed}
     rescue
       e -> {{:error, Exception.message(e)}, committed}
@@ -513,13 +560,33 @@ defmodule Catalyst.Extensions do
     end
   end
 
-  # Run each extension module's setup/1, collecting tools it registered inline
-  # (see wire_core_kinds). A raising setup is logged, not fatal: everything it
-  # registered before raising stays registered (owner-tagged, hence purgeable).
-  defp run_setups(ext_mods, api) do
-    Process.put(@setup_tools, [])
-    Enum.each(ext_mods, &run_setup(&1, api))
-    Process.delete(@setup_tools) || []
+  # Run each extension module's setup/1 outside the registry GenServer. A raising
+  # setup is logged, not fatal: everything it registered before raising stays
+  # registered (owner-tagged, hence purgeable). A hung setup task is killed at a
+  # bounded timeout so reload/install callers return and the registry stays live.
+  defp run_setups_async([], _api), do: :ok
+
+  defp run_setups_async(ext_mods, api) do
+    task = async_task(fn -> Enum.each(ext_mods, &run_setup(&1, api)) end)
+
+    case await_task(task, setup_timeout()) do
+      {:ok, :ok} ->
+        :ok
+
+      {:exit, reason} ->
+        Logger.warning("[extensions] #{api.owner}: setup task exited: #{inspect(reason)}")
+        {:error, {:setup_exit, reason}}
+
+      :timeout ->
+        Logger.warning("[extensions] #{api.owner}: setup timed out after #{setup_timeout()}ms")
+        {:error, :setup_timeout}
+    end
+  end
+
+  defp annotate_setup_status(summary, :ok), do: summary
+
+  defp annotate_setup_status(summary, {:error, reason}) do
+    Map.put(summary, :warning, "setup did not finish cleanly: #{inspect(reason)}")
   end
 
   defp run_setup(mod, api) do

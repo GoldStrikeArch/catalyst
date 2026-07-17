@@ -43,7 +43,7 @@ defmodule Catalyst.Agent.ToolRunner do
       end
 
     results = Enum.map(outcomes, & &1.message)
-    terminate? = outcomes != [] and Enum.all?(outcomes, & &1.terminate)
+    terminate? = Enum.any?(outcomes, & &1.terminate)
     {results, terminate?}
   end
 

@@ -137,6 +137,53 @@ defmodule Catalyst.AuthTest do
              TokenStore.get_access_token("race-provider")
   end
 
+  test "delete during an in-flight refresh discards the refresh result" do
+    test_pid = self()
+
+    Application.put_env(:catalyst, :oauth_refresh_fun, fn _refresh_token ->
+      send(test_pid, {:refresh_started, self()})
+
+      receive do
+        :finish_refresh -> :ok
+      after
+        1_000 -> :ok
+      end
+
+      {:ok,
+       %{
+         "access" => "from_deleted_refresh",
+         "refresh" => "rotated_ref",
+         "expires" => System.system_time(:millisecond) + 3_600_000,
+         "account_id" => "acct_deleted"
+       }}
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:catalyst, :oauth_refresh_fun)
+      TokenStore.delete("delete-race-provider")
+    end)
+
+    TokenStore.put("delete-race-provider", %{
+      access: "old",
+      refresh: "ref_1",
+      expires: 0,
+      account_id: "acct_old"
+    })
+
+    waiter = Task.async(fn -> TokenStore.get_access_token("delete-race-provider") end)
+    assert_receive {:refresh_started, refresh_pid}, 1_000
+
+    assert :ok = TokenStore.delete("delete-race-provider")
+    assert {:error, :not_logged_in} = Task.await(waiter)
+
+    ref = Process.monitor(refresh_pid)
+    send(refresh_pid, :finish_refresh)
+    assert_receive {:DOWN, ^ref, :process, ^refresh_pid, :normal}, 1_000
+
+    refute TokenStore.logged_in?("delete-race-provider")
+    assert {:error, :not_logged_in} = TokenStore.get_access_token("delete-race-provider")
+  end
+
   test "invalidate/1 forces the next get_access_token to refresh" do
     test_pid = self()
 

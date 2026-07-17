@@ -85,6 +85,7 @@ defmodule Catalyst.Auth.TokenStore do
     do: {:reply, Map.has_key?(state.creds, provider), state}
 
   def handle_call({:delete, provider}, _from, state) do
+    state = cancel_refresh(state, provider, :not_logged_in)
     state = %{state | creds: Map.delete(state.creds, provider)}
     persist(state.creds)
     {:reply, :ok, state}
@@ -165,6 +166,20 @@ defmodule Catalyst.Auth.TokenStore do
 
       {%{waiters: waiters}, refreshing} ->
         Enum.each(waiters, &GenServer.reply(&1, {:ok, public(creds)}))
+        %{state | refreshing: refreshing}
+    end
+  end
+
+  # Sign-out supersedes an in-flight refresh just like a fresh login does. Drop
+  # the entry so the task result is discarded when it arrives, and release any
+  # callers already waiting for the refresh instead of letting logout hang them.
+  defp cancel_refresh(state, provider, reason) do
+    case Map.pop(state.refreshing, provider) do
+      {nil, _refreshing} ->
+        state
+
+      {%{waiters: waiters}, refreshing} ->
+        Enum.each(waiters, &GenServer.reply(&1, {:error, reason}))
         %{state | refreshing: refreshing}
     end
   end
