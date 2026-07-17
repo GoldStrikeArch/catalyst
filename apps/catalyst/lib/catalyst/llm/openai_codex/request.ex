@@ -27,6 +27,9 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
 
     body
     |> maybe_put("prompt_cache_key", opts[:session_id])
+    # "Fast mode": service_tier "priority" (the only tier the Codex backend
+    # exposes; ~1.5x speed, increased usage). Omitted entirely otherwise.
+    |> maybe_put("service_tier", opts[:service_tier])
     |> maybe_put_tools(context.tools)
     |> maybe_put_reasoning(opts[:reasoning_effort], opts[:reasoning_summary])
   end

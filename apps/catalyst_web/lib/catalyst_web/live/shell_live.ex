@@ -19,6 +19,7 @@ defmodule CatalystWeb.ShellLive do
   alias Catalyst.Agent.Event
   alias Catalyst.Extensions
   alias Catalyst.Extensions.Versioning
+  alias Catalyst.LLM.OpenAICodex
   alias Catalyst.Session.{Manager, Server}
   alias CatalystWeb.{Assets, UI}
 
@@ -47,6 +48,11 @@ defmodule CatalystWeb.ShellLive do
         ext_action: nil,
         provider: :demo,
         model_label: "Demo (offline)",
+        # Codex run settings (model/effort/fast/transport) — survive remounts
+        # via persistent_term, applied to the session via Server.configure.
+        codex_prefs: load_codex_prefs(),
+        session_model: nil,
+        session_opts: [],
         session_id: nil,
         session_pid: nil,
         # Monitor on the attached session, so a replaced/crashed session leads
@@ -202,6 +208,24 @@ defmodule CatalystWeb.ShellLive do
     Catalyst.Auth.logout()
     socket = if socket.assigns.provider == :codex, do: start_session(socket, :demo), else: socket
     {:noreply, assign(socket, logged_in: false) |> put_flash(:info, "Signed out.")}
+  end
+
+  # ---- Codex run settings (model / reasoning effort / fast / transport) ------
+
+  def handle_event("codex_opts", params, socket) do
+    prefs =
+      socket.assigns.codex_prefs
+      |> put_pref(:model, params["model"])
+      |> put_pref(:effort, params["effort"])
+      |> put_pref(:transport, params["transport"])
+      |> clamp_fast()
+
+    {:noreply, apply_codex_prefs(socket, prefs)}
+  end
+
+  def handle_event("codex_fast", _params, socket) do
+    prefs = clamp_fast(%{socket.assigns.codex_prefs | fast: not socket.assigns.codex_prefs.fast})
+    {:noreply, apply_codex_prefs(socket, prefs)}
   end
 
   # ---- extensions panel actions ----------------------------------------------
@@ -602,12 +626,12 @@ defmodule CatalystWeb.ShellLive do
   # session's messages into the replay window.
   defp reattach_session(socket, id, pid, provider) do
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-    {_mod, _model, label} = provider_config(provider)
 
     socket
     |> monitor_session(pid)
-    |> assign(session_id: id, session_pid: pid, provider: provider, model_label: label)
+    |> assign(session_id: id, session_pid: pid, provider: provider)
     |> replay_transcript(pid)
+    |> sync_provider_ui(provider)
   catch
     # The server died between whereis and the state call — start fresh.
     kind, _reason when kind in [:exit, :error] ->
@@ -635,6 +659,8 @@ defmodule CatalystWeb.ShellLive do
       tools: %{},
       message_seq: seq,
       message_count: seq,
+      session_model: snapshot.model,
+      session_opts: snapshot[:opts] || [],
       replayed_tail: snapshot.messages |> Enum.take(-10) |> Enum.map(&:erlang.phash2/1)
     )
     |> seed_streaming(snapshot.streaming_message)
@@ -655,12 +681,14 @@ defmodule CatalystWeb.ShellLive do
       Manager.stop(old_id)
     end
 
-    {provider_mod, model, label} = provider_config(provider)
+    {provider_mod, model, label} = provider_config(socket, provider)
+    run_opts = session_run_opts(socket, provider)
 
     case Manager.start_session(
            cwd: socket.assigns.cwd,
            provider: provider_mod,
-           model: model
+           model: model,
+           opts: run_opts
          ) do
       {:ok, %{id: id, pid: pid}} ->
         Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
@@ -673,6 +701,8 @@ defmodule CatalystWeb.ShellLive do
           session_pid: pid,
           provider: provider,
           model_label: label,
+          session_model: model,
+          session_opts: run_opts,
           streaming: nil,
           running: false,
           tools: %{},
@@ -711,13 +741,109 @@ defmodule CatalystWeb.ShellLive do
     assign(socket, session_ref: Process.monitor(pid))
   end
 
-  defp provider_config(:codex) do
-    model = Catalyst.LLM.OpenAICodex.model()
+  defp provider_config(socket, :codex) do
+    model = OpenAICodex.model(socket.assigns.codex_prefs.model)
     {Catalyst.LLM.OpenAICodex.Provider, model, "Codex · #{model.id}"}
   end
 
-  defp provider_config(_demo),
+  defp provider_config(_socket, _demo),
     do: {Catalyst.LLM.Demo, Catalyst.LLM.Demo.model(), "Demo (offline)"}
+
+  # ---- Codex run settings helpers ---------------------------------------------
+
+  @codex_prefs_ptr {__MODULE__, :codex_prefs}
+
+  defp load_codex_prefs do
+    default = %{
+      model: OpenAICodex.default_model_id(),
+      effort: OpenAICodex.default_effort(),
+      fast: false,
+      transport: "auto"
+    }
+
+    case :persistent_term.get(@codex_prefs_ptr, nil) do
+      %{} = saved -> Map.merge(default, saved)
+      _none -> default
+    end
+  end
+
+  defp save_codex_prefs(prefs), do: :persistent_term.put(@codex_prefs_ptr, prefs)
+
+  defp put_pref(prefs, _key, nil), do: prefs
+  defp put_pref(prefs, key, value), do: Map.put(prefs, key, value)
+
+  # Fast (the "priority" service tier) only exists on models that support it.
+  defp clamp_fast(prefs) do
+    case OpenAICodex.catalog_entry(prefs.model).fast? do
+      true -> prefs
+      false -> %{prefs | fast: false}
+    end
+  end
+
+  defp session_run_opts(socket, :codex), do: codex_run_opts(socket.assigns.codex_prefs)
+  defp session_run_opts(_socket, _provider), do: []
+
+  # nil values matter: Server.configure's merge DELETES nil keys, so turning
+  # Fast off actually removes service_tier from the session opts.
+  defp codex_run_opts(prefs) do
+    [
+      reasoning_effort: prefs.effort,
+      service_tier: if(prefs.fast, do: "priority"),
+      transport: prefs.transport
+    ]
+  end
+
+  # Persist + apply the settings. With a live Codex session they reconfigure
+  # it for the NEXT run — no session restart, the transcript stays.
+  defp apply_codex_prefs(socket, prefs) do
+    save_codex_prefs(prefs)
+    socket = assign(socket, codex_prefs: prefs)
+
+    case socket.assigns do
+      %{provider: :codex, session_pid: pid} when is_pid(pid) ->
+        model = OpenAICodex.model(prefs.model)
+        opts = codex_run_opts(prefs)
+
+        try do
+          :ok = Server.configure(pid, model: model, opts: opts)
+
+          assign(socket,
+            model_label: "Codex · #{model.id}",
+            session_model: model,
+            session_opts: opts
+          )
+        catch
+          # Session died mid-click — the :DOWN handler reattaches; prefs are
+          # saved and re-applied when the next session starts.
+          :exit, _reason -> socket
+        end
+
+      _not_codex ->
+        socket
+    end
+  end
+
+  # After a reattach the SESSION is the source of truth for the controls.
+  defp sync_provider_ui(socket, :codex) do
+    model = socket.assigns.session_model || OpenAICodex.model(socket.assigns.codex_prefs.model)
+    opts = socket.assigns.session_opts || []
+
+    prefs =
+      clamp_fast(%{
+        model: model.id,
+        effort: opts[:reasoning_effort] || OpenAICodex.default_effort(),
+        fast: opts[:service_tier] == "priority",
+        transport: to_string(opts[:transport] || "auto")
+      })
+
+    save_codex_prefs(prefs)
+    assign(socket, codex_prefs: prefs, model_label: "Codex · #{model.id}")
+  end
+
+  defp sync_provider_ui(socket, provider) do
+    {_mod, _model, label} = provider_config(socket, provider)
+    assign(socket, model_label: label)
+  end
 
   # In a packaged release the launch dir is inside the .app bundle (the erts dir),
   # which is useless to work in — default to the user's home instead. In dev, the
@@ -793,6 +919,54 @@ defmodule CatalystWeb.ShellLive do
 
           <div class="flex flex-none items-center gap-1.5">
             {render_slot_components(:header_extra, assigns)}
+
+            <%!-- Codex run settings: applied to the live session for the NEXT
+            run (Server.configure) — no session restart, transcript stays. --%>
+            <div :if={@provider == :codex} class="flex items-center gap-1.5">
+              <form id="codex-opts" phx-change="codex_opts" class="flex items-center gap-1.5">
+                <select name="model" class={codex_select_class()} title="Codex model">
+                  <option
+                    :for={m <- OpenAICodex.list_models()}
+                    value={m.id}
+                    selected={m.id == @codex_prefs.model}
+                  >
+                    {m.name}
+                  </option>
+                </select>
+                <select name="effort" class={codex_select_class()} title="Reasoning effort">
+                  <option
+                    :for={e <- OpenAICodex.catalog_entry(@codex_prefs.model).efforts}
+                    value={e}
+                    selected={e == @codex_prefs.effort}
+                  >
+                    {e}
+                  </option>
+                </select>
+                <select
+                  name="transport"
+                  class={codex_select_class()}
+                  title="Transport: auto = websocket with SSE fallback"
+                >
+                  <option
+                    :for={{v, l} <- [{"auto", "auto"}, {"websocket", "ws"}, {"sse", "sse"}]}
+                    value={v}
+                    selected={v == @codex_prefs.transport}
+                  >
+                    {l}
+                  </option>
+                </select>
+              </form>
+              <button
+                :if={OpenAICodex.catalog_entry(@codex_prefs.model).fast?}
+                type="button"
+                phx-click="codex_fast"
+                title="Fast mode (priority service tier): ~1.5x speed, increased usage"
+                class={fast_button_class(@codex_prefs.fast)}
+              >
+                ⚡ Fast
+              </button>
+            </div>
+
             <button
               class={provider_button_class(@provider == :demo)}
               phx-click="set_provider"
@@ -869,6 +1043,22 @@ defmodule CatalystWeb.ShellLive do
     do: "the previous boot crashed while extensions were active"
 
   defp boot_status_reason(_), do: "safe mode"
+
+  defp codex_select_class do
+    "rounded-full border border-slate-200 bg-white/70 px-2 py-1 text-xs font-medium " <>
+      "text-slate-600 outline-none transition focus:border-indigo-400 " <>
+      "dark:border-white/10 dark:bg-white/10 dark:text-slate-300"
+  end
+
+  defp fast_button_class(active?) do
+    [
+      "rounded-full border px-2.5 py-1 text-xs font-semibold transition",
+      active? &&
+        "border-amber-400 bg-amber-100 text-amber-900 dark:border-amber-400/40 dark:bg-amber-400/20 dark:text-amber-200",
+      !active? &&
+        "border-slate-200 text-slate-500 hover:bg-slate-100 dark:border-white/10 dark:text-slate-300 dark:hover:bg-white/10"
+    ]
+  end
 
   defp provider_button_class(active?) do
     [

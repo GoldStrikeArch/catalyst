@@ -1,7 +1,21 @@
 defmodule Catalyst.LLM.OpenAICodex.Provider do
   @moduledoc """
   OpenAI Codex (ChatGPT subscription) provider over the Responses API at
-  `https://chatgpt.com/backend-api/codex/responses`, streamed via SSE.
+  `https://chatgpt.com/backend-api/codex/responses`.
+
+  Two transports (`opts[:transport]`, else `config :catalyst, :codex_transport`,
+  default `:auto`):
+
+    * `:websocket` — the Codex CLI's preferred transport (`prefer_websockets`
+      in its model catalog): one `response.create` text frame per turn, events
+      back as JSON frames. The connection is cached in the run task's process
+      dictionary, so consecutive turns of one run reuse it — and it can never
+      outlive the run, because the socket dies with its owning process.
+    * `:sse` — POST + `text/event-stream` (the original transport).
+    * `:auto` — websocket, falling back to SSE when the websocket fails before
+      any event reached the sink (a fallback after delivery would duplicate
+      events; a mid-stream failure finalizes the partial turn instead, exactly
+      like an SSE transport close).
 
   Per the `Catalyst.LLM.Provider` contract it never raises: auth/HTTP/stream
   failures come back as a final assistant with `stop_reason: :error`.
@@ -14,7 +28,7 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
   alias Catalyst.{Content, Debug, Message}
   alias Catalyst.Auth.TokenStore
   alias Catalyst.LLM.SSE
-  alias Catalyst.LLM.OpenAICodex.{Headers, Request, StreamParser}
+  alias Catalyst.LLM.OpenAICodex.{Headers, Request, StreamParser, WebSocket}
 
   @default_base "https://chatgpt.com/backend-api"
   # TokenStore key for the ChatGPT OAuth credentials (single source).
@@ -70,12 +84,142 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
   defp http_error(status, body), do: "HTTP #{status}: #{String.slice(body, 0, 600)}"
 
   defp attempt(model, context, opts, sink, token, account_id) do
-    url = resolve_url(model)
     session_id = opts[:session_id] || random_id()
-    headers = Headers.build(token, account_id, session_id)
+    body = Request.build(model, context, Keyword.put(opts, :session_id, session_id))
 
-    body =
-      Request.build(model, context, Keyword.put(opts, :session_id, session_id)) |> Jason.encode!()
+    case resolve_transport(opts) do
+      :sse -> attempt_sse(model, body, sink, token, account_id, session_id)
+      :websocket -> attempt_ws(model, body, sink, token, account_id, session_id, false)
+      :auto -> attempt_ws(model, body, sink, token, account_id, session_id, true)
+    end
+  end
+
+  defp resolve_transport(opts) do
+    normalize_transport(
+      opts[:transport] || Application.get_env(:catalyst, :codex_transport, :auto)
+    )
+  end
+
+  defp normalize_transport(t) when t in [:auto, :websocket, :sse], do: t
+  defp normalize_transport("websocket"), do: :websocket
+  defp normalize_transport("sse"), do: :sse
+  defp normalize_transport(_other), do: :auto
+
+  # ---- websocket transport ----------------------------------------------------
+
+  # The run task's process dictionary caches the connection: turn N+1 of the
+  # same run reuses turn N's socket, and the socket cannot leak — it closes
+  # with the owning process when the run ends or is aborted.
+  @ws_conn_key {__MODULE__, :ws_conn}
+
+  defp attempt_ws(model, body, sink, token, account_id, session_id, fallback?) do
+    url = resolve_url(model)
+    headers = Headers.websocket(token, account_id, session_id)
+
+    case checkout_ws(url, headers, session_id) do
+      {:ok, conn, reused?} ->
+        run_ws_request(conn, reused?, model, body, sink, token, account_id, session_id, fallback?)
+
+      # A rejected upgrade carries the HTTP response — a 401 drives the same
+      # forced-refresh retry as the SSE path.
+      {:error, {:upgrade, 401, resp_body}} ->
+        Debug.log(session_id, "codex.response", "ws upgrade 401")
+        {:unauthorized, resp_body}
+
+      {:error, reason} ->
+        ws_failure(model, body, sink, token, account_id, session_id, fallback?, reason)
+    end
+  end
+
+  defp checkout_ws(url, headers, session_id) do
+    case Process.get(@ws_conn_key) do
+      {^url, conn} ->
+        case WebSocket.open?(conn) do
+          true ->
+            {:ok, conn, true}
+
+          false ->
+            Process.delete(@ws_conn_key)
+            connect_ws(url, headers, session_id)
+        end
+
+      _none_or_other_url ->
+        connect_ws(url, headers, session_id)
+    end
+  end
+
+  defp connect_ws(url, headers, session_id) do
+    Debug.log(session_id, "codex.request", "ws connect #{url}")
+
+    case WebSocket.connect(url, headers) do
+      {:ok, conn} -> {:ok, conn, false}
+      {:error, _reason} = err -> err
+    end
+  end
+
+  defp run_ws_request(conn, reused?, model, body, sink, token, account_id, session_id, fallback?) do
+    Debug.log(
+      session_id,
+      "codex.request",
+      "ws response.create model=#{model.id} reused=#{reused?} " <>
+        "body=#{Debug.truncate(Jason.encode!(body), 3_000)}"
+    )
+
+    reducer = fn event, parser -> StreamParser.handle(parser, event, sink) end
+
+    case WebSocket.request(conn, body, StreamParser.new(), reducer) do
+      {:ok, conn, parser} ->
+        Process.put(@ws_conn_key, {resolve_url(model), conn})
+        Debug.log(session_id, "codex.response", "ws ok")
+        {:ok, StreamParser.finalize(parser, model)}
+
+      # Events already reached the sink — finalize the partial turn (same rule
+      # as an SSE transport close after 200); a fallback would duplicate them.
+      {:error, reason, parser, emitted} when emitted > 0 ->
+        Process.delete(@ws_conn_key)
+        Debug.log(session_id, "codex.error", "ws closed mid-response: #{inspect(reason)}")
+        {:ok, StreamParser.finalize(parser, model)}
+
+      {:error, reason, _parser, 0} when reused? ->
+        # A cached connection can go stale while tools ran — retry once on a
+        # fresh socket before considering fallback.
+        Process.delete(@ws_conn_key)
+
+        Debug.log(
+          session_id,
+          "codex.error",
+          "ws reused conn failed (#{inspect(reason)}) — reconnecting"
+        )
+
+        attempt_ws(model, body, sink, token, account_id, session_id, fallback?)
+
+      {:error, reason, _parser, 0} ->
+        Process.delete(@ws_conn_key)
+        ws_failure(model, body, sink, token, account_id, session_id, fallback?, reason)
+    end
+  end
+
+  defp ws_failure(model, body, sink, token, account_id, session_id, true = _fallback?, reason) do
+    Debug.log(
+      session_id,
+      "codex.error",
+      "websocket failed before any event (#{inspect(reason)}) — falling back to SSE"
+    )
+
+    attempt_sse(model, body, sink, token, account_id, session_id)
+  end
+
+  defp ws_failure(model, _body, _sink, _token, _account_id, session_id, false, reason) do
+    Debug.log(session_id, "codex.error", "websocket failed: #{inspect(reason)}")
+    {:ok, error_assistant(model, "websocket error: #{inspect(reason)}")}
+  end
+
+  # ---- SSE transport ------------------------------------------------------------
+
+  defp attempt_sse(model, body_map, sink, token, account_id, session_id) do
+    url = resolve_url(model)
+    headers = Headers.build(token, account_id, session_id)
+    body = Jason.encode!(body_map)
 
     request = Finch.build(:post, url, headers, body)
 

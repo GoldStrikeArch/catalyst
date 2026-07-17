@@ -45,7 +45,8 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
       |> send_resp(200, sse_body())
     end
 
-    defp sse_body do
+    @doc false
+    def sse_body do
       [
         %{"type" => "response.output_item.added", "item" => %{"type" => "message", "id" => "m1"}},
         %{"type" => "response.output_text.delta", "delta" => "hi"},
@@ -108,7 +109,10 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     context = %Context{system_prompt: "x", messages: [Message.user("hi")], tools: []}
     sink = fn ev -> send(test_pid, {:ev, ev}) end
 
-    assert {:ok, assistant} = OpenAICodex.Provider.stream(model, context, [], sink)
+    # Pinned to :sse — this test is about the SSE 401-retry semantics; the
+    # default :auto would prepend a websocket upgrade attempt per request.
+    assert {:ok, assistant} =
+             OpenAICodex.Provider.stream(model, context, [transport: :sse], sink)
 
     assert assistant.stop_reason == :stop
     assert Content.text_of(assistant.content) == "hi"
@@ -119,6 +123,69 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     assert_received {:codex_request, 1, "Bearer tok_old"}
     assert_received {:codex_request, 2, "Bearer tok_new"}
     refute_received {:codex_request, _, _}
+    assert_received {:ev, %Catalyst.LLM.Event.TextDelta{delta: "hi"}}
+    refute_received {:ev, %Catalyst.LLM.Event.TextDelta{}}
+  end
+
+  defmodule UpgradeRejectingCodex do
+    @moduledoc "Rejects websocket upgrades (GET 404) but serves SSE (POST 200)."
+    import Plug.Conn
+
+    def init(opts), do: opts
+
+    def call(conn, %{test: test}) do
+      send(test, {:codex_method, conn.method})
+
+      case conn.method do
+        "GET" ->
+          send_resp(conn, 404, "no websocket here")
+
+        "POST" ->
+          conn
+          |> put_resp_content_type("text/event-stream")
+          |> send_resp(200, StubCodex.sse_body())
+      end
+    end
+  end
+
+  test "auto transport falls back to SSE when the websocket upgrade is rejected" do
+    test_pid = self()
+
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {UpgradeRejectingCodex, %{test: test_pid}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    context = %Context{system_prompt: "x", messages: [Message.user("hi")], tools: []}
+    sink = fn ev -> send(test_pid, {:ev, ev}) end
+
+    assert {:ok, assistant} =
+             OpenAICodex.Provider.stream(model, context, [transport: :auto], sink)
+
+    assert assistant.stop_reason == :stop
+    assert Content.text_of(assistant.content) == "hi"
+
+    # One websocket upgrade attempt (rejected), then the SSE fallback.
+    assert_received {:codex_method, "GET"}
+    assert_received {:codex_method, "POST"}
+    refute_received {:codex_method, _}
     assert_received {:ev, %Catalyst.LLM.Event.TextDelta{delta: "hi"}}
     refute_received {:ev, %Catalyst.LLM.Event.TextDelta{}}
   end

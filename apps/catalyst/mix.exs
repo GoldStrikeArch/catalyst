@@ -41,9 +41,13 @@ defmodule Catalyst.MixProject do
       {:ex_json_schema, "~> 0.10"},
       {:muontrap, "~> 1.0"},
       {:finch, "~> 0.19"},
+      # Codex websocket transport (Mint is already in the tree via Finch).
+      {:mint_web_socket, "~> 1.0"},
       {:req, "~> 0.5"},
       {:bandit, "~> 1.5"},
-      {:plug, "~> 1.16"}
+      {:plug, "~> 1.16"},
+      # Test-only: local websocket server for the Codex websocket client tests.
+      {:websock_adapter, "~> 0.5", only: :test}
     ]
   end
 

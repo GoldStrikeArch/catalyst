@@ -88,6 +88,14 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
     refute Map.has_key?(body, "reasoning")
   end
 
+  test "includes service_tier only when set (the Fast-mode knob)" do
+    ctx = %Context{system_prompt: nil, messages: [], tools: []}
+
+    assert Request.build(model(), ctx, service_tier: "priority")["service_tier"] == "priority"
+    refute Map.has_key?(Request.build(model(), ctx, []), "service_tier")
+    refute Map.has_key?(Request.build(model(), ctx, service_tier: nil), "service_tier")
+  end
+
   test "includes reasoning config when an effort is set" do
     context = %Context{messages: [Message.user("hi")], tools: []}
     body = Request.build(model(), context, reasoning_effort: "high")

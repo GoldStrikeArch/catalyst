@@ -21,6 +21,9 @@ defmodule Catalyst.Session.Snapshot do
       pending_tool_calls: MapSet.to_list(state.pending_tool_calls),
       running: state.run != nil,
       model: state.model,
+      # Session run opts (reasoning effort, service tier, transport, ...) so a
+      # reattaching UI can restore its controls.
+      opts: state.opts || [],
       system_prompt: state.system_prompt,
       store_path: state.store.path,
       error_message: state.error_message

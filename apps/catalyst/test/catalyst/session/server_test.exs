@@ -234,6 +234,32 @@ defmodule Catalyst.Session.ServerTest do
     assert Server.state(pid2).messages == []
   end
 
+  test "configure applies model/opts to the next run without restarting", %{
+    tmp: tmp,
+    model: model
+  } do
+    {_id, pid} = start(tmp, model, [{:text, "first"}])
+
+    new_model = %Model{id: "faux-2", api: "faux", provider: "faux"}
+
+    :ok =
+      Server.configure(pid,
+        model: new_model,
+        opts: [reasoning_effort: "high", service_tier: "priority"]
+      )
+
+    snap = Server.state(pid)
+    assert snap.model.id == "faux-2"
+    assert snap.opts[:reasoning_effort] == "high"
+    assert snap.opts[:service_tier] == "priority"
+    # The original session opts (the Faux script) survive the merge.
+    assert snap.opts[:script] == [{:text, "first"}]
+
+    # A nil value DELETES the key (turning Fast off removes service_tier).
+    :ok = Server.configure(pid, opts: [service_tier: nil])
+    refute Keyword.has_key?(Server.state(pid).opts, :service_tier)
+  end
+
   test "a session without a provider returns a tagged error instead of crashing", %{tmp: tmp} do
     {:ok, %{pid: pid}} = Manager.start_session(cwd: tmp, provider: nil, model: nil)
 

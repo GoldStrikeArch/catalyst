@@ -106,6 +106,16 @@ defmodule Catalyst.Session.Server do
   @spec reset(GenServer.server()) :: :ok
   def reset(server), do: GenServer.cast(server, :reset)
 
+  @doc """
+  Reconfigure the session for subsequent runs: `:model` (a `%Catalyst.Model{}`),
+  `:provider`, and/or `:opts` (a keyword merged into the session opts; a nil
+  value deletes the key). Takes effect on the NEXT run — an in-flight run keeps
+  the config it started with (`RunConfig.build/3` reads state per run).
+  """
+  @spec configure(GenServer.server(), keyword()) :: :ok
+  def configure(server, changes) when is_list(changes),
+    do: GenServer.call(server, {:configure, changes})
+
   # ---- callbacks ------------------------------------------------------------
 
   @impl true
@@ -186,6 +196,17 @@ defmodule Catalyst.Session.Server do
   def handle_call({:drain_follow_up, _stale_ref}, _from, state), do: {:reply, [], state}
 
   def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
+
+  def handle_call({:configure, changes}, _from, %State{} = state) do
+    state = %State{
+      state
+      | model: Keyword.get(changes, :model, state.model),
+        provider: Keyword.get(changes, :provider, state.provider),
+        opts: merge_opts(state.opts, Keyword.get(changes, :opts, []))
+    }
+
+    {:reply, :ok, state}
+  end
 
   @impl true
   def handle_cast({:steer, msg}, state),
@@ -319,6 +340,13 @@ defmodule Catalyst.Session.Server do
       {:error, _reason} = err ->
         err
     end
+  end
+
+  defp merge_opts(opts, changes) do
+    Enum.reduce(changes, opts || [], fn
+      {key, nil}, acc -> Keyword.delete(acc, key)
+      {key, value}, acc -> Keyword.put(acc, key, value)
+    end)
   end
 
   defp persist(state, %Event.MessageEnd{message: m}), do: Store.append_message(state.store, m)
