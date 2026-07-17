@@ -11,7 +11,7 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
 
   require Logger
 
-  alias Catalyst.{Content, Message}
+  alias Catalyst.{Content, Debug, Message}
   alias Catalyst.Auth.TokenStore
   alias Catalyst.LLM.SSE
   alias Catalyst.LLM.OpenAICodex.{Headers, Request, StreamParser}
@@ -41,17 +41,41 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
 
     acc = %{status: nil, buffer: "", parser: StreamParser.new(), sink: sink, error_body: ""}
 
+    Debug.log(session_id, "codex.request", "POST #{url} model=#{model.id} bytes=#{byte_size(body)} body=#{Debug.truncate(body, 3_000)}")
+
+    # `Finch.stream/5` returns `{:ok, acc}` on completion, or `{:error, exception,
+    # partial_acc}` (a 3-tuple) on a transport failure — handle BOTH or a dropped
+    # connection (e.g. `%Finch.TransportError{reason: :closed}`) crashes the run.
     case Finch.stream(request, Catalyst.Finch, acc, &handle_chunk/2, receive_timeout: @receive_timeout) do
       {:ok, %{status: 200, parser: parser}} ->
+        Debug.log(session_id, "codex.response", "200 ok")
         {:ok, StreamParser.finalize(parser, model)}
 
       {:ok, %{status: status, error_body: body}} ->
+        Debug.log(session_id, "codex.response", "HTTP #{status} body=#{Debug.truncate(body, 1_500)}")
         {:ok, error_assistant(model, "HTTP #{status}: #{String.slice(body, 0, 600)}")}
 
+      # Connection dropped after a 200 with partial data — keep what we parsed.
+      {:error, reason, %{status: 200, parser: parser}} ->
+        Debug.log(session_id, "codex.error", "stream closed mid-response: #{inspect(reason)}")
+        {:ok, StreamParser.finalize(parser, model)}
+
+      {:error, reason, partial} ->
+        Debug.log(session_id, "codex.error", "transport error: #{inspect(reason)} (status=#{inspect(partial[:status])})")
+        {:ok, error_assistant(model, stream_error_message(reason))}
+
       {:error, reason} ->
-        {:ok, error_assistant(model, "stream error: #{inspect(reason)}")}
+        Debug.log(session_id, "codex.error", "stream error: #{inspect(reason)}")
+        {:ok, error_assistant(model, stream_error_message(reason))}
     end
   end
+
+  defp stream_error_message(%{__struct__: struct, reason: :closed}),
+    do:
+      "the connection to the Codex API closed before any response (#{inspect(struct)} :closed). " <>
+        "This is usually a transient network/endpoint issue — try again. See ~/.catalyst/debug/latest.log for the request."
+
+  defp stream_error_message(reason), do: "stream error: #{inspect(reason)}"
 
   defp handle_chunk({:status, status}, acc), do: %{acc | status: status}
   defp handle_chunk({:headers, _headers}, acc), do: acc

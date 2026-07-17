@@ -31,6 +31,10 @@ defmodule CatalystWeb.ShellLive do
   failure. Namespace modules under Catalyst.Ext.*. The new tool is loaded immediately and
   callable on your next turn. Only do this when an existing tool can't do the job. For the
   full contract, helpers and examples, read the guide at ~/.catalyst/guide.md.
+
+  Debugging: if a step fails or behaves unexpectedly, call `read_log` to see this session's
+  debug log (every agent-loop step, tool call, and truncated LLM request/response and error)
+  before deciding what to do next.
   """
 
   @impl true

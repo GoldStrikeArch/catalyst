@@ -14,7 +14,8 @@ defmodule Catalyst.Tools.Registry do
     DevelopTool,
     InstallExtension,
     ReloadTool,
-    RollbackTool
+    RollbackTool,
+    ReadLog
   }
 
   @default [
@@ -30,7 +31,8 @@ defmodule Catalyst.Tools.Registry do
     DevelopTool,
     InstallExtension,
     ReloadTool,
-    RollbackTool
+    RollbackTool,
+    ReadLog
   ]
 
   @doc "The default tool module list."

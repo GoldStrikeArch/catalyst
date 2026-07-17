@@ -65,7 +65,13 @@ defmodule Catalyst.Agent.ToolRunner do
               {Content.text(to_string(reason)), %{blocked: true}, true, false}
 
             _ ->
-              ctx = %{cwd: config.cwd, call_id: id, report: reporter(tool_call, emit)}
+              ctx = %{
+                cwd: config.cwd,
+                call_id: id,
+                session_id: Keyword.get(config[:opts] || [], :session_id),
+                report: reporter(tool_call, emit)
+              }
+
               execute_tool(module, args, ctx)
           end
       end

@@ -243,6 +243,17 @@ You don't have to go through the agent. To add a tool by hand:
 
 ---
 
+## Debugging a failed run
+
+Every session writes a debug log to **`~/.catalyst/debug/<session_id>.log`** (and
+`~/.catalyst/debug/latest.log` points at the most recent one) capturing every agent-loop
+step, each tool call + result, the LLM request (truncated, incl. byte size) and response/
+error. Call the **`read_log`** tool to read the tail of the current session's log when a step
+fails — it's the fastest way to see *what* was sent and *why* it failed. Disable with
+`CATALYST_DEBUG=0`.
+
+---
+
 ## Checklist for the agent before calling `develop_tool`
 
 1. Does a built-in tool already do this? If yes, use it instead.

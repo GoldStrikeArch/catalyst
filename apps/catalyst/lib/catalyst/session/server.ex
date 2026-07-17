@@ -90,6 +90,7 @@ defmodule Catalyst.Session.Server do
       store: Store.new(cwd, id: id)
     }
 
+    Catalyst.Debug.mark_latest(id)
     {:ok, state}
   end
 
@@ -134,6 +135,7 @@ defmodule Catalyst.Session.Server do
     do: {:noreply, %{state | messages: [], streaming_message: nil, pending_tool_calls: MapSet.new(), error_message: nil}}
 
   def handle_cast({:agent_event, event}, state) do
+    Catalyst.Debug.log_event(state.id, event)
     state = Reducer.reduce(event, state)
     broadcast(state, event)
     {:noreply, state}
@@ -171,6 +173,7 @@ defmodule Catalyst.Session.Server do
   end
 
   defp handle_failure(state, reason) do
+    Catalyst.Debug.log(state.id, "error", "run failed: " <> Catalyst.Debug.truncate(reason, 8_000))
     msg = Reducer.failure_message(state, reason)
     Store.append_message(state.store, msg)
 
