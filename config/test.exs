@@ -7,6 +7,10 @@ import Config
 # other's extension dirs mid-run.
 test_tmp = Path.join(System.tmp_dir!(), "catalyst_test_#{System.pid()}")
 
+# LiveView tests drive full turns offline: the chat's (Codex-shaped) sessions
+# stream through the input-aware Demo provider instead of the network.
+config :catalyst_web, codex_provider_mod: Catalyst.LLM.Demo
+
 config :catalyst,
   auth_path: Path.join(test_tmp, "auth.json"),
   sessions_root: Path.join(test_tmp, "sessions"),

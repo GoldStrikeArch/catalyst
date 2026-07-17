@@ -8,28 +8,8 @@ defmodule CatalystWeb.CodexControlsTest do
   alias Catalyst.Session.{Manager, Server}
 
   setup do
-    Application.put_env(:catalyst_web, :login_fun, fn -> {:ok, "acct_test"} end)
-
-    on_exit(fn ->
-      Application.delete_env(:catalyst_web, :login_fun)
-      :persistent_term.erase({CatalystWeb.ShellLive, :codex_prefs})
-    end)
-
+    on_exit(fn -> :persistent_term.erase({CatalystWeb.ShellLive, :codex_prefs}) end)
     :ok
-  end
-
-  defp wait_until(fun, tries \\ 100) do
-    cond do
-      fun.() ->
-        true
-
-      tries == 0 ->
-        false
-
-      true ->
-        Process.sleep(20)
-        wait_until(fun, tries - 1)
-    end
   end
 
   defp session_pid(view) do
@@ -38,16 +18,9 @@ defmodule CatalystWeb.CodexControlsTest do
     Manager.whereis(id)
   end
 
-  defp sign_in_to_codex(view) do
-    view |> element("button", "Sign in to ChatGPT") |> render_click()
-    assert wait_until(fn -> render(view) =~ "codex-opts" end)
-  end
-
-  test "controls appear with Codex and reconfigure the live session in place", %{conn: conn} do
+  test "the run controls reconfigure the live session in place", %{conn: conn} do
     {:ok, view, html} = live(conn, "/")
-    refute html =~ "codex-opts"
-
-    sign_in_to_codex(view)
+    assert html =~ "codex-opts"
     pid = session_pid(view)
 
     # The codex session starts with the default settings already applied.
@@ -79,7 +52,6 @@ defmodule CatalystWeb.CodexControlsTest do
 
   test "fast is clamped off when switching to a model without the priority tier", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
-    sign_in_to_codex(view)
     pid = session_pid(view)
 
     view |> element("button", "⚡ Fast") |> render_click()

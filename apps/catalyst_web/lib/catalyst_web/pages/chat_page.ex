@@ -67,6 +67,37 @@ defmodule CatalystWeb.Pages.ChatPage do
       </div>
     </main>
 
+    <div
+      :if={@file_search}
+      id="file-search-results"
+      class="border-t border-slate-200/80 bg-white/95 px-4 py-2 backdrop-blur dark:border-white/10 dark:bg-slate-950/90"
+    >
+      <div class="mx-auto max-w-5xl">
+        <p class="text-[0.65rem] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+          <%= if @file_search.results == [] do %>
+            no files match “@{@file_search.query}”
+          <% else %>
+            files matching “@{@file_search.query}” — Enter picks the first
+          <% end %>
+        </p>
+        <div class="mt-1 flex flex-col">
+          <button
+            :for={r <- @file_search.results}
+            type="button"
+            phx-click="pick_file"
+            phx-value-label={r.label}
+            phx-value-path={r.path}
+            class="flex items-baseline gap-3 rounded-lg px-2 py-1 text-left text-xs transition hover:bg-indigo-50 dark:hover:bg-white/10"
+          >
+            <code class="shrink-0 font-mono font-semibold text-indigo-700 dark:text-indigo-300">
+              {r.label}
+            </code>
+            <span class="truncate font-mono text-slate-400 dark:text-slate-500">{r.path}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <.form
       for={@chat_form}
       id="chat-form"
@@ -80,7 +111,8 @@ defmodule CatalystWeb.Pages.ChatPage do
             field={@chat_form[:message]}
             type="text"
             autocomplete="off"
-            placeholder="Ask Catalyst…  (e.g. “list the files” or “search defmodule”)"
+            phx-debounce="150"
+            placeholder="Ask Catalyst…  (type @ to reference a file)"
             class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/15 dark:border-white/10 dark:bg-white/10 dark:text-white dark:placeholder:text-slate-500"
           />
         </div>

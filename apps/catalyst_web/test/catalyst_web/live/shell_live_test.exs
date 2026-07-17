@@ -206,18 +206,6 @@ defmodule CatalystWeb.ShellLiveTest do
     assert_redirect(view, "/settings")
   end
 
-  test "re-clicking the active provider keeps the session and transcript", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
-    id = session_id(view)
-    assert submit_prompt(view, "list the files") =~ "list the files"
-
-    view |> element("button", "Demo") |> render_click()
-
-    # Same session, conversation intact — no restart for a no-op click.
-    assert session_id(view) == id
-    assert render(view) =~ "list the files"
-  end
-
   test "a bare /cd flashes a usage hint instead of prompting the model", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 

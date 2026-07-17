@@ -25,15 +25,15 @@ defmodule CatalystWeb.ChatLiveTest do
     render(view)
   end
 
-  test "renders the chat shell with the Demo provider", %{conn: conn} do
+  test "renders the chat shell with the Codex run controls", %{conn: conn} do
     {:ok, view, html} = live(conn, ~p"/")
-    assert html =~ "Catalyst"
-    assert html =~ "Demo (offline)"
+    assert html =~ "codex-opts"
+    refute html =~ "Demo (offline)"
     assert has_element?(view, "#chat-empty-state")
     assert has_element?(view, "#chat-form")
   end
 
-  test "sending a prompt streams a Demo reply with a tool result", %{conn: conn} do
+  test "sending a prompt streams a reply with a tool result (offline provider)", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 
     html = submit_prompt(view, "list the files")
@@ -70,7 +70,7 @@ defmodule CatalystWeb.ChatLiveTest do
     refute has_element?(view2, "#chat-empty-state")
   end
 
-  test "the Sign in button runs OAuth (stubbed) and switches to Codex", %{conn: conn} do
+  test "the Sign in button runs OAuth (stubbed) without restarting the session", %{conn: conn} do
     parent = self()
 
     Application.put_env(:catalyst_web, :login_fun, fn ->
@@ -82,12 +82,19 @@ defmodule CatalystWeb.ChatLiveTest do
 
     {:ok, view, html} = live(conn, ~p"/")
     assert html =~ "Sign in to ChatGPT"
+    id = session_id(view)
+    assert submit_prompt(view, "hello there") =~ "hello there"
 
     view |> element("button", "Sign in to ChatGPT") |> render_click()
     assert_receive :login_called, 1_000
 
     html = render(view)
     refute html =~ "Sign in to ChatGPT"
-    assert html =~ "Codex"
+    assert html =~ "Sign out of ChatGPT"
+
+    # The token is fetched per turn — signing in must NOT restart the session
+    # or wipe the conversation.
+    assert session_id(view) == id
+    assert render(view) =~ "hello there"
   end
 end

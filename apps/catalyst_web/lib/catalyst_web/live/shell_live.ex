@@ -46,13 +46,15 @@ defmodule CatalystWeb.ShellLive do
         # maybe_refresh_panel) and the in-flight panel action task, if any.
         ext_panel: nil,
         ext_action: nil,
-        provider: :demo,
-        model_label: "Demo (offline)",
         # Codex run settings (model/effort/fast/transport) — survive remounts
         # via persistent_term, applied to the session via Server.configure.
         codex_prefs: load_codex_prefs(),
         session_model: nil,
         session_opts: [],
+        # "@" file references: the active search (trailing @query in the input)
+        # and the label -> path map expanded into the prompt on send.
+        file_search: nil,
+        file_refs: %{},
         session_id: nil,
         session_pid: nil,
         # Monitor on the attached session, so a replaced/crashed session leads
@@ -123,10 +125,20 @@ defmodule CatalystWeb.ShellLive do
 
   @impl true
   def handle_event("typing", %{"message" => text}, socket),
-    do: {:noreply, assign_input(socket, text)}
+    do: {:noreply, socket |> assign_input(text) |> update_file_search(text)}
+
+  # Enter while the "@" dropdown is showing picks the FIRST match instead of
+  # sending — the trailing @query is still a search, not part of the prompt.
+  def handle_event(
+        "send",
+        %{"message" => text},
+        %{assigns: %{file_search: %{results: [first | _rest]}}} = socket
+      ) do
+    {:noreply, pick_file(socket, text, first.label, first.path)}
+  end
 
   def handle_event("send", %{"message" => text}, socket) do
-    text = String.trim(text)
+    text = socket.assigns.file_refs |> expand_file_refs(String.trim(text)) |> String.trim()
 
     cond do
       text == "" or socket.assigns.running ->
@@ -148,7 +160,7 @@ defmodule CatalystWeb.ShellLive do
         try do
           case Server.prompt(socket.assigns.session_pid, text) do
             :ok ->
-              {:noreply, socket |> assign_input("") |> assign(running: true)}
+              {:noreply, socket |> assign_input("") |> assign(running: true, file_search: nil)}
 
             # e.g. {:error, :no_provider} — keep the typed text and explain.
             {:error, reason} ->
@@ -163,35 +175,18 @@ defmodule CatalystWeb.ShellLive do
     end
   end
 
+  def handle_event("pick_file", %{"label" => label, "path" => path}, socket) do
+    text = socket.assigns.chat_form.params["message"] || ""
+    {:noreply, pick_file(socket, text, label, path)}
+  end
+
   def handle_event("abort", _params, socket) do
     if socket.assigns.session_pid, do: Server.abort(socket.assigns.session_pid)
     {:noreply, socket}
   end
 
   def handle_event("new_session", _params, socket),
-    do: {:noreply, start_session(socket, socket.assigns.provider)}
-
-  # Re-clicking the active provider must be a no-op: starting a new session
-  # would wipe the current conversation.
-  def handle_event("set_provider", %{"provider" => "codex"}, socket) do
-    cond do
-      socket.assigns.provider == :codex ->
-        {:noreply, socket}
-
-      socket.assigns.logged_in ->
-        {:noreply, start_session(socket, :codex)}
-
-      true ->
-        {:noreply, put_flash(socket, :error, "Not signed in. Run `mix catalyst.login` first.")}
-    end
-  end
-
-  def handle_event("set_provider", %{"provider" => _demo}, socket) do
-    case socket.assigns.provider do
-      :demo -> {:noreply, socket}
-      _other -> {:noreply, start_session(socket, :demo)}
-    end
-  end
+    do: {:noreply, start_session(socket)}
 
   # Run the ChatGPT OAuth flow in a supervised Task so the LiveView doesn't block
   # while the user completes login in their browser. Result arrives via handle_info.
@@ -206,7 +201,6 @@ defmodule CatalystWeb.ShellLive do
 
   def handle_event("logout", _params, socket) do
     Catalyst.Auth.logout()
-    socket = if socket.assigns.provider == :codex, do: start_session(socket, :demo), else: socket
     {:noreply, assign(socket, logged_in: false) |> put_flash(:info, "Signed out.")}
   end
 
@@ -285,11 +279,12 @@ defmodule CatalystWeb.ShellLive do
 
     case result do
       {:ok, _account_id} ->
-        socket
-        |> assign(logged_in: true, login_state: :idle, login_ref: nil)
-        |> put_flash(:info, "Signed in to ChatGPT.")
-        |> start_session(:codex)
-        |> then(&{:noreply, &1})
+        # No session restart: the loop pulls a fresh token each turn, so the
+        # conversation continues right where it was.
+        {:noreply,
+         socket
+         |> assign(logged_in: true, login_state: :idle, login_ref: nil)
+         |> put_flash(:info, "Signed in to ChatGPT.")}
 
       {:error, reason} ->
         {:noreply,
@@ -560,8 +555,7 @@ defmodule CatalystWeb.ShellLive do
   # it instead of starting over.
   @session_ptr {__MODULE__, :current_session}
 
-  defp remember_session(id, provider),
-    do: :persistent_term.put(@session_ptr, %{id: id, provider: provider})
+  defp remember_session(id), do: :persistent_term.put(@session_ptr, %{id: id})
 
   defp remembered_session do
     if Application.get_env(:catalyst_web, :reattach_sessions, true) do
@@ -571,21 +565,21 @@ defmodule CatalystWeb.ShellLive do
 
   defp attach_or_start(socket) do
     case remembered_session() do
-      %{id: id, provider: provider} ->
+      %{id: id} ->
         case await_session(id) do
           pid when is_pid(pid) ->
-            reattach_session(socket, id, pid, provider)
+            reattach_session(socket, id, pid)
 
           nil ->
             # Stop the abandoned id: a crashed session's supervisor restart
             # could still re-register it after we've moved on, and nothing
             # would ever attach to (or stop) it again.
             Manager.stop(id)
-            start_session(socket, fallback_provider(socket, provider))
+            start_session(socket)
         end
 
       _none ->
-        start_session(socket, :demo)
+        start_session(socket)
     end
   end
 
@@ -607,15 +601,6 @@ defmodule CatalystWeb.ShellLive do
     end
   end
 
-  # When recovery can't reattach, keep the user's provider choice — silently
-  # downgrading Codex to the offline demo would be confusing. Codex without a
-  # login can't run, so only then fall back to demo.
-  defp fallback_provider(socket, :codex),
-    do: if(socket.assigns.logged_in, do: :codex, else: :demo)
-
-  defp fallback_provider(_socket, provider) when is_atom(provider), do: provider
-  defp fallback_provider(_socket, _unknown), do: :demo
-
   # Rebuild the UI from the live server's snapshot: replay the transcript into
   # the stream and pick up an in-flight run (its events keep arriving via PubSub).
   # Subscribe BEFORE snapshotting so no event can fall in between: anything
@@ -624,19 +609,19 @@ defmodule CatalystWeb.ShellLive do
   # The dedup only ever sees this session's events — broadcasts carry the
   # session id and handle_info drops mismatches, so a switch can't leak another
   # session's messages into the replay window.
-  defp reattach_session(socket, id, pid, provider) do
+  defp reattach_session(socket, id, pid) do
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
 
     socket
     |> monitor_session(pid)
-    |> assign(session_id: id, session_pid: pid, provider: provider)
+    |> assign(session_id: id, session_pid: pid)
     |> replay_transcript(pid)
-    |> sync_provider_ui(provider)
+    |> sync_codex_ui()
   catch
     # The server died between whereis and the state call — start fresh.
     kind, _reason when kind in [:exit, :error] ->
       Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
-      start_session(socket, fallback_provider(socket, provider))
+      start_session(socket)
   end
 
   # Rebuild the message stream (and run-tracking assigns) from the session's
@@ -672,7 +657,7 @@ defmodule CatalystWeb.ShellLive do
 
   defp seed_streaming(socket, _none), do: socket
 
-  defp start_session(socket, provider) do
+  defp start_session(socket) do
     if old_id = socket.assigns.session_id do
       # Unsubscribe doesn't flush the mailbox, but any already-delivered event
       # from the old session carries old_id and is dropped by the handle_info
@@ -681,8 +666,8 @@ defmodule CatalystWeb.ShellLive do
       Manager.stop(old_id)
     end
 
-    {provider_mod, model, label} = provider_config(socket, provider)
-    run_opts = session_run_opts(socket, provider)
+    {provider_mod, model} = provider_config(socket)
+    run_opts = codex_run_opts(socket.assigns.codex_prefs)
 
     case Manager.start_session(
            cwd: socket.assigns.cwd,
@@ -692,15 +677,13 @@ defmodule CatalystWeb.ShellLive do
          ) do
       {:ok, %{id: id, pid: pid}} ->
         Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-        remember_session(id, provider)
+        remember_session(id)
 
         socket
         |> monitor_session(pid)
         |> assign(
           session_id: id,
           session_pid: pid,
-          provider: provider,
-          model_label: label,
           session_model: model,
           session_opts: run_opts,
           streaming: nil,
@@ -709,6 +692,8 @@ defmodule CatalystWeb.ShellLive do
           message_seq: 0,
           message_count: 0,
           replayed_tail: [],
+          file_search: nil,
+          file_refs: %{},
           chat_form: chat_form("")
         )
         |> stream(:messages, [], reset: true)
@@ -741,13 +726,14 @@ defmodule CatalystWeb.ShellLive do
     assign(socket, session_ref: Process.monitor(pid))
   end
 
-  defp provider_config(socket, :codex) do
-    model = OpenAICodex.model(socket.assigns.codex_prefs.model)
-    {Catalyst.LLM.OpenAICodex.Provider, model, "Codex · #{model.id}"}
+  defp provider_config(socket) do
+    {provider_mod(), OpenAICodex.model(socket.assigns.codex_prefs.model)}
   end
 
-  defp provider_config(_socket, _demo),
-    do: {Catalyst.LLM.Demo, Catalyst.LLM.Demo.model(), "Demo (offline)"}
+  # Injectable so tests can drive full turns with an offline provider.
+  defp provider_mod do
+    Application.get_env(:catalyst_web, :codex_provider_mod, Catalyst.LLM.OpenAICodex.Provider)
+  end
 
   # ---- Codex run settings helpers ---------------------------------------------
 
@@ -780,9 +766,6 @@ defmodule CatalystWeb.ShellLive do
     end
   end
 
-  defp session_run_opts(socket, :codex), do: codex_run_opts(socket.assigns.codex_prefs)
-  defp session_run_opts(_socket, _provider), do: []
-
   # nil values matter: Server.configure's merge DELETES nil keys, so turning
   # Fast off actually removes service_tier from the session opts.
   defp codex_run_opts(prefs) do
@@ -800,31 +783,26 @@ defmodule CatalystWeb.ShellLive do
     socket = assign(socket, codex_prefs: prefs)
 
     case socket.assigns do
-      %{provider: :codex, session_pid: pid} when is_pid(pid) ->
+      %{session_pid: pid} when is_pid(pid) ->
         model = OpenAICodex.model(prefs.model)
         opts = codex_run_opts(prefs)
 
         try do
           :ok = Server.configure(pid, model: model, opts: opts)
-
-          assign(socket,
-            model_label: "Codex · #{model.id}",
-            session_model: model,
-            session_opts: opts
-          )
+          assign(socket, session_model: model, session_opts: opts)
         catch
           # Session died mid-click — the :DOWN handler reattaches; prefs are
           # saved and re-applied when the next session starts.
           :exit, _reason -> socket
         end
 
-      _not_codex ->
+      _no_session ->
         socket
     end
   end
 
   # After a reattach the SESSION is the source of truth for the controls.
-  defp sync_provider_ui(socket, :codex) do
+  defp sync_codex_ui(socket) do
     model = socket.assigns.session_model || OpenAICodex.model(socket.assigns.codex_prefs.model)
     opts = socket.assigns.session_opts || []
 
@@ -837,12 +815,53 @@ defmodule CatalystWeb.ShellLive do
       })
 
     save_codex_prefs(prefs)
-    assign(socket, codex_prefs: prefs, model_label: "Codex · #{model.id}")
+    assign(socket, codex_prefs: prefs)
   end
 
-  defp sync_provider_ui(socket, provider) do
-    {_mod, _model, label} = provider_config(socket, provider)
-    assign(socket, model_label: label)
+  # ---- "@" file references ------------------------------------------------------
+
+  # A trailing "@token" (preceded by whitespace or start-of-input) is an active
+  # file search; an "@" inside a word (a@b) is not.
+  defp active_file_query(text) do
+    case Regex.run(~r/(?:^|\s)@(\S*)$/, text) do
+      [_, query] -> query
+      _no_match -> nil
+    end
+  end
+
+  defp update_file_search(socket, text) do
+    case active_file_query(text) do
+      nil ->
+        assign(socket, file_search: nil)
+
+      query ->
+        results = CatalystWeb.FileSearch.search(socket.assigns.cwd, query)
+        assign(socket, file_search: %{query: query, results: results})
+    end
+  end
+
+  # Replace the trailing @query with the picked label and remember the
+  # label -> path mapping for expansion at send time.
+  defp pick_file(socket, text, label, path) do
+    new_text = Regex.replace(~r/@\S*$/, text, fn _match -> label <> " " end)
+
+    socket
+    |> assign_input(new_text)
+    |> assign(
+      file_search: nil,
+      file_refs: Map.put(socket.assigns.file_refs, label, path)
+    )
+  end
+
+  # Expand picked "@parent/name" labels into real (cwd-relative) paths for the
+  # model. Longest labels first so a label can't clobber a longer one that
+  # contains it.
+  defp expand_file_refs(refs, text) when refs == %{}, do: text
+
+  defp expand_file_refs(refs, text) do
+    refs
+    |> Enum.sort_by(fn {label, _path} -> -byte_size(label) end)
+    |> Enum.reduce(text, fn {label, path}, acc -> String.replace(acc, label, path) end)
   end
 
   # In a packaged release the launch dir is inside the .app bundle (the erts dir),
@@ -863,7 +882,7 @@ defmodule CatalystWeb.ShellLive do
       socket
       |> assign(cwd: expanded)
       |> assign_input("")
-      |> start_session(socket.assigns.provider)
+      |> start_session()
     else
       put_flash(socket, :error, "Not a directory: #{expanded}")
     end
@@ -882,19 +901,13 @@ defmodule CatalystWeb.ShellLive do
       >
         <header class="flex min-h-14 items-center gap-3 border-b border-slate-200/80 bg-white/80 px-4 shadow-sm shadow-slate-200/60 backdrop-blur dark:border-white/10 dark:bg-slate-950/70 dark:shadow-black/20">
           <div class="flex min-w-0 flex-1 items-center gap-2">
-            <span class="text-lg font-bold tracking-tight text-slate-950 dark:text-white">
-              Catalyst
-            </span>
-            <span class="rounded-full border border-slate-200 bg-white/70 px-2 py-0.5 text-xs font-medium text-slate-500 dark:border-white/10 dark:bg-white/10 dark:text-slate-300">
-              {@model_label}
-            </span>
             <span :if={@running} class="flex items-center gap-1" aria-label="Agent running">
               <span class="size-1.5 animate-pulse rounded-full bg-indigo-500"></span>
               <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-150"></span>
               <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-300"></span>
             </span>
 
-            <nav :if={length(UI.Registry.list_pages()) > 1} class="ml-3 flex items-center gap-1">
+            <nav :if={length(UI.Registry.list_pages()) > 1} class="flex items-center gap-1">
               <.link
                 :for={p <- UI.Registry.list_pages()}
                 patch={~p"/#{p.path}"}
@@ -922,7 +935,7 @@ defmodule CatalystWeb.ShellLive do
 
             <%!-- Codex run settings: applied to the live session for the NEXT
             run (Server.configure) — no session restart, transcript stays. --%>
-            <div :if={@provider == :codex} class="flex items-center gap-1.5">
+            <div class="flex items-center gap-1.5">
               <form id="codex-opts" phx-change="codex_opts" class="flex items-center gap-1.5">
                 <select name="model" class={codex_select_class()} title="Codex model">
                   <option
@@ -967,24 +980,7 @@ defmodule CatalystWeb.ShellLive do
               </button>
             </div>
 
-            <button
-              class={provider_button_class(@provider == :demo)}
-              phx-click="set_provider"
-              phx-value-provider="demo"
-              type="button"
-            >
-              Demo
-            </button>
-
             <%= if @logged_in do %>
-              <button
-                class={provider_button_class(@provider == :codex)}
-                phx-click="set_provider"
-                phx-value-provider="codex"
-                type="button"
-              >
-                Codex ✓
-              </button>
               <button
                 class="rounded-full p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
                 phx-click="logout"
@@ -1057,16 +1053,6 @@ defmodule CatalystWeb.ShellLive do
         "border-amber-400 bg-amber-100 text-amber-900 dark:border-amber-400/40 dark:bg-amber-400/20 dark:text-amber-200",
       !active? &&
         "border-slate-200 text-slate-500 hover:bg-slate-100 dark:border-white/10 dark:text-slate-300 dark:hover:bg-white/10"
-    ]
-  end
-
-  defp provider_button_class(active?) do
-    [
-      "rounded-full px-3 py-1.5 text-xs font-medium transition",
-      active? &&
-        "bg-slate-950 text-white shadow-sm shadow-slate-950/20 dark:bg-white dark:text-slate-950",
-      !active? &&
-        "text-slate-500 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
     ]
   end
 

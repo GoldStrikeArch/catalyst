@@ -1,11 +1,13 @@
 defmodule Catalyst.LLM.Demo do
   @moduledoc """
-  An offline, input-aware provider for trying the GUI without a login.
+  An offline, input-aware provider used by the LiveView test suite (injected
+  via `config :catalyst_web, :codex_provider_mod`) and handy for headless dev.
+  It has no UI surface — the app's only real provider is OpenAI Codex.
 
   It runs one real tool against the working directory based on the user's
   message (a search, or a directory listing), then replies with a short summary.
   Text is streamed word-by-word (with a tiny delay) so the streaming UI is
-  visible. Swap in `Catalyst.LLM.OpenAICodex.Provider` for real answers.
+  visible.
   """
   @behaviour Catalyst.LLM.Provider
 
