@@ -1,0 +1,13 @@
+defmodule Catalyst.Auth.PKCE do
+  @moduledoc "PKCE (RFC 7636) verifier/challenge and OAuth state, matching the Codex CLI flow."
+
+  @doc "A fresh `%{verifier, challenge}` pair (S256)."
+  def generate do
+    verifier = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
+    challenge = :sha256 |> :crypto.hash(verifier) |> Base.url_encode64(padding: false)
+    %{verifier: verifier, challenge: challenge}
+  end
+
+  @doc "A random opaque `state` value."
+  def state, do: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+end

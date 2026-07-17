@@ -1,0 +1,29 @@
+import Config
+
+# Keep auth credentials and session logs out of the real ~/.catalyst during
+# tests. Set before the :catalyst app starts so TokenStore reads this path.
+config :catalyst,
+  auth_path: Path.join(System.tmp_dir!(), "catalyst_test_auth.json"),
+  sessions_root: Path.join(System.tmp_dir!(), "catalyst_test_sessions"),
+  extensions_dir: Path.join(System.tmp_dir!(), "catalyst_test_extensions")
+
+# We don't run a server during test. If one is required,
+# you can enable the server option below.
+config :catalyst_web, CatalystWeb.Endpoint,
+  http: [ip: {127, 0, 0, 1}, port: 4002],
+  secret_key_base: "YEFSoTMJ0FlpC47T+CGpr9KXtPxk6qrA3IJ4t2rt3s2Imdw+UmHuDfLP65piqAnb",
+  server: false
+
+# Print only warnings and errors during test
+config :logger, level: :warning
+
+# Initialize plugs at runtime for faster test compilation
+config :phoenix, :plug_init_mode, :runtime
+
+# Enable helpful, but potentially expensive runtime checks
+config :phoenix_live_view,
+  enable_expensive_runtime_checks: true
+
+# Sort query params output of verified routes for robust url comparisons
+config :phoenix,
+  sort_verified_routes_query_params: true

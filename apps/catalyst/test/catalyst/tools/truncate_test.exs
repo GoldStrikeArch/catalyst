@@ -1,0 +1,39 @@
+defmodule Catalyst.Tools.TruncateTest do
+  use ExUnit.Case, async: true
+  alias Catalyst.Tools.Truncate
+
+  test "head keeps the first N lines" do
+    content = Enum.map_join(1..100, "\n", &"line #{&1}")
+    {out, info} = Truncate.head(content, max_lines: 10)
+    assert info.truncated
+    assert info.truncated_by == :lines
+    assert info.total_lines == 100
+    assert info.output_lines == 10
+    assert String.starts_with?(out, "line 1\n")
+    assert String.ends_with?(out, "line 10")
+  end
+
+  test "tail keeps the last N lines" do
+    content = Enum.map_join(1..100, "\n", &"line #{&1}")
+    {out, info} = Truncate.tail(content, max_lines: 5)
+    assert info.truncated
+    assert String.ends_with?(out, "line 100")
+    assert String.starts_with?(out, "line 96\n")
+  end
+
+  test "no truncation when within budget" do
+    {out, info} = Truncate.head("a\nb\nc")
+    refute info.truncated
+    assert info.truncated_by == nil
+    assert out == "a\nb\nc"
+  end
+
+  test "byte budget clamps and keeps valid UTF-8" do
+    content = String.duplicate("héllo\n", 100)
+    {out, info} = Truncate.head(content, max_lines: 1000, max_bytes: 50)
+    assert info.truncated
+    assert info.truncated_by == :bytes
+    assert byte_size(out) <= 50
+    assert String.valid?(out)
+  end
+end
