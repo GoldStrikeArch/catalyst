@@ -6,6 +6,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   a custom card for a particular tool result or message type at runtime.
   """
   use CatalystWeb, :html
+  require Logger
 
   alias Catalyst.{Content, Message}
   alias CatalystWeb.UI.Registry
@@ -15,7 +16,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   def render_message(assigns) do
     case Registry.renderer(:message, assigns.msg) do
       nil -> message(assigns)
-      fun -> fun.(assigns)
+      fun -> safe_render(fun, assigns, &message/1)
     end
   end
 
@@ -24,8 +25,23 @@ defmodule CatalystWeb.UI.MessageRenderer do
   def render_block(assigns) do
     case Registry.renderer(:block, assigns.block) do
       nil -> block(assigns)
-      fun -> fun.(assigns)
+      fun -> safe_render(fun, assigns, &block/1)
     end
+  end
+
+  # A broken extension renderer must not crash-loop the LiveView on every
+  # render of the transcript (recovery — asking the agent to reload_extensions
+  # — needs the chat UI it would take down). Fall back to built-in rendering.
+  defp safe_render(fun, assigns, fallback) do
+    fun.(assigns)
+  rescue
+    e ->
+      Logger.warning("[ui] extension renderer raised: #{Exception.message(e)} — using built-in")
+      fallback.(assigns)
+  catch
+    kind, reason ->
+      Logger.warning("[ui] extension renderer #{kind}: #{inspect(reason)} — using built-in")
+      fallback.(assigns)
   end
 
   # ---- built-in message rendering -------------------------------------------

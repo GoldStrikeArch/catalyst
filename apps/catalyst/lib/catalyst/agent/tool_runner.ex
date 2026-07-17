@@ -137,14 +137,46 @@ defmodule Catalyst.Agent.ToolRunner do
   end
 
   defp execute_tool(module, args, ctx) do
-    try do
-      res = module.execute(args, ctx)
-      {res.content, Map.get(res, :details, %{}), false, Map.get(res, :terminate, false)}
-    rescue
-      e -> {Content.text(Exception.message(e)), %{}, true, false}
-    catch
-      kind, reason -> {Content.text("#{kind}: #{inspect(reason)}"), %{}, true, false}
+    case validate_args(module, args) do
+      {:error, message} ->
+        {Content.text(message), %{validation: :failed}, true, false}
+
+      :ok ->
+        try do
+          res = module.execute(args, ctx)
+          {res.content, Map.get(res, :details, %{}), false, Map.get(res, :terminate, false)}
+        rescue
+          e -> {Content.text(Exception.message(e)), %{}, true, false}
+        catch
+          kind, reason -> {Content.text("#{kind}: #{inspect(reason)}"), %{}, true, false}
+        end
     end
+  end
+
+  # Validate args against the tool's declared JSON Schema, so a malformed call
+  # (most common with self-developed tools) becomes a clean, fixable error
+  # result instead of a confusing crash inside execute/2. A schema that itself
+  # fails to resolve skips validation rather than blocking the tool.
+  defp validate_args(module, args) do
+    schema =
+      module.parameters()
+      # Normalize atom keys/values (hand-written schemas) to JSON shape.
+      |> Jason.encode!()
+      |> Jason.decode!()
+      |> ExJsonSchema.Schema.resolve()
+
+    case ExJsonSchema.Validator.validate(schema, args) do
+      :ok ->
+        :ok
+
+      {:error, errors} ->
+        details = Enum.map_join(errors, "; ", fn {msg, path} -> "#{path}: #{msg}" end)
+        {:error, "invalid arguments: " <> details}
+    end
+  rescue
+    _ -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   defp reporter(tool_call, emit) do

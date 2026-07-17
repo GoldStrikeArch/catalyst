@@ -11,6 +11,7 @@ defmodule Catalyst.Session.RunConfig do
   @doc "Assemble the loop config for `state`; `server` backs the steering/follow-up callbacks."
   def build(state, server) do
     %{
+      loop: resolve_loop(state),
       provider: resolve_provider(state),
       model: state.model,
       cwd: state.cwd,
@@ -20,6 +21,19 @@ defmodule Catalyst.Session.RunConfig do
       get_steering: fn -> drain(server, :drain_steering) end,
       get_follow_up: fn -> drain(server, :drain_follow_up) end
     }
+  end
+
+  @doc """
+  Resolve the loop module driving the run — data, not a hardcoded call: the
+  session's `opts[:loop]`, else the `:agent_loop` application env, else
+  `Catalyst.Agent.Loop`. An extension swaps the agent loop for every session with
+  `Application.put_env(:catalyst, :agent_loop, MyLoop)` (live on the next run)
+  and reverts by deleting the env; the module must export `run/4` with
+  `Catalyst.Agent.Loop`'s contract.
+  """
+  def resolve_loop(state) do
+    Keyword.get(state.opts || [], :loop) ||
+      Application.get_env(:catalyst, :agent_loop, Catalyst.Agent.Loop)
   end
 
   @doc """

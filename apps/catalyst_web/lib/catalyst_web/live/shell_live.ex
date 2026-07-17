@@ -13,31 +13,17 @@ defmodule CatalystWeb.ShellLive do
   through `CatalystWeb.UI.MessageRenderer`, so the UI is runtime-extensible.
   """
   use CatalystWeb, :live_view
+  require Logger
 
   alias Catalyst.Message
   alias Catalyst.Agent.Event
   alias Catalyst.Session.{Manager, Server}
   alias CatalystWeb.{Assets, UI}
 
-  @system_prompt """
-  You are Catalyst, a concise coding agent running on the user's machine.
-  You can read files, run shell commands, search with ripgrep, find files with fd,
-  edit files, replace text with sd, and make structural edits with ast-grep.
-  Prefer using tools to inspect the repository before answering. Keep replies short.
-
-  Self-extension: if you need a capability no built-in tool provides, you can write a
-  new tool for yourself by calling `develop_tool` with an Elixir module that
-  `use Catalyst.Tools.Tool` and implements name/0, description/0, parameters/0 (a JSON
-  Schema object) and execute/2. In execute(args, ctx): resolve paths with
-  Catalyst.Tools.Paths.resolve(path, ctx.cwd), return result("text", %{}), and raise on
-  failure. Namespace modules under Catalyst.Ext.*. The new tool is loaded immediately and
-  callable on your next turn. Only do this when an existing tool can't do the job. For the
-  full contract, helpers and examples, read the guide at ~/.catalyst/guide.md.
-
-  Debugging: if a step fails or behaves unexpectedly, call `read_log` to see this session's
-  debug log (every agent-loop step, tool call, and truncated LLM request/response and error)
-  before deciding what to do next.
-  """
+  # The system prompt is intentionally NOT set here: leaving the session's
+  # :system_prompt nil makes Session.Server resolve Catalyst.SystemPrompt.get/0
+  # fresh on every run (~/.catalyst/system_prompt.md override → built-in default),
+  # so the prompt is editable data, not compiled-in UI code.
 
   @impl true
   def mount(_params, _session, socket) do
@@ -53,10 +39,16 @@ defmodule CatalystWeb.ShellLive do
         logged_in: Catalyst.Auth.logged_in?(),
         login_state: :idle,
         login_ref: nil,
+        boot_status: Catalyst.Extensions.boot_status(),
         provider: :demo,
         model_label: "Demo (offline)",
         session_id: nil,
         session_pid: nil,
+        # Monitor on the attached session, so a replaced/crashed session leads
+        # to a graceful reattach instead of calls to a dead pid.
+        session_ref: nil,
+        # Dedup window for events re-received right after a reattach.
+        replayed_tail: [],
         cwd: default_cwd(),
         # Conversation is a LiveView stream (append-only), so the socket never
         # retains the full transcript. `message_seq` is a monotonic counter used
@@ -102,8 +94,15 @@ defmodule CatalystWeb.ShellLive do
         {:noreply, set_cwd(socket, text |> String.replace_prefix("/cd ", "") |> String.trim())}
 
       true ->
-        Server.prompt(socket.assigns.session_pid, text)
-        {:noreply, socket |> assign_input("") |> assign(running: true)}
+        try do
+          Server.prompt(socket.assigns.session_pid, text)
+          {:noreply, socket |> assign_input("") |> assign(running: true)}
+        catch
+          # The session died (e.g. another window replaced it) — the :DOWN
+          # handler reattaches; keep the typed text so nothing is lost.
+          :exit, _reason ->
+            {:noreply, put_flash(socket, :error, "Session is restarting — try again.")}
+        end
     end
   end
 
@@ -178,6 +177,22 @@ defmodule CatalystWeb.ShellLive do
      |> put_flash(:error, "Sign-in crashed.")}
   end
 
+  # The session this view is attached to died or was replaced (e.g. another
+  # window started a new one) — reattach to whatever is current instead of
+  # holding a dead pid (the next send would crash the LiveView).
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{assigns: %{session_ref: ref}} = socket) do
+    if id = socket.assigns.session_id do
+      Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
+    end
+
+    socket =
+      socket
+      |> assign(session_ref: nil, session_id: nil, session_pid: nil, running: false)
+      |> attach_or_start()
+
+    {:noreply, put_flash(socket, :info, "Session was replaced — reattached.")}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   # Overridable so tests can stub the OAuth flow.
@@ -207,16 +222,28 @@ defmodule CatalystWeb.ShellLive do
        do: push_stream_delta(socket, "thinking", d)
 
   defp apply_event(%Event.MessageEnd{message: message}, socket) do
-    streaming = if match?(%Message.Assistant{}, message), do: nil, else: socket.assigns.streaming
-    seq = socket.assigns.message_seq + 1
+    # A MessageEnd broadcast between reattach's subscribe and snapshot call
+    # arrives again here; duplicates form an in-order suffix of the replayed
+    # snapshot tail. Drop them; the first genuinely new message ends the window.
+    case split_replayed(socket.assigns.replayed_tail, :erlang.phash2(message)) do
+      {:duplicate, rest} ->
+        assign(socket, replayed_tail: rest)
 
-    socket
-    |> assign(
-      streaming: streaming,
-      message_seq: seq,
-      message_count: socket.assigns.message_count + 1
-    )
-    |> stream_insert(:messages, %{id: seq, msg: message})
+      :new ->
+        streaming =
+          if match?(%Message.Assistant{}, message), do: nil, else: socket.assigns.streaming
+
+        seq = socket.assigns.message_seq + 1
+
+        socket
+        |> assign(
+          streaming: streaming,
+          message_seq: seq,
+          message_count: socket.assigns.message_count + 1,
+          replayed_tail: []
+        )
+        |> stream_insert(:messages, %{id: seq, msg: message})
+    end
   end
 
   defp apply_event(%Event.ToolExecutionStart{call_id: id, name: name, args: args}, socket),
@@ -243,6 +270,15 @@ defmodule CatalystWeb.ShellLive do
   # A delta with no open bubble (e.g. reattached mid-stream) still gets one.
   defp ensure_streaming(socket) do
     if socket.assigns.streaming, do: socket, else: assign(socket, streaming: true)
+  end
+
+  defp split_replayed([], _hash), do: :new
+
+  defp split_replayed(tail, hash) do
+    case Enum.split_while(tail, &(&1 != hash)) do
+      {_skipped, [^hash | rest]} -> {:duplicate, rest}
+      _ -> :new
+    end
   end
 
   # ---- session lifecycle ----------------------------------------------------
@@ -272,17 +308,22 @@ defmodule CatalystWeb.ShellLive do
 
   # Rebuild the UI from the live server's snapshot: replay the transcript into
   # the stream and pick up an in-flight run (its events keep arriving via PubSub).
+  # Subscribe BEFORE snapshotting so no event can fall in between: anything
+  # broadcast before the snapshot answered arrives again via PubSub and is
+  # dropped by the replayed_tail dedup (see the MessageEnd apply_event clause).
   defp reattach_session(socket, id, pid, provider) do
-    snapshot = Server.state(pid)
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+    snapshot = Server.state(pid)
     {_mod, _model, label} = provider_config(provider)
 
     {socket, seq} =
-      Enum.reduce(snapshot.messages, {socket, 0}, fn msg, {sock, seq} ->
-        {stream_insert(sock, :messages, %{id: seq + 1, msg: msg}), seq + 1}
+      Enum.reduce(snapshot.messages, {stream(socket, :messages, [], reset: true), 0}, fn
+        msg, {sock, seq} -> {stream_insert(sock, :messages, %{id: seq + 1, msg: msg}), seq + 1}
       end)
 
-    assign(socket,
+    socket
+    |> monitor_session(pid)
+    |> assign(
       session_id: id,
       session_pid: pid,
       provider: provider,
@@ -292,11 +333,14 @@ defmodule CatalystWeb.ShellLive do
       streaming: nil,
       tools: %{},
       message_seq: seq,
-      message_count: seq
+      message_count: seq,
+      replayed_tail: snapshot.messages |> Enum.take(-10) |> Enum.map(&:erlang.phash2/1)
     )
   catch
     # The server died between whereis and the state call — start fresh.
-    kind, _reason when kind in [:exit, :error] -> start_session(socket, :demo)
+    kind, _reason when kind in [:exit, :error] ->
+      Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
+      start_session(socket, :demo)
   end
 
   defp start_session(socket, provider) do
@@ -311,14 +355,14 @@ defmodule CatalystWeb.ShellLive do
       Manager.start_session(
         cwd: socket.assigns.cwd,
         provider: provider_mod,
-        model: model,
-        system_prompt: @system_prompt
+        model: model
       )
 
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
     remember_session(id, provider)
 
     socket
+    |> monitor_session(pid)
     |> assign(
       session_id: id,
       session_pid: pid,
@@ -329,10 +373,18 @@ defmodule CatalystWeb.ShellLive do
       tools: %{},
       message_seq: 0,
       message_count: 0,
+      replayed_tail: [],
       input: "",
       chat_form: chat_form("")
     )
     |> stream(:messages, [], reset: true)
+  end
+
+  # One monitor per attached session: the :DOWN handler reattaches gracefully
+  # when the session is stopped from elsewhere (another window) or crashes.
+  defp monitor_session(socket, pid) do
+    if ref = socket.assigns.session_ref, do: Process.demonitor(ref, [:flush])
+    assign(socket, session_ref: Process.monitor(pid))
   end
 
   defp provider_config(:codex) do
@@ -472,11 +524,26 @@ defmodule CatalystWeb.ShellLive do
           </div>
         </header>
 
+        <div
+          :if={@boot_status != :ok}
+          class="border-b border-amber-300/60 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          ⚠ Extensions were not loaded — {boot_status_reason(@boot_status)}. Fix the files in
+          ~/.catalyst/extensions (or remove the offender), then ask the agent to run <code class="font-mono">reload_extensions</code>.
+        </div>
+
         {render_active_page(assigns)}
       </div>
     </Layouts.app>
     """
   end
+
+  defp boot_status_reason({:safe_mode, :env}), do: "CATALYST_SAFE_MODE is set"
+
+  defp boot_status_reason({:safe_mode, :crash_detected}),
+    do: "the previous boot crashed while extensions were active"
+
+  defp boot_status_reason(_), do: "safe mode"
 
   defp provider_button_class(active?) do
     [
@@ -488,10 +555,26 @@ defmodule CatalystWeb.ShellLive do
     ]
   end
 
-  # Render the active page from the registry (falling back to chat).
+  # Render the active page from the registry (falling back to chat). A broken
+  # extension page must not crash-loop the LiveView — recovery (asking the
+  # agent to reload_extensions) needs the very chat UI it would take down.
   defp render_active_page(assigns) do
     {mod, fun} = UI.Registry.fetch_page(assigns.page) || {CatalystWeb.Pages.ChatPage, :render}
-    apply(mod, fun, [assigns])
+
+    try do
+      apply(mod, fun, [assigns])
+    rescue
+      e ->
+        Logger.warning(
+          "[ui] page #{inspect(mod)}.#{fun} raised: #{Exception.message(e)} — falling back to chat"
+        )
+
+        CatalystWeb.Pages.ChatPage.render(assigns)
+    catch
+      kind, reason ->
+        Logger.warning("[ui] page #{inspect(mod)}.#{fun} #{kind}: #{inspect(reason)}")
+        CatalystWeb.Pages.ChatPage.render(assigns)
+    end
   end
 
   # Render every component registered for a named slot.
@@ -500,8 +583,22 @@ defmodule CatalystWeb.ShellLive do
 
     ~H"""
     <%= for fun <- @__slot_funs__ do %>
-      {fun.(assigns)}
+      {safe_component(fun, assigns)}
     <% end %>
     """
+  end
+
+  # A broken extension slot component renders as nothing rather than crashing
+  # the whole shell on every render.
+  defp safe_component(fun, assigns) do
+    fun.(assigns)
+  rescue
+    e ->
+      Logger.warning("[ui] slot component raised: #{Exception.message(e)}")
+      nil
+  catch
+    kind, reason ->
+      Logger.warning("[ui] slot component #{kind}: #{inspect(reason)}")
+      nil
   end
 end

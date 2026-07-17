@@ -17,6 +17,14 @@ defmodule Catalyst.Tools.Truncate do
           total_bytes: non_neg_integer()
         }
 
+  @doc "Default line budget for tool output."
+  @spec default_max_lines() :: pos_integer()
+  def default_max_lines, do: @default_max_lines
+
+  @doc "Default byte budget for tool output."
+  @spec default_max_bytes() :: pos_integer()
+  def default_max_bytes, do: @default_max_bytes
+
   @doc "Keep the first lines/bytes within budget."
   @spec head(String.t(), keyword()) :: {String.t(), info()}
   def head(content, opts \\ []) when is_binary(content) do

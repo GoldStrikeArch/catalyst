@@ -38,7 +38,8 @@ defmodule Catalyst.ExtensionAPI do
   self-call; hooks/providers/UI register purgers here.)
   """
   def register_purger(fun) when is_function(fun, 1) do
-    :persistent_term.put({__MODULE__, :purgers}, [fun | purgers()])
+    # Dedup: subsystems re-wire on restart; the same capture must not stack.
+    :persistent_term.put({__MODULE__, :purgers}, Enum.uniq([fun | purgers()]))
   end
 
   @doc "Run every registered purger for `owner`."
@@ -67,6 +68,14 @@ defmodule Catalyst.ExtensionAPI do
 
   def register_page(api, path, module, opts \\ []), do: dispatch(api, :page, [path, module, opts])
   def register_command(api, name, opts \\ []), do: dispatch(api, :command, [name, opts])
+
+  @doc """
+  Start a supervised, owner-tagged process (any child spec) under
+  `Catalyst.Extensions.Processes`. Purging/reloading the extension terminates it
+  — use this for watchers, pollers, client connections, and other long-lived
+  extension processes instead of unsupervised `spawn`.
+  """
+  def start_child(api, child_spec), do: dispatch(api, :process, [child_spec])
 
   defp dispatch(%__MODULE__{} = api, kind, args) do
     case :persistent_term.get({__MODULE__, :kind, kind}, nil) do

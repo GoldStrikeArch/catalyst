@@ -33,6 +33,9 @@ defmodule Catalyst.Session.Server do
       # Ref identifying the CURRENT run; events from killed/finished runs that
       # are still buffered in the mailbox carry a stale ref and are dropped.
       :run_ref,
+      # Whether the current run's AgentEnd was folded/broadcast — lets abort
+      # tell "run finished cleanly" from "its tail events got dropped".
+      agent_ended: false,
       messages: [],
       streaming_message: nil,
       pending_tool_calls: MapSet.new(),
@@ -139,9 +142,17 @@ defmodule Catalyst.Session.Server do
     state = %{state | run_ref: nil}
 
     state =
-      case shutdown_run(task) do
-        {:ok, _result} -> %{state | run: nil}
-        _ -> handle_failure(%{state | run: nil}, :killed)
+      case {shutdown_run(task), state.agent_ended} do
+        # Task completed AND its AgentEnd was already folded — nothing was lost.
+        {{:ok, _result}, true} ->
+          %{state | run: nil}
+
+        # Killed, or completed with its tail events (final MessageEnd/AgentEnd)
+        # queued behind this abort and dropped as stale: synthesize the aborted
+        # turn so streaming/pending state is reset and subscribers always get
+        # an AgentEnd (the UI unlocks input on it).
+        _ ->
+          handle_failure(%{state | run: nil}, :killed)
       end
 
     {:noreply, state}
@@ -165,7 +176,7 @@ defmodule Catalyst.Session.Server do
     Catalyst.Debug.log_event(state.id, event)
     state = Reducer.reduce(event, state)
     broadcast(state, event)
-    {:noreply, state}
+    {:noreply, track_agent_end(state, event)}
   end
 
   # Stale event from an aborted/replaced run — drop it.
@@ -200,17 +211,30 @@ defmodule Catalyst.Session.Server do
   defp start_run(state, prompts) do
     server = self()
     run_ref = make_ref()
-    context = %{system_prompt: state.system_prompt, messages: state.messages}
+
+    # Both resolve fresh per run, as data: the system prompt falls back to
+    # ~/.catalyst/system_prompt.md (then the built-in default), and the loop
+    # module comes from RunConfig (session opt → :agent_loop env → Agent.Loop) —
+    # so prompt edits and loop swaps take effect on the next run, no restart.
+    context = %{
+      system_prompt: state.system_prompt || Catalyst.SystemPrompt.get(),
+      messages: state.messages
+    }
+
     config = RunConfig.build(state, server)
+    loop = Map.get(config, :loop, Loop)
     emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
 
     task =
       Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-        Loop.run(prompts, context, config, emit)
+        loop.run(prompts, context, config, emit)
       end)
 
-    %{state | run: task, run_ref: run_ref, error_message: nil}
+    %{state | run: task, run_ref: run_ref, agent_ended: false, error_message: nil}
   end
+
+  defp track_agent_end(state, %Event.AgentEnd{}), do: %{state | agent_ended: true}
+  defp track_agent_end(state, _event), do: state
 
   defp handle_failure(state, reason) do
     Catalyst.Debug.log(

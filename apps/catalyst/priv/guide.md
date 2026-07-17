@@ -369,12 +369,30 @@ and a `setup(api)` callback. Inside `setup/1`, register any mix of:
   `register_renderer(api, :message, match_fun, render_fun)` overrides how a message or
   tool result is shown; `register_component(api, :header_extra, fun)` adds a header/
   sidebar/footer widget. Render functions are `Phoenix.Component`s.
+- **Processes** — `Catalyst.ExtensionAPI.start_child(api, child_spec)` starts a
+  long-lived process (watcher, poller, client connection) under a supervisor owned by
+  your extension. Never use a bare `spawn`: supervised children are restarted on crash
+  and torn down when your extension is purged/reloaded.
 
 Everything you register is tagged with the file's name (its *owner*); reinstalling the
-same file purges its old contributions first, so reloads never duplicate. Installs are
-git-committed: **`rollback_extension`** reverts the last change, **`reload_extensions`**
-reloads from disk, and booting with `CATALYST_SAFE_MODE=1` loads only built-ins if an
-extension misbehaves.
+same file purges its old contributions first, so reloads never duplicate — including
+**module definitions**: modules your file compiled are removed from the VM on purge, and
+a module that shadowed one shipping with the app is restored from its original beam.
+Installs are git-committed: **`rollback_extension`** reverts the last change,
+**`reload_extensions`** reloads from disk. Safe mode loads only built-ins: set
+`CATALYST_SAFE_MODE=1` manually, or it engages **automatically** when the previous boot
+crashed while extensions were active (a boot-marker file detects it; a successful
+`reload_extensions` clears it, and the UI shows a banner while it is active).
+
+### The system prompt and the agent loop are data too
+
+- **System prompt** — writing `~/.catalyst/system_prompt.md` replaces the built-in
+  system prompt from the **next run** onward (no reload of any kind); delete the file to
+  restore the default. Blank files are ignored.
+- **Agent loop** — `Application.put_env(:catalyst, :agent_loop, MyLoop)` swaps the loop
+  module for every subsequent run (`MyLoop.run/4` must follow `Catalyst.Agent.Loop`'s
+  contract); `Application.delete_env(:catalyst, :agent_loop)` reverts to the built-in.
+  Prefer this (data, reversible) over redefining `Catalyst.Agent.Loop` in place.
 
 ### Applying UI changes
 | Change | How to apply |

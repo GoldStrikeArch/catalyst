@@ -39,6 +39,7 @@ defmodule Catalyst.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:phoenix_pubsub, "~> 2.1"},
       {:jason, "~> 1.4"},
+      {:ex_json_schema, "~> 0.10"},
       {:muontrap, "~> 1.0"},
       {:finch, "~> 0.19"},
       {:req, "~> 0.5"},

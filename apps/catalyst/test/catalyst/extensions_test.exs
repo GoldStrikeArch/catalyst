@@ -203,6 +203,96 @@ defmodule Catalyst.ExtensionsTest do
     assert Extensions.fetch("ephemeral_tool") == nil
   end
 
+  test "purging an extension removes its modules from the VM" do
+    source = ~S'''
+    defmodule Catalyst.Ext.VanishingTool do
+      use Catalyst.Tools.Tool
+      @impl true
+      def name, do: "vanishing_tool"
+      @impl true
+      def description, do: "test tool"
+      @impl true
+      def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+      @impl true
+      def execute(_args, _ctx), do: result("ok")
+    end
+    '''
+
+    path = write_ext("vanishing", source)
+    assert {:ok, _} = Extensions.load_file(path)
+    assert Code.ensure_loaded?(Catalyst.Ext.VanishingTool)
+
+    File.rm!(path)
+    capture_log(fn -> Extensions.load_all() end)
+
+    # Not just unregistered — the module itself is gone from the VM.
+    refute Code.ensure_loaded?(Catalyst.Ext.VanishingTool)
+    assert Extensions.fetch("vanishing_tool") == nil
+  end
+
+  test "purging an extension that shadowed a module restores the original beam" do
+    # Put an "original" beam on the code path, as the release's ebin would be.
+    tmp_ebin =
+      Path.join(System.tmp_dir!(), "catalyst_shadow_ebin_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(tmp_ebin)
+
+    [{mod, bin}] =
+      capture_log_compile(~S'''
+      defmodule Catalyst.Ext.Shadowed do
+        def version, do: :original
+      end
+      ''')
+
+    File.write!(Path.join(tmp_ebin, "Elixir.Catalyst.Ext.Shadowed.beam"), bin)
+    true = :code.add_patha(String.to_charlist(tmp_ebin))
+
+    on_exit(fn ->
+      :code.del_path(String.to_charlist(tmp_ebin))
+      File.rm_rf!(tmp_ebin)
+      :code.purge(mod)
+      :code.delete(mod)
+    end)
+
+    assert Catalyst.Ext.Shadowed.version() == :original
+
+    # An extension redefines (shadows) it...
+    path =
+      write_ext("shadower", ~S'''
+      defmodule Catalyst.Ext.Shadowed do
+        def version, do: :shadowed
+      end
+      ''')
+
+    capture_log(fn -> assert {:ok, _} = Extensions.load_file(path) end)
+    assert Catalyst.Ext.Shadowed.version() == :shadowed
+
+    # ...and removing the extension restores the original code, not just the registry.
+    File.rm!(path)
+    capture_log(fn -> Extensions.load_all() end)
+    assert Catalyst.Ext.Shadowed.version() == :original
+  end
+
+  test "reloading the same file keeps its modules (no restore-clobber mid-reload)" do
+    on_exit(fn -> Extensions.uninstall("multikind") end)
+    path = write_ext("multikind", @multikind_source)
+
+    capture_log(fn ->
+      Extensions.load_file(path)
+      Extensions.load_file(path)
+    end)
+
+    assert Extensions.fetch("mk_tool") == Catalyst.Ext.MultiKindTool
+    assert Catalyst.Ext.MultiKindTool.execute(%{}, %{}).content
+  end
+
+  defp capture_log_compile(source) do
+    # Code.compile_string warns when redefining across runs; keep logs quiet.
+    import ExUnit.CaptureIO
+    {result, _io} = with_io(:stderr, fn -> Code.compile_string(source) end)
+    result
+  end
+
   test "a broken extension file registers nothing and returns an error" do
     source = ~S'''
     defmodule Catalyst.Ext.BrokenTool do

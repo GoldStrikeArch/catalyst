@@ -56,20 +56,21 @@ defmodule Catalyst.Tools.Ripgrep do
     case Exec.collect(rg, rg_args, cwd: ctx.cwd) do
       # rg: 0 = matches, 1 = no matches (both fine), >1 = real error
       {:ok, %{out: out, status: status}} when status in [0, 1] ->
-        matches = parse_matches(out)
-        limited? = length(matches) > limit
-        shown = Enum.take(matches, limit)
+        entries = parse_entries(out)
+        total_matches = Enum.count(entries, &match?({:match, _}, &1))
+        limited? = total_matches > limit
+        shown = take_matches(entries, limit)
         text = if shown == [], do: "No matches.", else: Enum.join(shown, "\n")
 
         text =
           if limited?,
-            do: text <> "\n... [showing first #{limit} of #{length(matches)} matches]",
+            do: text <> "\n... [showing first #{limit} of #{total_matches} matches]",
             else: text
 
         {body, info} = Truncate.head(text)
 
         result(Truncate.notice(body, info, :head), %{
-          match_count: length(shown),
+          match_count: min(total_matches, limit),
           match_limit_reached: limited?,
           truncation: info
         })
@@ -95,22 +96,40 @@ defmodule Catalyst.Tools.Ripgrep do
   defp add_kv(acc, nil, _flag), do: acc
   defp add_kv(acc, value, flag), do: acc ++ [flag, value]
 
-  defp parse_matches(out) do
+  defp parse_entries(out) do
     out
     |> String.split("\n", trim: true)
-    |> Enum.flat_map(&decode_match/1)
+    |> Enum.flat_map(&decode_entry/1)
   end
 
-  defp decode_match(line) do
+  # With --json, the lines requested via --context arrive as separate
+  # "context" records; render them grep-style (`path-line- text`) and keep
+  # them from counting toward the match limit.
+  defp decode_entry(line) do
     case Jason.decode(line) do
-      {:ok, %{"type" => "match", "data" => data}} ->
-        path = get_in(data, ["path", "text"])
-        n = data["line_number"]
-        text = data |> get_in(["lines", "text"]) |> to_string() |> String.trim_trailing("\n")
-        ["#{path}:#{n}: #{text}"]
-
-      _ ->
-        []
+      {:ok, %{"type" => "match", "data" => data}} -> [{:match, format_line(data, ":")}]
+      {:ok, %{"type" => "context", "data" => data}} -> [{:context, format_line(data, "-")}]
+      _ -> []
     end
+  end
+
+  defp format_line(data, sep) do
+    path = get_in(data, ["path", "text"])
+    n = data["line_number"]
+    text = data |> get_in(["lines", "text"]) |> to_string() |> String.trim_trailing("\n")
+    "#{path}#{sep}#{n}#{sep} #{text}"
+  end
+
+  # Keep entries in order until `limit` matches are included; context lines
+  # ride along without counting.
+  defp take_matches(entries, limit) do
+    {lines, _count} =
+      Enum.reduce_while(entries, {[], 0}, fn
+        {:match, line}, {acc, n} when n < limit -> {:cont, {[line | acc], n + 1}}
+        {:match, _line}, acc_n -> {:halt, acc_n}
+        {:context, line}, {acc, n} -> {:cont, {[line | acc], n}}
+      end)
+
+    Enum.reverse(lines)
   end
 end

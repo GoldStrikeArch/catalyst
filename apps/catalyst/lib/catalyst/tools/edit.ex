@@ -6,7 +6,7 @@ defmodule Catalyst.Tools.Edit do
   for structural edits use the `ast_grep` tool.)
   """
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.Paths
+  alias Catalyst.Tools.{Diff, Paths, Truncate}
 
   @impl true
   def execution_mode, do: :sequential
@@ -58,10 +58,18 @@ defmodule Catalyst.Tools.Edit do
     updated = apply_edits(original, edits)
     File.write!(abs, updated)
 
-    result("Applied #{length(edits)} edit(s) to #{abs}", %{
+    # The diff goes in the content too (not just details), so the model gets a
+    # self-verification signal without re-reading the file. Scrub + cap it:
+    # the file bytes may be invalid UTF-8 (JSON-encoding the transcript would
+    # crash) and one huge line appears twice in a diff, blowing the budget.
+    {diff, info} = original |> Diff.unified(updated) |> Truncate.scrub_utf8() |> Truncate.head()
+    diff = Truncate.notice(diff, info, :head)
+
+    result(String.trim_trailing("Applied #{length(edits)} edit(s) to #{abs}\n\n" <> diff), %{
       path: abs,
       bytes_before: byte_size(original),
-      bytes_after: byte_size(updated)
+      bytes_after: byte_size(updated),
+      diff: diff
     })
   end
 

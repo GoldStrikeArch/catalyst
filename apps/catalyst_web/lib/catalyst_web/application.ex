@@ -47,8 +47,13 @@ defmodule CatalystWeb.Application do
   # The boot-time extension load in :catalyst ran before this app wired the UI
   # kinds (:renderer/:component/:page) into ExtensionAPI, so any UI
   # registrations from extensions were dropped. Reload now that they resolve.
+  # reload_after_wiring/0 no-ops in safe mode (env or crash-detected) and never
+  # clears the BootGuard marker — only an explicit reload_extensions does that.
   defp reload_extensions do
-    unless Catalyst.Extensions.safe_mode?(), do: Catalyst.Extensions.load_all()
+    case Catalyst.Extensions.reload_after_wiring() do
+      {:skipped, status} -> Logger.info("extension reload skipped: #{inspect(status)}")
+      {:ok, _summaries} -> :ok
+    end
   rescue
     e -> Logger.warning("extension reload after UI wiring failed: #{Exception.message(e)}")
   end

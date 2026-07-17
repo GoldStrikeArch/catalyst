@@ -5,7 +5,13 @@ import Config
 config :catalyst,
   auth_path: Path.join(System.tmp_dir!(), "catalyst_test_auth.json"),
   sessions_root: Path.join(System.tmp_dir!(), "catalyst_test_sessions"),
-  extensions_dir: Path.join(System.tmp_dir!(), "catalyst_test_extensions")
+  extensions_dir: Path.join(System.tmp_dir!(), "catalyst_test_extensions"),
+  # Keep the boot marker + system-prompt override out of ~/.catalyst too (a
+  # stale "booting" marker in a shared location would flip test boots into
+  # safe mode); short stabilization so boot marks itself ok quickly.
+  boot_marker_path: Path.join(System.tmp_dir!(), "catalyst_test_boot_marker"),
+  system_prompt_path: Path.join(System.tmp_dir!(), "catalyst_test_system_prompt.md"),
+  boot_stable_ms: 50
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
