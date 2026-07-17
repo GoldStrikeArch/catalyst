@@ -132,6 +132,17 @@ defmodule CatalystWeb.UI.Registry do
     ArgumentError -> []
   end
 
+  @doc "The command entry registered under `name`. Returns `{:ok, entry}` or `:error`."
+  @spec fetch_command(String.t()) :: {:ok, map()} | :error
+  def fetch_command(name) do
+    case :ets.lookup(@table, {:command, name}) do
+      [] -> :error
+      entries -> {:ok, entries |> Enum.map(&elem(&1, 1)) |> Enum.max_by(& &1.seq)}
+    end
+  rescue
+    ArgumentError -> :error
+  end
+
   ## purge
 
   @doc "Remove every UI contribution made by `owner`."
@@ -144,6 +155,7 @@ defmodule CatalystWeb.UI.Registry do
   def init(:ok) do
     :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
     seed_builtin_pages()
+    seed_builtin_commands()
     wire()
     {:ok, %{seq: 0}}
   end
@@ -217,6 +229,21 @@ defmodule CatalystWeb.UI.Registry do
       entry = Map.merge(page, %{fun: :render, owner: nil, seq: 0})
       :ets.insert(@table, {{:page, page.path}, entry})
     end)
+  end
+
+  # Built-in chat commands live in the same registry extensions write to
+  # (dogfooding it, and making them introspectable/overridable): `ShellLive`
+  # dispatches every "/name [arg]" message through `fetch_command/1`.
+  defp seed_builtin_commands do
+    entry = %{
+      name: "cd",
+      owner: nil,
+      handler: &CatalystWeb.ShellLive.command_cd/2,
+      label: "/cd <path> — change the session working directory",
+      seq: 0
+    }
+
+    :ets.insert(@table, {{:command, "cd"}, entry})
   end
 
   defp wire do

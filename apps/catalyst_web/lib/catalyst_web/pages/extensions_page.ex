@@ -255,6 +255,12 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
           </div>
 
           <div class="flex flex-col gap-1.5 px-4 py-2.5 text-xs">
+            <p
+              :if={is_binary(ext.metadata[:description])}
+              class="text-slate-500 dark:text-slate-400"
+            >
+              {ext.metadata[:description]}
+            </p>
             <div :if={ext.tools != []} class="flex flex-wrap items-center gap-1.5">
               <span class="text-slate-400 dark:text-slate-500">tools</span>
               <code

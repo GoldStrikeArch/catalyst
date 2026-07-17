@@ -43,7 +43,10 @@ defmodule Catalyst.Agent.ToolRunner do
       end
 
     results = Enum.map(outcomes, & &1.message)
-    terminate? = Enum.any?(outcomes, & &1.terminate)
+    # The batch terminates the loop only when EVERY call asked to (PI parity:
+    # `toolResults.every((r) => r.terminate === true)`), so one terminating
+    # tool can't cut off siblings' pending work.
+    terminate? = outcomes != [] and Enum.all?(outcomes, & &1.terminate)
     {results, terminate?}
   end
 
@@ -237,16 +240,19 @@ defmodule Catalyst.Agent.ToolRunner do
     _kind, _reason -> :ok
   end
 
-  # Resolving a schema is expensive, so cache the result in :persistent_term.
-  # The key hashes the tool's current parameters: a hot-reloaded tool whose
-  # schema changed gets a fresh entry, while unchanged tools hit the cache.
+  # Resolving a schema is expensive, so cache the result in :persistent_term,
+  # ONE entry per tool module holding {params_hash, resolved}: a hot-reloaded
+  # tool whose schema changed REPLACES its entry (hash mismatch → re-resolve)
+  # instead of accumulating one permanent entry per schema version, while
+  # unchanged tools hit the cache.
   defp resolved_schema(module) do
     params = module.parameters()
-    key = {__MODULE__, module, :erlang.phash2(params)}
+    key = {__MODULE__, module}
+    hash = :erlang.phash2(params)
 
     case :persistent_term.get(key, :unresolved) do
-      :unresolved -> cache_schema(key, params)
-      cached -> cached
+      {^hash, resolved} -> resolved
+      _missing_or_stale -> cache_schema(key, hash, params)
     end
   rescue
     _ -> :error
@@ -254,9 +260,9 @@ defmodule Catalyst.Agent.ToolRunner do
     _kind, _reason -> :error
   end
 
-  defp cache_schema(key, params) do
+  defp cache_schema(key, hash, params) do
     resolved = resolve_schema(params)
-    :persistent_term.put(key, resolved)
+    :persistent_term.put(key, {hash, resolved})
     resolved
   end
 

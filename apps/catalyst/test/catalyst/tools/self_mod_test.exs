@@ -270,9 +270,45 @@ defmodule Catalyst.Tools.SelfModTest do
     end
   end
 
-  # RollbackTool itself just delegates to Versioning + load_all; exercised via the
-  # Versioning round-trip above. Reference it so the module is covered/loaded.
-  test "rollback tool is available" do
-    assert RollbackTool.name() == "rollback_extension"
+  @rb_probe ~S'''
+  defmodule Catalyst.Ext.RbProbe do
+    use Catalyst.Tools.Tool
+    @impl true
+    def name, do: "rb_probe"
+    @impl true
+    def description, do: "rollback probe tool"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+    @impl true
+    def execute(_args, _ctx), do: result("ok")
+  end
+  '''
+
+  @tag :git
+  test "the rollback_extension tool reverts the newest install end-to-end", %{ctx: ctx} do
+    if Versioning.available?() do
+      capture_log(fn ->
+        {:ok, _summary} = Installer.install("rb_probe", @rb_probe, "install")
+        assert {:ok, _mod} = Extensions.fetch("rb_probe")
+
+        res = RollbackTool.execute(%{}, ctx)
+        assert res.content |> hd() |> Map.get(:text) =~ "Rolled back"
+
+        # The tool is gone from the live registry AND its source is reverted.
+        assert Extensions.fetch("rb_probe") == :error
+        refute File.exists?(Path.join(Extensions.dir(), "rb_probe.ex"))
+      end)
+    end
+  end
+
+  @tag :git
+  test "the rollback_extension tool raises cleanly when there is nothing to revert", %{ctx: ctx} do
+    if Versioning.available?() do
+      Versioning.ensure_repo(Extensions.dir())
+
+      assert_raise RuntimeError, ~r/Rollback failed/, fn ->
+        RollbackTool.execute(%{}, ctx)
+      end
+    end
   end
 end

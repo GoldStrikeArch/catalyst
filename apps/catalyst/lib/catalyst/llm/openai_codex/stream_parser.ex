@@ -132,13 +132,18 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
         %{s | blocks: [block | s.blocks], current: nil}
 
       "message" ->
-        text = current_text(s) |> default(message_text(item))
+        # The done item carries the COMPLETE text — authoritative over the
+        # accumulated deltas (a dropped delta frame would otherwise silently
+        # truncate the message).
+        text = message_text(item) |> default(current_text(s) || "")
         sink.(%Event.TextEnd{})
         %{s | blocks: [%Content.Text{text: text} | s.blocks], current: nil}
 
       "function_call" ->
         {id, name, partial} = current_tool(s, item)
-        args = decode_args(partial, item["arguments"])
+        # Same authority rule: the done item's full `arguments` string beats
+        # the accumulated deltas (dropped frame ⇒ corrupt/empty args).
+        args = decode_args(item["arguments"], partial)
         sink.(%Event.ToolCallEnd{id: id, name: name, arguments: args})
 
         %{

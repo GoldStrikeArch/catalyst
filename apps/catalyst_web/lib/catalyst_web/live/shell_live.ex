@@ -148,13 +148,12 @@ defmodule CatalystWeb.ShellLive do
       is_nil(socket.assigns.session_pid) ->
         {:noreply, put_flash(socket, :error, "No active session — click New to start one.")}
 
-      # A bare `/cd` is a mistyped command, not a prompt for the model.
-      text == "/cd" ->
-        {:noreply, put_flash(socket, :error, "usage: /cd <path>")}
-
-      # `/cd <path>` points the session at a different working directory.
-      String.starts_with?(text, "/cd ") ->
-        {:noreply, set_cwd(socket, text |> String.replace_prefix("/cd ", "") |> String.trim())}
+      # "/name [arg]" dispatches through the commands registry (built-ins like
+      # /cd are seeded there; extensions add their own via register_command).
+      # Text merely starting with "/" (e.g. "/etc/passwd holds…") stays a prompt.
+      match?({:ok, _name, _arg}, parse_command(text)) ->
+        {:ok, name, arg} = parse_command(text)
+        {:noreply, run_command(name, arg, socket)}
 
       true ->
         try do
@@ -357,20 +356,25 @@ defmodule CatalystWeb.ShellLive do
 
   defp assign_input(socket, text), do: assign(socket, chat_form: chat_form(text))
 
+  # `streaming` is nil (no open bubble) or a seed map %{thinking, text} — the
+  # content rendered INTO the bubble on its first paint. Subsequent deltas are
+  # push_event'd and appended client-side (the bubble is phx-update="ignore",
+  # so LiveView never repaints over the appended text). A stale MessageStart
+  # replayed around a reattach must not blank an already-seeded bubble.
   defp apply_event(%Event.MessageStart{message: %Message.Assistant{}}, socket),
-    do: assign(socket, streaming: true)
+    do: assign(socket, streaming: socket.assigns.streaming || empty_stream_seed())
 
   defp apply_event(
-         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{}},
+         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{delta: delta}},
          socket
        ),
-       do: ensure_streaming(socket)
+       do: socket |> ensure_streaming() |> push_stream_delta("text", delta)
 
   defp apply_event(
-         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.ThinkingDelta{}},
+         %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.ThinkingDelta{delta: delta}},
          socket
        ),
-       do: ensure_streaming(socket)
+       do: socket |> ensure_streaming() |> push_stream_delta("thinking", delta)
 
   defp apply_event(%Event.MessageEnd{message: message}, socket) do
     # A MessageEnd broadcast between reattach's subscribe and snapshot call
@@ -403,6 +407,19 @@ defmodule CatalystWeb.ShellLive do
   defp apply_event(%Event.ToolExecutionStart{call_id: id, name: name, args: args}, socket),
     do: assign(socket, tools: Map.put(socket.assigns.tools, id, %{name: name, args: args}))
 
+  # Live partial output (bash streams a throttled tail via ctx.report) shown
+  # under the tool spinner. Updates for unknown call ids (already ended, or
+  # started before a reattach) are dropped.
+  defp apply_event(%Event.ToolExecutionUpdate{call_id: id, partial: partial}, socket) do
+    case socket.assigns.tools do
+      %{^id => info} = tools ->
+        assign(socket, tools: Map.put(tools, id, Map.put(info, :partial, partial_text(partial))))
+
+      _unknown ->
+        socket
+    end
+  end
+
   defp apply_event(%Event.ToolExecutionEnd{call_id: id}, socket),
     do: assign(socket, tools: Map.delete(socket.assigns.tools, id))
 
@@ -420,12 +437,21 @@ defmodule CatalystWeb.ShellLive do
 
   defp apply_event(_event, socket), do: socket
 
-  # A delta with no open bubble (e.g. reattached mid-stream) still gets a
-  # placeholder, but streamed text is only rendered once the assistant message
-  # finishes and flows through MessageRenderer as a complete response.
+  # A delta with no open bubble (e.g. reattached mid-stream) opens one.
   defp ensure_streaming(socket) do
-    if socket.assigns.streaming, do: socket, else: assign(socket, streaming: true)
+    if socket.assigns.streaming,
+      do: socket,
+      else: assign(socket, streaming: empty_stream_seed())
   end
+
+  defp empty_stream_seed, do: %{thinking: "", text: ""}
+
+  defp partial_text(%{output: out}) when is_binary(out), do: out
+  defp partial_text(out) when is_binary(out), do: out
+  defp partial_text(_other), do: nil
+
+  defp push_stream_delta(socket, kind, delta),
+    do: push_event(socket, "stream_delta", %{kind: kind, delta: delta})
 
   defp split_replayed([], _hash), do: :new
 
@@ -618,8 +644,10 @@ defmodule CatalystWeb.ShellLive do
     |> replay_transcript(pid)
     |> sync_codex_ui()
   catch
-    # The server died between whereis and the state call — start fresh.
-    kind, _reason when kind in [:exit, :error] ->
+    # The server died between whereis and the state call (GenServer.call
+    # exits) — start fresh. ONLY :exit: an :error here is a real bug in the
+    # replay code and must crash visibly, not masquerade as transcript loss.
+    :exit, _reason ->
       Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
       start_session(socket)
   end
@@ -630,6 +658,7 @@ defmodule CatalystWeb.ShellLive do
   # dead pid (`Server.state/1` exits).
   defp replay_transcript(socket, pid) do
     snapshot = Server.state(pid)
+    flush_stale_deltas(snapshot.id)
 
     {socket, seq} =
       Enum.reduce(snapshot.messages, {stream(socket, :messages, [], reset: true), 0}, fn
@@ -651,11 +680,38 @@ defmodule CatalystWeb.ShellLive do
     |> seed_streaming(snapshot.streaming_message)
   end
 
-  # Rebuild only the in-flight placeholder. The session still accumulates the
-  # streamed content internally; the UI renders it after the final MessageEnd.
-  defp seed_streaming(socket, %Message.Assistant{}), do: assign(socket, streaming: true)
+  # Rebuild the in-flight bubble from the snapshot's accumulated partial
+  # content — a late joiner (reattach, page return) sees the text streamed so
+  # far, and deltas arriving after the snapshot append client-side on top.
+  defp seed_streaming(socket, %Message.Assistant{content: content}) do
+    seed = %{
+      thinking:
+        content
+        |> Enum.filter(&match?(%Catalyst.Content.Thinking{}, &1))
+        |> Enum.map_join("", & &1.thinking),
+      text:
+        content
+        |> Enum.filter(&match?(%Catalyst.Content.Text{}, &1))
+        |> Enum.map_join("", & &1.text)
+    }
+
+    assign(socket, streaming: seed)
+  end
 
   defp seed_streaming(socket, _none), do: socket
+
+  # After `Server.state/1` returns, every MessageUpdate already in our mailbox
+  # is ≤ the snapshot (the session server both dispatches the PubSub sends and
+  # answers the call, and per-pair message order is guaranteed) — appending
+  # those deltas onto the seeded bubble would duplicate text. Anything arriving
+  # after this flush is genuinely newer than the snapshot.
+  defp flush_stale_deltas(id) do
+    receive do
+      {:agent_event, ^id, %Event.MessageUpdate{}} -> flush_stale_deltas(id)
+    after
+      0 -> :ok
+    end
+  end
 
   defp start_session(socket) do
     if old_id = socket.assigns.session_id do
@@ -886,6 +942,51 @@ defmodule CatalystWeb.ShellLive do
     else
       put_flash(socket, :error, "Not a directory: #{expanded}")
     end
+  end
+
+  # ---- chat commands --------------------------------------------------------
+
+  @doc "The built-in `/cd` command (seeded into `UI.Registry` at boot)."
+  def command_cd("", socket), do: put_flash(socket, :error, "usage: /cd <path>")
+  def command_cd(path, socket), do: set_cwd(socket, path)
+
+  # "/name" or "/name arg…" where name is a bare word — anything else (like a
+  # unix path) is not a command attempt and falls through to the model.
+  defp parse_command(text) do
+    case Regex.run(~r/^\/([a-z0-9_-]+)(?:\s+(.*))?$/s, text) do
+      [_, name] -> {:ok, name, ""}
+      [_, name, arg] -> {:ok, name, String.trim(arg)}
+      nil -> :error
+    end
+  end
+
+  # Handlers are `fun(arg, socket) -> socket` and crash-isolated: a broken
+  # extension command flashes an error instead of taking down the LiveView.
+  defp run_command(name, arg, socket) do
+    case UI.Registry.fetch_command(name) do
+      {:ok, %{handler: handler}} when is_function(handler, 2) ->
+        safe_command(handler, arg, socket)
+
+      {:ok, _entry_without_handler} ->
+        put_flash(socket, :error, "command /#{name} has no handler")
+
+      :error ->
+        known =
+          UI.Registry.list_commands()
+          |> Enum.map(&("/" <> &1.name))
+          |> Enum.sort()
+          |> Enum.join(", ")
+
+        put_flash(socket, :error, "unknown command /#{name} (known: #{known})")
+    end
+  end
+
+  defp safe_command(handler, arg, socket) do
+    %Phoenix.LiveView.Socket{} = handler.(arg, socket)
+  rescue
+    e -> put_flash(socket, :error, "command failed: #{Exception.message(e)}")
+  catch
+    kind, reason -> put_flash(socket, :error, "command failed: #{kind} #{inspect(reason)}")
   end
 
   # ---- render ---------------------------------------------------------------

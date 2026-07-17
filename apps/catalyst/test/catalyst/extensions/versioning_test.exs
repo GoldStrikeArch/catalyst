@@ -19,6 +19,34 @@ defmodule Catalyst.Extensions.VersioningTest do
   end
 
   @tag :git
+  test "commit_paths stages only the named file, leaving unrelated edits uncommitted" do
+    if Versioning.available?() do
+      dir = tmp_repo!("scoped")
+      mine = Path.join(dir, "mine.ex")
+      other = Path.join(dir, "other.ex")
+      File.write!(mine, "# mine v1\n")
+      File.write!(other, "# other, mid-edit\n")
+
+      assert :ok = Versioning.commit_paths(dir, [mine], "install mine")
+
+      # `other.ex` was dirty during the commit but is NOT part of it.
+      {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: dir)
+      assert status =~ "other.ex"
+      refute status =~ "mine.ex"
+
+      {shown, 0} = System.cmd("git", ["show", "--name-only", "--format=%s", "HEAD"], cd: dir)
+      assert shown =~ "install mine"
+      assert shown =~ "mine.ex"
+      refute shown =~ "other.ex"
+
+      # Byte-identical re-commit is a no-op, not an empty commit.
+      assert :ok = Versioning.commit_paths(dir, [mine], "install mine again")
+      {subject, 0} = System.cmd("git", ["log", "-1", "--format=%s"], cd: dir)
+      assert String.trim(subject) == "install mine"
+    end
+  end
+
+  @tag :git
   test "repeated rollbacks walk the change history LIFO instead of toggling" do
     if Versioning.available?() do
       dir = tmp_repo!("lifo")

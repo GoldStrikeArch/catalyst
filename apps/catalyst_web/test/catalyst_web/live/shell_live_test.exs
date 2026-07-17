@@ -107,7 +107,7 @@ defmodule CatalystWeb.ShellLiveTest do
     assert has_element?(view, "#message-stream")
   end
 
-  test "streaming shows a loader and hides partial deltas until the final assistant message",
+  test "streaming pushes deltas to the client bubble, then the final message replaces it",
        %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
     id = session_id(view)
@@ -118,7 +118,14 @@ defmodule CatalystWeb.ShellLiveTest do
     )
 
     assert has_element?(view, "#streaming-message")
+    assert has_element?(view, "#streaming-message [data-stream=text]")
     assert render(view) =~ "Assistant is working"
+
+    send(
+      view.pid,
+      {:agent_event, id,
+       %Event.MessageUpdate{llm_event: %LLMEvent.ThinkingDelta{delta: "hmm…"}}}
+    )
 
     send(
       view.pid,
@@ -126,9 +133,11 @@ defmodule CatalystWeb.ShellLiveTest do
        %Event.MessageUpdate{llm_event: %LLMEvent.TextDelta{delta: "- partial `item`"}}}
     )
 
-    html = render(view)
-    assert html =~ "Assistant is working"
-    refute html =~ "partial"
+    # Each delta is push_event'd for the client-side append (the server render
+    # itself stays at the seed — LiveView never repaints the ignored bubble).
+    assert_push_event(view, "stream_delta", %{kind: "thinking", delta: "hmm…"})
+    assert_push_event(view, "stream_delta", %{kind: "text", delta: "- partial `item`"})
+    refute render(view) =~ "partial"
 
     final = %Message.Assistant{content: Content.text("- final `item`")}
     send(view.pid, {:agent_event, id, %Event.MessageEnd{message: final}})
@@ -137,6 +146,111 @@ defmodule CatalystWeb.ShellLiveTest do
     assert has_element?(view, "ul li")
     assert has_element?(view, "code", "item")
     assert render(view) =~ "final"
+  end
+
+  defmodule SlowStreamProvider do
+    @moduledoc """
+    Streams one text delta, then blocks until the test says finish — so the
+    session server genuinely holds an in-flight `streaming_message` while the
+    test exercises the late-joiner replay path.
+    """
+    @behaviour Catalyst.LLM.Provider
+
+    @impl true
+    def stream(model, _context, _opts, sink) do
+      sink.(%Catalyst.LLM.Event.TextDelta{delta: "already streamed"})
+      test = Application.fetch_env!(:catalyst_web, :slow_provider_test)
+      send(test, {:slow_provider, self()})
+
+      receive do
+        :finish -> :ok
+      end
+
+      {:ok,
+       %Message.Assistant{
+         content: Content.text("done"),
+         model: model && model.id,
+         stop_reason: :stop,
+         timestamp: Message.now()
+       }}
+    end
+  end
+
+  test "a mid-stream replay seeds the bubble with the accumulated partial text",
+       %{conn: conn} do
+    Application.put_env(:catalyst_web, :codex_provider_mod, SlowStreamProvider)
+    Application.put_env(:catalyst_web, :slow_provider_test, self())
+
+    on_exit(fn ->
+      Application.put_env(:catalyst_web, :codex_provider_mod, Catalyst.LLM.Demo)
+      Application.delete_env(:catalyst_web, :slow_provider_test)
+    end)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+    [{session_pid, _}] = Elixir.Registry.lookup(Catalyst.Session.Registry, id)
+
+    view |> form("#chat-form", %{"message" => "stream please"}) |> render_submit()
+    assert_receive {:slow_provider, provider_pid}, 5_000
+
+    # Wait for the delta cast to fold into the server's streaming state.
+    wait_until(fn ->
+      Server.state(session_pid).streaming_message != nil
+    end)
+
+    # Patch away and back: the chat replays from the snapshot — the bubble's
+    # server-rendered seed must carry the partial text a late joiner missed.
+    view |> element("a", "Extensions") |> render_click()
+    view |> element("a", "Chat") |> render_click()
+
+    html = render(view)
+    assert has_element?(view, "#streaming-message")
+    assert html =~ "already streamed"
+
+    send(provider_pid, :finish)
+
+    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
+  end
+
+  test "a replayed MessageEnd after a page round-trip is deduped, new ones are not",
+       %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+    submit_prompt(view, "run ls for me")
+
+    # Page away and back arms the replayed_tail dedup window from the snapshot.
+    view |> element("a", "Extensions") |> render_click()
+    view |> element("a", "Chat") |> render_click()
+
+    [{session_pid, _}] = Elixir.Registry.lookup(Catalyst.Session.Registry, id)
+    last = Catalyst.Session.Server.state(session_pid).messages |> List.last()
+    # A needle that survives markdown rendering (no backticks/formatting).
+    needle = "offline Demo provider"
+    assert Catalyst.Content.text_of(last.content) =~ needle
+    count = fn html -> length(String.split(html, needle)) - 1 end
+
+    before_count = count.(render(view))
+    assert before_count >= 1
+
+    # A duplicate broadcast (the reattach race) must NOT double-render...
+    send(view.pid, {:agent_event, id, %Event.MessageEnd{message: last}})
+    assert count.(render(view)) == before_count
+
+    # ...while a genuinely new message still renders (the window closed).
+    fresh = %Message.User{content: Content.text("brand new message")}
+    send(view.pid, {:agent_event, id, %Event.MessageEnd{message: fresh}})
+    assert render(view) =~ "brand new message"
+  end
+
+  defp wait_until(fun, tries \\ 50) do
+    cond do
+      fun.() -> :ok
+      tries == 0 -> flunk("condition never became true")
+      true ->
+        Process.sleep(20)
+        wait_until(fun, tries - 1)
+    end
   end
 
   test "tool execution indicators and results render immediately", %{conn: conn} do
@@ -150,6 +264,21 @@ defmodule CatalystWeb.ShellLiveTest do
 
     assert render(view) =~ "running"
     assert has_element?(view, "code", "grep")
+
+    # A streamed partial-output tail renders under the spinner.
+    send(
+      view.pid,
+      {:agent_event, id,
+       %Event.ToolExecutionUpdate{
+         call_id: "call-1",
+         name: "grep",
+         args: %{},
+         partial: %{output: "partial tail line"}
+       }}
+    )
+
+    assert render(view) =~ "partial tail line"
+    assert has_element?(view, "[data-tool-partial]")
 
     result = %Message.ToolResult{
       tool_call_id: "call-1",
@@ -213,6 +342,39 @@ defmodule CatalystWeb.ShellLiveTest do
 
     assert render(view) =~ "usage: /cd"
     # Nothing was sent to the agent.
+    assert has_element?(view, "#chat-empty-state")
+  end
+
+  test "an unknown /command flashes the known command list instead of prompting", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view |> form("#chat-form", %{"message" => "/nope now"}) |> render_submit()
+
+    html = render(view)
+    assert html =~ "unknown command /nope"
+    assert html =~ "/cd"
+    assert has_element?(view, "#chat-empty-state")
+  end
+
+  test "a runtime-registered command dispatches from the chat input", %{conn: conn} do
+    parent = self()
+
+    CatalystWeb.UI.Registry.register_command("ping_test",
+      owner: "cmd_test",
+      handler: fn arg, socket ->
+        send(parent, {:command_ran, arg})
+        Phoenix.LiveView.put_flash(socket, :info, "pong #{arg}")
+      end
+    )
+
+    on_exit(fn -> CatalystWeb.UI.Registry.unregister_owner("cmd_test") end)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view |> form("#chat-form", %{"message" => "/ping_test hello"}) |> render_submit()
+
+    assert_receive {:command_ran, "hello"}
+    assert render(view) =~ "pong hello"
     assert has_element?(view, "#chat-empty-state")
   end
 

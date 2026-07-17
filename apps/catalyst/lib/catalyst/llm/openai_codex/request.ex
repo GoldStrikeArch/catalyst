@@ -34,6 +34,14 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
     |> maybe_put_reasoning(opts[:reasoning_effort], opts[:reasoning_summary])
   end
 
+  @doc """
+  Responses `input` items for a message list (what `build/3` puts under
+  `"input"`). The websocket delta path uses this to encode ONLY the messages
+  the connection's `previous_response_id` doesn't already cover.
+  """
+  @spec input_items([Catalyst.Message.t()]) :: [map()]
+  def input_items(messages), do: convert_messages(messages)
+
   defp maybe_put(body, _key, nil), do: body
   defp maybe_put(body, key, value), do: Map.put(body, key, value)
 

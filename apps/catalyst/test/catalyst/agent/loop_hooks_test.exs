@@ -169,6 +169,55 @@ defmodule Catalyst.Agent.LoopHooksTest do
            end)
   end
 
+  test "prepare_next_turn also runs on a toolless (natural-stop) turn", %{tmp: tmp, owner: owner} do
+    parent = self()
+
+    Hooks.register(
+      :prepare_next_turn,
+      fn {context, config}, ctx ->
+        if ctx.cwd == tmp, do: send(parent, {:prepared, ctx.tool_results})
+        {:ok, {context, config}}
+      end,
+      owner: owner
+    )
+
+    run([{:text, "over"}], "go", tmp)
+
+    assert_receive {:prepared, []}
+  end
+
+  test "should_stop_after_turn on a natural stop also skips the follow-up queue", %{
+    tmp: tmp,
+    owner: owner
+  } do
+    parent = self()
+
+    Hooks.register(
+      :should_stop_after_turn,
+      fn ctx -> if ctx.cwd == tmp, do: true, else: :cont end,
+      owner: owner
+    )
+
+    config = %{
+      provider: Catalyst.LLM.Faux,
+      model: %Model{id: "faux", api: "faux", provider: "faux"},
+      cwd: tmp,
+      tools: Registry.default_tools(),
+      opts: [script: [{:text, "over"}]],
+      get_follow_up: fn ->
+        send(parent, :follow_up_drained)
+        [Message.user("queued")]
+      end
+    }
+
+    {:ok, msgs, _ctx} =
+      Loop.run([Message.user("go")], %{system_prompt: nil, messages: []}, config, fn _ -> :ok end)
+
+    # The hook vetoed continuing: one assistant turn, follow-ups untouched.
+    assert Enum.count(msgs, &match?(%Message.Assistant{}, &1)) == 1
+    refute_received :follow_up_drained
+  end
+
   test "event observers receive loop events", %{tmp: tmp, owner: owner} do
     pid = self()
     Hooks.on(fn ev -> send(pid, {:obs, ev}) end, owner: owner)

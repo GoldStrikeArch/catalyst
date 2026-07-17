@@ -265,6 +265,28 @@ defmodule Catalyst.ToolsTest do
     assert out =~ "a�b"
   end
 
+  test "bash streams a throttled partial-output tail through ctx.report", %{tmp: tmp} do
+    parent = self()
+    ctx = %{cwd: tmp, call_id: "t", report: fn partial -> send(parent, {:partial, partial}) end}
+
+    out = text(Bash.execute(%{"command" => "echo first; sleep 0.15; echo second"}, ctx))
+    assert out =~ "first"
+    assert out =~ "second"
+
+    # The first chunk reports immediately; the second lands after the 100ms
+    # throttle window, so it reports too.
+    assert_receive {:partial, %{output: p1}}, 2_000
+    assert p1 =~ "first"
+    assert_receive {:partial, %{output: p2}}, 2_000
+    assert p2 =~ "second"
+  end
+
+  test "a crashing report observer does not fail the bash command", %{tmp: tmp} do
+    ctx = %{cwd: tmp, call_id: "t", report: fn _ -> raise "observer boom" end}
+    out = text(Bash.execute(%{"command" => "echo resilient"}, ctx))
+    assert out =~ "resilient"
+  end
+
   test "bash caps runaway output and reports it", %{ctx: ctx} do
     # ~1KB lines; the 4MB cap in Exec.bash kills the loop long before the
     # 120s default timeout, and Truncate.tail bounds what the model sees.

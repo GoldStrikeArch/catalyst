@@ -48,36 +48,44 @@ defmodule Catalyst.Extensions.Installer do
       Application.get_env(:catalyst, :allow_self_modification, true)
   end
 
+  # The whole write → load → commit sequence runs as ONE critical section
+  # under the extensions load lock (`Extensions.locked/1`, re-entrant for the
+  # inner `load_file`): a concurrent `load_all` can't glob the half-written
+  # file, and a concurrent install can't interleave between our write and our
+  # commit. The commit itself is scoped to this file (`commit_paths/3`), so
+  # someone else's uncommitted edits aren't swept into our history entry.
   defp do_install(name, source, commit_prefix) do
-    dir = Extensions.dir()
-    File.mkdir_p!(dir)
-    # The repo is normally ensured by the boot-time load path, but that is
-    # skipped in safe mode — and an install must still be committable then.
-    # Idempotent and cheap once the repo exists.
-    Versioning.ensure_repo(dir)
-    path = Path.join(dir, sanitize(name) <> ".ex")
-    existed = File.exists?(path)
-    backup = if existed, do: File.read!(path), else: nil
+    Extensions.locked(fn ->
+      dir = Extensions.dir()
+      File.mkdir_p!(dir)
+      # The repo is normally ensured by the boot-time load path, but that is
+      # skipped in safe mode — and an install must still be committable then.
+      # Idempotent and cheap once the repo exists.
+      Versioning.ensure_repo(dir)
+      path = Path.join(dir, sanitize(name) <> ".ex")
+      existed = File.exists?(path)
+      backup = if existed, do: File.read!(path), else: nil
 
-    File.write!(path, source)
+      File.write!(path, source)
 
-    case Extensions.load_file(path) do
-      {:ok, summary} ->
-        commit_install(dir, path, summary, commit_prefix)
+      case Extensions.load_file(path) do
+        {:ok, summary} ->
+          commit_install(dir, path, summary, commit_prefix)
 
-      {:error, reason} ->
-        # Restore the prior version (or remove a brand-new broken file) so a
-        # failed install leaves neither broken source nor an uncommitted diff.
-        restore_prior(path, existed, backup)
-        {:error, reason}
-    end
+        {:error, reason} ->
+          # Restore the prior version (or remove a brand-new broken file) so a
+          # failed install leaves neither broken source nor an uncommitted diff.
+          restore_prior(path, existed, backup)
+          {:error, reason}
+      end
+    end)
   end
 
   # A versioning failure must not undo a successful install — the code is live
   # and the file is written. But the change has no commit, so rollback can't
   # revert it: flag the summary so the agent/user knows.
   defp commit_install(dir, path, summary, commit_prefix) do
-    case Versioning.commit(dir, "#{commit_prefix} #{summary.owner}") do
+    case Versioning.commit_paths(dir, [path], "#{commit_prefix} #{summary.owner}") do
       :ok ->
         {:ok, Map.put(summary, :path, path)}
 

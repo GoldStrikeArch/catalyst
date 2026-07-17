@@ -107,27 +107,42 @@ defmodule Catalyst.Agent.ToolRunnerTest do
     assert Content.text_of(res.content) == "no mode"
   end
 
-  test "a mixed batch terminates when any successful tool asks to terminate" do
-    calls = [
+  test "a batch terminates only when EVERY successful tool asks to terminate (PI parity)" do
+    config = %{cwd: ".", tools: [TerminatingTool, StrictTool], opts: []}
+    emit = fn _event -> :ok end
+
+    mixed = [
       %{id: "c1", name: "terminating_tool", arguments: %{}},
       %{id: "c2", name: "strict_tool", arguments: %{"text" => "hi"}}
     ]
 
-    config = %{cwd: ".", tools: [TerminatingTool, StrictTool], opts: []}
+    {_results, terminate?} = ToolRunner.run_batch(mixed, config, emit)
+    refute terminate?
 
-    {_results, terminate?} = ToolRunner.run_batch(calls, config, fn _event -> :ok end)
+    unanimous = [
+      %{id: "c1", name: "terminating_tool", arguments: %{}},
+      %{id: "c2", name: "terminating_tool", arguments: %{}}
+    ]
 
+    {_results, terminate?} = ToolRunner.run_batch(unanimous, config, emit)
     assert terminate?
   end
 
-  test "resolved schemas are cached in :persistent_term keyed by the parameters hash" do
+  test "resolved schemas are cached per MODULE (a changed schema replaces, not accumulates)" do
     run("strict_tool", [StrictTool], %{"text" => "hi"})
 
-    key = {ToolRunner, StrictTool, :erlang.phash2(StrictTool.parameters())}
-    assert {:ok, %ExJsonSchema.Schema.Root{}} = :persistent_term.get(key)
+    key = {ToolRunner, StrictTool}
+    hash = :erlang.phash2(StrictTool.parameters())
+    assert {^hash, {:ok, %ExJsonSchema.Schema.Root{}}} = :persistent_term.get(key)
 
     # The cache-hit path still validates and still rejects bad args.
     assert run("strict_tool", [StrictTool], %{"text" => "again"}).is_error == false
     assert run("strict_tool", [StrictTool], %{}).is_error
+
+    # A stale entry (hot-reloaded tool whose schema changed) is REPLACED in
+    # place — the module keeps exactly one entry, so reload churn can't leak.
+    :persistent_term.put(key, {hash + 1, :error})
+    assert run("strict_tool", [StrictTool], %{}).is_error
+    assert {^hash, {:ok, %ExJsonSchema.Schema.Root{}}} = :persistent_term.get(key)
   end
 end

@@ -71,9 +71,32 @@ defmodule CatalystWeb.ExtensionsPageTest do
     assert html =~ "faux"
     assert html =~ "/extensions"
 
+    # The commands registry has producers: the built-in /cd is seeded there.
+    assert html =~ "change the session working directory"
+
     # The nav now has two built-in pages.
     assert html =~ "Chat"
     assert html =~ "Extensions"
+  end
+
+  test "safe mode shows the shell banner and 'Load extensions now' recovers", %{conn: conn} do
+    :persistent_term.put({Catalyst.Extensions, :boot_status}, {:safe_mode, :crash_detected})
+    on_exit(fn -> :persistent_term.put({Catalyst.Extensions, :boot_status}, :ok) end)
+
+    # The banner shows on every page and links to the panel.
+    {:ok, _view, html} = live(conn, "/")
+    assert html =~ "Extensions were not loaded"
+    assert html =~ "previous boot crashed while extensions were active"
+
+    {:ok, view, html} = live(conn, "/extensions")
+    assert html =~ "Load extensions now"
+
+    # Recovery: an explicit successful load clears safe mode (empty dir → ok).
+    view |> element("button", "Load extensions now") |> render_click()
+    assert wait_until(fn -> Catalyst.Extensions.boot_status() == :ok end)
+    assert wait_until(fn -> not (render(view) =~ "Load extensions now") end)
+
+    refute render(view) =~ "Extensions were not loaded"
   end
 
   test "disable and enable round-trip through the panel buttons", %{conn: conn} do

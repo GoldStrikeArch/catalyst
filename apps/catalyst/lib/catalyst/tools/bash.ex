@@ -37,7 +37,11 @@ defmodule Catalyst.Tools.Bash do
   def execute(%{"command" => command} = args, ctx) do
     timeout_s = timeout_seconds(args["timeout"])
 
-    case Exec.bash(command, cwd: ctx.cwd, timeout: timeout_s * 1000) do
+    case Exec.bash(command,
+           cwd: ctx.cwd,
+           timeout: timeout_s * 1000,
+           on_output: stream_reporter(ctx)
+         ) do
       {:ok, %{out: out, status: status} = res} ->
         # truncated: true means Exec.bash killed the command at its output
         # cap — tell the model, the way a timeout is reported.
@@ -70,4 +74,35 @@ defmodule Catalyst.Tools.Bash do
   defp timeout_seconds(s) when is_integer(s) and s > 0, do: s
   defp timeout_seconds(s) when is_float(s) and s > 0, do: round(s)
   defp timeout_seconds(_), do: @default_timeout_s
+
+  @report_interval_ms 100
+  @partial_tail_bytes 400
+
+  # Stream the command's live output to the UI via `ctx.report` (→
+  # `ToolExecutionUpdate`), throttled to one report per #{@report_interval_ms}ms
+  # carrying a bounded tail. Throttle state lives in the process dictionary —
+  # execute/2 runs in its own (or the sequential loop's) task process, and the
+  # state is re-initialized here on every call. The first chunk always reports
+  # (nil last-emit), so short commands still show something.
+  defp stream_reporter(ctx) do
+    report = Map.get(ctx, :report)
+    key = {__MODULE__, :stream_state}
+    Process.put(key, {nil, ""})
+
+    fn chunk ->
+      {last_ms, tail} = Process.get(key, {nil, ""})
+      tail = take_tail(tail <> chunk, @partial_tail_bytes)
+      now = System.monotonic_time(:millisecond)
+
+      if is_function(report, 1) and (last_ms == nil or now - last_ms >= @report_interval_ms) do
+        report.(%{output: Truncate.scrub_utf8(tail)})
+        Process.put(key, {now, tail})
+      else
+        Process.put(key, {last_ms, tail})
+      end
+    end
+  end
+
+  defp take_tail(bin, max) when byte_size(bin) <= max, do: bin
+  defp take_tail(bin, max), do: binary_part(bin, byte_size(bin) - max, max)
 end

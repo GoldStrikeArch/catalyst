@@ -39,30 +39,49 @@ defmodule CatalystWeb.Pages.ChatPage do
           </div>
         </div>
 
-        <%!-- The model is working, but partial text stays internal until MessageEnd.
-        The final assistant message then renders through MessageRenderer once. --%>
+        <%!-- The live streaming bubble. `@streaming` seeds the first paint
+        (accumulated text for late joiners); every later delta is push_event'd
+        and appended client-side by the StreamingMessage hook. phx-update="ignore"
+        keeps LiveView from repainting over the appended text; the completed
+        message then renders once through MessageRenderer at MessageEnd, which
+        removes this element (@streaming goes nil). --%>
         <div
           :if={@streaming}
           id="streaming-message"
+          phx-hook="StreamingMessage"
+          phx-update="ignore"
           data-message-role="assistant-streaming"
           class="flex justify-start"
         >
-          <div class="inline-flex items-center gap-1.5 rounded-3xl rounded-bl-md border border-slate-200 bg-white/85 px-4 py-3 text-slate-500 shadow-sm shadow-slate-200/50 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:text-slate-300 dark:shadow-black/20">
-            <span class="sr-only">Assistant is working</span>
-            <span class="size-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.2s]">
-            </span>
-            <span class="size-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.1s]">
-            </span>
-            <span class="size-1.5 animate-bounce rounded-full bg-indigo-500"></span>
+          <div class="max-w-[85%] rounded-3xl rounded-bl-md border border-slate-200 bg-white/85 px-4 py-3 text-slate-800 shadow-sm shadow-slate-200/50 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:text-slate-100 dark:shadow-black/20">
+            <div
+              data-stream="thinking"
+              class="whitespace-pre-wrap text-xs italic text-slate-400 empty:hidden dark:text-slate-500"
+            >{@streaming.thinking}</div>
+            <div data-stream="text" class="whitespace-pre-wrap text-sm">{@streaming.text}</div>
+            <div data-stream-dots class="inline-flex items-center gap-1.5 text-slate-500 dark:text-slate-300">
+              <span class="sr-only">Assistant is working</span>
+              <span class="size-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.2s]">
+              </span>
+              <span class="size-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.1s]">
+              </span>
+              <span class="size-1.5 animate-bounce rounded-full bg-indigo-500"></span>
+            </div>
           </div>
         </div>
 
-        <div :for={{_id, t} <- @tools} class="flex justify-start">
+        <div :for={{_id, t} <- @tools} class="flex flex-col items-start gap-1">
           <div class="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 shadow-sm dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-200">
             <span class="size-3 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600 dark:border-indigo-200/20 dark:border-t-indigo-200">
             </span>
             running <code class="font-mono">{t.name}</code>…
           </div>
+          <%!-- Live output tail streamed by the tool (bash) via ToolExecutionUpdate. --%>
+          <pre
+            :if={t[:partial]}
+            data-tool-partial
+            class="max-w-[85%] overflow-x-auto whitespace-pre-wrap rounded-lg bg-slate-100 px-2.5 py-1.5 font-mono text-[0.65rem] leading-relaxed text-slate-500 dark:bg-white/5 dark:text-slate-400"
+          >{t[:partial]}</pre>
         </div>
       </div>
     </main>

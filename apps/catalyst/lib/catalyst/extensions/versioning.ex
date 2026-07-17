@@ -94,6 +94,47 @@ defmodule Catalyst.Extensions.Versioning do
   end
 
   @doc """
+  Stage only `paths` and commit. The installer's scoped variant of `commit/2`:
+  an unrelated dirty file (a hand-edit in progress, another extension's
+  half-written source) stays uncommitted instead of being swept into this
+  change's commit — which would skew what `rollback/1` reverts.
+  """
+  @spec commit_paths(Path.t(), [Path.t()], String.t()) :: :ok | {:error, term()}
+  def commit_paths(dir, paths, message) do
+    case repo?(dir) do
+      false ->
+        {:error, :no_git}
+
+      true ->
+        rel = Enum.map(paths, &Path.relative_to(&1, dir))
+
+        case git(dir, ["add", "--"] ++ rel) do
+          {_out, 0} -> commit_staged_index(dir, message)
+          other -> error(other)
+        end
+    end
+  end
+
+  # Commit the index only when something is actually staged (exit 1 from
+  # `diff --cached --quiet` = differences): a byte-identical reinstall stays a
+  # no-op `:ok` for the same empty-commit reason as `commit/2`.
+  defp commit_staged_index(dir, message) do
+    case git(dir, ["diff", "--cached", "--quiet"]) do
+      {_out, 0} ->
+        :ok
+
+      {_out, 1} ->
+        case git(dir, @id ++ ["commit", "-q", "-m", message]) do
+          {_out, 0} -> :ok
+          other -> error(other)
+        end
+
+      other ->
+        error(other)
+    end
+  end
+
+  @doc """
   Undo the most recent extension change that has not already been reverted.
 
   A naive `git revert HEAD` is a toggle: a second rollback reverts the revert,

@@ -103,6 +103,15 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     assert LazyHTML.text(doc) =~ "click me"
   end
 
+  test "protocol-relative links (//host) are not clickable; single-slash paths are" do
+    msg = %Message.Assistant{content: Content.text("[spoof](//evil.example) [ok](/local/path)")}
+    doc = render_doc(msg)
+
+    anchors = LazyHTML.query(doc, "a")
+    assert LazyHTML.attribute(anchors, "href") == ["/local/path"]
+    assert LazyHTML.text(doc) =~ "spoof"
+  end
+
   test "a successful tool result shows the tool name and output" do
     msg = %Message.ToolResult{
       tool_call_id: "c1",

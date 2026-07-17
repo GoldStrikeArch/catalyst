@@ -6,6 +6,13 @@ defmodule Catalyst.Agent.LoopTest do
   alias Catalyst.{Content, Message, Model}
   alias Catalyst.Tools.Registry
 
+  defmodule FailingProvider do
+    @behaviour Catalyst.LLM.Provider
+
+    @impl true
+    def stream(_model, _context, _opts, _sink), do: {:error, :boom}
+  end
+
   setup do
     tmp = Path.join(System.tmp_dir!(), "catalyst_loop_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
@@ -79,6 +86,71 @@ defmodule Catalyst.Agent.LoopTest do
              Content.text_of(tool_result.content) =~ "missing.txt"
 
     assert Content.text_of(List.last(msgs).content) == "recovered"
+  end
+
+  test "a steer arriving during the final toolless turn runs another turn", %{tmp: tmp} do
+    # Drain calls: 0 = loop start (empty), 1 = the re-check after the final
+    # turn (delivers the steer), later = empty.
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    get_steering = fn ->
+      case Agent.get_and_update(counter, fn n -> {n, n + 1} end) do
+        1 -> [Message.user("actually, one more thing")]
+        _ -> []
+      end
+    end
+
+    config = %{
+      provider: Catalyst.LLM.Faux,
+      model: %Model{id: "faux", api: "faux", provider: "faux"},
+      cwd: tmp,
+      tools: Registry.default_tools(),
+      opts: [script: [{:text, "first"}, {:text, "after steer"}]],
+      get_steering: get_steering
+    }
+
+    {:ok, msgs, _ctx} =
+      Loop.run([Message.user("go")], %{system_prompt: nil, messages: []}, config, fn _ -> :ok end)
+
+    # The steer was injected and answered in the SAME run, not left queued.
+    assert roles(msgs) == [:user, :assistant, :user, :assistant]
+    assert Content.text_of(List.last(msgs).content) == "after steer"
+  end
+
+  test "a provider error ends the run without draining follow-ups", %{tmp: tmp} do
+    parent = self()
+
+    get_follow_up = fn ->
+      send(parent, :follow_up_drained)
+      [Message.user("queued follow-up")]
+    end
+
+    config = %{
+      provider: FailingProvider,
+      model: %Model{id: "faux", api: "faux", provider: "faux"},
+      cwd: tmp,
+      tools: Registry.default_tools(),
+      opts: [],
+      get_follow_up: get_follow_up
+    }
+
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+    emit = fn ev -> Agent.update(agent, &[ev | &1]) end
+
+    {:ok, msgs, _ctx} =
+      Loop.run([Message.user("go")], %{system_prompt: nil, messages: []}, config, emit)
+
+    events = Agent.get(agent, & &1) |> Enum.reverse()
+    Agent.stop(agent)
+
+    # One failed assistant turn, then a hard stop: the queued follow-up was
+    # never drained into another doomed provider call.
+    assert roles(msgs) == [:user, :assistant]
+    assert List.last(msgs).stop_reason == :error
+    refute_received :follow_up_drained
+
+    assert Enum.any?(events, &match?(%Event.TurnEnd{}, &1))
+    assert Enum.any?(events, &match?(%Event.AgentEnd{}, &1))
   end
 
   test "parallel read-only tools all run", %{tmp: tmp} do

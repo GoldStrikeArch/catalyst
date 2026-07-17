@@ -18,8 +18,9 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   cached connection can never leak past its run. `request/4` is a fold: each
   decoded event map is fed to the caller's reducer (which feeds
   `Catalyst.LLM.OpenAICodex.StreamParser`), and the final accumulator comes
-  back with the result, success or failure, along with how many events were
-  delivered (the SSE-fallback decision needs "did anything reach the sink?").
+  back with the result, success or failure, along with how many decoded events
+  reached the reducer (diagnostic — the caller judges retry/fallback safety by
+  what reached its own sink, since bookkeeping events never do).
   """
 
   @upgrade_timeout 15_000
@@ -140,8 +141,9 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   Send one `response.create` request and fold the streamed event maps into
   `acc` with `reducer`. Returns `{:ok, conn, acc}` with the socket still open
   (reusable for the next turn), or `{:error, reason, acc, emitted}` with the
-  socket closed — `emitted` says how many events reached the reducer, which
-  decides whether an `:auto` caller may still fall back to SSE.
+  socket closed — `emitted` says how many decoded events reached the reducer
+  (diagnostic; whether an `:auto` caller may still fall back to SSE is judged
+  by what reached its sink, not this count).
   """
   @spec request(t(), map(), term(), reducer(), keyword()) ::
           {:ok, t(), term()} | {:error, term(), term(), non_neg_integer()}

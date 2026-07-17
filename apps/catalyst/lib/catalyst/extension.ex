@@ -33,6 +33,14 @@ defmodule Catalyst.Extension do
 
   @callback setup(api :: Catalyst.ExtensionAPI.t()) :: :ok | {:error, term()}
 
+  @doc """
+  Optional self-description (e.g. `%{name: "…", description: "…", version: "…"}`),
+  surfaced by `Catalyst.Extensions.list_loaded/0` and the `/extensions` panel.
+  """
+  @callback metadata() :: %{optional(atom()) => term()}
+
+  @optional_callbacks metadata: 0
+
   defmacro __using__(_opts) do
     quote do
       @behaviour Catalyst.Extension
@@ -43,5 +51,24 @@ defmodule Catalyst.Extension do
   @spec extension_module?(module()) :: boolean()
   def extension_module?(module) do
     Code.ensure_loaded?(module) and function_exported?(module, :setup, 1)
+  end
+
+  @doc "Merged `metadata/0` of the given modules (crash-safe; non-map results ignored)."
+  @spec metadata_of([module()]) :: %{optional(atom()) => term()}
+  def metadata_of(modules) do
+    modules
+    |> Enum.filter(&(Code.ensure_loaded?(&1) and function_exported?(&1, :metadata, 0)))
+    |> Enum.reduce(%{}, fn mod, acc -> Map.merge(acc, safe_metadata(mod)) end)
+  end
+
+  defp safe_metadata(mod) do
+    case mod.metadata() do
+      %{} = meta -> meta
+      _other -> %{}
+    end
+  rescue
+    _ -> %{}
+  catch
+    _kind, _reason -> %{}
   end
 end

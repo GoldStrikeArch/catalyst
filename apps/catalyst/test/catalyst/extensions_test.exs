@@ -37,6 +37,57 @@ defmodule Catalyst.ExtensionsTest do
     assert "ast_grep" in Extensions.names()
   end
 
+  @meta_ext_source ~S'''
+  defmodule Catalyst.Ext.MetaProbe do
+    use Catalyst.Extension
+
+    @impl true
+    def metadata, do: %{name: "Meta Probe", description: "self-description via metadata/0"}
+
+    @impl true
+    def setup(_api), do: :ok
+  end
+  '''
+
+  test "an extension's optional metadata/0 is surfaced by list_loaded/0" do
+    path = Path.join(Extensions.dir(), "meta_probe.ex")
+    File.write!(path, @meta_ext_source)
+    on_exit(fn -> Extensions.uninstall("meta_probe") end)
+
+    assert {:ok, _summary} = Extensions.load_file(path)
+
+    info = Enum.find(Extensions.list_loaded(), &(&1.owner == "meta_probe"))
+    assert info.metadata[:name] == "Meta Probe"
+    assert info.metadata[:description] =~ "metadata/0"
+  end
+
+  test "the load lock mutually excludes different processes" do
+    parent = self()
+
+    holder =
+      Task.async(fn ->
+        Extensions.locked(fn ->
+          send(parent, :holder_in)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :holder_in, 1_000
+
+    waiter = Task.async(fn -> Extensions.locked(fn -> send(parent, :waiter_in) end) end)
+
+    # With the old fixed-atom lock requester, :global treated both processes
+    # as "the same requester" and the waiter would enter immediately.
+    refute_receive :waiter_in, 200
+
+    send(holder.pid, :release)
+    assert_receive :waiter_in, 1_000
+    Task.await_many([holder, waiter])
+  end
+
   test "develop_tool compiles and loads a new tool at runtime (no restart)" do
     ctx = %{cwd: System.tmp_dir!(), call_id: "t", report: fn _ -> :ok end}
 

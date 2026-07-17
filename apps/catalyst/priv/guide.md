@@ -370,10 +370,18 @@ and a `setup(api)` callback. Inside `setup/1`, register any mix of:
   `register_renderer(api, :message, match_fun, render_fun)` overrides how a message or
   tool result is shown; `register_component(api, :header_extra, fun)` adds a header/
   sidebar/footer widget. Render functions are `Phoenix.Component`s.
+- **Chat commands** — `register_command(api, "mycmd", handler: fn arg, socket -> socket end,
+  label: "/mycmd — what it does")`. Typing `/mycmd some arg` in the chat dispatches to your
+  handler (crash-isolated; return the socket, e.g. after `Phoenix.LiveView.put_flash/3`).
+  The built-in `/cd` is itself a registered command; re-registering the name overrides it.
 - **Processes** — `Catalyst.ExtensionAPI.start_child(api, child_spec)` starts a
   long-lived process (watcher, poller, client connection) under a supervisor owned by
   your extension. Never use a bare `spawn`: supervised children are restarted on crash
   and torn down when your extension is purged/reloaded.
+
+An extension module may also export an optional **`metadata/0`** returning
+`%{name: "…", description: "…"}` — it is shown on the Extensions panel so humans can
+tell at a glance what an installed extension does.
 
 Everything you register is tagged with the file's name (its *owner*); reinstalling the
 same file purges its old contributions first, so reloads never duplicate — including

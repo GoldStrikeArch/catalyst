@@ -60,9 +60,35 @@ const Hooks = {
         this.shouldScroll = this.pinned();
       });
       this.el.scrollTop = this.el.scrollHeight;
+      // Client-side appends (streaming deltas) don't trigger updated(); the
+      // StreamingMessage hook dispatches this event instead.
+      this.autoscroll = () => {
+        if (this.shouldScroll) this.el.scrollTop = this.el.scrollHeight;
+      };
+      window.addEventListener("catalyst:autoscroll", this.autoscroll);
     },
     updated() {
       if (this.shouldScroll) this.el.scrollTop = this.el.scrollHeight;
+    },
+    destroyed() {
+      window.removeEventListener("catalyst:autoscroll", this.autoscroll);
+    },
+  },
+
+  // The live streaming bubble: the server pushes each text/thinking delta as
+  // a "stream_delta" event; append it into the matching [data-stream] span.
+  // The element is phx-update="ignore", so LiveView never repaints over the
+  // appended text; the finished message removes the whole element.
+  StreamingMessage: {
+    mounted() {
+      this.handleEvent("stream_delta", ({ kind, delta }) => {
+        const target = this.el.querySelector(`[data-stream="${kind}"]`);
+        if (!target) return;
+        target.appendChild(document.createTextNode(delta));
+        const dots = this.el.querySelector("[data-stream-dots]");
+        if (dots) dots.style.display = "none";
+        window.dispatchEvent(new Event("catalyst:autoscroll"));
+      });
     },
   },
 };

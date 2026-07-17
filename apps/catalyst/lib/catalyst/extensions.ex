@@ -167,20 +167,35 @@ defmodule Catalyst.Extensions do
 
   @doc "Remove every contribution made by `owner` (tools here + hooks/providers/UI)."
   @spec uninstall(String.t()) :: :ok
-  def uninstall(owner), do: GenServer.call(__MODULE__, {:uninstall, owner})
+  def uninstall(owner) do
+    # Under the load lock: an uninstall racing an in-flight load_file (compile
+    # done, commit pending) would otherwise be resurrected by the commit.
+    serialized_load(fn -> GenServer.call(__MODULE__, {:uninstall, owner}) end)
+  end
 
-  @typedoc "One live owner's footprint: source file (nil when registered without a file), tool names, modules its file defined."
+  @doc """
+  Run `fun` under the extensions load lock — the same lock `load_file/1`,
+  `load_all/0`, `disable/1`… take. Per-process re-entrant, so a caller may
+  compose locked steps (the installer's write → load → commit) into one
+  critical section that a concurrent load can't interleave.
+  """
+  @spec locked((-> result)) :: result when result: term()
+  def locked(fun) when is_function(fun, 0), do: serialized_load(fun)
+
+  @typedoc "One live owner's footprint: source file (nil when registered without a file), tool names, modules its file defined, merged `metadata/0`."
   @type loaded_info :: %{
           owner: String.t(),
           path: Path.t() | nil,
           tools: [String.t()],
-          modules: [module()]
+          modules: [module()],
+          metadata: map()
         }
 
   @doc """
-  Snapshot of every live extension owner — what each registered and which
-  modules its file defined. The introspection behind the Extensions panel;
-  built-in tools are not listed (they have no owner).
+  Snapshot of every live extension owner — what each registered, which
+  modules its file defined, and their merged optional `metadata/0`. The
+  introspection behind the Extensions panel; built-in tools are not listed
+  (they have no owner).
   """
   @spec list_loaded() :: [loaded_info()]
   def list_loaded do
@@ -188,7 +203,11 @@ defmodule Catalyst.Extensions do
 
     __MODULE__
     |> GenServer.call(:snapshot)
-    |> Enum.map(fn {owner, info} -> Map.put(info, :path, Map.get(files, owner)) end)
+    |> Enum.map(fn {owner, info} ->
+      info
+      |> Map.put(:path, Map.get(files, owner))
+      |> Map.put(:metadata, Catalyst.Extension.metadata_of(info.modules))
+    end)
     |> Enum.sort_by(& &1.owner)
   end
 
@@ -534,7 +553,11 @@ defmodule Catalyst.Extensions do
 
   # Keep boot load, post-web-wiring reload, explicit reload, and single-file
   # loads ordered without putting compile/setup work back inside this GenServer.
-  defp serialized_load(fun), do: :global.trans(@load_lock, fun, [node()], :infinity)
+  # The lock requester must be the calling pid: `:global` treats locks held by
+  # the SAME requester id as compatible, so a fixed atom requester would let
+  # any two processes hold the "lock" at once (no mutual exclusion at all).
+  # With `self()` it excludes across processes and stays re-entrant within one.
+  defp serialized_load(fun), do: :global.trans({@load_lock, self()}, fun, [node()], :infinity)
 
   defp extension_files do
     case File.dir?(dir()) do

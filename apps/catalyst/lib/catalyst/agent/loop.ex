@@ -57,23 +57,36 @@ defmodule Catalyst.Agent.Loop do
   end
 
   # Outer loop: after the inner loop reaches a natural stop, drain follow-ups.
+  # A halted run (provider error/abort, or a should_stop_after_turn veto) skips
+  # them — queued follow-ups wait for the next run instead of re-firing into a
+  # failed provider.
   defp outer_loop(context, acc, config, emit) do
-    {context, acc} = inner_loop(context, acc, config, emit)
-
-    case drain(config[:get_follow_up]) do
-      [] ->
+    case inner_loop(context, acc, config, emit) do
+      {:halt, context, acc} ->
         {context, acc}
 
-      follow ->
-        Enum.each(follow, fn m -> emit.(%Event.MessageEnd{message: m}) end)
-        context = %{context | messages: context.messages ++ follow}
-        outer_loop(context, Enum.reverse(follow, acc), config, emit)
+      {:stop, context, acc} ->
+        case drain(config[:get_follow_up]) do
+          [] ->
+            {context, acc}
+
+          follow ->
+            Enum.each(follow, fn m -> emit.(%Event.MessageEnd{message: m}) end)
+            context = %{context | messages: context.messages ++ follow}
+            outer_loop(context, Enum.reverse(follow, acc), config, emit)
+        end
     end
   end
 
-  # Inner loop: stream a turn, run tools, repeat while tool calls remain.
+  # Inner loop: stream a turn, run tools, repeat while tool calls (or steering
+  # messages) remain. Returns `{:stop, ...}` on a natural stop (follow-ups may
+  # re-enter) or `{:halt, ...}` on a hard stop (they may not).
   defp inner_loop(context, acc, config, emit) do
     {context, acc} = inject_steering(context, acc, config, emit)
+    run_turn(context, acc, config, emit)
+  end
+
+  defp run_turn(context, acc, config, emit) do
     turn_config = resolve_turn_tools(config)
     {assistant, context, acc} = run_assistant_turn(context, acc, turn_config, emit)
 
@@ -94,22 +107,60 @@ defmodule Catalyst.Agent.Loop do
   end
 
   defp continue_after_assistant(assistant, context, acc, config, turn_config, emit) do
-    case Message.tool_calls(assistant) do
-      [] ->
-        finish_turn(context, acc, assistant, [], emit)
-
-      tool_calls ->
-        run_tool_turn(tool_calls, assistant, context, acc, config, turn_config, emit)
+    # A failed/aborted stream ends the run immediately (PI parity): no tool
+    # execution, no per-turn hooks, and outer_loop won't drain follow-ups.
+    if assistant.stop_reason in [:error, :aborted] do
+      {context, acc} = finish_turn(context, acc, assistant, [], emit)
+      {:halt, context, acc}
+    else
+      run_turn_tail(Message.tool_calls(assistant), assistant, context, acc, config, turn_config, emit)
     end
   end
 
-  defp run_tool_turn(tool_calls, assistant, context, acc, config, turn_config, emit) do
-    {results, terminate?} = run_tool_batch(tool_calls, assistant, turn_config, emit)
+  # Shared tail for tool and toolless turns: execute the batch (if any), emit
+  # TurnEnd, run the per-turn hooks, then decide whether the loop lives on —
+  # so prepare_next_turn/should_stop_after_turn see every turn, including the
+  # natural stop (PI parity).
+  defp run_turn_tail(tool_calls, assistant, context, acc, config, turn_config, emit) do
+    {results, more_tool_calls?} = run_tools(tool_calls, assistant, turn_config, emit)
     {context, acc} = append_tool_results(context, acc, results, emit)
     {context, acc} = finish_turn(context, acc, assistant, results, emit)
     {context, config, hook_ctx} = prepare_next_turn_state(context, config, assistant, results)
 
-    continue_or_stop(terminate?, context, acc, config, hook_ctx, emit)
+    cond do
+      # should_stop_after_turn is a hard stop: PI emits agent_end right away,
+      # skipping the follow-up queue.
+      Hooks.should_stop?(Map.put(hook_ctx, :context, context)) ->
+        {:halt, context, acc}
+
+      more_tool_calls? ->
+        inner_loop(context, acc, config, emit)
+
+      true ->
+        steer_or_stop(context, acc, config, emit)
+    end
+  end
+
+  defp run_tools([], _assistant, _turn_config, _emit), do: {[], false}
+
+  defp run_tools(tool_calls, assistant, turn_config, emit) do
+    {results, terminate?} = run_tool_batch(tool_calls, assistant, turn_config, emit)
+    {results, not terminate?}
+  end
+
+  # A stopping turn (no tool calls, or a terminating batch) still re-checks
+  # steering: a steer that arrived while the final turn streamed keeps the
+  # inner loop alive (PI's `hasMoreToolCalls || pendingMessages.length > 0`)
+  # instead of sitting queued until the next prompt.
+  defp steer_or_stop(context, acc, config, emit) do
+    case drain(config[:get_steering]) do
+      [] ->
+        {:stop, context, acc}
+
+      msgs ->
+        {context, acc} = append_steering(context, acc, msgs, emit)
+        run_turn(context, acc, config, emit)
+    end
   end
 
   defp run_tool_batch(tool_calls, assistant, turn_config, emit) do
@@ -137,14 +188,6 @@ defmodule Catalyst.Agent.Loop do
     {context, config} = Hooks.prepare_next_turn(context, config, hook_ctx)
 
     {context, config, hook_ctx}
-  end
-
-  defp continue_or_stop(terminate?, context, acc, config, hook_ctx, emit) do
-    if terminate? or Hooks.should_stop?(Map.put(hook_ctx, :context, context)) do
-      {context, acc}
-    else
-      inner_loop(context, acc, config, emit)
-    end
   end
 
   defp stream_assistant(context, config, emit) do
@@ -201,13 +244,14 @@ defmodule Catalyst.Agent.Loop do
 
   defp inject_steering(context, acc, config, emit) do
     case drain(config[:get_steering]) do
-      [] ->
-        {context, acc}
-
-      msgs ->
-        Enum.each(msgs, fn m -> emit.(%Event.MessageEnd{message: m}) end)
-        {%{context | messages: context.messages ++ msgs}, Enum.reverse(msgs, acc)}
+      [] -> {context, acc}
+      msgs -> append_steering(context, acc, msgs, emit)
     end
+  end
+
+  defp append_steering(context, acc, msgs, emit) do
+    Enum.each(msgs, fn m -> emit.(%Event.MessageEnd{message: m}) end)
+    {%{context | messages: context.messages ++ msgs}, Enum.reverse(msgs, acc)}
   end
 
   defp empty_assistant(model) do

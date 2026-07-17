@@ -124,6 +124,59 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParserTest do
     assert_received {:ev, %Event.TextDelta{delta: "Hello "}}
   end
 
+  test "the output_item.done payload is authoritative over accumulated deltas" do
+    # Simulate a DROPPED delta frame: only "hel" arrived as a delta, but the
+    # done item carries the complete text — the complete text must win.
+    events = [
+      %{
+        "type" => "response.output_item.added",
+        "item" => %{"type" => "message", "id" => "m1"}
+      },
+      %{"type" => "response.output_text.delta", "delta" => "hel"},
+      %{
+        "type" => "response.output_item.done",
+        "item" => %{
+          "type" => "message",
+          "id" => "m1",
+          "content" => [%{"type" => "output_text", "text" => "hello world"}]
+        }
+      },
+      %{
+        "type" => "response.output_item.added",
+        "item" => %{
+          "type" => "function_call",
+          "id" => "fc_1",
+          "call_id" => "call_1",
+          "name" => "grep",
+          "arguments" => ""
+        }
+      },
+      # Dropped arguments.delta: the accumulated partial is invalid JSON.
+      %{"type" => "response.function_call_arguments.delta", "delta" => "{\"patt"},
+      %{
+        "type" => "response.output_item.done",
+        "item" => %{
+          "type" => "function_call",
+          "id" => "fc_1",
+          "call_id" => "call_1",
+          "name" => "grep",
+          "arguments" => "{\"pattern\":\"TODO\"}"
+        }
+      },
+      %{
+        "type" => "response.completed",
+        "response" => %{"id" => "r1", "status" => "completed"}
+      }
+    ]
+
+    assistant = run(events)
+
+    assert [%Content.Text{text: "hello world"}, %Content.ToolCall{arguments: args}] =
+             assistant.content
+
+    assert args == %{"pattern" => "TODO"}
+  end
+
   test "surfaces a failed response as an error assistant" do
     events = [
       %{

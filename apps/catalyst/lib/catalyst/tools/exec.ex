@@ -136,7 +136,8 @@ defmodule Catalyst.Tools.Exec do
     try do
       port = Port.open({:spawn_executable, path}, port_opts)
       deadline = System.monotonic_time(:millisecond) + timeout
-      collect_loop(port, [], 0, deadline, max_bytes, mode)
+      notify = Keyword.get(opts, :on_output)
+      collect_loop(port, [], 0, deadline, max_bytes, mode, notify)
     rescue
       e -> {:error, e}
     end
@@ -153,8 +154,10 @@ defmodule Catalyst.Tools.Exec do
   # still gets killed when its budget runs out. Output is also bounded by
   # max_bytes: past the cap the child is killed and the partial output is
   # returned as a truncated success. The timeout result carries the partial
-  # output so bash/2 can surface it; collect/3 drops it.
-  defp collect_loop(port, acc, bytes, deadline, max_bytes, mode) do
+  # output so bash/2 can surface it; collect/3 drops it. `notify` (the
+  # `:on_output` option) sees each chunk as it arrives — crash-isolated, so a
+  # broken observer can't fail the command.
+  defp collect_loop(port, acc, bytes, deadline, max_bytes, mode, notify) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
@@ -166,8 +169,18 @@ defmodule Catalyst.Tools.Exec do
             {:ok, %{out: scrub(IO.iodata_to_binary([acc, data])), status: 0, truncated: true}}
 
           false ->
+            safe_notify(notify, data)
             ack(port, byte_size(data), mode)
-            collect_loop(port, [acc, data], bytes + byte_size(data), deadline, max_bytes, mode)
+
+            collect_loop(
+              port,
+              [acc, data],
+              bytes + byte_size(data),
+              deadline,
+              max_bytes,
+              mode,
+              notify
+            )
         end
 
       {^port, {:exit_status, status}} ->
@@ -178,6 +191,16 @@ defmodule Catalyst.Tools.Exec do
         drain_port(port)
         {:error, {:timeout, scrub(IO.iodata_to_binary(acc))}}
     end
+  end
+
+  defp safe_notify(nil, _data), do: :ok
+
+  defp safe_notify(notify, data) when is_function(notify, 1) do
+    notify.(data)
+  rescue
+    _ -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   defp over_budget?(_bytes, :infinity), do: false

@@ -56,7 +56,10 @@ defmodule CatalystWeb.UI.Markdown do
 
     cond do
       uri.scheme in ["http", "https", "mailto"] -> true
-      String.starts_with?(href, ["/", "#"]) -> true
+      # A single leading `/` is a local path; `//host` is protocol-relative
+      # (scheme nil, but it navigates to an arbitrary external host).
+      String.starts_with?(href, "/") -> not String.starts_with?(href, "//")
+      String.starts_with?(href, "#") -> true
       true -> false
     end
   rescue

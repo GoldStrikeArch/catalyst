@@ -20,6 +20,85 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     assert {:ok, OpenAICodex.Provider} = Catalyst.LLM.Registry.fetch("openai-codex-responses")
   end
 
+  test "a token without a ChatGPT account id fails loudly instead of 401-looping" do
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: nil
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    model = OpenAICodex.model("gpt-5.4")
+    context = %Context{system_prompt: "x", messages: [Message.user("hi")], tools: []}
+
+    assert {:ok, assistant} = OpenAICodex.Provider.stream(model, context, [], fn _ -> :ok end)
+    assert assistant.stop_reason == :error
+    assert assistant.error_message =~ "account id"
+    assert assistant.error_message =~ "sign in again"
+  end
+
+  defmodule UsageLimitCodex do
+    @moduledoc "Always answers with a Codex-style usage-limit 429."
+    import Plug.Conn
+
+    def init(opts), do: opts
+
+    def call(conn, %{resets_at: resets_at}) do
+      body =
+        Jason.encode!(%{
+          "error" => %{
+            "code" => "usage_limit_reached",
+            "message" => "Usage limit reached",
+            "plan_type" => "Plus",
+            "resets_at" => resets_at
+          }
+        })
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(429, body)
+    end
+  end
+
+  test "a 429 usage-limit response surfaces as a friendly message, not raw JSON" do
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    resets_at = div(System.system_time(:millisecond), 1000) + 30 * 60
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {UsageLimitCodex, %{resets_at: resets_at}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    context = %Context{system_prompt: "x", messages: [Message.user("hi")], tools: []}
+
+    assert {:ok, assistant} =
+             OpenAICodex.Provider.stream(model, context, [transport: :sse], fn _ -> :ok end)
+
+    assert assistant.stop_reason == :error
+    assert assistant.error_message =~ "You have hit your ChatGPT usage limit (plus plan)."
+    assert assistant.error_message =~ ~r/Try again in ~(29|30) min\./
+    refute assistant.error_message =~ "usage_limit_reached"
+  end
+
   defmodule StubCodex do
     @moduledoc "Local Codex stub: 401 on the first request, an SSE 200 afterwards."
     import Plug.Conn
@@ -186,6 +265,486 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     assert_received {:codex_method, "GET"}
     assert_received {:codex_method, "POST"}
     refute_received {:codex_method, _}
+    assert_received {:ev, %Catalyst.LLM.Event.TextDelta{delta: "hi"}}
+    refute_received {:ev, %Catalyst.LLM.Event.TextDelta{}}
+  end
+
+  defmodule BookkeepingOnlyWs do
+    @moduledoc """
+    Accepts the websocket upgrade, pushes ONE bookkeeping event (which
+    `StreamParser` never forwards to the sink) and closes before the terminal
+    event — the dying-early websocket the sink never heard from.
+    """
+    @behaviour WebSock
+
+    @impl true
+    def init(opts), do: {:ok, opts}
+
+    @impl true
+    def handle_in({payload, opcode: :text}, state) do
+      %{"type" => "response.create"} = Jason.decode!(payload)
+      frame = {:text, Jason.encode!(%{"type" => "response.created", "response" => %{"id" => "r"}})}
+      {:stop, :normal, 1000, [frame], state}
+    end
+
+    @impl true
+    def handle_info(_msg, state), do: {:ok, state}
+
+    @impl true
+    def terminate(_reason, _state), do: :ok
+  end
+
+  defmodule BookkeepingRouter do
+    use Plug.Router
+
+    plug(:match)
+    plug(:dispatch)
+
+    get "/codex/responses" do
+      send(conn.private.test_pid, {:codex_method, "GET"})
+      WebSockAdapter.upgrade(conn, BookkeepingOnlyWs, %{}, timeout: 10_000)
+    end
+
+    post "/codex/responses" do
+      send(conn.private.test_pid, {:codex_method, "POST"})
+
+      conn
+      |> put_resp_content_type("text/event-stream")
+      |> send_resp(200, StubCodex.sse_body())
+    end
+
+    match _ do
+      send_resp(conn, 404, "not found")
+    end
+  end
+
+  defmodule PrivatePlug do
+    @moduledoc "Wraps a router, stashing the test pid in conn.private first."
+    def init(opts), do: opts
+
+    def call(conn, {router, test_pid}) do
+      conn
+      |> Plug.Conn.put_private(:test_pid, test_pid)
+      |> router.call(router.init([]))
+    end
+  end
+
+  defmodule AuthWsRouter do
+    @moduledoc "Rejects the ws upgrade with 401 for the old token, accepts the new one."
+    use Plug.Router
+
+    plug(:match)
+    plug(:dispatch)
+
+    get "/codex/responses" do
+      case get_req_header(conn, "authorization") do
+        ["Bearer tok_new"] ->
+          # Fully qualified: ContinuationWs is defined later in the outer
+          # module, so its nested alias is not in scope here yet.
+          WebSockAdapter.upgrade(
+            conn,
+            Catalyst.LLM.OpenAICodex.ProviderTest.ContinuationWs,
+            %{test: conn.private.test_pid},
+            timeout: 10_000
+          )
+
+        _old_or_missing ->
+          send(conn.private.test_pid, :ws_upgrade_401)
+          send_resp(conn, 401, ~s({"detail":"Unauthorized"}))
+      end
+    end
+
+    match _ do
+      send_resp(conn, 404, "not found")
+    end
+  end
+
+  test "a 401 websocket upgrade forces one token refresh and retries over ws" do
+    test_pid = self()
+
+    Application.put_env(:catalyst, :oauth_refresh_fun, fn _refresh_token ->
+      send(test_pid, :refreshed)
+
+      {:ok,
+       %{
+         "access" => "tok_new",
+         "refresh" => "ref_2",
+         "expires" => System.system_time(:millisecond) + 3_600_000,
+         "account_id" => "acct"
+       }}
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:catalyst, :oauth_refresh_fun)
+      TokenStore.delete("openai-codex")
+    end)
+
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_old",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {PrivatePlug, {AuthWsRouter, test_pid}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    context = %Context{system_prompt: "x", messages: [Message.user("hi")], tools: []}
+
+    assert {:ok, assistant} =
+             OpenAICodex.Provider.stream(model, context, [transport: :websocket], fn _ -> :ok end)
+
+    assert assistant.stop_reason == :stop
+    assert Content.text_of(assistant.content) == "answer 1"
+
+    assert_received :ws_upgrade_401
+    assert_received :refreshed
+    assert_received {:ws_request, _frame}
+    refute_received :ws_upgrade_401
+  end
+
+  defmodule PartialWs do
+    @moduledoc "Streams sink-visible content, then closes BEFORE the terminal event."
+    @behaviour WebSock
+
+    @impl true
+    def init(opts), do: {:ok, opts}
+
+    @impl true
+    def handle_in({payload, opcode: :text}, state) do
+      %{"type" => "response.create"} = Jason.decode!(payload)
+
+      frames = [
+        {:text,
+         Jason.encode!(%{
+           "type" => "response.output_item.added",
+           "item" => %{"type" => "message", "id" => "m1"}
+         })},
+        {:text,
+         Jason.encode!(%{"type" => "response.output_text.delta", "delta" => "oops partial"})}
+      ]
+
+      {:stop, :normal, 1000, frames, state}
+    end
+
+    @impl true
+    def handle_info(_msg, state), do: {:ok, state}
+
+    @impl true
+    def terminate(_reason, _state), do: :ok
+  end
+
+  defmodule PartialWsRouter do
+    use Plug.Router
+
+    plug(:match)
+    plug(:dispatch)
+
+    get "/codex/responses" do
+      WebSockAdapter.upgrade(conn, PartialWs, %{}, timeout: 10_000)
+    end
+
+    post "/codex/responses" do
+      send(conn.private.test_pid, :fallback_post)
+
+      conn
+      |> put_resp_content_type("text/event-stream")
+      |> send_resp(200, StubCodex.sse_body())
+    end
+
+    match _ do
+      send_resp(conn, 404, "not found")
+    end
+  end
+
+  test "a ws dying after sink-visible events finalizes the partial turn instead of falling back" do
+    test_pid = self()
+
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {PrivatePlug, {PartialWsRouter, test_pid}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    context = %Context{system_prompt: "x", messages: [Message.user("hi")], tools: []}
+    sink = fn ev -> send(test_pid, {:ev, ev}) end
+
+    assert {:ok, assistant} =
+             OpenAICodex.Provider.stream(model, context, [transport: :auto], sink)
+
+    # The partial text is kept, the turn is marked errored, and no SSE
+    # fallback fired (it would duplicate the delivered deltas).
+    assert assistant.stop_reason == :error
+    assert Content.text_of(assistant.content) =~ "oops partial"
+    assert assistant.error_message =~ "before completion"
+
+    assert_received {:ev, %Catalyst.LLM.Event.TextDelta{delta: "oops partial"}}
+    refute_received :fallback_post
+  end
+
+  defmodule RetryAfterCodex do
+    @moduledoc "429 + retry-after-ms on the first request, SSE 200 afterwards."
+    import Plug.Conn
+
+    def init(opts), do: opts
+
+    def call(conn, %{counter: counter, test: test}) do
+      n = Agent.get_and_update(counter, fn n -> {n + 1, n + 1} end)
+      send(test, {:codex_request, n})
+
+      case n do
+        1 ->
+          conn
+          |> put_resp_header("retry-after-ms", "50")
+          |> put_resp_content_type("application/json")
+          |> send_resp(429, ~s({"error":{"code":"rate_limit_exceeded","message":"slow down"}}))
+
+        _n ->
+          conn
+          |> put_resp_content_type("text/event-stream")
+          |> send_resp(200, StubCodex.sse_body())
+      end
+    end
+  end
+
+  test "a 429 with retry-after is retried once and then succeeds" do
+    test_pid = self()
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {RetryAfterCodex, %{counter: counter, test: test_pid}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    context = %Context{system_prompt: "x", messages: [Message.user("hi")], tools: []}
+
+    assert {:ok, assistant} =
+             OpenAICodex.Provider.stream(model, context, [transport: :sse], fn _ -> :ok end)
+
+    assert assistant.stop_reason == :stop
+    assert Content.text_of(assistant.content) == "hi"
+
+    assert_received {:codex_request, 1}
+    assert_received {:codex_request, 2}
+    refute_received {:codex_request, _}
+  end
+
+  defmodule ContinuationWs do
+    @moduledoc "Echoes each response.create frame to the test, then serves a full turn."
+    @behaviour WebSock
+
+    @impl true
+    def init(opts), do: {:ok, Map.put(opts, :turn, 0)}
+
+    @impl true
+    def handle_in({payload, opcode: :text}, state) do
+      send(state.test, {:ws_request, Jason.decode!(payload)})
+      turn = state.turn + 1
+
+      frames = [
+        text(%{"type" => "response.created", "response" => %{"id" => "resp_#{turn}"}}),
+        text(%{
+          "type" => "response.output_item.added",
+          "item" => %{"type" => "message", "id" => "m#{turn}"}
+        }),
+        text(%{"type" => "response.output_text.delta", "delta" => "answer #{turn}"}),
+        text(%{
+          "type" => "response.output_item.done",
+          "item" => %{
+            "type" => "message",
+            "id" => "m#{turn}",
+            "content" => [%{"type" => "output_text", "text" => "answer #{turn}"}]
+          }
+        }),
+        text(%{
+          "type" => "response.completed",
+          "response" => %{"id" => "resp_#{turn}", "status" => "completed"}
+        })
+      ]
+
+      {:push, frames, %{state | turn: turn}}
+    end
+
+    @impl true
+    def handle_info(_msg, state), do: {:ok, state}
+
+    @impl true
+    def terminate(_reason, _state), do: :ok
+
+    defp text(map), do: {:text, Jason.encode!(map)}
+  end
+
+  defmodule ContinuationRouter do
+    use Plug.Router
+
+    plug(:match)
+    plug(:dispatch)
+
+    get "/codex/responses" do
+      WebSockAdapter.upgrade(conn, ContinuationWs, %{test: conn.private.test_pid},
+        timeout: 10_000
+      )
+    end
+
+    match _ do
+      send_resp(conn, 404, "not found")
+    end
+  end
+
+  test "same-connection follow-up turns upload only new messages via previous_response_id" do
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {PrivatePlug, {ContinuationRouter, self()}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    sink = fn _ -> :ok end
+    opts = [transport: :websocket, session_id: "cont-test"]
+
+    # Turn 1: full upload, no continuation yet.
+    ctx1 = %Context{system_prompt: "sys", messages: [Message.user("hi")], tools: []}
+    assert {:ok, a1} = OpenAICodex.Provider.stream(model, ctx1, opts, sink)
+    assert Content.text_of(a1.content) == "answer 1"
+    assert a1.response_id == "resp_1"
+
+    assert_receive {:ws_request, frame1}
+    refute Map.has_key?(frame1, "previous_response_id")
+    assert length(frame1["input"]) == 1
+
+    # Turn 2 (same process = same run task = same cached connection): the
+    # transcript grew by [assistant, new user message] — only the NEW user
+    # message is uploaded, chained to resp_1.
+    ctx2 = %Context{
+      system_prompt: "sys",
+      messages: ctx1.messages ++ [a1, Message.user("again")],
+      tools: []
+    }
+
+    assert {:ok, a2} = OpenAICodex.Provider.stream(model, ctx2, opts, sink)
+    assert Content.text_of(a2.content) == "answer 2"
+
+    assert_receive {:ws_request, frame2}
+    assert frame2["previous_response_id"] == "resp_1"
+    assert [%{"role" => "user", "content" => [%{"text" => "again"} | _]}] = frame2["input"]
+
+    # Turn 3 with a changed request option: the body probe mismatches, so the
+    # delta is abandoned — full input, no previous_response_id.
+    ctx3 = %Context{
+      system_prompt: "sys",
+      messages: ctx2.messages ++ [a2, Message.user("third")],
+      tools: []
+    }
+
+    assert {:ok, _a3} =
+             OpenAICodex.Provider.stream(
+               model,
+               ctx3,
+               Keyword.put(opts, :reasoning_effort, "high"),
+               sink
+             )
+
+    assert_receive {:ws_request, frame3}
+    refute Map.has_key?(frame3, "previous_response_id")
+    assert length(frame3["input"]) == 5
+  end
+
+  test "auto transport still falls back to SSE when the socket dies after bookkeeping-only events" do
+    test_pid = self()
+
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    on_exit(fn -> TokenStore.delete("openai-codex") end)
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {PrivatePlug, {BookkeepingRouter, test_pid}},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    context = %Context{system_prompt: "x", messages: [Message.user("hi")], tools: []}
+    sink = fn ev -> send(test_pid, {:ev, ev}) end
+
+    assert {:ok, assistant} =
+             OpenAICodex.Provider.stream(model, context, [transport: :auto], sink)
+
+    # The websocket delivered only `response.created` (never forwarded to the
+    # sink), so the fallback was safe — the SSE retry produced the full turn.
+    assert assistant.stop_reason == :stop
+    assert Content.text_of(assistant.content) == "hi"
+
+    assert_received {:codex_method, "GET"}
+    assert_received {:codex_method, "POST"}
     assert_received {:ev, %Catalyst.LLM.Event.TextDelta{delta: "hi"}}
     refute_received {:ev, %Catalyst.LLM.Event.TextDelta{}}
   end
