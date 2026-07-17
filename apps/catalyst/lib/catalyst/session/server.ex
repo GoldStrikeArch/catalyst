@@ -8,8 +8,8 @@ defmodule Catalyst.Session.Server do
   state (append on `message_end`, persist to JSONL, track pending tool calls) and
   re-broadcasts on `"session:<id>"` for any subscribers (LiveViews/CLI).
 
-  Cancellation is process kill: `abort/1` kills the run Task; its linked
-  ports/MuonTrap daemons die with it, and an aborted turn is synthesized.
+  Cancellation shuts down the active run task; its linked ports/MuonTrap daemons
+  die with it, and an aborted turn is synthesized.
   """
 
   use GenServer
@@ -61,7 +61,7 @@ defmodule Catalyst.Session.Server do
   @doc "Queue a message to run after the agent reaches a natural stop."
   def follow_up(server, input), do: GenServer.cast(server, {:follow_up, normalize(input)})
 
-  @doc "Abort the active run (process kill)."
+  @doc "Abort the active run."
   def abort(server), do: GenServer.cast(server, :abort)
 
   @doc "Snapshot of the current session state."
@@ -74,6 +74,8 @@ defmodule Catalyst.Session.Server do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
+
     id = Keyword.fetch!(opts, :id)
     cwd = Keyword.get(opts, :cwd, File.cwd!())
 
@@ -124,8 +126,13 @@ defmodule Catalyst.Session.Server do
   def handle_cast({:follow_up, msg}, state),
     do: {:noreply, %{state | follow_up: :queue.in(msg, state.follow_up)}}
 
-  def handle_cast(:abort, %State{run: %Task{pid: pid}} = state) do
-    Process.exit(pid, :kill)
+  def handle_cast(:abort, %State{run: %Task{} = task} = state) do
+    state =
+      case shutdown_run(task) do
+        {:ok, _result} -> %{state | run: nil}
+        _ -> handle_failure(%{state | run: nil}, :killed)
+      end
+
     {:noreply, state}
   end
 
@@ -163,6 +170,14 @@ defmodule Catalyst.Session.Server do
     do: {:noreply, handle_failure(state, reason)}
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, %State{run: %Task{} = task}) do
+    shutdown_run(task)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   # ---- internals ------------------------------------------------------------
 
@@ -206,6 +221,8 @@ defmodule Catalyst.Session.Server do
 
   defp broadcast(state, event),
     do: Phoenix.PubSub.broadcast(Catalyst.PubSub, topic(state.id), {:agent_event, event})
+
+  defp shutdown_run(%Task{} = task), do: Task.shutdown(task, :brutal_kill)
 
   defp drain_queue(q), do: {:queue.to_list(q), :queue.new()}
 

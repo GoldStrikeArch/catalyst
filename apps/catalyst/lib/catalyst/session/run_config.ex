@@ -17,8 +17,8 @@ defmodule Catalyst.Session.RunConfig do
       tools: state.tools,
       # Stable session id → Codex prompt_cache_key + request headers.
       opts: Keyword.put_new(state.opts, :session_id, state.id),
-      get_steering: fn -> GenServer.call(server, :drain_steering) end,
-      get_follow_up: fn -> GenServer.call(server, :drain_follow_up) end
+      get_steering: fn -> drain(server, :drain_steering) end,
+      get_follow_up: fn -> drain(server, :drain_follow_up) end
     }
   end
 
@@ -38,4 +38,10 @@ defmodule Catalyst.Session.RunConfig do
 
   def resolve_provider(_),
     do: raise(ArgumentError, "session has no provider configured")
+
+  defp drain(server, message) do
+    GenServer.call(server, message)
+  catch
+    :exit, _reason -> []
+  end
 end

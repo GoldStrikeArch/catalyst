@@ -25,18 +25,6 @@ defmodule Catalyst.Session.ServerTest do
     {id, pid}
   end
 
-  defp wait_until(_fun, 0), do: flunk("condition not met in time")
-
-  defp wait_until(fun, tries) do
-    if fun.(),
-      do: :ok,
-      else:
-        (
-          Process.sleep(50)
-          wait_until(fun, tries - 1)
-        )
-  end
-
   test "runs an end-to-end turn: transcript, events, JSONL persistence", %{tmp: tmp, model: model} do
     File.write!(Path.join(tmp, "lib/g.ex"), "defmodule G do\n  def h, do: IO.puts(\"hi\")\nend\n")
 
@@ -91,11 +79,9 @@ defmodule Catalyst.Session.ServerTest do
     {_id, pid} = start(tmp, model, script)
 
     assert :ok = Server.prompt(pid, "long task")
-    # Let the run reach the sleeping bash, then abort.
-    Process.sleep(200)
     Server.abort(pid)
 
-    wait_until(fn -> not Server.state(pid).running end, 60)
+    assert_receive {:agent_event, %Event.AgentEnd{}}, 5000
     snap = Server.state(pid)
     assert snap.error_message == "Run aborted."
     assert Enum.any?(snap.messages, &match?(%Message.Assistant{stop_reason: :aborted}, &1))

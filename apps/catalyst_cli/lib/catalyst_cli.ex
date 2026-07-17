@@ -20,8 +20,15 @@ defmodule CatalystCli do
   end
   '''
 
+  @doc """
+  Run a CLI command. Returns `:ok` on success and `:error` on failure so the
+  caller (`CatalystCli.Application.run_and_halt/0`) can set a meaningful process
+  exit code for scripts/CI.
+  """
+  @spec run([String.t()]) :: :ok | :error
   def run(["tools" | _]) do
     IO.puts("registered tools: " <> Enum.join(Enum.sort(Catalyst.Extensions.names()), ", "))
+    :ok
   end
 
   def run(["selftest" | _]) do
@@ -34,15 +41,35 @@ defmodule CatalystCli do
     case Catalyst.Extensions.load_file(path) do
       {:ok, mods} ->
         IO.puts("compiled + loaded at runtime: #{inspect(mods)}")
-        ctx = %{cwd: ".", call_id: "x", report: fn _ -> :ok end}
-        out = Catalyst.Extensions.fetch("cli_shout").execute(%{"text" => "packaged hot-load works"}, ctx)
-        IO.puts("called the new tool -> " <> (out.content |> hd() |> Map.get(:text)))
-        IO.puts("OK: a self-contained binary loaded NEW code into the running VM.")
+        run_loaded_tool()
 
       {:error, reason} ->
         IO.puts("FAILED: #{inspect(reason)}")
+        :error
     end
   end
 
-  def run(_), do: IO.puts("usage: catalyst [tools|selftest]")
+  def run(argv) do
+    IO.puts("usage: catalyst [tools|selftest] (got: #{inspect(argv)})")
+    :error
+  end
+
+  # Exercise the just-loaded tool, guarding a missing registration or an
+  # unexpected result shape so a broken hot-load reports failure instead of
+  # crashing with a MatchError/UndefinedFunctionError.
+  defp run_loaded_tool do
+    ctx = %{cwd: ".", call_id: "x", report: fn _ -> :ok end}
+
+    with tool when not is_nil(tool) <- Catalyst.Extensions.fetch("cli_shout"),
+         %{content: content} <- tool.execute(%{"text" => "packaged hot-load works"}, ctx),
+         text when is_binary(text) <- Catalyst.Content.text_of(content) do
+      IO.puts("called the new tool -> " <> text)
+      IO.puts("OK: a self-contained binary loaded NEW code into the running VM.")
+      :ok
+    else
+      other ->
+        IO.puts("FAILED: tool loaded but did not run as expected (#{inspect(other)})")
+        :error
+    end
+  end
 end

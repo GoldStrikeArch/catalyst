@@ -15,9 +15,11 @@ defmodule CatalystWeb.Assets do
   @profile :catalyst_web
 
   @doc "PubSub topic used to signal UI/asset reloads to connected LiveViews."
+  @spec topic() :: String.t()
   def topic, do: @topic
 
   @doc "Rebuild CSS+JS, then (by default) ask clients to reload."
+  @spec rebuild(keyword()) :: :ok | {:error, term()}
   def rebuild(opts \\ []) do
     with :ok <- run(Tailwind, @profile),
          :ok <- run(Esbuild, @profile) do
@@ -27,6 +29,7 @@ defmodule CatalystWeb.Assets do
   end
 
   @doc "Broadcast a reload request to every connected LiveView."
+  @spec reload() :: :ok | {:error, term()}
   def reload, do: Phoenix.PubSub.broadcast(Catalyst.PubSub, @topic, :reload_assets)
 
   defp run(mod, profile) do

@@ -29,8 +29,17 @@ defmodule Catalyst.Agent.ToolRunner do
 
   defp run_parallel(tool_calls, config, emit) do
     tool_calls
-    |> Enum.map(fn tc -> Task.async(fn -> run_one(tc, config, emit) end) end)
-    |> Enum.map(&Task.await(&1, :infinity))
+    |> Task.async_stream(&run_one(&1, config, emit),
+      max_concurrency: Map.get(config, :max_tool_concurrency, System.schedulers_online()),
+      ordered: true,
+      timeout: Map.get(config, :tool_timeout, :infinity),
+      on_timeout: :kill_task
+    )
+    |> Enum.zip(tool_calls)
+    |> Enum.map(fn
+      {{:ok, outcome}, _tool_call} -> outcome
+      {{:exit, reason}, tool_call} -> failed_outcome(tool_call, reason, emit)
+    end)
   end
 
   defp batch_mode(tool_calls, config) do
@@ -46,6 +55,29 @@ defmodule Catalyst.Agent.ToolRunner do
       nil -> :parallel
       module -> module.execution_mode()
     end
+  end
+
+  defp failed_outcome(tool_call, reason, emit) do
+    %{id: id, name: name} = tool_call
+    content = Content.text("tool runner failed: #{inspect(reason)}")
+
+    emit.(%Event.ToolExecutionEnd{
+      call_id: id,
+      name: name,
+      result: %{content: content, details: %{}},
+      is_error: true
+    })
+
+    message = %Message.ToolResult{
+      tool_call_id: id,
+      tool_name: name,
+      content: content,
+      details: %{},
+      is_error: true,
+      timestamp: Message.now()
+    }
+
+    %{message: message, terminate: false}
   end
 
   defp run_one(tool_call, config, emit) do
