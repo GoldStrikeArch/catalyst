@@ -53,15 +53,19 @@ defmodule Catalyst.Extensions do
   require Logger
 
   alias Catalyst.{ExtensionAPI, Hooks, Tasks}
-  alias Catalyst.Extensions.{BootGuard, Loader, Processes, Versioning}
+
+  alias Catalyst.Extensions.{BootGuard, Loader, ModuleVersions, Processes, Versioning}
+
   alias Catalyst.Files.AtomicWrite
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @table :catalyst_tools
   @host_owner :host
+  @host_roles [:application, :registry]
 
   @load_lock {__MODULE__, :load_lock}
   @load_context_key {__MODULE__, :load_context}
+  @runtime_generation_key {__MODULE__, :runtime_generation}
 
   @typedoc "Per-file load summary. `:conflicts` is present only when this file redefines modules another loaded file also defines."
   @type summary :: %{
@@ -131,6 +135,40 @@ defmodule Catalyst.Extensions do
   end
 
   @doc """
+  Register a live host lease used to coordinate extension bootstrap.
+
+  A lease is valid only while its process remains alive. The host supplies the
+  same role again after a restart, replacing the prior lease without retaining a
+  monitor in the extension coordinator.
+  """
+  @spec register_host(atom(), :application | :registry, pid()) :: :ok
+  def register_host(host, role, pid)
+      when is_atom(host) and role in @host_roles and is_pid(pid) do
+    :persistent_term.put({__MODULE__, :host_lease, host, role}, pid)
+    :ok
+  end
+
+  @doc "Whether every required lease for `host` names a live process."
+  @spec host_ready?(atom()) :: boolean()
+  def host_ready?(host) when is_atom(host) do
+    Enum.all?(@host_roles, fn role ->
+      case :persistent_term.get({__MODULE__, :host_lease, host, role}, nil) do
+        pid when is_pid(pid) -> Process.alive?(pid)
+        _missing -> false
+      end
+    end)
+  end
+
+  @doc "Acknowledge that an optional host has finished wiring its extension kinds."
+  @spec bootstrap() :: :ok | {:skipped, term()}
+  def bootstrap do
+    case Process.whereis(__MODULE__) do
+      nil -> {:skipped, :extension_runtime_unavailable}
+      _pid -> :ok
+    end
+  end
+
+  @doc """
   Compile an extension source file and apply its contributions (tools + anything
   its `setup/1` registers). Returns `{:ok, summary}` or `{:error, reason}`.
   """
@@ -189,8 +227,25 @@ defmodule Catalyst.Extensions do
   @doc false
   @spec record_setup_collision(reference(), term()) :: :ok
   def record_setup_collision(load_ref, reason) when is_reference(load_ref) do
-    GenServer.call(__MODULE__, {:record_setup_collision, load_ref, reason})
+    record_setup_collision(__MODULE__, load_ref, reason)
   end
+
+  @doc false
+  @spec record_setup_collision(GenServer.server(), reference(), term()) :: :ok
+  def record_setup_collision(server, load_ref, reason) when is_reference(load_ref) do
+    GenServer.call(server, {:record_setup_collision, load_ref, reason})
+  end
+
+  @doc false
+  @spec generation_token() :: reference() | nil
+  def generation_token, do: :persistent_term.get(@runtime_generation_key, nil)
+
+  @doc false
+  @spec generation_current?(reference() | nil) :: boolean()
+  def generation_current?(generation) when is_reference(generation),
+    do: generation == generation_token()
+
+  def generation_current?(_generation), do: false
 
   @doc """
   Run `fun` under the extensions load lock — the same lock `load_file/1`,
@@ -417,6 +472,26 @@ defmodule Catalyst.Extensions do
       "#{inspect(attempted)} cannot replace it"
   end
 
+  def format_error({:prompt_owner_collision, key, existing, attempted}) do
+    "prompt #{inspect(key)} is already owned by #{inspect(existing)}; " <>
+      "#{inspect(attempted)} cannot replace it"
+  end
+
+  def format_error({:workflow_owner_collision, name, existing, attempted}) do
+    "workflow #{inspect(name)} is already owned by #{inspect(existing)}; " <>
+      "#{inspect(attempted)} cannot replace it"
+  end
+
+  def format_error({:context_policy_owner_collision, existing, attempted}) do
+    "context policy is already owned by #{inspect(existing)}; " <>
+      "#{inspect(attempted)} cannot replace it"
+  end
+
+  def format_error({:context_threshold_owner_collision, key, existing, attempted}) do
+    "context threshold #{inspect(key)} is already owned by #{inspect(existing)}; " <>
+      "#{inspect(attempted)} cannot replace it"
+  end
+
   def format_error(reason) when is_binary(reason), do: reason
   def format_error(reason), do: inspect(reason)
 
@@ -424,13 +499,13 @@ defmodule Catalyst.Extensions do
 
   @impl true
   def init(:ok) do
+    :persistent_term.put(@runtime_generation_key, make_ref())
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
     seed_builtins()
     wire_core_kinds()
+    hook_generation = Hooks.begin_runtime_generation()
+    Hooks.mark_runtime_ready(hook_generation)
     ensure_guide()
-    # In a task: reseeders call register_tool/2, a call back into this server,
-    # which would deadlock from init. Runs in safe mode too — reseeded tools
-    # are app wiring, not extension code.
     run_reseeders()
 
     state = %{
@@ -597,6 +672,10 @@ defmodule Catalyst.Extensions do
     {:reply, :ok, purge_owner(owner, state)}
   end
 
+  def handle_call({:owner_snapshot, owner}, _from, state) do
+    {:reply, owner_snapshot(owner, state), state}
+  end
+
   def handle_call({:path_for, owner}, _from, state) do
     case Map.fetch(state.paths, owner) do
       {:ok, path} -> {:reply, {:ok, path}, state}
@@ -657,26 +736,38 @@ defmodule Catalyst.Extensions do
     Enum.each(Catalyst.Tools.Registry.default_tools(), &insert/1)
   end
 
+  @doc false
+  @spec register_extension_tool(ExtensionAPI.t(), module()) :: term()
+  def register_extension_tool(%ExtensionAPI{owner: owner}, module) do
+    register_tool(module, owner: owner)
+  end
+
+  @doc false
+  @spec register_extension_hook(ExtensionAPI.t(), atom(), function(), keyword()) :: term()
+  def register_extension_hook(%ExtensionAPI{owner: owner}, point, fun, opts) do
+    # Force the file owner: extension-supplied :owner would survive purge_owner/1.
+    Hooks.register(point, fun, Keyword.put(opts, :owner, owner))
+  end
+
+  @doc false
+  @spec register_extension_observer(ExtensionAPI.t(), function(), keyword()) :: term()
+  def register_extension_observer(%ExtensionAPI{owner: owner}, fun, opts) do
+    Hooks.on(fun, Keyword.put(opts, :owner, owner))
+  end
+
+  @doc false
+  @spec start_extension_process(ExtensionAPI.t(), Supervisor.child_spec()) :: term()
+  def start_extension_process(%ExtensionAPI{owner: owner}, child_spec) do
+    Processes.start_child(owner || "anonymous", child_spec)
+  end
+
   # Wire the extension kinds that core can back, and the hooks owner-purger.
   # Provider (E3) and UI (E5) kinds/purgers are wired by their own subsystems.
   defp wire_core_kinds do
-    ExtensionAPI.register_kind(:tool, fn api, module ->
-      register_tool(module, owner: api.owner)
-    end)
-
-    ExtensionAPI.register_kind(:hook, fn api, point, fun, opts ->
-      Hooks.register(point, fun, Keyword.put_new(opts, :owner, api.owner))
-    end)
-
-    ExtensionAPI.register_kind(:event, fn api, fun, opts ->
-      Hooks.on(fun, Keyword.put_new(opts, :owner, api.owner))
-    end)
-
-    # Extension-owned processes live under a per-owner supervisor, so a purge
-    # tears down the whole subtree (including restarted children).
-    ExtensionAPI.register_kind(:process, fn api, child_spec ->
-      Processes.start_child(api.owner || "anonymous", child_spec)
-    end)
+    ExtensionAPI.register_kind(:tool, &__MODULE__.register_extension_tool/2)
+    ExtensionAPI.register_kind(:hook, &__MODULE__.register_extension_hook/4)
+    ExtensionAPI.register_kind(:event, &__MODULE__.register_extension_observer/3)
+    ExtensionAPI.register_kind(:process, &__MODULE__.start_extension_process/2)
 
     ExtensionAPI.register_purger(&Hooks.unregister/1)
     ExtensionAPI.register_purger(&Processes.stop_owner/1)
@@ -728,13 +819,6 @@ defmodule Catalyst.Extensions do
 
   # ---- loading --------------------------------------------------------------
 
-  # Keep boot load, post-web-wiring reload, explicit reload, and single-file
-  # loads ordered without putting compile/setup work back inside this GenServer.
-  # A supervised, unlinked transaction process deliberately owns the operation:
-  # if a UI/session caller disappears after commit_load/4, the transaction still
-  # reaches setup collision handling and either accepts or rolls back the file.
-  # Nested calls (Installer holds the lock and then calls load_file/1) execute in
-  # that same transaction process via the process-local context marker.
   defp serialized_load(fun) do
     case Process.get(@load_context_key, false) do
       true -> fun.()
@@ -774,9 +858,6 @@ defmodule Catalyst.Extensions do
     kind, reason -> {:raised, kind, reason, __STACKTRACE__}
   end
 
-  # The lock requester must be the transaction pid: `:global` treats locks held
-  # by the SAME requester id as compatible, so a fixed atom requester would let
-  # unrelated processes hold the "lock" concurrently.
   defp with_load_lock(fun) do
     :global.trans(
       {@load_lock, self()},
@@ -854,6 +935,11 @@ defmodule Catalyst.Extensions do
     # neither registers nor drops the prior version.
     case Loader.compile(path) do
       {:ok, contribution} ->
+        # Committing drops the prior accepted version's tracking and beams, so
+        # a later setup-phase rejection needs this pre-commit snapshot to keep
+        # the "rejected contribution restores the accepted version" contract.
+        prior = GenServer.call(__MODULE__, {:owner_snapshot, owner}, 30_000)
+
         case GenServer.call(__MODULE__, {:commit_load, owner, path, contribution}, 30_000) do
           {:ok, summary} ->
             load_ref = make_ref()
@@ -877,6 +963,7 @@ defmodule Catalyst.Extensions do
                 # hitting this collision. Reject the contribution as a unit,
                 # then restore the prior owner's code outside the GenServer.
                 :ok = GenServer.call(__MODULE__, {:uninstall, owner}, 30_000)
+                restore_prior_version(owner, prior)
                 {:error, collision}
             end
 
@@ -1010,8 +1097,6 @@ defmodule Catalyst.Extensions do
     }
 
     try do
-      # Modules the new file still defines were just redefined by the compile
-      # above and must survive the purge; ones it dropped are restored/removed.
       purge_owner_effects(owner, state,
         keep_modules: modules,
         module_versions: module_versions
@@ -1045,6 +1130,26 @@ defmodule Catalyst.Extensions do
 
   defp ownership_collision_reason(
          {:provider_owner_collision, _api, _existing_owner, _attempted_owner} = reason
+       ),
+       do: reason
+
+  defp ownership_collision_reason(
+         {:prompt_owner_collision, _key, _existing_owner, _attempted_owner} = reason
+       ),
+       do: reason
+
+  defp ownership_collision_reason(
+         {:workflow_owner_collision, _name, _existing_owner, _attempted_owner} = reason
+       ),
+       do: reason
+
+  defp ownership_collision_reason(
+         {:context_policy_owner_collision, _existing_owner, _attempted_owner} = reason
+       ),
+       do: reason
+
+  defp ownership_collision_reason(
+         {:context_threshold_owner_collision, _key, _existing_owner, _attempted_owner} = reason
        ),
        do: reason
 
@@ -1181,6 +1286,104 @@ defmodule Catalyst.Extensions do
     end)
 
     ExtensionAPI.purge_owner(owner)
+  end
+
+  # Everything needed to reinstate the owner's currently accepted version after
+  # a rejected reload: exact beams, tool pairs, and metadata. `:none` (first
+  # install, or incomplete tracking) makes the later restore a no-op.
+  defp owner_snapshot(owner, state) do
+    with {:ok, path} <- Map.fetch(state.paths, owner),
+         {:ok, modules} <- Map.fetch(state.modules, owner),
+         {:ok, beams} <- owner_beams(modules, owner, state.module_versions) do
+      pairs = state.contrib |> Map.get(owner, MapSet.new()) |> Enum.sort()
+
+      {:ok,
+       %{
+         path: path,
+         modules: modules,
+         beams: beams,
+         tool_names: Enum.map(pairs, &elem(&1, 0)),
+         tool_mods: Enum.map(pairs, &elem(&1, 1)),
+         metadata: Map.get(state.metadata, owner, %{})
+       }}
+    else
+      _missing -> :none
+    end
+  end
+
+  defp owner_beams(modules, owner, module_versions) do
+    Enum.reduce_while(modules, {:ok, %{}}, fn module, {:ok, acc} ->
+      case module_versions |> Map.get(module, []) |> Enum.find(&(&1.owner == owner)) do
+        %{beam: beam} -> {:cont, {:ok, Map.put(acc, module, beam)}}
+        nil -> {:halt, :error}
+      end
+    end)
+  end
+
+  # Best-effort reinstatement of the last accepted version after its reload was
+  # rejected: reload the retained beams, recommit tracking/tools through the
+  # normal accepted-load pipeline, and re-run setup so owner-tagged
+  # registrations return. A failure here leaves the owner unloaded (the
+  # pre-snapshot behavior) and is logged rather than raised.
+  defp restore_prior_version(_owner, :none), do: :ok
+
+  defp restore_prior_version(owner, {:ok, snapshot}) do
+    case ModuleVersions.load_beams(snapshot.path, snapshot.beams) do
+      :ok ->
+        contribution = %{
+          modules: snapshot.modules,
+          beams: snapshot.beams,
+          ext_mods: Enum.filter(snapshot.modules, &Catalyst.Extension.extension_module?/1),
+          tool_mods: snapshot.tool_mods,
+          tool_names: snapshot.tool_names,
+          metadata: snapshot.metadata
+        }
+
+        case GenServer.call(
+               __MODULE__,
+               {:commit_load, owner, snapshot.path, contribution},
+               30_000
+             ) do
+          {:ok, _summary} -> restore_prior_setup(owner, snapshot.path, contribution)
+          {:error, reason} -> log_failed_restore(owner, reason)
+        end
+
+      {:error, failures} ->
+        log_failed_restore(owner, {:load_beams, failures})
+    end
+  end
+
+  defp restore_prior_setup(owner, path, contribution) do
+    load_ref = make_ref()
+    :ok = GenServer.call(__MODULE__, {:begin_setup, load_ref}, 30_000)
+
+    setup_status =
+      Loader.run_setups(contribution.ext_mods, ExtensionAPI.new(owner, path, load_ref))
+
+    collisions = GenServer.call(__MODULE__, {:take_setup_collisions, load_ref}, 30_000)
+
+    case List.first(collisions) || setup_restore_failure(setup_status) do
+      nil ->
+        Logger.info("[extensions] restored prior accepted version of #{owner}")
+        :ok
+
+      reason ->
+        :ok = GenServer.call(__MODULE__, {:uninstall, owner}, 30_000)
+        log_failed_restore(owner, reason)
+    end
+  end
+
+  # Rollback must not report success when setup failed for any reason. Ownership
+  # collisions are one failure mode; timeouts and other setup errors are too.
+  # Loader.run_setups/2 returns exactly :ok | {:error, _}; the compiler rejects
+  # an unreachable catch-all clause here.
+  defp setup_restore_failure(:ok), do: nil
+  defp setup_restore_failure({:error, reason}), do: reason
+
+  defp log_failed_restore(owner, reason) do
+    Logger.warning("[extensions] could not restore prior version of #{owner}: #{inspect(reason)}")
+
+    :ok
   end
 
   defp put_module_versions(module_versions, owner, path, beams) do

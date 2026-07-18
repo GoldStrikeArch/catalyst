@@ -35,19 +35,19 @@ are installed.
   with an install hint); bash output streaming (partial `report`) deferred — both flagged in
   code.
 - **P2 — DONE ✅ (offline-verified; live login pending user)**. OAuth: `Auth.{PKCE, JWT,
-  OpenAIOAuth, CallbackServer (Bandit :1455), TokenStore}` + `Catalyst.Auth.login_openai_codex/0`
-  + `mix catalyst.login`; creds in `~/.catalyst/auth.json` (0600), single-flight refresh.
-  Provider: `LLM.SSE` (Finch stream decoder) + `LLM.OpenAICodex.{Headers, Request,
-  StreamParser, Provider}` against `chatgpt.com/backend-api/codex/responses`; reasoning
-  round-trip (`include: reasoning.encrypted_content` + replay), tool-call id `call|item`
-  split, usage/stop-reason mapping; registered as api `openai-codex-responses`; never raises
-  (errors → error assistant). **`mix test`: 38 (catalyst) + 7 (web) green** — incl. SSE
-  decode, full stream-parser event mapping, request round-trip, and the callback server on
-  :1455 (state match/mismatch). The live ChatGPT-authenticated streamed turn needs the user
-  to `mix catalyst.login` (interactive browser OAuth) — everything up to the network call is
-  tested. Caveat: this PI fork referenced future-dated model ids (gpt-5.4/5.5); set
-  `config :catalyst, :codex_model` (or pass an id to `OpenAICodex.model/1`) to one your
-  subscription serves.
+OpenAIOAuth, CallbackServer (Bandit :1455), TokenStore}` + `Catalyst.Auth.login_openai_codex/0`
+  - `mix catalyst.login`; creds in `~/.catalyst/auth.json` (0600), single-flight refresh.
+    Provider: `LLM.SSE` (Finch stream decoder) + `LLM.OpenAICodex.{Headers, Request,
+StreamParser, Provider}` against `chatgpt.com/backend-api/codex/responses`; reasoning
+    round-trip (`include: reasoning.encrypted_content` + replay), tool-call id `call|item`
+    split, usage/stop-reason mapping; registered as api `openai-codex-responses`; never raises
+    (errors → error assistant). **`mix test`: 38 (catalyst) + 7 (web) green** — incl. SSE
+    decode, full stream-parser event mapping, request round-trip, and the callback server on
+    :1455 (state match/mismatch). The live ChatGPT-authenticated streamed turn needs the user
+    to `mix catalyst.login` (interactive browser OAuth) — everything up to the network call is
+    tested. Caveat: this PI fork referenced future-dated model ids (gpt-5.4/5.5); set
+    `config :catalyst, :codex_model` (or pass an id to `OpenAICodex.model/1`) to one your
+    subscription serves.
 - **P3 — DONE ✅**. `ChatLive` rewritten into a real chat: owns a `Session.Server` (started
   on connect), subscribes to `"session:<id>"`, and renders the live transcript — streaming
   assistant tokens, thinking blocks (collapsible), tool-call chips, and tool-result cards —
@@ -80,14 +80,14 @@ are installed.
   `apps/catalyst_cli`. Also made `runtime.exs` generate a `secret_key_base` fallback (local
   app) instead of raising.
 - **P4c — DONE ✅ (macOS `.app` via desktop_deployment).** `{:desktop_deployment, github:
-  ...}` + root `mix.exs` `package/0` (name "Catalyst", id `dev.catalyst.app`, icon
+...}` + root `mix.exs` `package/0` (name "Catalyst", id `dev.catalyst.app`, icon
   `apps/catalyst_desktop/priv/icon.png`, `app_name: :catalyst_desktop` — required for an
   umbrella) + a `catalyst_desktop` release with `steps: [:assemble,
-  &Desktop.Deployment.generate_installer/1]`. Prod config fixed for a local app: `prod.exs`
+&Desktop.Deployment.generate_installer/1]`. Prod config fixed for a local app: `prod.exs`
   (localhost url, no force_ssl, `start_window: true`), `runtime.exs` (loopback + fixed port +
   url port + generated secret). Build = `MIX_ENV=prod mix do --app catalyst_web
-  assets.deploy` then `MIX_ENV=prod mix release catalyst_desktop --overwrite` (≡ `mix
-  desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M),
+assets.deploy` then `MIX_ENV=prod mix release catalyst_desktop --overwrite` (≡ `mix
+desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M),
   **`Catalyst-0.1.0.pkg`** in `_build/prod/`, with **20 wxWidgets dylibs bundled +
   relocated to `@loader_path`** (runs without Homebrew wx). Verified launching: boots from
   the **bundled ERTS** (`Catalyst.smp`), endpoint up on 127.0.0.1:4000, `Desktop.Auth`
@@ -108,7 +108,7 @@ are installed.
   tells the agent it can self-extend and points to the guide + `read_log`. (Keep `./guide.md`,
   `apps/catalyst/priv/guide.md`, and the in-bundle copy in sync.)
 - **P4d — DONE ✅ (runtime extensibility: "modify everything at runtime", E1–E6).** Design =
-  *everything is a registry + hooks + hot-swap*. (E1) `Catalyst.Hooks` (ETS-GenServer) with 6
+  _everything is a registry + hooks + hot-swap_. (E1) `Catalyst.Hooks` (ETS-GenServer) with 6
   PI-style loop hook points wired into `agent/loop.ex` + `tool_runner.ex` (`transform_context`,
   `before_tool_call` (block), `after_tool_call` (override), `prepare_next_turn`,
   `should_stop_after_turn`, `on`/`notify` observers) — no-op when empty, each handler
@@ -160,9 +160,10 @@ are installed.
   `ExtensionAPI.start_child(api, child_spec)` → per-owner `DynamicSupervisor` (registered by
   ext id under `Extensions.ProcessSupervisor`/`ProcessRegistry`); purge/reload terminates the
   owner's whole subtree, including supervisor-restarted children. (3) **Loop + system prompt as
-  data** — `RunConfig.resolve_loop/1` (session `opts[:loop]` → `:agent_loop` app env →
-  `Agent.Loop`) and `Catalyst.SystemPrompt.get/0` (session override → `~/.catalyst/system_prompt.md`
-  → built-in default), both resolved fresh per run; `ShellLive`'s hardcoded `@system_prompt`
+  data** — `Workflow.Registry.resolve/1`, consumed by `RunContext.build/4`, resolves session
+  workflow/loop overrides through runtime and application fallbacks; `Catalyst.SystemPrompt.get/0`
+  resolves the session override → `~/.catalyst/system_prompt.md`
+  → built-in default. Both are resolved fresh per run; `ShellLive`'s hardcoded `@system_prompt`
   removed (prompt now lives in core and advertises its own override file). (4) **Reversible module
   overrides** — the loader tracks every module an extension file compiles; purge removes them from
   the VM and restores a shadowed module from its original beam on the code path
@@ -174,9 +175,9 @@ are installed.
   `details`. Also: `ExtensionAPI.register_purger/1` now dedupes. Docs updated (architecture §2/§3/
   §11 + drift fixes: `Exec.bash/2` naming, deferred items marked deferred, store entry types,
   SSE timeout, `Desktop.Window app:`); guide.md (+priv copy) documents `start_child`,
-  `system_prompt.md`, `:agent_loop`, auto safe-mode, module restore. **`mix test`: 129 (catalyst)
-  + 3 (cli) + 19 (web) = 151 green.** (Note: ~25 of those tests landed in
-  `tools_test`/`self_mod_test`/`truncate_test` outside this change, earlier the same day.)
+  `system_prompt.md`, `:agent_loop`, auto safe-mode, module restore. \*\*`mix test`: 129 (catalyst)
+  - 3 (cli) + 19 (web) = 151 green.\*\* (Note: ~25 of those tests landed in
+    `tools_test`/`self_mod_test`/`truncate_test` outside this change, earlier the same day.)
 - **P4f — DONE ✅ (extensions panel: human-facing introspection + recovery).** `/extensions` is a
   second **seeded built-in page** (`CatalystWeb.Pages.ExtensionsPage`, registered like `ChatPage` —
   dogfoods the page registry; trusted alongside ChatPage in `render_active_page`). Lists loaded
@@ -234,8 +235,8 @@ are installed.
   Codex provider + the saved run settings; sign-in/sign-out no longer restart the session (the
   loop pulls a fresh token per turn, so login mid-conversation keeps the transcript); the
   not-authenticated error now points at the header button. `Catalyst.LLM.Demo` survives with no
-  UI surface as the LiveView test/offline-dev provider, injected via
-  `config :catalyst_web, :codex_provider_mod` (test.exs). (2) **Header decluttered** — removed
+  UI surface as the LiveView test/offline-dev provider, registered for the Codex API through
+  `Catalyst.LLM.Registry` by the web test helper. (2) **Header decluttered** — removed
   the "Catalyst" brand text and the model-label chip (the model select already shows it); the
   provider pill buttons are gone; `<title>` keeps the app name. (3) **"@" file search** —
   `CatalystWeb.FileSearch` (fd via `Binaries`/`Exec`, `--full-path`, ≤8 results, 3s deadline,
@@ -275,7 +276,7 @@ are installed.
   the noise — chosen because stream/ignore regions never re-render on assign changes, so a
   server-side conditional would need a full transcript re-stream per toggle; CSS is instant,
   retroactive, reversible, and works mid-stream. New stable hooks: `data-block-kind=
-  "text|thinking|tool-call"` on the built-in block renderers (tool-result cards already had
+"text|thinking|tool-call"` on the built-in block renderers (tool-result cards already had
   `data-message-role`); a `:has()` rule collapses assistant bubbles left empty by hiding
   (streaming bubble unaffected — different role value). Wiring mirrors the ⚡ Fast pattern but
   UI-only: `ui_prefs` in a **separate** persistent_term (`sync_codex_ui` rebuilds
@@ -286,6 +287,54 @@ are installed.
   a `data-block-kind` contract test in `message_renderer_test.exs`. **`mix test`: 262 + 3 +
   64 + 2 = 331 green**; dialyzer clean. Visual hiding is CSS (not LiveViewTest-able) —
   verify by clicking Quiet during/after a Demo run.
+- **Flexibility proof suite — DONE ✅.** A serial, default-on `:flexibility` tier composes and
+  explicitly reverts the supported runtime seams across real core sessions and LiveView renders,
+  with a normalized baseline detector for leaked registrations, modules, processes, sessions,
+  paths, config, prompts, and boot state. The bundled guide's six Elixir examples are
+  fingerprint-classified and executable/static checked. The opt-in `mix test.release` tier builds
+  a plain headless `catalyst_cli` release in a temporary path and checks the
+  `PACKAGED HOT-LOAD WORKS`, `RELEASE TURN OK`, and `RELEASE SAFE MODE OK` sentinels in isolated
+  fresh VMs. Observed locally: `mix test.flex` ran **26 tests in 7.19s**; the earlier cold release
+  build took **25.2s**, and a warm integrated `mix test.release` run took **3.0s**. The automated
+  release proof deliberately excludes Phoenix/HEEx/runtime assets; packaged GUI behavior remains
+  a manual `.app` smoke.
+- **P5c — DONE ✅ (purpose-aware prompts, guarded context, workflows, and child sessions).**
+  Run construction moved out of `Session.Server` callbacks into supervised
+  `Session.RunContext`, which pins prompt/workflow/catalog selection and reports current or
+  last-successful diagnostic metadata. Three owner-aware runtime-overlay registries now cover
+  prompt policy/text, named/default workflows, and context policy/thresholds, with live
+  application/file/built-in fallbacks and extension purge/collision semantics. System and
+  compaction prompts resolve independently by exact model id/API/default with digest and ordered
+  provenance. Model catalog context metadata feeds request-time token fingerprinting, anchored or
+  coarse estimates, absolute/ratio/disabled thresholds, and staged persistent compaction; durable
+  `ContextCompacted` JSONL replacements and transient `ContextStatus` drive resume and the chat
+  meter. `Catalyst.Workflow`/`Workflow.Support` make the built-in loop and extensions share
+  observed events, final tool capability filtering, and the context-guard provider seam.
+  `list_agents`/`spawn_agent` run fresh file-backed definitions in real, exclusively-created child
+  sessions with inherited configuration, root-tree depth/fan-out accounting, watchdog cleanup,
+  persisted topology, and bounded explicitly untrusted results. The extensions panel and chat
+  expose registry provenance, prompt diagnostics, and context status without invoking extension
+  description callbacks on the UI process.
+- **Core simplification and durability audit — DONE ✅.** Session-store writes and persisted-line
+  decoding now return tagged failures; compaction appends before reduction/broadcast and uses a
+  shared `Session.EventSink` for durable, ordinary, and synthetic observer semantics. GUI sessions
+  resolve providers through `LLM.Registry`, and tool execution consumes one validated, generation-
+  pinned registry entry instead of calling extension metadata twice. CLI controlled exits mark the
+  boot clean, while self-test uses an exclusive temporary source and never touches user extension
+  state. Shared ownership bookkeeping moved into pure `OwnedIndex`; Codex token accounting and
+  request construction share one projection; `Extensions` keeps its façade while delegating state,
+  transaction, BEAM-version, and source concerns; obsolete `RunConfig` and `ModuleScan` paths were
+  removed. Extension setup now has one host-controlled bootstrap, and exact live UI contributions
+  replay after table loss without recompiling or running setup twice. Extension transactions and
+  API handles are generation-pinned, prior runtime footprints are revoked before restart/safe-mode
+  readiness, and stale asynchronous boot work cannot run after or replace newer explicit outcomes.
+  Replacement also waits for prior compilation, whose traced candidates are restored if its
+  generation went stale; a restart-stable provisional compiler journal covers boot workers killed
+  before they can return those candidates. Extension-owner teardown is bounded even when a child
+  start callback or shutdown never returns, while preserving the shared process registry. Core
+  state/config types, behaviour callback docs, reverse chunk accumulation, async debug writes, and
+  concurrent provider cleanup tighten the idiomatic Elixir/OTP boundaries; the former core compile
+  cycle is gone.
 - **Next options:** notarize for distribution (the launcher step must then re-sign inside-out +
   re-sign the dmg); replace the placeholder icon; optional approval gate as an extension via the
   `before_tool_call` hook (a panel toggle could install it); optional `self_test/0` extension
@@ -376,8 +425,35 @@ window; abort mid-run works; a persisted session resumes.
 - More providers behind `LLM.Provider` (Anthropic, OpenAI Responses non-Codex, completions) via
   `LLM.Registry.register_provider/3` + `ProviderConfig`.
 - Device-code OAuth; websocket reuse across runs + cached-context deltas
-  (`previous_response_id`); session compaction/branching; permission gating via the
+  (`previous_response_id`); session branching; permission gating via the
   `before_tool_call` hook surfaced in the LiveView; additional fast tools as needed.
+
+## P5c — Prompt, context, workflows, and supervised child sessions
+
+This slice is delivered in dependency order rather than deferred as generic P5 breadth:
+
+1. Move extension callbacks and run assembly behind the supervised `Session.RunContext` boundary;
+   keep synchronous host-owned busy/provider checks in `Session.Server`.
+2. Add purpose/model-aware prompt resolution and provenance. Persistent compaction depends on its
+   compaction-purpose prompt; prompt work therefore precedes the context guard.
+3. Normalize effective catalog limits, deterministic request accounting, context policy and
+   threshold overlays, staged compaction, durable JSONL replacement events, and UI stream reset.
+4. Add `Workflow.Registry`, `Workflow.Support`, and the `Catalyst.Workflow` contract. This registry
+   is independent of compaction, while conforming workflows consume the guard seam once present.
+5. Add file-backed `list_agents`/`spawn_agent`, exclusive child creation, persisted topology,
+   root-tree depth/fan-out ownership, final capability filtering, watchdog cleanup, and bounded
+   results. Child sessions could exist without compaction, but landing them after the guard gives
+   long-running parents and children the same context safety.
+
+No built-in orchestrator workflow is included: `Agent.Loop` already runs independent tool calls
+concurrently, and alternative scheduling belongs behind the workflow registry when it has a
+distinct contract.
+
+**Exit:** prompt/workflow/context registry precedence and owner purge are tested; a resumed
+session folds durable compaction; chat streams reset on `ContextCompacted` and status updates do
+not create transcript blocks; custom conforming workflows use the guard; child sessions preserve
+root/depth metadata, respect tree-wide capacity, reap on parent death, and return bounded
+untrusted output.
 
 ---
 
@@ -392,4 +468,10 @@ window; abort mid-run works; a persisted session resumes.
   single-flight refresh.
 - **P3:** in browser and desktop window, send a prompt and watch live streaming + tool cards;
   abort mid-run; resume a persisted session.
-- **P4:** build the release, launch the packaged `.app`, run an end-to-end chat.
+- **P4:** run `mix test.flex` (also included by ordinary `mix test`/`mix precommit`); run the
+  opt-in `mix test.release` and observe `PACKAGED HOT-LOAD WORKS`, `RELEASE TURN OK`, and
+  `RELEASE SAFE MODE OK` from a temporary plain headless release; then build and launch the
+  packaged `.app` for the still-manual Phoenix/HEEx/runtime-asset and end-to-end GUI smoke.
+- **P5c:** focused registry/prompt/context/store/workflow/child and LiveView tests, then
+  `mix precommit`, `mix dialyzer`, and `mix test.release`; manually smoke the packaged context
+  meter, compaction transcript replacement, prompt provenance, and parallel child tools.

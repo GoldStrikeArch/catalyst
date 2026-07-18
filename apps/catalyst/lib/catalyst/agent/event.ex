@@ -68,6 +68,56 @@ defmodule Catalyst.Agent.Event do
     defstruct [:call_id, :name, :result, :is_error]
   end
 
+  defmodule ContextStatus do
+    @moduledoc """
+    Transient request-window diagnostics. This event is broadcast to live
+    subscribers but deliberately never written to the session JSONL.
+    """
+
+    defstruct [
+      :used_tokens,
+      :threshold,
+      :threshold_source,
+      :anchored,
+      :estimate_source,
+      :context_digest
+    ]
+
+    @type t :: %__MODULE__{
+            used_tokens: non_neg_integer(),
+            threshold: pos_integer() | nil,
+            threshold_source: term(),
+            anchored: boolean(),
+            estimate_source: atom(),
+            context_digest: String.t() | nil
+          }
+  end
+
+  defmodule ContextCompacted do
+    @moduledoc """
+    Durable authoritative transcript replacement accepted by the context guard.
+    `replacement` is chronological and is persisted as one compaction entry.
+    """
+
+    defstruct [
+      :replacement,
+      :summary,
+      :replaced_count,
+      :tokens_before,
+      :tokens_after,
+      :policy
+    ]
+
+    @type t :: %__MODULE__{
+            replacement: [Catalyst.Message.t()],
+            summary: Catalyst.Message.User.t() | nil,
+            replaced_count: pos_integer(),
+            tokens_before: non_neg_integer(),
+            tokens_after: non_neg_integer(),
+            policy: term()
+          }
+  end
+
   @type t ::
           %AgentStart{}
           | %AgentEnd{}
@@ -79,4 +129,6 @@ defmodule Catalyst.Agent.Event do
           | %ToolExecutionStart{}
           | %ToolExecutionUpdate{}
           | %ToolExecutionEnd{}
+          | %ContextStatus{}
+          | %ContextCompacted{}
 end

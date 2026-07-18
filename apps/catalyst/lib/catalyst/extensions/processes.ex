@@ -75,12 +75,16 @@ defmodule Catalyst.Extensions.Processes do
   # there wedges the whole registry (every register/load/uninstall call times
   # out until app restart). Give graceful shutdown a deadline, then kill.
   #
-  # Children are snapshotted BEFORE the terminate begins (a sup mid-shutdown
-  # stops answering which_children) and killed directly on the timeout path:
-  # exit(pid, :kill) is untrappable, unlike the :killed propagated by killing
-  # the sup, which a trap_exit child could ignore and survive as an orphan.
+  # Children are snapshotted from the supervisor's links, not via
+  # DynamicSupervisor.which_children/1: an extension start MFA runs inside the
+  # owner supervisor, so one that never returns also prevents that GenServer
+  # call from returning. Proper supervisor children are linked. The supervisor
+  # is also linked to its Registry partition, however, so that infrastructure
+  # link must be excluded along with the top-level parent. exit(pid, :kill) is
+  # untrappable, unlike the :killed propagated by killing the sup, which a
+  # trap_exit child could ignore and survive as an orphan.
   defp stop_sup(pid) do
-    kids = children(pid)
+    kids = linked_children(pid)
 
     task = Tasks.async(fn -> DynamicSupervisor.terminate_child(@top, pid) end)
 
@@ -92,6 +96,37 @@ defmodule Catalyst.Extensions.Processes do
         Process.exit(pid, :kill)
         Enum.each(kids, &Process.exit(&1, :kill))
         :ok
+    end
+  end
+
+  defp linked_children(supervisor) do
+    infrastructure = infrastructure_links()
+
+    case Process.info(supervisor, :links) do
+      {:links, links} -> Enum.reject(links, &MapSet.member?(infrastructure, &1))
+      nil -> []
+    end
+  end
+
+  # Use link snapshots for Catalyst-owned infrastructure too. Unlike a
+  # GenServer/Supervisor call, Process.info/2 cannot queue behind an extension
+  # callback. Registry partitions are linked to their Registry supervisor, so
+  # this excludes every shared partition without relying on private names or
+  # process-dictionary metadata.
+  defp infrastructure_links do
+    registry = Process.whereis(@registry)
+
+    [Process.whereis(@top), registry | process_links(registry)]
+    |> Enum.filter(&is_pid/1)
+    |> MapSet.new()
+  end
+
+  defp process_links(nil), do: []
+
+  defp process_links(pid) do
+    case Process.info(pid, :links) do
+      {:links, links} -> links
+      nil -> []
     end
   end
 

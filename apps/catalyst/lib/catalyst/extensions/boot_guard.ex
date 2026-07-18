@@ -38,15 +38,38 @@ defmodule Catalyst.Extensions.BootGuard do
   @spec mark_booting() :: :ok
   def mark_booting, do: write("booting")
 
+  @doc "Arm a uniquely identified boot marker for a later conditional stabilization."
+  @spec arm() :: String.t()
+  def arm do
+    token = System.unique_integer([:positive, :monotonic]) |> Integer.to_string(36)
+    :ok = write("booting:" <> token)
+    token
+  end
+
   @doc "Record that the app booted (or reloaded) cleanly with extensions active."
   @spec mark_ok() :: :ok
   def mark_ok, do: write("ok")
+
+  @doc "Mark clean only when the marker still belongs to the identified boot."
+  @spec mark_ok(String.t()) :: :ok
+  def mark_ok(token) do
+    case File.read(marker_path()) do
+      {:ok, contents} when is_binary(token) ->
+        case String.trim(contents) == "booting:" <> token do
+          true -> write("ok")
+          false -> :ok
+        end
+
+      _missing_or_unidentified ->
+        :ok
+    end
+  end
 
   @doc "Whether the previous boot died before its extensions were marked stable."
   @spec crashed_last_boot?() :: boolean()
   def crashed_last_boot? do
     case File.read(marker_path()) do
-      {:ok, contents} -> String.trim(contents) == "booting"
+      {:ok, contents} -> String.starts_with?(String.trim(contents), "booting")
       _ -> false
     end
   end

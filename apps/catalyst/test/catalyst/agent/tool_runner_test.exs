@@ -1,6 +1,8 @@
 defmodule Catalyst.Agent.ToolRunnerTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureIO, only: [with_io: 2]
+
   alias Catalyst.Agent.ToolRunner
   alias Catalyst.Content
 
@@ -66,6 +68,33 @@ defmodule Catalyst.Agent.ToolRunnerTest do
     end
   end
 
+  defmodule ContextProbeTool do
+    use Catalyst.Tools.Tool
+
+    @impl true
+    def name, do: "context_probe"
+
+    @impl true
+    def description, do: "returns the ToolRunner-built inheritance context"
+
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+
+    @impl true
+    def execute(_args, context) do
+      result("context", %{
+        parent_session_id: context.parent_session_id,
+        root_session_id: context.root_session_id,
+        model: context.model,
+        provider: context.provider,
+        opts: context.opts,
+        workflow: context.workflow,
+        tool_source: context.tool_source,
+        agent_depth: context.agent_depth
+      })
+    end
+  end
+
   defmodule SequentialBlockingTool do
     use Catalyst.Tools.Tool
     @impl true
@@ -82,6 +111,32 @@ defmodule Catalyst.Agent.ToolRunnerTest do
         :never_sent -> result("unexpected")
       end
     end
+  end
+
+  defmodule ModeProbeTool do
+    use Catalyst.Tools.Tool
+
+    @impl true
+    def name, do: "mode_probe"
+
+    @impl true
+    def description, do: "reports when execution_mode metadata is evaluated"
+
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    @impl true
+    def execution_mode do
+      case :persistent_term.get({__MODULE__, :observer}, nil) do
+        pid when is_pid(pid) -> send(pid, :execution_mode_called)
+        _none -> :ok
+      end
+
+      :parallel
+    end
+
+    @impl true
+    def execute(_args, _ctx), do: result("mode probe ran")
   end
 
   defp run(tool_name, tools, args) do
@@ -113,6 +168,47 @@ defmodule Catalyst.Agent.ToolRunnerTest do
     assert Content.text_of(res.content) == "got hi"
   end
 
+  test "ToolRunner builds the complete inheritable tool context" do
+    model = %Catalyst.Model{id: "model", api: "api"}
+    workflow = %{name: "review", module: Catalyst.Agent.Loop}
+    # Live config.opts win over a stale inheritable_opts snapshot so mid-run
+    # option changes (hooks) reach subsequently spawned children.
+    opts = [
+      session_id: "parent",
+      reasoning_effort: "high",
+      context_threshold: 100,
+      get_steering: fn -> [] end
+    ]
+
+    config = %{
+      cwd: ".",
+      tools: [ContextProbeTool],
+      opts: opts,
+      parent_session_id: "parent",
+      root_session_id: "root",
+      model: model,
+      provider: Catalyst.LLM.Faux,
+      inheritable_opts: [reasoning_effort: "stale"],
+      workflow: workflow,
+      tool_source: :extensions,
+      agent_depth: 2
+    }
+
+    calls = [%{id: "context-call", name: "context_probe", arguments: %{}}]
+    {[result], false} = ToolRunner.run_batch(calls, config, fn _event -> :ok end)
+
+    assert result.details == %{
+             parent_session_id: "parent",
+             root_session_id: "root",
+             model: model,
+             provider: Catalyst.LLM.Faux,
+             opts: [reasoning_effort: "high", context_threshold: 100],
+             workflow: workflow,
+             tool_source: :extensions,
+             agent_depth: 2
+           }
+  end
+
   test "tool text is valid UTF-8 before it enters the transcript" do
     res = run("strict_tool", [StrictTool], %{"text" => "invalid-result"})
     text = Content.text_of(res.content)
@@ -134,6 +230,24 @@ defmodule Catalyst.Agent.ToolRunnerTest do
 
     refute res.is_error
     assert Content.text_of(res.content) == "no mode"
+  end
+
+  test "execution mode is consumed from the validated entry, not called again by the runner" do
+    key = {ModeProbeTool, :observer}
+    :persistent_term.put(key, self())
+    Catalyst.Tools.Registry.invalidate(ModeProbeTool)
+
+    on_exit(fn ->
+      :persistent_term.erase(key)
+      Catalyst.Tools.Registry.invalidate(ModeProbeTool)
+    end)
+
+    res = run("mode_probe", [ModeProbeTool], %{})
+
+    refute res.is_error
+    assert Content.text_of(res.content) == "mode probe ran"
+    assert_receive :execution_mode_called
+    refute_receive :execution_mode_called, 0
   end
 
   test "sequential tools honor the per-tool timeout" do
@@ -167,23 +281,129 @@ defmodule Catalyst.Agent.ToolRunnerTest do
     assert terminate?
   end
 
-  test "resolved schemas are cached per MODULE (a changed schema replaces, not accumulates)" do
-    key = {ToolRunner, StrictTool}
-    on_exit(fn -> :persistent_term.erase(key) end)
+  test "validator exceptions become invalid arguments errors" do
+    previous = Application.get_env(:catalyst, :tool_argument_validator)
 
-    run("strict_tool", [StrictTool], %{"text" => "hi"})
+    Application.put_env(:catalyst, :tool_argument_validator, fn _schema, _args ->
+      raise "validator exploded"
+    end)
 
-    params = StrictTool.parameters()
-    assert {^params, {:ok, %ExJsonSchema.Schema.Root{}}} = :persistent_term.get(key)
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:catalyst, :tool_argument_validator)
+        validator -> Application.put_env(:catalyst, :tool_argument_validator, validator)
+      end
+    end)
 
-    # The cache-hit path still validates and still rejects bad args.
-    assert run("strict_tool", [StrictTool], %{"text" => "again"}).is_error == false
-    assert run("strict_tool", [StrictTool], %{}).is_error
+    defmodule CrashingTool do
+      use Catalyst.Tools.Tool
+      @impl true
+      def name, do: "crashing_tool"
+      @impl true
+      def description, do: "crashes during validation"
+      @impl true
+      def parameters, do: %{"type" => "object", "properties" => %{}}
 
-    # A stale entry (hot-reloaded tool whose schema changed) is REPLACED in
-    # place — the module keeps exactly one entry, so reload churn can't leak.
-    :persistent_term.put(key, {%{"type" => "array"}, :error})
-    assert run("strict_tool", [StrictTool], %{}).is_error
-    assert {^params, {:ok, %ExJsonSchema.Schema.Root{}}} = :persistent_term.get(key)
+      @impl true
+      def execute(_args, _ctx), do: result("ran")
+    end
+
+    res = run("crashing_tool", [CrashingTool], %{"a" => 1})
+    assert res.is_error
+    assert Content.text_of(res.content) =~ "invalid arguments"
+    assert Content.text_of(res.content) =~ "validation"
+  end
+
+  test "a reloaded macro tool executes the generation matching its cached mode and schema" do
+    module = Catalyst.Test.ToolRunnerPinnedEpochTool
+    observer_key = {module, :observer}
+    :persistent_term.put(observer_key, self())
+    on_exit(fn -> unload_epoch_tool(module, observer_key) end)
+
+    compile_epoch_tool(module, "pinned_epoch_tool", :parallel, :old, true)
+    index = Catalyst.Tools.Registry.index([module])
+    assert index["pinned_epoch_tool"].definition.execution_mode == :parallel
+
+    compile_epoch_tool(module, "pinned_epoch_tool", :sequential, :new, true)
+
+    assert {:ok, %{definition: %{execution_mode: :sequential}}} =
+             Catalyst.Tools.Registry.cached_entry(module)
+
+    calls = [
+      %{id: "epoch", name: "pinned_epoch_tool", arguments: %{"old_arg" => "accepted"}}
+    ]
+
+    config = %{cwd: ".", tools: [module], opts: []}
+
+    {[result], false} = ToolRunner.run_batch_with_index(calls, index, config, fn _ -> :ok end)
+
+    refute result.is_error
+    assert Content.text_of(result.content) == "old"
+    assert_receive {:executed, :old}
+    refute_receive {:executed, :new}, 0
+  end
+
+  test "a stale legacy tool entry fails the whole batch before new code executes" do
+    module = Catalyst.Test.ToolRunnerLegacyEpochTool
+    observer_key = {module, :observer}
+    :persistent_term.put(observer_key, self())
+    on_exit(fn -> unload_epoch_tool(module, observer_key) end)
+
+    compile_epoch_tool(module, "legacy_epoch_tool", :parallel, :old, false)
+    index = Catalyst.Tools.Registry.index([module])
+    compile_epoch_tool(module, "legacy_epoch_tool", :sequential, :new, false)
+
+    calls = [
+      %{id: "epoch", name: "legacy_epoch_tool", arguments: %{"old_arg" => "accepted"}}
+    ]
+
+    config = %{cwd: ".", tools: [module], opts: []}
+
+    {[result], false} = ToolRunner.run_batch_with_index(calls, index, config, fn _ -> :ok end)
+
+    assert result.is_error
+    assert result.details.validation == :stale_tool_entry
+    assert Content.text_of(result.content) =~ "stale_tool_entry"
+    refute_receive {:executed, :new}, 0
+  end
+
+  defp compile_epoch_tool(module, name, mode, version, use_macro?) do
+    use_tool = if use_macro?, do: "use Catalyst.Tools.Tool", else: ""
+    required = "#{version}_arg"
+
+    source = """
+    defmodule #{inspect(module)} do
+      #{use_tool}
+      def name, do: #{inspect(name)}
+      def description, do: "generation probe"
+      def parameters do
+        %{
+          "type" => "object",
+          "properties" => %{#{inspect(required)} => %{"type" => "string"}},
+          "required" => [#{inspect(required)}]
+        }
+      end
+      def execution_mode, do: #{inspect(mode)}
+      def execute(_args, _context) do
+        case :persistent_term.get({__MODULE__, :observer}, nil) do
+          pid when is_pid(pid) -> send(pid, {:executed, #{inspect(version)}})
+          _none -> :ok
+        end
+
+        %{content: Catalyst.Content.text(#{inspect(to_string(version))}), details: %{}, terminate: false}
+      end
+    end
+    """
+
+    {_compiled, _stderr} = with_io(:stderr, fn -> Code.compile_string(source) end)
+    :ok
+  end
+
+  defp unload_epoch_tool(module, observer_key) do
+    :persistent_term.erase(observer_key)
+    Catalyst.Tools.Registry.invalidate(module)
+    :code.purge(module)
+    :code.delete(module)
+    :code.purge(module)
   end
 end

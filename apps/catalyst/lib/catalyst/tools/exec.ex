@@ -11,6 +11,8 @@ defmodule Catalyst.Tools.Exec do
   """
 
   @default_timeout 120_000
+  @max_receive_timeout 4_294_967_295
+  @owner_shutdown_grace 1_000
 
   # bash/2's default :max_output_bytes. Bash output is tail-truncated to
   # 2000 lines / 50KB (Truncate.tail) before it reaches the model, so 4MB
@@ -32,7 +34,8 @@ defmodule Catalyst.Tools.Exec do
   @doc """
   Run `path` with `args` to completion. Options: `:cwd`, `:timeout` (ms),
   `:env` (list of `{name, value}`), `:max_output_bytes` (cap on accumulated
-  output). stderr is merged into stdout.
+  output), and `:on_output` (a crash-isolated function called for each chunk).
+  stderr is merged into stdout.
 
   When `:max_output_bytes` is exceeded the child is killed and
   `{:ok, %{out: partial, status: 0, truncated: true}}` is returned. The
@@ -82,7 +85,8 @@ defmodule Catalyst.Tools.Exec do
 
   @doc """
   Run a shell command. Options: `:cwd`, `:timeout` (ms, default 120_000),
-  `:env`, `:max_output_bytes` (default `bash_max_output_bytes/0`).
+  `:env`, `:max_output_bytes` (default `bash_max_output_bytes/0`), and
+  `:on_output` (a crash-isolated function called for each chunk).
   Returns `{:ok, %{out, status}}` — with `truncated: true` when the output
   cap killed the command early — or `{:error, {:timeout, partial_out}}`, so
   partial output is preserved on timeout.
@@ -90,8 +94,9 @@ defmodule Catalyst.Tools.Exec do
   The command runs under the muontrap wrapper so that hitting the timeout or
   the output cap kills the whole child process tree: closing the wrapper's
   port makes it SIGTERM (then SIGKILL) its child, which a plain port close
-  would leave running. Runs in the calling process — a raise becomes
-  `{:error, exception}` instead of killing a linked caller.
+  would leave running. A dedicated supervised task owns the linked port;
+  chunk callbacks and accumulation stay in the caller, and caller-side
+  failures always stop the owner before returning `{:error, exception}`.
   """
   @spec bash(String.t(), keyword()) :: collect_result() | {:error, {:timeout, String.t()}}
   def bash(command, opts \\ []) do
@@ -111,12 +116,23 @@ defmodule Catalyst.Tools.Exec do
     args = ["--capture-output", "--capture-stderr", "--", shell, "-c", command]
 
     opts = Keyword.put_new(opts, :max_output_bytes, @bash_max_output_bytes)
-    run(MuonTrap.muontrap_path(), args, opts, :muontrap)
-  rescue
-    e -> {:error, e}
+
+    try do
+      run(MuonTrap.muontrap_path(), args, opts, :muontrap)
+    rescue
+      # narrow exception handling: only rescue ArgumentError from port boundary
+      # (e.g. malformed PORT in env passing through to System.cmd internally)
+      e in ArgumentError -> {:error, e}
+    end
   end
 
   defp run(path, args, opts, mode) do
+    with :ok <- validate_options(opts) do
+      do_run(path, args, opts, mode)
+    end
+  end
+
+  defp do_run(path, args, opts, mode) do
     cwd = Keyword.get(opts, :cwd) || File.cwd!()
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     max_bytes = Keyword.get(opts, :max_output_bytes, :infinity)
@@ -132,15 +148,61 @@ defmodule Catalyst.Tools.Exec do
         {:cd, cwd}
       ] ++ env_opt(opts)
 
+    caller = self()
+    token = make_ref()
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    task =
+      Catalyst.Tasks.async(fn ->
+        port_owner(caller, token, path, port_opts, mode)
+      end)
+
     try do
-      port = Port.open({:spawn_executable, path}, port_opts)
-      deadline = System.monotonic_time(:millisecond) + timeout
-      notify = Keyword.get(opts, :on_output)
-      collect_loop(port, [], 0, deadline, max_bytes, mode, notify)
-    rescue
-      e -> {:error, e}
+      collect_loop(
+        task,
+        token,
+        [],
+        0,
+        deadline,
+        max_bytes,
+        notify: Keyword.get(opts, :on_output)
+      )
+    after
+      ensure_owner_stopped(task, token)
+    end
+  rescue
+    error -> {:error, error}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp validate_options(opts) when is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         :ok <- validate_timeout(Keyword.get(opts, :timeout, @default_timeout)),
+         :ok <- validate_max_output(Keyword.get(opts, :max_output_bytes, :infinity)),
+         :ok <- validate_notify(Keyword.get(opts, :on_output)) do
+      :ok
+    else
+      false -> {:error, {:invalid_options, opts}}
+      {:error, _reason} = error -> error
     end
   end
+
+  defp validate_options(opts), do: {:error, {:invalid_options, opts}}
+
+  defp validate_timeout(timeout)
+       when is_integer(timeout) and timeout >= 0 and timeout <= @max_receive_timeout,
+       do: :ok
+
+  defp validate_timeout(timeout), do: {:error, {:invalid_option, :timeout, timeout}}
+
+  defp validate_max_output(:infinity), do: :ok
+  defp validate_max_output(bytes) when is_integer(bytes) and bytes >= 0, do: :ok
+  defp validate_max_output(bytes), do: {:error, {:invalid_option, :max_output_bytes, bytes}}
+
+  defp validate_notify(nil), do: :ok
+  defp validate_notify(notify) when is_function(notify, 1), do: :ok
+  defp validate_notify(notify), do: {:error, {:invalid_option, :on_output, notify}}
 
   defp env_opt(opts) do
     case Keyword.get(opts, :env) do
@@ -156,39 +218,177 @@ defmodule Catalyst.Tools.Exec do
   # output so bash/2 can surface it; collect/3 drops it. `notify` (the
   # `:on_output` option) sees each chunk as it arrives — crash-isolated, so a
   # broken observer can't fail the command.
-  defp collect_loop(port, acc, bytes, deadline, max_bytes, mode, notify) do
+  defp collect_loop(task, token, acc, bytes, deadline, max_bytes, opts) do
+    owner = task.pid
+    task_ref = task.ref
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
-    receive do
-      {^port, {:data, data}} ->
-        case over_budget?(bytes + byte_size(data), max_bytes) do
-          true ->
-            kill_port(port, mode)
-            drain_port(port)
-            {:ok, %{out: scrub(IO.iodata_to_binary([acc, data])), status: 0, truncated: true}}
+    case remaining do
+      0 ->
+        stop_owner(task, token)
+        {:error, {:timeout, scrub(acc_to_binary(acc))}}
 
-          false ->
-            safe_notify(notify, data)
-            ack(port, byte_size(data), mode)
+      _positive ->
+        receive do
+          {^token, ^owner, {:data, data}} ->
+            collect_data(task, token, data, acc, bytes, deadline, max_bytes, opts)
 
-            collect_loop(
-              port,
-              [acc, data],
-              bytes + byte_size(data),
-              deadline,
-              max_bytes,
-              mode,
-              notify
-            )
+          {^task_ref, {:status, status}} ->
+            finish_owner(task, token)
+            {:ok, %{out: scrub(acc_to_binary(acc)), status: status}}
+
+          {^task_ref, {:error, reason}} ->
+            finish_owner(task, token)
+            {:error, reason}
+
+          {:DOWN, ^task_ref, :process, ^owner, reason} ->
+            drain_owner_messages(token, owner)
+
+            # If the process exited before we could read status, but we have output,
+            # treat it as ok if it's likely just a race with status.
+            case acc do
+              [] -> {:error, {:port_owner_exit, reason}}
+              _ -> {:ok, %{out: scrub(acc_to_binary(acc)), status: 0}}
+            end
+        after
+          remaining ->
+            stop_owner(task, token)
+            {:error, {:timeout, scrub(acc_to_binary(acc))}}
         end
+    end
+  end
+
+  defp collect_data(task, token, data, acc, bytes, deadline, max_bytes, opts) do
+    case over_budget?(bytes + byte_size(data), max_bytes) do
+      true ->
+        stop_owner(task, token)
+        {:ok, %{out: scrub(acc_to_binary([data | acc])), status: 0, truncated: true}}
+
+      false ->
+        safe_notify(opts[:notify], data)
+        send(task.pid, {token, self(), {:continue, byte_size(data)}})
+
+        collect_loop(
+          task,
+          token,
+          [data | acc],
+          bytes + byte_size(data),
+          deadline,
+          max_bytes,
+          opts
+        )
+    end
+  end
+
+  # The disposable task is the only process linked to the port. It relays one
+  # chunk at a time and waits for the caller's decision, preserving output
+  # order while keeping callback execution and accumulation in the caller.
+  defp port_owner(caller, token, path, port_opts, mode) do
+    Process.flag(:trap_exit, true)
+    port = Port.open({:spawn_executable, path}, port_opts)
+
+    try do
+      port_loop(port, caller, token, mode)
+    after
+      close_port(port)
+    end
+  rescue
+    error -> {:error, error}
+  end
+
+  defp port_loop(port, caller, token, mode) do
+    receive do
+      {^token, ^caller, :stop} ->
+        kill_port(port, mode)
+        :stopped
+
+      {^port, {:data, data}} ->
+        send(caller, {token, self(), {:data, data}})
+        await_caller(port, caller, token, mode)
 
       {^port, {:exit_status, status}} ->
-        {:ok, %{out: scrub(IO.iodata_to_binary(acc)), status: status}}
-    after
-      remaining ->
+        {:status, status}
+
+      {:EXIT, ^port, reason} ->
+        {:error, {:port_exit, reason}}
+
+      {:EXIT, _linked, reason} ->
         kill_port(port, mode)
-        drain_port(port)
-        {:error, {:timeout, scrub(IO.iodata_to_binary(acc))}}
+        exit(reason)
+    end
+  end
+
+  # Port messages are deliberately unmatched here. Selective receive leaves
+  # them in their original order until the relayed chunk is acknowledged.
+  defp await_caller(port, caller, token, mode) do
+    receive do
+      {^token, ^caller, {:continue, count}} ->
+        ack(port, count, mode)
+        port_loop(port, caller, token, mode)
+
+      {^token, ^caller, :stop} ->
+        kill_port(port, mode)
+        :stopped
+
+      {:EXIT, linked, reason} when linked != port ->
+        kill_port(port, mode)
+        exit(reason)
+    end
+  end
+
+  defp stop_owner(task, token) do
+    send(task.pid, {token, self(), :stop})
+    _result = Catalyst.Tasks.await(task, @owner_shutdown_grace)
+    finish_owner(task, token)
+  end
+
+  defp finish_owner(task, token) do
+    Process.demonitor(task.ref, [:flush])
+    drain_owner_messages(token, task.pid)
+    drain_task_replies(task.ref)
+  end
+
+  defp ensure_owner_stopped(task, token) do
+    case Process.alive?(task.pid) do
+      true -> stop_live_owner(task, token)
+      false -> :ok
+    end
+
+    finish_owner(task, token)
+  end
+
+  defp stop_live_owner(task, token) do
+    monitor = Process.monitor(task.pid)
+    send(task.pid, {token, self(), :stop})
+
+    receive do
+      {:DOWN, ^monitor, :process, _pid, _reason} -> :ok
+    after
+      @owner_shutdown_grace ->
+        Process.exit(task.pid, :kill)
+
+        receive do
+          {:DOWN, ^monitor, :process, _pid, _reason} -> :ok
+        end
+    end
+  end
+
+  # A Task reply or DOWN is an ordering fence: the same owner sent every relay
+  # before terminating, so no matching protocol message can arrive later.
+  defp drain_owner_messages(token, owner) do
+    receive do
+      {^token, ^owner, _message} -> drain_owner_messages(token, owner)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp drain_task_replies(ref) do
+    receive do
+      {^ref, _result} -> drain_task_replies(ref)
+      {:DOWN, ^ref, :process, _pid, _reason} -> drain_task_replies(ref)
+    after
+      0 -> :ok
     end
   end
 
@@ -201,6 +401,8 @@ defmodule Catalyst.Tools.Exec do
   catch
     _kind, _reason -> :ok
   end
+
+  defp safe_notify(_invalid, _data), do: :ok
 
   defp over_budget?(_bytes, :infinity), do: false
   defp over_budget?(bytes, max_bytes), do: bytes > max_bytes
@@ -241,17 +443,8 @@ defmodule Catalyst.Tools.Exec do
     end
   end
 
-  # Sequential tools run in the long-lived agent-loop process: `{port, ...}`
-  # messages already delivered before the kill would otherwise sit in that
-  # mailbox forever.
-  defp drain_port(port) do
-    receive do
-      {^port, _} -> drain_port(port)
-    after
-      0 -> :ok
-    end
-  end
-
   # Command output ends up in LLM request JSON, which requires valid UTF-8.
+  defp acc_to_binary(acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
   defp scrub(out), do: Catalyst.Tools.Truncate.scrub_utf8(out)
 end

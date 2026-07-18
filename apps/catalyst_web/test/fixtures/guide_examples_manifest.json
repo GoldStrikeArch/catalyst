@@ -1,0 +1,32 @@
+[
+  {
+    "id": "white_background",
+    "fingerprint": "58507dfadd0afe5626dc83cb8adaea166360691cb71ca790fb8efdbc8dbab44d",
+    "treatment": "compile_only"
+  },
+  {
+    "id": "word_count",
+    "fingerprint": "e308465b6aec800739725d4ffa17dee3fe0a463f054b7f86171570f2ca171abd",
+    "treatment": "install_and_execute"
+  },
+  {
+    "id": "result_helpers",
+    "fingerprint": "2ba640ea37f657aec36748e038af0d206bdce827087ccc5a052069ad23c5b213",
+    "treatment": "generated_tool"
+  },
+  {
+    "id": "count_matches",
+    "fingerprint": "8927339f485c94d9950a8192768cc49319ce99a3bc96197d711d8df58fca3903",
+    "treatment": "install_and_execute"
+  },
+  {
+    "id": "http_get",
+    "fingerprint": "49dd1aba2cbe699420f4fe6c88368310081b9efb07a4a53d049c5f0d781c34c1",
+    "treatment": "install_and_execute"
+  },
+  {
+    "id": "manual_load",
+    "fingerprint": "e1f0a3d33af1c7ce476d6bdc1397b75dfc79d424e631372b7eb26679910e4e5f",
+    "treatment": "parse_and_check_calls"
+  }
+]

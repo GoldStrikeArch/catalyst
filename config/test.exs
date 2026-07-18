@@ -7,12 +7,11 @@ import Config
 # other's extension dirs mid-run.
 test_tmp = Path.join(System.tmp_dir!(), "catalyst_test_#{System.pid()}")
 
-# LiveView tests drive full turns offline: the chat's (Codex-shaped) sessions
-# stream through the input-aware Demo provider instead of the network.
-config :catalyst_web, codex_provider_mod: Catalyst.LLM.Demo
-
 config :catalyst,
   home: test_tmp,
+  # Chaos/recovery tests intentionally kill several runtime registries inside
+  # OTP's five-second restart window. Keep production's default budget intact.
+  extension_runtime_max_restarts: 10,
   auth_path: Path.join(test_tmp, "auth.json"),
   sessions_root: Path.join(test_tmp, "sessions"),
   extensions_dir: Path.join(test_tmp, "extensions"),
@@ -24,6 +23,8 @@ config :catalyst,
   # safe mode); short stabilization so boot marks itself ok quickly.
   boot_marker_path: Path.join(test_tmp, "boot_marker"),
   system_prompt_path: Path.join(test_tmp, "system_prompt.md"),
+  prompts_dir: Path.join(test_tmp, "prompts"),
+  agents_dir: Path.join(test_tmp, "agents"),
   boot_stable_ms: 50
 
 # We don't run a server during test. If one is required,
@@ -35,6 +36,10 @@ config :catalyst_web, CatalystWeb.Endpoint,
 
 # Each test mount gets a fresh session; reattach is exercised explicitly.
 config :catalyst_web, reattach_sessions: false
+
+# UI recovery tests intentionally restart both the table owner and registry in
+# one suite. Production retains OTP's default escalation threshold.
+config :catalyst_web, ui_runtime_max_restarts: 10
 
 # Print only warnings and errors during test
 config :logger, level: :warning

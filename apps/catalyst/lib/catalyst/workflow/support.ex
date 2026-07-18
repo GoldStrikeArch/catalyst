@@ -1,0 +1,272 @@
+defmodule Catalyst.Workflow.Support do
+  @moduledoc """
+  Shared lifecycle helpers for conforming workflows.
+
+  The built-in loop and extension workflows use this module so observer
+  delivery, live tool selection, depth capabilities, and request-time context
+  guarding do not drift apart. Calling a provider module directly is an
+  unsupported bypass of these guarantees.
+  """
+
+  alias Catalyst.Agent.Event
+  alias Catalyst.Context.{Guard, Tokens, Window}
+  alias Catalyst.Session.EventSink
+  alias Catalyst.Message
+  alias Catalyst.Tools.Registry, as: ToolRegistry
+
+  @default_subagent_max_depth 3
+
+  @doc "Build, transform, account for, and compact one ordinary request when needed."
+  @spec prepare_request(map(), map(), (Event.t() -> any()), keyword() | map()) ::
+          {:ok, Guard.prepared()} | {:error, term()}
+  def prepare_request(context, config, emit, opts \\ []) do
+    Guard.prepare_request(context, config, emit, opts)
+  end
+
+  @doc "Wrap an event sink so every event is also offered to ordered observers."
+  @spec observed_emit((Event.t() -> any()), map()) :: (Event.t() -> any())
+  def observed_emit(emit, config) when is_function(emit, 1) and is_map(config) do
+    observer_key = option(config, :session_id, self())
+    EventSink.observed(emit, observer_key)
+  end
+
+  @doc "Resolve the original live tool source, then apply final capability filtering."
+  @spec resolve_tools(map()) :: [module()]
+  def resolve_tools(config) when is_map(config) do
+    config
+    |> tool_source()
+    |> Catalyst.Extensions.resolve()
+    |> filter_capabilities(config)
+  end
+
+  @doc "Return a turn config with one validated tool index and its exact provider definitions."
+  @spec resolve_turn_tools(map()) :: map()
+  def resolve_turn_tools(config) when is_map(config) do
+    source = tool_source(config)
+    tools = resolve_tools(config)
+
+    config
+    |> Map.put(:tool_source, source)
+    |> Map.put(:tools, tools)
+    |> Map.put(:tool_index, ToolRegistry.index(tools))
+  end
+
+  @doc "Apply non-bypassable capability limits after every tool source is resolved."
+  @spec filter_capabilities([module()], map()) :: [module()]
+  def filter_capabilities(tools, config) when is_list(tools) and is_map(config) do
+    case at_subagent_depth_limit?(config) do
+      true -> Enum.reject(tools, &(&1 == spawn_agent_module()))
+      false -> tools
+    end
+  end
+
+  @doc "Return the unexpanded selector retained for child-session inheritance."
+  @spec tool_source(map()) :: term()
+  def tool_source(config) when is_map(config) do
+    case Map.fetch(config, :tool_source) do
+      {:ok, source} -> source
+      :error -> Map.get(config, :tools, :extensions)
+    end
+  end
+
+  @doc "Whether the current run has reached its configured subagent depth cap."
+  @spec at_subagent_depth_limit?(map()) :: boolean()
+  def at_subagent_depth_limit?(config) when is_map(config) do
+    depth = non_negative(option(config, :agent_depth, 0), 0)
+
+    max_depth =
+      config
+      |> option(
+        :subagent_max_depth,
+        Application.get_env(:catalyst, :subagent_max_depth, @default_subagent_max_depth)
+      )
+      |> non_negative(@default_subagent_max_depth)
+
+    depth >= max_depth
+  end
+
+  @doc """
+  Make one ordinary provider request through the context-guard seam.
+
+  The default path prepares the exact request with `Context.Guard`, streams the
+  prepared provider context, and returns the prepared value alongside the
+  provider outcome. Successful assistant responses receive a resumable digest
+  when the provider implements the fingerprint adapter and return as
+  `{:ok, assistant, prepared}`. After persisting the assistant `MessageEnd`, call
+  `emit_anchor_status/3` to publish the matching total. Provider failures return
+  `{:error, reason, prepared}` so a workflow can keep an accepted compaction in
+  its local context. Guard failures return the guard's ordinary `{:error, reason}`.
+
+  The fifth argument is reserved for internal requests such as compaction:
+  `guard: false` deliberately bypasses recursive guarding and retains the
+  provider's `{:ok, assistant} | {:error, reason}` contract. A module supplied
+  as `guard: MyGuard` is useful for isolated implementations and tests and must
+  implement the same `prepare_request/4` contract as `Context.Guard`.
+  """
+  @spec request_provider(
+          Catalyst.Model.t() | nil,
+          term(),
+          map(),
+          (Event.t() -> any()),
+          keyword()
+        ) :: term()
+  def request_provider(model, context, config, emit, opts \\ [])
+      when is_map(config) and is_function(emit, 1) and is_list(opts) do
+    case guard_module(opts) do
+      false -> stream_provider(model, context, config, emit)
+      {:error, _reason} = error -> error
+      guard -> guarded_request(guard, model, context, config, emit, opts)
+    end
+  end
+
+  @doc "Attach a provider-accurate resumable digest to a successful assistant response."
+  @spec attach_context_digest(
+          Message.Assistant.t(),
+          Catalyst.Model.t() | nil,
+          Catalyst.LLM.Context.t(),
+          map()
+        ) :: Message.Assistant.t()
+  def attach_context_digest(%Message.Assistant{} = assistant, model, llm_context, config) do
+    Tokens.attach_context_digest(assistant, model, llm_context, token_options(config))
+  end
+
+  @doc """
+  Emit the post-persistence anchored status for a digested assistant response.
+
+  A built-in threshold resolved for an unanchored pre-request estimate used the
+  conservative ratio; the anchored status recomputes it for the model so the
+  meter matches what the next anchored request will enforce. Explicit
+  session/registry/application thresholds are anchor-independent and reused.
+  """
+  @spec emit_anchor_status(
+          Message.Assistant.t(),
+          Event.ContextStatus.t() | nil,
+          function(),
+          Catalyst.Model.t() | nil
+        ) :: :ok
+  def emit_anchor_status(assistant, status, emit, model \\ nil)
+
+  def emit_anchor_status(
+        %Message.Assistant{
+          stop_reason: reason,
+          usage: %Catalyst.Usage{total_tokens: total, context_digest: digest}
+        },
+        %Event.ContextStatus{} = status,
+        emit,
+        model
+      )
+      when reason not in [:error, :aborted] and total > 0 and is_binary(digest) and
+             is_function(emit, 1) do
+    {threshold, threshold_source} = anchored_threshold(status, model)
+
+    emit.(%Event.ContextStatus{
+      used_tokens: total,
+      threshold: threshold,
+      threshold_source: threshold_source,
+      anchored: true,
+      estimate_source: :provider,
+      context_digest: digest
+    })
+
+    :ok
+  end
+
+  def emit_anchor_status(%Message.Assistant{}, _status, _emit, _model), do: :ok
+
+  defp anchored_threshold(%Event.ContextStatus{threshold_source: :builtin} = status, model) do
+    case Window.builtin_threshold(model, true) do
+      {:ok, value, :builtin} -> {value, :builtin}
+      :none -> {status.threshold, status.threshold_source}
+    end
+  end
+
+  defp anchored_threshold(status, _model), do: {status.threshold, status.threshold_source}
+
+  defp guarded_request(guard, model, context, config, emit, opts) do
+    config = Map.put(config, :model, model)
+
+    with {:ok, prepared} <- call_guard(guard, context, config, emit, opts) do
+      case stream_provider(model, prepared.llm_context, config, emit) do
+        {:ok, %Message.Assistant{} = assistant} ->
+          assistant = attach_context_digest(assistant, model, prepared.llm_context, config)
+          {:ok, assistant, prepared}
+
+        {:ok, assistant} ->
+          {:ok, assistant, prepared}
+
+        {:error, reason} ->
+          {:error, reason, prepared}
+
+        invalid ->
+          {:error, {:invalid_provider_return, invalid}, prepared}
+      end
+    end
+  end
+
+  defp call_guard(guard, context, config, emit, opts) do
+    case Code.ensure_loaded?(guard) and function_exported?(guard, :prepare_request, 4) do
+      true -> apply(guard, :prepare_request, [context, config, emit, guard_options(config, opts)])
+      false -> {:error, {:invalid_context_guard, guard}}
+    end
+  end
+
+  defp guard_options(config, opts) do
+    opts
+    |> Keyword.delete(:guard)
+    |> Keyword.put_new(:register_resource, Map.get(config, :register_resource))
+    |> Keyword.put_new(:persist_event, Map.get(config, :persist_event))
+    |> Keyword.put_new(:session_id, option(config, :session_id, nil))
+    |> Keyword.put_new(:cwd, Map.get(config, :cwd))
+  end
+
+  defp token_options(config) do
+    config
+    |> Map.get(:opts, [])
+    |> Keyword.put(:provider, Map.get(config, :provider))
+  end
+
+  defp stream_provider(model, context, config, emit) do
+    sink = fn llm_event -> emit.(%Event.MessageUpdate{llm_event: llm_event}) end
+
+    case Map.get(config, :provider) do
+      provider when is_atom(provider) and not is_nil(provider) ->
+        provider.stream(model, context, Map.get(config, :opts, []), sink)
+
+      provider ->
+        {:error, {:invalid_provider, provider}}
+    end
+  end
+
+  defp guard_module(opts) do
+    case Keyword.get(opts, :guard, true) do
+      false -> false
+      nil -> false
+      true -> context_guard_module()
+      module when is_atom(module) -> module
+      invalid -> {:error, {:invalid_context_guard, invalid}}
+    end
+  end
+
+  # Resolve these optional runtime seams without compile-time module attributes;
+  # otherwise xref connects Workflow.Support back into the modules that use it.
+  defp context_guard_module, do: Module.concat(["Catalyst", "Context", "Guard"])
+  defp spawn_agent_module, do: Module.concat(["Catalyst", "Tools", "SpawnAgent"])
+
+  defp option(config, key, default) do
+    case Map.fetch(config, key) do
+      {:ok, value} -> value
+      :error -> nested_option(config, key, default)
+    end
+  end
+
+  defp nested_option(config, key, default) do
+    case Map.get(config, :opts, []) do
+      opts when is_list(opts) -> Keyword.get(opts, key, default)
+      opts when is_map(opts) -> Map.get(opts, key, default)
+      _invalid -> default
+    end
+  end
+
+  defp non_negative(value, _default) when is_integer(value) and value >= 0, do: value
+  defp non_negative(_value, default), do: default
+end

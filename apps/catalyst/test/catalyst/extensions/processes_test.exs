@@ -4,6 +4,7 @@ defmodule Catalyst.Extensions.ProcessesTest do
 
   alias Catalyst.{ExtensionAPI, Extensions}
   alias Catalyst.Extensions.Processes
+  alias Catalyst.Test.{BlockingExtensionChild, StubbornExtensionChild}
 
   test "start_child runs a process under the owner's supervisor; purge kills it" do
     owner = "proc_test_#{System.unique_integer([:positive])}"
@@ -74,30 +75,6 @@ defmodule Catalyst.Extensions.ProcessesTest do
     end
   end
 
-  defmodule Stubborn do
-    @moduledoc false
-    # Simulates a wedged extension process: traps exits and ignores ALL
-    # messages, so only an untrappable direct kill can take it down. A raw
-    # receive loop, deliberately not a GenServer — gen_server intercepts a
-    # parent supervisor's EXIT and complies with the shutdown.
-    def start_link(test_pid) do
-      pid =
-        spawn_link(fn ->
-          Process.flag(:trap_exit, true)
-          send(test_pid, {:stubborn, self()})
-          loop()
-        end)
-
-      {:ok, pid}
-    end
-
-    defp loop do
-      receive do
-        _ -> loop()
-      end
-    end
-  end
-
   test "stop_owner stays bounded and kills a tree that ignores graceful shutdown" do
     owner = "stubborn_#{System.unique_integer([:positive])}"
 
@@ -114,7 +91,7 @@ defmodule Catalyst.Extensions.ProcessesTest do
     {:ok, child} =
       Processes.start_child(owner, %{
         id: :stubborn,
-        start: {Stubborn, :start_link, [self()]},
+        start: {StubbornExtensionChild, :start_link, [self()]},
         shutdown: :infinity
       })
 
@@ -138,6 +115,68 @@ defmodule Catalyst.Extensions.ProcessesTest do
 
     assert Process.alive?(pid2)
     Processes.stop_owner(owner)
+  end
+
+  test "stop_owner stays bounded while an extension child start callback is wedged" do
+    owner = "blocking_start_#{System.unique_integer([:positive])}"
+    token = make_ref()
+    test_pid = self()
+    previous_timeout = Application.get_env(:catalyst, :extension_stop_timeout)
+
+    Application.put_env(:catalyst, :extension_stop_timeout, 50)
+
+    caller =
+      spawn(fn ->
+        result =
+          Processes.start_child(owner, %{
+            id: :blocking_start,
+            start: {BlockingExtensionChild, :start_link, [{test_pid, token}]},
+            restart: :temporary
+          })
+
+        send(test_pid, {:blocking_start_result, self(), result})
+      end)
+
+    caller_ref = Process.monitor(caller)
+
+    on_exit(fn ->
+      try do
+        if Process.alive?(caller) do
+          case Registry.lookup(Catalyst.Extensions.ProcessRegistry, owner) do
+            [{pid, _value}] -> send(pid, {:release_blocking_extension_child, token})
+            [] -> :ok
+          end
+
+          Process.exit(caller, :kill)
+        end
+
+        Processes.stop_owner(owner)
+      after
+        case previous_timeout do
+          nil -> Application.delete_env(:catalyst, :extension_stop_timeout)
+          timeout -> Application.put_env(:catalyst, :extension_stop_timeout, timeout)
+        end
+      end
+    end)
+
+    assert_receive {:blocking_extension_child, owner_supervisor, ^token}
+    owner_ref = Process.monitor(owner_supervisor)
+
+    assert :ok = Processes.stop_owner(owner)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner_supervisor, :killed}, 2_000
+    assert_receive {:DOWN, ^caller_ref, :process, ^caller, _reason}, 1_000
+    refute_receive {:blocking_start_result, ^caller, _result}
+
+    # Forced teardown must leave both the shared Registry and the owner slot
+    # healthy enough for an immediate replacement.
+    assert {:ok, replacement} =
+             Processes.start_child(owner, %{
+               id: :replacement,
+               start: {Agent, :start_link, [fn -> :alive end]},
+               restart: :temporary
+             })
+
+    assert Process.alive?(replacement)
   end
 
   @proc_ext_source ~S'''

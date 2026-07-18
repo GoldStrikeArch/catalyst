@@ -69,6 +69,7 @@ defmodule Catalyst.Agent.LoopTest do
     assert Enum.any?(events, &match?(%Event.AgentStart{}, &1))
     assert Enum.any?(events, &match?(%Event.AgentEnd{}, &1))
     assert Enum.count(events, &match?(%Event.ToolExecutionEnd{}, &1)) == 2
+    assert_guard_before_each_turn(events, 3)
   end
 
   test "a failing tool becomes an error result and the loop continues", %{tmp: tmp} do
@@ -86,6 +87,33 @@ defmodule Catalyst.Agent.LoopTest do
              Content.text_of(tool_result.content) =~ "missing.txt"
 
     assert Content.text_of(List.last(msgs).content) == "recovered"
+  end
+
+  test "the guard runs before initial and resumed session requests", %{tmp: tmp} do
+    config = %{
+      provider: Catalyst.LLM.Faux,
+      model: %Model{id: "faux", api: "faux", provider: "faux"},
+      cwd: tmp,
+      tools: Registry.default_tools(),
+      opts: [script: [{:text, "initial"}, {:text, "resumed"}]]
+    }
+
+    initial_events =
+      run_events(
+        [Message.user("new")],
+        %{system_prompt: nil, messages: []},
+        config
+      )
+
+    resumed_context = %{
+      system_prompt: nil,
+      messages: [Message.user("old"), assistant("old answer")]
+    }
+
+    resumed_events = run_events([Message.user("continue")], resumed_context, config)
+
+    assert_guard_before_each_turn(initial_events, 1)
+    assert_guard_before_each_turn(resumed_events, 1)
   end
 
   test "a steer arriving during the final toolless turn runs another turn", %{tmp: tmp} do
@@ -109,12 +137,43 @@ defmodule Catalyst.Agent.LoopTest do
       get_steering: get_steering
     }
 
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+    emit = fn event -> Agent.update(agent, &[event | &1]) end
+
     {:ok, msgs, _ctx} =
-      Loop.run([Message.user("go")], %{system_prompt: nil, messages: []}, config, fn _ -> :ok end)
+      Loop.run([Message.user("go")], %{system_prompt: nil, messages: []}, config, emit)
+
+    events = agent |> Agent.get(&Enum.reverse/1) |> tap(fn _events -> Agent.stop(agent) end)
 
     # The steer was injected and answered in the SAME run, not left queued.
     assert roles(msgs) == [:user, :assistant, :user, :assistant]
     assert Content.text_of(List.last(msgs).content) == "after steer"
+    assert_guard_before_each_turn(events, 2)
+  end
+
+  test "the guard runs before a queued follow-up request", %{tmp: tmp} do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    get_follow_up = fn ->
+      case Agent.get_and_update(counter, fn count -> {count, count + 1} end) do
+        0 -> [Message.user("queued follow-up")]
+        _later -> []
+      end
+    end
+
+    config = %{
+      provider: Catalyst.LLM.Faux,
+      model: %Model{id: "faux", api: "faux", provider: "faux"},
+      cwd: tmp,
+      tools: Registry.default_tools(),
+      opts: [script: [{:text, "first"}, {:text, "follow-up answer"}]],
+      get_follow_up: get_follow_up
+    }
+
+    events = run_events([Message.user("go")], %{system_prompt: nil, messages: []}, config)
+
+    assert_guard_before_each_turn(events, 2)
+    Agent.stop(counter)
   end
 
   test "a provider error ends the run without draining follow-ups", %{tmp: tmp} do
@@ -166,5 +225,36 @@ defmodule Catalyst.Agent.LoopTest do
     tool_results = Enum.filter(msgs, &match?(%Message.ToolResult{}, &1))
     assert length(tool_results) == 2
     assert Enum.map(tool_results, & &1.tool_name) |> Enum.sort() == ["find", "grep"]
+  end
+
+  defp run_events(prompts, context, config) do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+    emit = fn event -> Agent.update(agent, &[event | &1]) end
+
+    assert {:ok, _messages, _context} = Loop.run(prompts, context, config, emit)
+
+    events = Agent.get(agent, &Enum.reverse/1)
+    Agent.stop(agent)
+    events
+  end
+
+  defp assert_guard_before_each_turn(events, expected_count) do
+    statuses = event_indexes(events, Event.ContextStatus)
+    turns = event_indexes(events, Event.TurnStart)
+
+    assert length(statuses) == expected_count
+    assert length(turns) == expected_count
+    assert Enum.zip(statuses, turns) |> Enum.all?(fn {status, turn} -> status < turn end)
+  end
+
+  defp event_indexes(events, module) do
+    events
+    |> Enum.with_index()
+    |> Enum.filter(fn {event, _index} -> event.__struct__ == module end)
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  defp assistant(text) do
+    %Message.Assistant{content: Content.text(text), stop_reason: :stop}
   end
 end

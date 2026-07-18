@@ -33,7 +33,15 @@ defmodule CatalystCli.Application do
           1
       end
 
-    System.halt(code)
+    clean_halt(code)
+  end
+
+  @doc false
+  @spec clean_halt(non_neg_integer(), (non_neg_integer() -> result)) :: result when result: term()
+  def clean_halt(code, halt_fun \\ &System.halt/1)
+      when is_integer(code) and code >= 0 and is_function(halt_fun, 1) do
+    Catalyst.Extensions.mark_clean_shutdown()
+    halt_fun.(code)
   end
 
   # Burrito's Zig wrapper passes user args as plain arguments — System.argv/0

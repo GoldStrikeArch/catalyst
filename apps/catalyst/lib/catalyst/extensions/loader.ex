@@ -31,18 +31,43 @@ defmodule Catalyst.Extensions.Loader do
   @doc "Compile and classify one source file within a bounded task."
   @spec compile(Path.t()) :: {:ok, contribution()} | {:error, term(), [module()]}
   def compile(path) do
+    case compile_tracked(path) do
+      {:ok, contribution, trace_ref} ->
+        CompilerTracer.acknowledge(trace_ref)
+        {:ok, contribution}
+
+      {:error, reason, emitted_modules, trace_ref} ->
+        CompilerTracer.acknowledge(trace_ref)
+        {:error, reason, emitted_modules}
+    end
+  end
+
+  @doc false
+  @spec compile_tracked(Path.t()) ::
+          {:ok, contribution(), reference()} | {:error, term(), [module()], reference()}
+  def compile_tracked(path) do
     with_compiler_options(fn ->
       collector = self()
       trace_ref = make_ref()
-      task = Tasks.async(fn -> compile_and_classify(path, collector, trace_ref) end)
+      gate = make_ref()
+
+      task =
+        Tasks.async(fn ->
+          receive do
+            {^gate, :compile} -> compile_and_classify(path, collector, trace_ref)
+          end
+        end)
+
+      :ok = CompilerTracer.reserve(trace_ref, task.pid)
+      send(task.pid, {gate, :compile})
       outcome = Tasks.await(task, compile_timeout())
       emitted_modules = CompilerTracer.collect(trace_ref)
 
       case outcome do
-        {:ok, {:ok, contribution}} -> {:ok, contribution}
-        {:ok, {:error, reason}} -> {:error, reason, emitted_modules}
-        {:exit, reason} -> {:error, {:exit, reason}, emitted_modules}
-        :timeout -> {:error, :timeout, emitted_modules}
+        {:ok, {:ok, contribution}} -> {:ok, contribution, trace_ref}
+        {:ok, {:error, reason}} -> {:error, reason, emitted_modules, trace_ref}
+        {:exit, reason} -> {:error, {:exit, reason}, emitted_modules, trace_ref}
+        :timeout -> {:error, :timeout, emitted_modules, trace_ref}
       end
     end)
   end

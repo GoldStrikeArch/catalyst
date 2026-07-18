@@ -199,6 +199,8 @@ const Hooks = {
         });
         code.innerHTML = value;
         code.dataset.highlighted = "yes";
+        // Mark as DOM-managed by the hook to prevent LiveView from patching children
+        code.setAttribute("phx-update", "ignore");
       });
     },
   },
@@ -210,7 +212,9 @@ const Hooks = {
     mounted() {
       this.el.addEventListener("paste", (e) => {
         const files = Array.from(e.clipboardData?.items || [])
-          .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+          .filter(
+            (item) => item.kind === "file" && item.type.startsWith("image/"),
+          )
           .map((item) => item.getAsFile())
           .filter(Boolean);
         if (files.length === 0) return;

@@ -38,7 +38,7 @@ defmodule Catalyst.Auth.TokenStore do
   Supersedes any in-flight refresh for the same provider: its waiters are
   replied to with these credentials and its result is discarded.
   """
-  @spec put(String.t(), map()) :: :ok
+  @spec put(String.t(), map()) :: :ok | {:error, term()}
   def put(provider, creds), do: GenServer.call(__MODULE__, {:put, provider, normalize(creds)})
 
   @doc "Whether a provider has stored credentials."
@@ -47,7 +47,7 @@ defmodule Catalyst.Auth.TokenStore do
     do: GenServer.call(__MODULE__, {:logged_in?, provider})
 
   @doc "Forget a provider's credentials and persist."
-  @spec delete(String.t()) :: :ok
+  @spec delete(String.t()) :: :ok | {:error, term()}
   def delete(provider), do: GenServer.call(__MODULE__, {:delete, provider})
 
   @doc """
@@ -94,20 +94,32 @@ defmodule Catalyst.Auth.TokenStore do
   end
 
   def handle_call({:put, provider, creds}, _from, state) do
-    state = supersede_refresh(state, provider, creds)
-    state = %{state | creds: Map.put(state.creds, provider, creds)}
-    persist(state.creds)
-    {:reply, :ok, state}
+    new_creds = Map.put(state.creds, provider, creds)
+
+    case persist(new_creds) do
+      :ok ->
+        state = supersede_refresh(state, provider, creds)
+        {:reply, :ok, %{state | creds: new_creds}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:logged_in?, provider}, _from, state),
     do: {:reply, Map.has_key?(state.creds, provider), state}
 
   def handle_call({:delete, provider}, _from, state) do
-    state = cancel_refresh(state, provider, :not_logged_in)
-    state = %{state | creds: Map.delete(state.creds, provider)}
-    persist(state.creds)
-    {:reply, :ok, state}
+    new_creds = Map.delete(state.creds, provider)
+
+    case persist(new_creds) do
+      :ok ->
+        state = cancel_refresh(state, provider, :not_logged_in)
+        {:reply, :ok, %{state | creds: new_creds}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:invalidate, provider}, _from, state) do
@@ -284,9 +296,16 @@ defmodule Catalyst.Auth.TokenStore do
       end
 
     creds = Map.put(state.creds, provider, new_creds)
-    persist(creds)
-    Enum.each(waiters, &GenServer.reply(&1, {:ok, public(new_creds)}))
-    %{state | creds: creds}
+
+    case persist(creds) do
+      :ok ->
+        Enum.each(waiters, &GenServer.reply(&1, {:ok, public(new_creds)}))
+        %{state | creds: creds}
+
+      {:error, reason} ->
+        Enum.each(waiters, &GenServer.reply(&1, {:error, {:refresh_failed, reason}}))
+        state
+    end
   end
 
   defp apply_refresh(_provider, {:error, reason}, waiters, state) do
@@ -320,8 +339,8 @@ defmodule Catalyst.Auth.TokenStore do
 
   # Never raises: a disk error here (full disk, read-only home) inside a
   # handle_call would crash the server — and the resulting crash report would
-  # carry token material (see format_status/1, which only mitigates). The creds
-  # stay usable in memory; losing persistence costs a re-login after restart.
+  # carry token material (see format_status/1, which only mitigates). Callers
+  # receive the tagged error and memory remains unchanged, so :ok means durable.
   defp persist(creds) do
     path = auth_path()
     dir = Path.dirname(path)
@@ -337,10 +356,7 @@ defmodule Catalyst.Auth.TokenStore do
       end
 
     with {:error, reason} <- result do
-      Logger.warning(
-        "[auth] could not persist credentials to #{path}: #{inspect(reason)} — " <>
-          "tokens stay in memory; you will need to sign in again after a restart"
-      )
+      Logger.warning("[auth] could not persist credentials to #{path}: #{inspect(reason)}")
 
       {:error, reason}
     end

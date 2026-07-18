@@ -18,6 +18,7 @@ defmodule Catalyst.Session.Reducer do
     %{
       state
       | messages: [m | state.messages],
+        run_final_assistant: final_assistant(m, state.run_final_assistant),
         in_flight: drop_in_flight(state.in_flight, m),
         error_message: error_of(m) || state.error_message
     }
@@ -27,19 +28,29 @@ defmodule Catalyst.Session.Reducer do
   def reduce(%Event.MessageStart{message: m}, state),
     do: %{state | streaming_message: m, streaming_text: [], streaming_thinking: []}
 
-  # Accumulate streamed deltas (as iodata) so a reattaching UI can rebuild the
-  # in-flight bubble from the snapshot instead of losing already-streamed text.
+  # Accumulate streamed deltas newest-first so every append is O(1). Snapshot
+  # reverses once when a reattaching UI rebuilds the in-flight bubble.
   def reduce(%Event.MessageUpdate{llm_event: %LLM.Event.TextDelta{delta: d}}, state),
-    do: %{state | streaming_text: [state.streaming_text | d]}
+    do: %{state | streaming_text: prepend_delta(state.streaming_text, d)}
 
   def reduce(%Event.MessageUpdate{llm_event: %LLM.Event.ThinkingDelta{delta: d}}, state),
-    do: %{state | streaming_thinking: [state.streaming_thinking | d]}
+    do: %{state | streaming_thinking: prepend_delta(state.streaming_thinking, d)}
 
   def reduce(%Event.ToolExecutionStart{call_id: id}, state),
     do: %{state | pending_tool_calls: MapSet.put(state.pending_tool_calls, id)}
 
   def reduce(%Event.ToolExecutionEnd{call_id: id}, state),
     do: %{state | pending_tool_calls: MapSet.delete(state.pending_tool_calls, id)}
+
+  def reduce(%Event.ContextCompacted{replacement: replacement}, state),
+    do: %{state | messages: Enum.reverse(replacement)}
+
+  def reduce(%Event.ContextStatus{} = status, %{current_run_metadata: metadata} = state)
+      when is_map(metadata) do
+    %{state | current_run_metadata: Map.put(metadata, :context_status, Map.from_struct(status))}
+  end
+
+  def reduce(%Event.ContextStatus{}, state), do: state
 
   # A clean run end: everything drained was delivered (or folded above).
   def reduce(%Event.AgentEnd{}, state), do: %{state | in_flight: []}
@@ -51,6 +62,9 @@ defmodule Catalyst.Session.Reducer do
 
   defp clear_streaming(state, _message), do: state
 
+  defp final_assistant(%Message.Assistant{} = assistant, _current), do: assistant
+  defp final_assistant(_message, current), do: current
+
   # Surface provider failures (assistant turns with stop_reason :error) in the
   # snapshot's error_message — they are not run crashes, so handle_failure
   # never sees them.
@@ -61,6 +75,20 @@ defmodule Catalyst.Session.Reducer do
   defp drop_in_flight([], _m), do: []
   defp drop_in_flight([{_kind, m} | rest], m), do: rest
   defp drop_in_flight([entry | rest], m), do: [entry | drop_in_flight(rest, m)]
+
+  # A live session may cross a hot reload while carrying the former nested
+  # chronological iodata accumulator. Collapse that old value once, then keep
+  # the new reverse-chunk representation for subsequent O(1) appends.
+  defp prepend_delta(acc, delta) do
+    case proper_list?(acc) do
+      true -> [delta | acc]
+      false -> [delta, IO.iodata_to_binary(acc)]
+    end
+  end
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(_improper_tail), do: false
 
   @doc """
   Synthesized error ToolResults for tool calls orphaned by a run failure/abort.

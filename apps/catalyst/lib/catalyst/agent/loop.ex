@@ -25,22 +25,20 @@ defmodule Catalyst.Agent.Loop do
   `context` is `%{system_prompt: String.t() | nil, messages: [Catalyst.Message.t()]}`.
   """
 
+  @behaviour Catalyst.Workflow
+
   alias Catalyst.Agent.{Event, ToolRunner}
   alias Catalyst.{Content, Hooks, Message}
-  alias Catalyst.LLM
-  alias Catalyst.Tools.Registry
+
+  alias Catalyst.Session.RunContext
+  alias Catalyst.Workflow.Support
 
   @doc "Run the loop for the given prompts. Returns `{:ok, new_messages, final_context}`."
-  @spec run([Message.t()], map(), map(), (Event.t() -> any())) :: {:ok, [Message.t()], map()}
+  @impl true
+  @spec run([Message.t()], map(), map(), (Event.t() -> any())) ::
+          {:ok, [Message.t()], map()} | {:error, term()}
   def run(prompts, context, config, emit) do
-    observer_key = Keyword.get(config[:opts] || [], :session_id, self())
-
-    # Every event is also offered to registered observers (Hooks `on/1`). The
-    # dispatcher preserves order for this session without delaying the loop.
-    emit = fn ev ->
-      Hooks.notify(ev, observer_key)
-      emit.(ev)
-    end
+    emit = Support.observed_emit(emit, config)
 
     emit.(%Event.AgentStart{})
 
@@ -52,11 +50,15 @@ defmodule Catalyst.Agent.Loop do
     # `acc` is carried NEWEST-FIRST (O(1) appends) and reversed once here.
     # `context.messages` stays chronological: its batch appends are O(n) per
     # turn, which the per-turn LLM request building costs anyway.
-    {context, acc} = outer_loop(context, Enum.reverse(prompts), config, emit)
-    new_messages = Enum.reverse(acc)
+    case outer_loop(context, Enum.reverse(prompts), config, emit) do
+      {:ok, context, acc} ->
+        new_messages = Enum.reverse(acc)
+        emit.(%Event.AgentEnd{messages: new_messages})
+        {:ok, new_messages, context}
 
-    emit.(%Event.AgentEnd{messages: new_messages})
-    {:ok, new_messages, context}
+      {:error, reason, _context, _acc} ->
+        {:error, reason}
+    end
   end
 
   # Outer loop: after the inner loop reaches a natural stop, drain follow-ups.
@@ -66,47 +68,64 @@ defmodule Catalyst.Agent.Loop do
   defp outer_loop(context, acc, config, emit) do
     case inner_loop(context, acc, config, emit) do
       {:halt, context, acc} ->
-        {context, acc}
+        {:ok, context, acc}
 
-      {:stop, context, acc} ->
-        case drain(config[:get_follow_up]) do
+      {:stop, context, acc, next_config} ->
+        case drain(next_config[:get_follow_up]) do
           [] ->
-            {context, acc}
+            {:ok, context, acc}
 
           follow ->
             Enum.each(follow, fn m -> emit.(%Event.MessageEnd{message: m}) end)
             context = %{context | messages: context.messages ++ follow}
-            outer_loop(context, Enum.reverse(follow, acc), config, emit)
+            outer_loop(context, Enum.reverse(follow, acc), next_config, emit)
         end
+
+      {:error, reason, context, acc} ->
+        {:error, reason, context, acc}
     end
   end
 
   # Inner loop: stream a turn, run tools, repeat while tool calls (or steering
-  # messages) remain. Returns `{:stop, ...}` on a natural stop (follow-ups may
-  # re-enter) or `{:halt, ...}` on a hard stop (they may not).
+  # messages) remain. Returns `{:stop, ..., config}` on a natural stop so
+  # hook-updated config reaches follow-ups, or `{:halt, ...}` on a hard stop.
   defp inner_loop(context, acc, config, emit) do
     {context, acc} = inject_steering(context, acc, config, emit)
     run_turn(context, acc, config, emit)
   end
 
   defp run_turn(context, acc, config, emit) do
-    turn_config = resolve_turn_tools(config)
-    {assistant, context, acc} = run_assistant_turn(context, acc, turn_config, emit)
+    case Hooks.capture_snapshot() do
+      {:ok, hook_snapshot} ->
+        turn_config =
+          config
+          |> Support.resolve_turn_tools()
+          |> Map.put(:hook_snapshot, hook_snapshot)
 
-    continue_after_assistant(assistant, context, acc, config, turn_config, emit)
-  end
+        with {:ok, context, turn_config} <- RunContext.reconcile_request(context, turn_config),
+             {:ok, assistant, context, acc} <-
+               run_assistant_turn(context, acc, turn_config, emit) do
+          config = Map.put(turn_config, :tools, Map.get(config, :tools, :extensions))
+          continue_after_assistant(assistant, context, acc, config, turn_config, emit)
+        else
+          {:error, reason} -> {:error, reason, context, acc}
+        end
 
-  defp resolve_turn_tools(config) do
-    # Resolve the live tool set for THIS turn (re-resolved each turn, so a tool the
-    # agent just created with develop_tool becomes callable on the next turn).
-    Map.put(config, :tools, Catalyst.Extensions.resolve(config.tools))
+      {:error, reason} ->
+        {:error, reason, context, acc}
+    end
   end
 
   defp run_assistant_turn(context, acc, turn_config, emit) do
-    emit.(%Event.TurnStart{})
-    {assistant, context} = stream_assistant(context, turn_config, emit)
+    case Support.prepare_request(context, turn_config, emit, guard_options(turn_config)) do
+      {:ok, prepared} ->
+        emit.(%Event.TurnStart{})
+        {assistant, context} = stream_assistant(prepared, turn_config, emit)
+        {:ok, assistant, context, [assistant | acc]}
 
-    {assistant, context, [assistant | acc]}
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp continue_after_assistant(assistant, context, acc, config, turn_config, emit) do
@@ -141,7 +160,7 @@ defmodule Catalyst.Agent.Loop do
     cond do
       # should_stop_after_turn is a hard stop: PI emits agent_end right away,
       # skipping the follow-up queue.
-      Hooks.should_stop?(Map.put(hook_ctx, :context, context)) ->
+      Hooks.should_stop?(Map.put(hook_ctx, :context, context), turn_config.hook_snapshot) ->
         {:halt, context, acc}
 
       more_tool_calls? ->
@@ -166,7 +185,7 @@ defmodule Catalyst.Agent.Loop do
   defp steer_or_stop(context, acc, config, emit) do
     case drain(config[:get_steering]) do
       [] ->
-        {:stop, context, acc}
+        {:stop, context, acc, config}
 
       msgs ->
         {context, acc} = append_steering(context, acc, msgs, emit)
@@ -178,7 +197,7 @@ defmodule Catalyst.Agent.Loop do
     # Make the assistant message that issued the calls available to before_tool_call hooks.
     batch_config = Map.put(turn_config, :assistant, assistant)
 
-    ToolRunner.run_batch(tool_calls, batch_config, emit)
+    ToolRunner.run_batch_with_index(tool_calls, turn_config.tool_index, batch_config, emit)
   end
 
   defp append_tool_results(context, acc, results, emit) do
@@ -196,43 +215,37 @@ defmodule Catalyst.Agent.Loop do
   defp prepare_next_turn_state(context, config, assistant, tool_results) do
     # Hooks may swap the context/model for the next turn, or force a stop.
     hook_ctx = %{assistant: assistant, tool_results: tool_results, cwd: config.cwd}
-    {context, config} = Hooks.prepare_next_turn(context, config, hook_ctx)
 
-    {context, config, hook_ctx}
+    {context, hooked} =
+      Hooks.prepare_next_turn(context, config, hook_ctx, Map.fetch!(config, :hook_snapshot))
+
+    {context, retarget_tool_source(hooked, config), hook_ctx}
+  end
+
+  # A hook that changes `:tools` supplies a NEW selector for the next turn; the
+  # retained `:tool_source` must follow it, or `Support.resolve_turn_tools/1`
+  # keeps resolving the stale source and the hook's change never applies.
+  defp retarget_tool_source(hooked, config) do
+    case Map.get(hooked, :tools) == Map.get(config, :tools) do
+      true -> hooked
+      false -> Map.put(hooked, :tool_source, Map.get(hooked, :tools, :extensions))
+    end
   end
 
   defp stream_assistant(context, config, emit) do
     model = config.model
-    llm_ctx = build_llm_context(context, config)
+    llm_ctx = context.llm_context
 
     emit.(%Event.MessageStart{message: empty_assistant(model)})
 
     assistant =
-      stream_provider(model, llm_ctx, config, emit)
+      Support.request_provider(model, llm_ctx, config, emit, guard: false)
       |> normalize_assistant_response(model)
+      |> Support.attach_context_digest(model, llm_ctx, config)
 
     emit.(%Event.MessageEnd{message: assistant})
-    {assistant, append_messages(context, [assistant])}
-  end
-
-  defp build_llm_context(context, config) do
-    convert = config[:convert_to_llm] || (&Function.identity/1)
-
-    # Hooks may rewrite/compact/redact the message list for THIS request only
-    # (the stored context is untouched).
-    messages = Hooks.transform_context(context.messages, %{config: config})
-
-    %LLM.Context{
-      system_prompt: context.system_prompt,
-      messages: convert.(messages),
-      tools: Registry.to_provider_tools(config.tools)
-    }
-  end
-
-  defp stream_provider(model, llm_ctx, config, emit) do
-    sink = fn ev -> emit.(%Event.MessageUpdate{llm_event: ev}) end
-
-    config.provider.stream(model, llm_ctx, config[:opts] || [], sink)
+    Support.emit_anchor_status(assistant, context.status, emit, model)
+    {assistant, append_messages(context.context, [assistant])}
   end
 
   defp normalize_assistant_response({:ok, %Message.Assistant{} = assistant}, _model) do
@@ -246,6 +259,15 @@ defmodule Catalyst.Agent.Loop do
       stop_reason: :error,
       error_message: inspect(reason),
       timestamp: Message.now()
+    }
+  end
+
+  defp guard_options(config) do
+    %{
+      register_resource: Map.get(config, :register_resource),
+      persist_event: Map.get(config, :persist_event),
+      session_id: config |> Map.get(:opts, []) |> Keyword.get(:session_id),
+      cwd: Map.get(config, :cwd)
     }
   end
 

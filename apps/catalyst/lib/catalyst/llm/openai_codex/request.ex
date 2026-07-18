@@ -1,21 +1,60 @@
 defmodule Catalyst.LLM.OpenAICodex.Request do
   @moduledoc """
-  Builds the Codex Responses request body (ported from PI's `buildRequestBody` +
-  `convertResponsesMessages` / `convertResponsesTools`).
+  Builds the Codex Responses request body and its stable semantic projection
+  (ported from PI's `buildRequestBody` + `convertResponsesMessages` /
+  `convertResponsesTools`).
 
   The system prompt goes in `instructions` (not in `input`). Messages convert to
   Responses `input` items; reasoning blocks are replayed from their stored
   signature; tool-call ids carry `"<call_id>|<item_id>"` and are split apart.
+  The semantic projection reuses the same encoder while omitting generated
+  assistant replay ids, so request fingerprints never depend on random values.
   """
 
   alias Catalyst.{Content, Message}
+
+  @provider_module "Elixir.Catalyst.LLM.OpenAICodex.Provider"
+
+  @typedoc "Whether generated assistant replay item ids are emitted."
+  @type assistant_replay_ids :: :generate | :omit
+
+  @typedoc "Options controlling the conversion of messages into request input items."
+  @type input_options :: [assistant_replay_ids: assistant_replay_ids()]
 
   @doc "Build the JSON-encodable request body map."
   @spec build(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) :: map()
   def build(model, context, opts \\ []) do
     model
     |> base(context, opts)
-    |> Map.put("input", convert_messages(context.messages, image_input?(model)))
+    |> Map.put(
+      "input",
+      input_items(context.messages, model, assistant_replay_ids: :generate)
+    )
+  end
+
+  @doc """
+  Build the stable provider-visible projection used for request accounting.
+
+  Runtime-only transport options and generated assistant replay ids are absent.
+  Reasoning and function-call item ids remain because they are sent verbatim to
+  the provider. JSON-equivalent tool schemas and function arguments normalize
+  to the same value.
+  """
+  @spec semantic_projection(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) :: map()
+  def semantic_projection(model, context, opts \\ []) do
+    body = base(model, context, opts)
+
+    %{
+      provider: %{module: @provider_module, api: model.api, provider: model.provider},
+      model: Map.take(model, [:id, :api, :provider, :base_url]),
+      instructions: body["instructions"],
+      tools: body |> Map.get("tools", []) |> json_semantic_value(),
+      options: semantic_options(body),
+      messages:
+        context.messages
+        |> input_items(model, assistant_replay_ids: :omit)
+        |> Enum.map(&semantic_item/1)
+    }
   end
 
   @doc "Build request fields other than `input`, for websocket delta selection."
@@ -44,9 +83,14 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
   `"input"`). The websocket delta path uses this to encode ONLY the messages
   the connection's `previous_response_id` doesn't already cover. Pass the
   model so image handling matches what `build/3` would produce.
+
+  Set `:assistant_replay_ids` to `:omit` only when building a stable semantic
+  projection. Wire requests use the default `:generate` mode.
   """
-  @spec input_items([Catalyst.Message.t()], Catalyst.Model.t() | nil) :: [map()]
-  def input_items(messages, model \\ nil), do: convert_messages(messages, image_input?(model))
+  @spec input_items([Catalyst.Message.t()], Catalyst.Model.t() | nil, input_options()) :: [map()]
+  def input_items(messages, model \\ nil, opts \\ []) do
+    convert_messages(messages, image_input?(model), replay_id_mode(opts))
+  end
 
   @doc "Whether the model accepts image input (nil model → assume yes)."
   @spec image_input?(Catalyst.Model.t() | nil) :: boolean()
@@ -82,20 +126,24 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
 
   # ---- messages -> Responses input items ------------------------------------
 
-  defp convert_messages(messages, image_input?),
-    do: Enum.flat_map(messages, &convert_message(&1, image_input?))
+  defp convert_messages(messages, image_input?, replay_ids),
+    do: Enum.flat_map(messages, &convert_message(&1, image_input?, replay_ids))
 
-  defp convert_message(%Message.User{content: content}, image_input?),
+  defp convert_message(%Message.User{content: content}, image_input?, _replay_ids),
     do: [%{"role" => "user", "content" => user_content(content, image_input?)}]
 
-  defp convert_message(%Message.Assistant{content: blocks}, _image_input?),
-    do: Enum.flat_map(blocks, &assistant_block/1)
+  defp convert_message(%Message.Assistant{content: blocks}, _image_input?, replay_ids),
+    do: Enum.flat_map(blocks, &assistant_block(&1, replay_ids))
 
   # Tool results with images ship as a function_call_output ITEM LIST
   # (input_text + input_image parts) when the model accepts images — PI's
   # openai-responses-shared behavior; a non-vision model gets the text (or a
   # placeholder note) instead.
-  defp convert_message(%Message.ToolResult{tool_call_id: id, content: content}, image_input?) do
+  defp convert_message(
+         %Message.ToolResult{tool_call_id: id, content: content},
+         image_input?,
+         _replay_ids
+       ) do
     {call_id, _item} = split_id(id)
     images = Enum.filter(content, &match?(%Content.Image{}, &1))
     text = Content.text_of(content)
@@ -124,7 +172,7 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
     [%{"type" => "function_call_output", "call_id" => call_id, "output" => output}]
   end
 
-  defp convert_message(_, _image_input?), do: []
+  defp convert_message(_, _image_input?, _replay_ids), do: []
 
   defp user_content(content, image_input?) do
     parts =
@@ -157,28 +205,30 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
   end
 
   # Reasoning items are replayed verbatim from their stored signature.
-  defp assistant_block(%Content.Thinking{signature: sig}) when is_binary(sig) do
+  defp assistant_block(%Content.Thinking{signature: sig}, _replay_ids) when is_binary(sig) do
     case Jason.decode(sig) do
       {:ok, item} -> [item]
       _ -> []
     end
   end
 
-  defp assistant_block(%Content.Thinking{}), do: []
+  defp assistant_block(%Content.Thinking{}, _replay_ids), do: []
 
-  defp assistant_block(%Content.Text{text: text}) do
-    [
-      %{
-        "type" => "message",
-        "role" => "assistant",
-        "content" => [%{"type" => "output_text", "text" => text, "annotations" => []}],
-        "status" => "completed",
-        "id" => gen_msg_id()
-      }
-    ]
+  defp assistant_block(%Content.Text{text: text}, replay_ids) do
+    item = %{
+      "type" => "message",
+      "role" => "assistant",
+      "content" => [%{"type" => "output_text", "text" => text, "annotations" => []}],
+      "status" => "completed"
+    }
+
+    [maybe_put_replay_id(item, replay_ids)]
   end
 
-  defp assistant_block(%Content.ToolCall{id: id, name: name, arguments: args}) do
+  defp assistant_block(
+         %Content.ToolCall{id: id, name: name, arguments: args},
+         _replay_ids
+       ) do
     {call_id, item_id} = split_id(id)
 
     [
@@ -192,7 +242,45 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
     ]
   end
 
-  defp assistant_block(_), do: []
+  defp assistant_block(_, _replay_ids), do: []
+
+  defp maybe_put_replay_id(item, :generate), do: Map.put(item, "id", gen_msg_id())
+  defp maybe_put_replay_id(item, :omit), do: item
+
+  defp replay_id_mode(opts) do
+    case Keyword.get(opts, :assistant_replay_ids, :generate) do
+      :omit -> :omit
+      _generate_or_invalid -> :generate
+    end
+  end
+
+  defp semantic_options(body) do
+    %{
+      text_verbosity: get_in(body, ["text", "verbosity"]),
+      prompt_cache_key: Map.get(body, "prompt_cache_key"),
+      service_tier: Map.get(body, "service_tier"),
+      reasoning: Map.get(body, "reasoning")
+    }
+  end
+
+  defp semantic_item(%{"type" => "function_call", "arguments" => arguments} = item)
+       when is_binary(arguments) do
+    case Jason.decode(arguments) do
+      {:ok, value} -> Map.put(item, "arguments", value)
+      {:error, _reason} -> item
+    end
+  end
+
+  defp semantic_item(item), do: json_semantic_value(item)
+
+  defp json_semantic_value(value) do
+    with {:ok, encoded} <- Jason.encode(value),
+         {:ok, decoded} <- Jason.decode(encoded) do
+      decoded
+    else
+      _not_json -> value
+    end
+  end
 
   defp split_id(id) do
     case String.split(id, "|", parts: 2) do

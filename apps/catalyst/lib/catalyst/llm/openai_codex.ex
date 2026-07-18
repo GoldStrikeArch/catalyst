@@ -111,9 +111,16 @@ defmodule Catalyst.LLM.OpenAICodex do
   @doc "Build a Codex `%Model{}` for `id` (defaults to the configured codex_model)."
   @spec model(String.t(), keyword()) :: Model.t()
   def model(id \\ default_model_id(), opts \\ []) do
+    entry = catalog_entry(id)
+    explicit_window = positive(Keyword.get(opts, :context_window))
+    explicit_window? = is_integer(explicit_window)
+
+    context_window =
+      explicit_window || entry.context_window || entry.max_context_window || 272_000
+
     %Model{
       id: id,
-      name: catalog_entry(id).name,
+      name: entry.name,
       api: "openai-codex-responses",
       provider: "openai-codex",
       base_url: Keyword.get(opts, :base_url, @base_url),
@@ -121,7 +128,16 @@ defmodule Catalyst.LLM.OpenAICodex do
       # The gpt-5.x Codex models are vision-capable (live catalog
       # `input_modalities` defaults to ["text","image"]; PI declares the same).
       input: [:text, :image],
-      context_window: Keyword.get(opts, :context_window, 272_000),
+      context_window: context_window,
+      max_context_window: entry.max_context_window,
+      effective_context_window_percent: entry.effective_context_window_percent,
+      auto_compact_token_limit: entry.auto_compact_token_limit,
+      context_window_source:
+        cond do
+          explicit_window? -> :session
+          entry.context_window || entry.max_context_window -> :catalog
+          true -> :fallback
+        end,
       max_tokens: Keyword.get(opts, :max_tokens, 128_000)
     }
   end
@@ -136,4 +152,7 @@ defmodule Catalyst.LLM.OpenAICodex do
       entries -> entries
     end
   end
+
+  defp positive(value) when is_integer(value) and value > 0, do: value
+  defp positive(_value), do: nil
 end

@@ -16,6 +16,11 @@ defmodule Catalyst.Application do
       # Supervises the loop/tool Tasks spawned per run (and token refreshes),
       # so it must start before TokenStore.
       {Task.Supervisor, name: Catalyst.TaskSupervisor},
+      # Observer entries are passed by value, so delivery has no lifecycle
+      # dependency on the extension registries. Keeping the dispatcher outside
+      # their rest-for-one group preserves admitted queues during registry
+      # recovery; committed admission retries its own rare direct restart.
+      Catalyst.Hooks.ObserverDispatcher,
       # Validates built-in tool metadata once; extension registrations populate
       # the same hot-reload-safe cache before a tool becomes visible.
       Catalyst.Tools.Registry,
@@ -31,18 +36,47 @@ defmodule Catalyst.Application do
       # TableOwner crash restarted it with a fresh empty ETS table while Hooks
       # kept running — every registered handler silently lost and the
       # before_tool_call gates failing open — and a Hooks/LLM.Registry restart
-      # lost extension registrations with nothing re-registering them.
+      # lost extension registrations with nothing re-registering them. The
+      # restart budget is test-overridable because chaos tests deliberately
+      # kill several different children in one short window; production keeps
+      # OTP's default escalation threshold.
       %{
         id: Catalyst.ExtensionRuntimeSupervisor,
         type: :supervisor,
-        start: {Supervisor, :start_link, [extension_runtime(), [strategy: :rest_for_one]]}
+        start:
+          {Supervisor, :start_link,
+           [
+             extension_runtime(),
+             [strategy: :rest_for_one, max_restarts: extension_runtime_max_restarts()]
+           ]}
       },
       # Registry maps session id -> Session.Server pid.
       {Registry, keys: :unique, name: Catalyst.Session.Registry},
+      # Atomic root-tree capacity and parent/child monitoring for real
+      # subagent sessions. The table owner survives a Children restart so the
+      # coordinator can reconstruct monitors without forgetting live leases.
+      %{
+        id: Catalyst.AgentChildrenSupervisor,
+        type: :supervisor,
+        start:
+          {Supervisor, :start_link,
+           [
+             [Catalyst.Agent.Children.TableOwner, Catalyst.Agent.Children],
+             [strategy: :rest_for_one]
+           ]}
+      },
       # Supervises one Session.Server per session. Outside the runtime group:
       # sessions resolve tools/hooks/providers from the live registries per
       # turn, so they ride out a registry-chain restart without being killed.
-      {DynamicSupervisor, name: Catalyst.Session.DynamicSupervisor, strategy: :one_for_one}
+      {
+        DynamicSupervisor,
+        # All Manager-started sessions are :temporary, so this is a backstop for
+        # direct children rather than a shared failure domain for normal sessions.
+        name: Catalyst.Session.DynamicSupervisor,
+        strategy: :one_for_one,
+        max_restarts: 100,
+        max_seconds: 5
+      }
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Catalyst.Supervisor)
@@ -69,10 +103,14 @@ defmodule Catalyst.Application do
       Catalyst.Hooks.TableOwner,
       # Runtime agent-loop hook registry (before/after tool call, etc.).
       Catalyst.Hooks,
-      # Ordered, bounded asynchronous delivery for read-only event observers.
-      Catalyst.Hooks.ObserverDispatcher,
       # Runtime LLM provider registry (built-ins + runtime-registered providers).
       Catalyst.LLM.Registry,
+      # Runtime-only owned overlays. Application config remains a live fallback
+      # and Catalyst.Extensions (last below) replays extension registrations
+      # after any rest-for-one restart.
+      Catalyst.Prompt.Registry,
+      Catalyst.Workflow.Registry,
+      Catalyst.Context.Registry,
       # Supervised home for extension-owned processes: one DynamicSupervisor per
       # extension owner (registered by id) under this top-level one, so purging
       # an extension can terminate its whole process subtree.
@@ -83,5 +121,9 @@ defmodule Catalyst.Application do
       # of the above.
       Catalyst.Extensions
     ]
+  end
+
+  defp extension_runtime_max_restarts do
+    Application.get_env(:catalyst, :extension_runtime_max_restarts, 3)
   end
 end

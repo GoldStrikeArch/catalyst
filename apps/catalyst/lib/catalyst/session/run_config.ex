@@ -1,60 +1,74 @@
 defmodule Catalyst.Session.RunConfig do
   @moduledoc """
-  Builds the `Catalyst.Agent.Loop` config for a run, including resolving the
-  session's provider through `Catalyst.LLM.Registry`. Extracted from the GenServer
-  so the run-assembly + provider-resolution rules can be hot-reloaded.
+  Builds the host-owned portion of a workflow run configuration and resolves
+  the session's provider through `Catalyst.LLM.Registry`. Extracted from the
+  GenServer so run assembly and provider-resolution rules can be hot-reloaded.
   """
 
-  alias Catalyst.{Model, Tasks}
+  alias Catalyst.Agent.Event
+  alias Catalyst.{Message, Model, Tasks}
   alias Catalyst.LLM.Registry
+  alias Catalyst.Session.{EventSink, RunContext}
 
   require Logger
 
   @provider_cleanup_timeout 1_000
 
-  @doc """
-  Assemble the loop config for `state`; `server` backs the steering/follow-up
-  callbacks and `run_ref` scopes them to this run — the server replies `[]` to a
-  drain carrying a stale ref, so a drain racing an abort can't move queued
-  messages into a run that can no longer deliver them. Returns `{:ok, config}`,
-  or `{:error, reason}` when the session has no resolvable provider — an
-  expected configuration error that must not crash the session server.
-  """
-  @spec build(map(), pid(), reference()) :: {:ok, map()} | {:error, term()}
-  def build(state, server, run_ref) do
-    case resolve_provider(state) do
-      {:ok, provider} ->
-        {:ok,
-         %{
-           loop: resolve_loop(state),
-           provider: provider,
-           model: state.model,
-           cwd: state.cwd,
-           tools: state.tools,
-           # Stable session id → Codex prompt_cache_key + request headers.
-           # `:session_id` is an internal identity, never caller-overridable.
-           opts: Keyword.put(state.opts, :session_id, state.id),
-           get_steering: fn -> drain(server, {:drain_steering, run_ref}) end,
-           get_follow_up: fn -> drain(server, {:drain_follow_up, run_ref}) end
-         }}
+  @typedoc """
+  Immutable configuration for one run.
 
-      {:error, _reason} = err ->
-        err
-    end
-  end
+  The map is deliberately open: workflow and hook extensions may add keys for
+  later turns without requiring a core struct upgrade.
+  """
+  @type t :: %{
+          required(:provider) => module(),
+          required(:model) => Model.t() | nil,
+          required(:cwd) => String.t(),
+          required(:tools) => term(),
+          required(:tool_source) => term(),
+          required(:parent_session_id) => String.t(),
+          required(:root_session_id) => String.t(),
+          required(:agent_depth) => non_neg_integer(),
+          required(:opts) => keyword(),
+          required(:inheritable_opts) => keyword(),
+          required(:get_steering) => (-> [Message.t()]),
+          required(:get_follow_up) => (-> [Message.t()]),
+          required(:register_resource) => (map() -> :ok | {:error, term()}),
+          required(:persist_event) => (Event.t() -> :ok | {:error, term()}),
+          required(:report_metadata) => (map() -> :ok),
+          optional(atom()) => term()
+        }
 
   @doc """
-  Resolve the loop module driving the run — data, not a hardcoded call: the
-  session's `opts[:loop]`, else the `:agent_loop` application env, else
-  `Catalyst.Agent.Loop`. An extension swaps the agent loop for every session with
-  `Application.put_env(:catalyst, :agent_loop, MyLoop)` (live on the next run)
-  and reverts by deleting the env; the module must export `run/4` with
-  `Catalyst.Agent.Loop`'s contract.
+  Build the callback/provider/tool portion of a run without invoking prompt or
+  workflow policy code. `Session.RunContext` calls this only after the
+  supervised run task has started.
   """
-  @spec resolve_loop(map()) :: module()
-  def resolve_loop(state) do
-    Keyword.get(state.opts || [], :loop) ||
-      Application.get_env(:catalyst, :agent_loop, Catalyst.Agent.Loop)
+  @spec build_base(map(), pid(), reference(), module()) :: {:ok, t()}
+  def build_base(state, server, run_ref, provider) do
+    opts = Keyword.put(state.opts || [], :session_id, state.id)
+    source = Map.get(state, :tools, :extensions)
+
+    {:ok,
+     %{
+       provider: provider,
+       model: state.model,
+       cwd: state.cwd,
+       tools: source,
+       tool_source: source,
+       parent_session_id: state.id,
+       root_session_id: Map.get(state, :root_session_id) || state.id,
+       agent_depth: Map.get(state, :agent_depth, 0),
+       opts: opts,
+       inheritable_opts: inheritable_opts(opts),
+       get_steering: fn -> drain(server, {:drain_steering, run_ref}) end,
+       get_follow_up: fn -> drain(server, {:drain_follow_up, run_ref}) end,
+       register_resource: fn resource -> register_resource(server, run_ref, resource) end,
+       persist_event: fn event -> EventSink.persist(server, run_ref, state.id, event) end,
+       report_metadata: fn metadata ->
+         GenServer.cast(server, {:run_metadata, run_ref, metadata})
+       end
+     }}
   end
 
   @doc """
@@ -86,17 +100,7 @@ defmodule Catalyst.Session.RunConfig do
   def start_prewarm(state) do
     with {:ok, provider} <- resolve_provider(state),
          true <- Code.ensure_loaded?(provider) and function_exported?(provider, :prewarm, 3) do
-      model = state.model
-      opts = Keyword.put(state.opts, :session_id, state.id)
-
-      context = %Catalyst.LLM.Context{
-        system_prompt: state.system_prompt || Catalyst.SystemPrompt.get(),
-        # Server state holds messages newest-first; requests are chronological.
-        messages: Enum.reverse(state.messages),
-        tools: Catalyst.Tools.Registry.to_provider_tools(Catalyst.Extensions.resolve(state.tools))
-      }
-
-      Tasks.start_background(fn -> provider.prewarm(model, context, opts) end)
+      Tasks.start_background(fn -> prewarm(provider, state) end)
     else
       _no_provider_or_no_prewarm -> :ok
     end
@@ -106,13 +110,28 @@ defmodule Catalyst.Session.RunConfig do
   Let every live provider release session-scoped resources.
 
   Providers without the optional `cleanup_session/1` callback are a no-op.
-  Cleanup failures are isolated because session termination must still finish.
+  Cleanup callbacks run concurrently under one shared deadline; failures are
+  isolated because session termination must still finish.
   """
   @spec cleanup_session(map()) :: :ok
   def cleanup_session(state) do
-    state
-    |> cleanup_providers()
-    |> Enum.each(&cleanup_provider(&1, state.id))
+    cleanups =
+      state
+      |> cleanup_providers()
+      |> Enum.filter(&cleanup_provider?/1)
+      |> Enum.map(fn provider ->
+        {provider, Tasks.async(fn -> call_provider_cleanup(provider, state.id) end)}
+      end)
+
+    provider_by_ref = Map.new(cleanups, fn {provider, task} -> {task.ref, provider} end)
+    tasks = Enum.map(cleanups, &elem(&1, 1))
+
+    tasks
+    |> Task.yield_many(provider_cleanup_timeout())
+    |> Enum.each(fn {task, result} ->
+      provider = Map.fetch!(provider_by_ref, task.ref)
+      finish_provider_cleanup(provider, state.id, task, result)
+    end)
 
     :ok
   end
@@ -132,21 +151,28 @@ defmodule Catalyst.Session.RunConfig do
     Enum.uniq(selected ++ registered)
   end
 
-  defp cleanup_provider(provider, session_id) do
-    case Code.ensure_loaded?(provider) and function_exported?(provider, :cleanup_session, 1) do
-      true -> run_provider_cleanup(provider, session_id)
-      false -> :ok
-    end
+  defp call_provider_cleanup(provider, session_id) do
+    {:ok, provider.cleanup_session(session_id)}
+  rescue
+    error -> {:error, {:error, error}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
-  defp run_provider_cleanup(provider, session_id) do
-    task = Tasks.async(fn -> provider.cleanup_session(session_id) end)
+  defp cleanup_provider?(provider),
+    do: Code.ensure_loaded?(provider) and function_exported?(provider, :cleanup_session, 1)
 
-    case Tasks.await(task, provider_cleanup_timeout()) do
-      {:ok, _result} -> :ok
-      {:exit, reason} -> log_cleanup_failure(provider, session_id, {:exit, reason})
-      :timeout -> log_cleanup_failure(provider, session_id, :timeout)
-    end
+  defp finish_provider_cleanup(_provider, _session_id, _task, {:ok, {:ok, _result}}), do: :ok
+
+  defp finish_provider_cleanup(provider, session_id, _task, {:ok, {:error, reason}}),
+    do: log_cleanup_failure(provider, session_id, reason)
+
+  defp finish_provider_cleanup(provider, session_id, _task, {:exit, reason}),
+    do: log_cleanup_failure(provider, session_id, {:exit, reason})
+
+  defp finish_provider_cleanup(provider, session_id, task, nil) do
+    _result = Task.shutdown(task, :brutal_kill)
+    log_cleanup_failure(provider, session_id, :timeout)
   end
 
   defp log_cleanup_failure(provider, session_id, reason) do
@@ -161,6 +187,12 @@ defmodule Catalyst.Session.RunConfig do
   defp provider_cleanup_timeout,
     do: Application.get_env(:catalyst, :provider_cleanup_timeout, @provider_cleanup_timeout)
 
+  defp register_resource(server, run_ref, resource) do
+    GenServer.call(server, {:register_run_resource, run_ref, resource}, :infinity)
+  catch
+    :exit, reason -> {:error, {:resource_registration_failed, reason}}
+  end
+
   defp drain(server, message) do
     # :infinity is deliberate: a finite timeout abandons a call the server still
     # processes later (draining into a run that can't deliver), while the call
@@ -170,4 +202,83 @@ defmodule Catalyst.Session.RunConfig do
   catch
     :exit, _reason -> []
   end
+
+  defp prewarm(provider, state) do
+    with {:ok, prompt} <- RunContext.resolve_prompt(state, state.model) do
+      context = %Catalyst.LLM.Context{
+        system_prompt: prompt.text,
+        # Server state holds messages newest-first; requests are chronological.
+        messages: Enum.reverse(state.messages),
+        tools:
+          %{
+            tools: state.tools,
+            tool_source: state.tools,
+            opts: state.opts || [],
+            agent_depth: Map.get(state, :agent_depth, 0)
+          }
+          |> Catalyst.Workflow.Support.resolve_tools()
+          |> Catalyst.Tools.Registry.to_provider_tools()
+      }
+
+      opts = Keyword.put(state.opts || [], :session_id, state.id)
+      provider.prewarm(state.model, context, opts)
+    else
+      {:error, reason} ->
+        Logger.warning("[session] prewarm prompt resolution failed: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning("[session] prewarm failed: #{Exception.message(error)}")
+      :ok
+  catch
+    kind, reason ->
+      Logger.warning("[session] prewarm #{kind}: #{inspect(reason)}")
+      :ok
+  end
+
+  @doc "Return provider/context options safe to copy into a child run."
+  @spec inheritable_opts(keyword()) :: keyword()
+  def inheritable_opts(opts) when is_list(opts) do
+    opts
+    |> Keyword.drop([
+      :session_id,
+      :system_prompt,
+      :loop,
+      :workflow,
+      :get_steering,
+      :get_follow_up,
+      :convert_to_llm,
+      :register_resource,
+      :persist_event,
+      :report_metadata,
+      :report,
+      :call_id,
+      :parent_session_id,
+      :root_session_id,
+      :agent_depth,
+      :task
+    ])
+    |> Enum.filter(fn {_key, value} -> inheritable_term?(value) end)
+  end
+
+  defp inheritable_term?(value)
+       when is_function(value) or is_pid(value) or is_port(value) or is_reference(value),
+       do: false
+
+  # Walk lists cell by cell: an improper tail (e.g. `[1 | 2]`) satisfies
+  # is_list/1 but crashes Enum.all?/2, so it is rejected rather than raised on.
+  defp inheritable_term?(value) when is_list(value), do: inheritable_list?(value)
+
+  defp inheritable_term?(value) when is_map(value),
+    do: Enum.all?(value, fn {key, item} -> inheritable_term?(key) and inheritable_term?(item) end)
+
+  defp inheritable_term?(value) when is_tuple(value),
+    do: value |> Tuple.to_list() |> Enum.all?(&inheritable_term?/1)
+
+  defp inheritable_term?(_value), do: true
+
+  defp inheritable_list?([]), do: true
+  defp inheritable_list?([head | tail]), do: inheritable_term?(head) and inheritable_list?(tail)
+  defp inheritable_list?(_improper_tail), do: false
 end

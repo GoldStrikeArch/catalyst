@@ -17,7 +17,7 @@ defmodule CatalystWeb.Layouts do
 
   attr :class, :any,
     default:
-      "min-h-screen bg-white text-slate-950 antialiased dark:bg-slate-950 dark:text-slate-50",
+      "min-h-screen bg-neutral-50 text-neutral-900 antialiased dark:bg-neutral-900 dark:text-neutral-100",
     doc: "classes for the layout wrapper"
 
   slot :inner_block, required: true
@@ -53,7 +53,7 @@ defmodule CatalystWeb.Layouts do
         kind={:error}
         title="We can't find the internet"
         phx-disconnected={show(".phx-client-error #client-error") |> JS.remove_attribute("hidden")}
-        phx-connected={hide("#client-error") |> JS.set_attribute({"hidden", ""})}
+        phx-connected={hide("#client-error")}
         hidden
       >
         Attempting to reconnect
@@ -65,7 +65,7 @@ defmodule CatalystWeb.Layouts do
         kind={:error}
         title="Something went wrong!"
         phx-disconnected={show(".phx-server-error #server-error") |> JS.remove_attribute("hidden")}
-        phx-connected={hide("#server-error") |> JS.set_attribute({"hidden", ""})}
+        phx-connected={hide("#server-error")}
         hidden
       >
         Attempting to reconnect
@@ -80,37 +80,48 @@ defmodule CatalystWeb.Layouts do
   """
   def theme_toggle(assigns) do
     ~H"""
-    <div class="relative grid grid-cols-3 rounded-full border border-slate-200 bg-white/80 p-1 shadow-sm shadow-slate-200/70 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:shadow-black/20">
+    <div
+      id="theme-toggle"
+      class="grid grid-cols-3 rounded-full border border-neutral-200 p-0.5 dark:border-white/10"
+      title="Theme: system / light / dark"
+    >
       <button
-        class="rounded-full p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+        class={theme_segment_class()}
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="system"
         type="button"
         aria-label="Use system theme"
       >
-        <.icon name="hero-computer-desktop-micro" class="size-4" />
+        <.icon name="hero-computer-desktop-micro" class="size-3.5" />
       </button>
 
       <button
-        class="rounded-full p-2 text-slate-500 transition hover:bg-slate-100 hover:text-amber-600 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-amber-300"
+        class={theme_segment_class()}
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="light"
         type="button"
         aria-label="Use light theme"
       >
-        <.icon name="hero-sun-micro" class="size-4" />
+        <.icon name="hero-sun-micro" class="size-3.5" />
       </button>
 
       <button
-        class="rounded-full p-2 text-slate-500 transition hover:bg-slate-100 hover:text-indigo-600 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-indigo-300"
+        class={theme_segment_class()}
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="dark"
         type="button"
         aria-label="Use dark theme"
       >
-        <.icon name="hero-moon-micro" class="size-4" />
+        <.icon name="hero-moon-micro" class="size-3.5" />
       </button>
     </div>
     """
+  end
+
+  # The pressed segment is styled from html[data-theme] by CSS in app.css —
+  # the theme is client-owned, so no server assign can know it.
+  defp theme_segment_class do
+    "flex items-center justify-center rounded-full p-1 text-neutral-400 transition " <>
+      "hover:text-neutral-900 dark:text-neutral-500 dark:hover:text-white"
   end
 end

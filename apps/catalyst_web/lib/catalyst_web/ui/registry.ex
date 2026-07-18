@@ -16,6 +16,7 @@ defmodule CatalystWeb.UI.Registry do
   use GenServer
 
   alias Catalyst.ExtensionAPI
+  alias CatalystWeb.UI.Contributions
 
   @table :catalyst_ui
 
@@ -156,22 +157,31 @@ defmodule CatalystWeb.UI.Registry do
   @spec unregister_owner(term()) :: :ok
   def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
 
+  @doc false
+  @spec purge_extension_owner(term()) :: :ok
+  def purge_extension_owner(owner) do
+    :ok = Contributions.drop_owner(owner)
+
+    case Process.whereis(__MODULE__) do
+      nil -> :ok
+      _pid -> GenServer.call(__MODULE__, {:unregister_owner, owner, false})
+    end
+  end
+
   # ---- callbacks ------------------------------------------------------------
 
   @impl true
   def init(:ok) do
-    :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
-    seed_builtin_pages()
-    seed_builtin_commands()
+    ensure_table()
+    :ets.delete_all_objects(@table)
+    reseed_displaced_builtins()
+    replay_contributions()
     wire()
-    {:ok, %{seq: 0}}
+    {:ok, %{seq: next_seq()}}
   end
 
   @impl true
   def handle_call({:register_page, path, {mod, fun}, opts}, _from, state) do
-    # last write wins per path
-    :ets.match_delete(@table, {{:page, path}, :_})
-
     entry = %{
       path: path,
       mod: mod,
@@ -181,25 +191,28 @@ defmodule CatalystWeb.UI.Registry do
       seq: state.seq
     }
 
+    :ok = Contributions.record({:page, path}, entry)
+    # last write wins per path
+    :ets.match_delete(@table, {{:page, path}, :_})
     :ets.insert(@table, {{:page, path}, entry})
     {:reply, :ok, bump(state)}
   end
 
   def handle_call({:register_renderer, kind, match, render, opts}, _from, state) do
     entry = %{match: match, render: render, owner: opts[:owner], seq: state.seq}
+    :ok = Contributions.record({:renderer, kind}, entry)
     :ets.insert(@table, {{:renderer, kind}, entry})
     {:reply, :ok, bump(state)}
   end
 
   def handle_call({:register_component, slot, fun, opts}, _from, state) do
     entry = %{fun: fun, owner: opts[:owner], seq: state.seq}
+    :ok = Contributions.record({:component, slot}, entry)
     :ets.insert(@table, {{:component, slot}, entry})
     {:reply, :ok, bump(state)}
   end
 
   def handle_call({:register_command, name, opts}, _from, state) do
-    :ets.match_delete(@table, {{:command, name}, :_})
-
     entry = %{
       name: name,
       owner: opts[:owner],
@@ -208,11 +221,22 @@ defmodule CatalystWeb.UI.Registry do
       seq: state.seq
     }
 
+    :ok = Contributions.record({:command, name}, entry)
+    :ets.match_delete(@table, {{:command, name}, :_})
     :ets.insert(@table, {{:command, name}, entry})
     {:reply, :ok, bump(state)}
   end
 
   def handle_call({:unregister_owner, owner}, _from, state) do
+    :ok = Contributions.drop_owner(owner)
+    {:reply, :ok, unregister_owner_entries(owner, state)}
+  end
+
+  def handle_call({:unregister_owner, owner, false}, _from, state) do
+    {:reply, :ok, unregister_owner_entries(owner, state)}
+  end
+
+  defp unregister_owner_entries(owner, state) do
     @table
     |> :ets.tab2list()
     |> Enum.each(fn {_key, entry} = obj ->
@@ -220,10 +244,41 @@ defmodule CatalystWeb.UI.Registry do
     end)
 
     reseed_displaced_builtins()
-    {:reply, :ok, state}
+    state
   end
 
   # ---- internals ------------------------------------------------------------
+
+  defp ensure_table do
+    case :ets.whereis(@table) do
+      :undefined ->
+        :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
+        :ok
+
+      _table ->
+        :ok
+    end
+  end
+
+  defp next_seq do
+    @table
+    |> :ets.tab2list()
+    |> Enum.map(fn {_key, entry} -> Map.get(entry, :seq, -1) end)
+    |> Enum.max(fn -> -1 end)
+    |> Kernel.+(1)
+  end
+
+  defp replay_contributions do
+    Contributions.list()
+    |> Enum.each(&replay_contribution/1)
+  end
+
+  defp replay_contribution({{kind, _name} = key, entry}) when kind in [:page, :command] do
+    :ets.match_delete(@table, {key, :_})
+    :ets.insert(@table, {key, entry})
+  end
+
+  defp replay_contribution(entry), do: :ets.insert(@table, entry)
 
   defp bump(state), do: %{state | seq: state.seq + 1}
 
@@ -243,18 +298,12 @@ defmodule CatalystWeb.UI.Registry do
       %{
         name: "cd",
         owner: nil,
-        handler: &CatalystWeb.ShellLive.command_cd/2,
+        handler: &CatalystWeb.ShellLive.Commands.change_directory/2,
         label: "/cd <path> — change the session working directory",
         seq: 0
       }
     ]
   end
-
-  defp seed_builtin_pages,
-    do: Enum.each(builtin_pages(), &:ets.insert(@table, {{:page, &1.path}, &1}))
-
-  defp seed_builtin_commands,
-    do: Enum.each(builtin_commands(), &:ets.insert(@table, {{:command, &1.name}, &1}))
 
   defp reseed_displaced_builtins do
     Enum.each(builtin_pages(), fn page ->
@@ -268,24 +317,39 @@ defmodule CatalystWeb.UI.Registry do
     end)
   end
 
+  @doc false
+  @spec register_extension_renderer(ExtensionAPI.t(), kind(), function(), render_fun()) :: :ok
+  def register_extension_renderer(%ExtensionAPI{owner: owner}, kind, match, fun) do
+    register_renderer(kind, match, fun, owner: owner)
+  end
+
+  @doc false
+  @spec register_extension_component(ExtensionAPI.t(), atom(), render_fun(), keyword()) :: :ok
+  def register_extension_component(%ExtensionAPI{owner: owner}, slot, fun, opts) do
+    register_component(slot, fun, Keyword.put(opts, :owner, owner))
+  end
+
+  @doc false
+  @spec register_extension_page(ExtensionAPI.t(), String.t(), target(), keyword()) :: :ok
+  def register_extension_page(%ExtensionAPI{owner: owner}, path, target, opts) do
+    # Keyword.put, not put_new: a spoofed :owner in extension opts would detach
+    # the registration from its real owner and survive that owner's purge.
+    register_page(path, target, Keyword.put(opts, :owner, owner))
+  end
+
+  @doc false
+  @spec register_extension_command(ExtensionAPI.t(), String.t(), keyword()) :: :ok
+  def register_extension_command(%ExtensionAPI{owner: owner}, name, opts) do
+    register_command(name, Keyword.put(opts, :owner, owner))
+  end
+
   defp wire do
-    ExtensionAPI.register_kind(:renderer, fn api, kind, match, fun ->
-      register_renderer(kind, match, fun, owner: api.owner)
-    end)
-
-    ExtensionAPI.register_kind(:component, fn api, slot, fun, opts ->
-      register_component(slot, fun, Keyword.put_new(opts, :owner, api.owner))
-    end)
-
-    ExtensionAPI.register_kind(:page, fn api, path, target, opts ->
-      register_page(path, target, Keyword.put_new(opts, :owner, api.owner))
-    end)
-
-    ExtensionAPI.register_kind(:command, fn api, name, opts ->
-      register_command(name, Keyword.put_new(opts, :owner, api.owner))
-    end)
-
-    ExtensionAPI.register_purger(&unregister_owner/1)
+    ExtensionAPI.register_kind(:renderer, &__MODULE__.register_extension_renderer/4)
+    ExtensionAPI.register_kind(:component, &__MODULE__.register_extension_component/4)
+    ExtensionAPI.register_kind(:page, &__MODULE__.register_extension_page/4)
+    ExtensionAPI.register_kind(:command, &__MODULE__.register_extension_command/3)
+    ExtensionAPI.register_purger(&__MODULE__.purge_extension_owner/1)
+    Catalyst.Extensions.register_host(:web, :registry, self())
   end
 
   defp normalize_target({mod, fun}) when is_atom(mod) and is_atom(fun), do: {mod, fun}

@@ -11,7 +11,8 @@ defmodule Catalyst.Agent.ToolRunner do
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Hooks, Message}
   alias Catalyst.Content.Text
-  alias Catalyst.Tools.{Registry, Truncate}
+  alias Catalyst.Session.RunConfig
+  alias Catalyst.Tools.{Context, Registry, Truncate}
 
   @type outcome :: %{message: Message.ToolResult.t(), terminate: boolean()}
 
@@ -37,18 +38,45 @@ defmodule Catalyst.Agent.ToolRunner do
   def run_batch(tool_calls, config, emit) do
     index = Registry.index(config.tools)
 
+    run_batch_with_index(tool_calls, index, config, emit)
+  end
+
+  @doc false
+  @spec run_batch_with_index([tool_call()], Registry.index(), map(), (struct() -> any())) ::
+          {[Message.ToolResult.t()], boolean()}
+  def run_batch_with_index(tool_calls, index, config, emit) do
+    names = Enum.map(tool_calls, & &1.name)
+
     outcomes =
-      case batch_mode(tool_calls, config, index) do
-        :sequential -> run_stream(tool_calls, index, config, emit, 1)
-        :parallel -> run_stream(tool_calls, index, config, emit, max_concurrency(config))
+      case Registry.validate_index(index, names) do
+        :ok -> run_current_batch(tool_calls, index, config, emit)
+        {:error, reason} -> fail_batch(tool_calls, reason, emit)
       end
 
+    finish_batch(outcomes)
+  end
+
+  defp run_current_batch(tool_calls, index, config, emit) do
+    case batch_mode(tool_calls, config, index) do
+      :sequential -> run_stream(tool_calls, index, config, emit, 1)
+      :parallel -> run_stream(tool_calls, index, config, emit, max_concurrency(config))
+    end
+  end
+
+  defp finish_batch(outcomes) do
     results = Enum.map(outcomes, & &1.message)
     # The batch terminates the loop only when EVERY call asked to (PI parity:
     # `toolResults.every((r) => r.terminate === true)`), so one terminating
     # tool can't cut off siblings' pending work.
     terminate? = outcomes != [] and Enum.all?(outcomes, & &1.terminate)
     {results, terminate?}
+  end
+
+  defp fail_batch(tool_calls, reason, emit) do
+    Enum.map(tool_calls, fn %{id: id, name: name, arguments: args} = tool_call ->
+      emit_tool_start(id, name, args, emit)
+      failed_outcome(tool_call, reason, emit, stale_details(reason))
+    end)
   end
 
   defp run_stream(tool_calls, index, config, emit, max_concurrency) do
@@ -78,25 +106,15 @@ defmodule Catalyst.Agent.ToolRunner do
   end
 
   defp module_mode(index, tool_call) do
-    case Registry.fetch(index, tool_call.name) do
-      {:ok, module} -> declared_mode(module)
+    case Registry.fetch_entry(index, tool_call.name) do
+      {:ok, entry} -> entry.definition.execution_mode
       :error -> :parallel
     end
   end
 
-  # `execution_mode/0` is an optional callback (the default is injected by
-  # `use Catalyst.Tools.Tool`), so a bare behaviour implementation may omit it.
-  defp declared_mode(module) do
-    case Code.ensure_loaded?(module) and function_exported?(module, :execution_mode, 0) do
-      true -> module.execution_mode()
-      false -> :parallel
-    end
-  end
-
-  defp failed_outcome(tool_call, reason, emit) do
+  defp failed_outcome(tool_call, reason, emit, details \\ %{}) do
     %{id: id, name: name} = tool_call
     content = Content.text("tool runner failed: #{inspect(reason)}")
-    details = %{}
 
     emit_tool_end(id, name, content, details, true, emit)
 
@@ -112,7 +130,7 @@ defmodule Catalyst.Agent.ToolRunner do
 
     raw_result = run_registered_tool(index, name, args, tool_call, hook_ctx, config, emit)
 
-    {content, details, error?, terminate} = apply_after_tool_hook(raw_result, hook_ctx)
+    {content, details, error?, terminate} = apply_after_tool_hook(raw_result, hook_ctx, config)
     content = scrub_text_content(content)
 
     emit_tool_end(id, name, content, details, error?, emit)
@@ -138,34 +156,52 @@ defmodule Catalyst.Agent.ToolRunner do
   end
 
   defp run_registered_tool(index, name, args, tool_call, hook_ctx, config, emit) do
-    case Registry.fetch(index, name) do
+    case Registry.fetch_entry(index, name) do
       :error ->
         unknown_tool_result(name)
 
-      {:ok, module} ->
-        run_resolved_tool(module, args, tool_call, hook_ctx, config, emit)
+      {:ok, entry} ->
+        run_resolved_tool(entry, args, tool_call, hook_ctx, config, emit)
     end
   end
 
-  defp run_resolved_tool(module, args, tool_call, hook_ctx, config, emit) do
-    case Hooks.before_tool_call(hook_ctx) do
+  defp run_resolved_tool(entry, args, tool_call, hook_ctx, config, emit) do
+    case before_tool_call(hook_ctx, config) do
       {:block, reason} ->
         blocked_tool_result(reason)
 
       _ ->
         ctx = build_execution_context(tool_call, config, emit)
 
-        execute_tool(module, args, ctx)
+        execute_tool(entry, args, ctx)
     end
   end
 
   defp build_execution_context(tool_call, config, emit) do
-    %{
+    Context.new(
       cwd: config.cwd,
       call_id: tool_call.id,
-      session_id: Keyword.get(config[:opts] || [], :session_id),
+      parent_session_id: Map.get(config, :parent_session_id, session_id(config)),
+      root_session_id: Map.get(config, :root_session_id, session_id(config)),
+      model: Map.get(config, :model),
+      provider: Map.get(config, :provider),
+      opts: current_inheritable_opts(config),
+      workflow: Map.get(config, :workflow),
+      tool_source: Map.get(config, :tool_source, Map.get(config, :tools, :extensions)),
+      agent_depth: Map.get(config, :agent_depth, 0),
       report: reporter(tool_call, emit)
-    }
+    )
+  end
+
+  defp session_id(config), do: Keyword.get(config[:opts] || [], :session_id)
+
+  # Prefer the live turn opts so prepare_next_turn option changes (reasoning,
+  # thresholds, provider tuning) flow into subsequently spawned children.
+  defp current_inheritable_opts(config) do
+    case Map.get(config, :opts) do
+      opts when is_list(opts) -> RunConfig.inheritable_opts(opts)
+      _missing -> Map.get(config, :inheritable_opts, [])
+    end
   end
 
   defp unknown_tool_result(name) do
@@ -179,9 +215,19 @@ defmodule Catalyst.Agent.ToolRunner do
   defp format_block_reason(reason) when is_binary(reason), do: reason
   defp format_block_reason(reason), do: inspect(reason)
 
-  defp apply_after_tool_hook(raw_result, hook_ctx) do
+  defp before_tool_call(hook_ctx, config) do
+    case Map.get(config, :hook_snapshot) do
+      snapshot when is_map(snapshot) -> Hooks.before_tool_call(hook_ctx, snapshot)
+      _missing -> Hooks.before_tool_call(hook_ctx)
+    end
+  end
+
+  defp apply_after_tool_hook(raw_result, hook_ctx, config) do
     # Hooks may override the result (content/details/is_error/terminate).
-    Hooks.after_tool_call(raw_result, hook_ctx)
+    case Map.get(config, :hook_snapshot) do
+      snapshot when is_map(snapshot) -> Hooks.after_tool_call(raw_result, hook_ctx, snapshot)
+      _missing -> Hooks.after_tool_call(raw_result, hook_ctx)
+    end
   end
 
   defp scrub_text_content(content) do
@@ -211,37 +257,46 @@ defmodule Catalyst.Agent.ToolRunner do
     }
   end
 
-  defp execute_tool(module, args, ctx) do
-    case validate_args(module, args) do
-      {:error, message} ->
+  defp execute_tool(entry, args, ctx) do
+    with :ok <- validate_args(entry.resolved_schema, args),
+         {:ok, executor} <- Registry.execution_target(entry) do
+      call_executor(executor, args, ctx)
+    else
+      {:error, message} when is_binary(message) ->
         {Content.text(message), %{validation: :failed}, true, false}
 
-      :ok ->
-        try do
-          res = module.execute(args, ctx)
-          {res.content, Map.get(res, :details, %{}), false, Map.get(res, :terminate, false)}
-        rescue
-          e -> {Content.text(Exception.message(e)), %{}, true, false}
-        catch
-          kind, reason -> {Content.text("#{kind}: #{inspect(reason)}"), %{}, true, false}
-        end
+      {:error, {:stale_tool_entry, _module} = reason} ->
+        {Content.text("tool runner failed: #{inspect(reason)}"), stale_details(reason), true,
+         false}
     end
   end
 
+  defp call_executor(executor, args, ctx) do
+    try do
+      res = executor.(args, ctx)
+      {res.content, Map.get(res, :details, %{}), false, Map.get(res, :terminate, false)}
+    rescue
+      e -> {Content.text(Exception.message(e)), %{}, true, false}
+    catch
+      kind, reason -> {Content.text("#{kind}: #{inspect(reason)}"), %{}, true, false}
+    end
+  end
+
+  defp stale_details(reason), do: %{validation: :stale_tool_entry, reason: reason}
+
   # Validate args against the tool's declared JSON Schema, so a malformed call
   # (most common with self-developed tools) becomes a clean, fixable error
-  # result instead of a confusing crash inside execute/2. A schema that itself
-  # fails to resolve (or a crashing validator) skips validation rather than
-  # blocking the tool.
-  defp validate_args(module, args) do
-    case resolved_schema(module) do
+  # result instead of a confusing crash inside execute/2. An unresolvable
+  # schema retains the legacy permissive behavior; a validator crash does not.
+  defp validate_args(resolved_schema, args) do
+    case resolved_schema do
       {:ok, schema} -> check_args(schema, args)
       :error -> :ok
     end
   end
 
   defp check_args(schema, args) do
-    case ExJsonSchema.Validator.validate(schema, args) do
+    case argument_validator().(schema, args) do
       :ok ->
         :ok
 
@@ -250,46 +305,13 @@ defmodule Catalyst.Agent.ToolRunner do
         {:error, "invalid arguments: " <> details}
     end
   rescue
-    _ -> :ok
+    e -> {:error, "invalid arguments: validation exception: #{Exception.message(e)}"}
   catch
-    _kind, _reason -> :ok
+    kind, reason -> {:error, "invalid arguments: validation #{kind}: #{inspect(reason)}"}
   end
 
-  # Resolving a schema is expensive, so cache the result in :persistent_term,
-  # ONE entry per tool module holding {params, resolved}: a hot-reloaded
-  # tool whose schema changed REPLACES its entry (exact mismatch → re-resolve)
-  # instead of accumulating one permanent entry per schema version, while
-  # unchanged tools hit the cache.
-  defp resolved_schema(module) do
-    with {:ok, %{parameters: params}} <- Registry.cached_definition(module) do
-      key = {__MODULE__, module}
-
-      case :persistent_term.get(key, :unresolved) do
-        {^params, resolved} -> resolved
-        _missing_or_stale -> cache_schema(key, params)
-      end
-    else
-      {:error, _reason} -> :error
-    end
-  rescue
-    _ -> :error
-  catch
-    _kind, _reason -> :error
-  end
-
-  defp cache_schema(key, params) do
-    resolved = resolve_schema(params)
-    :persistent_term.put(key, {params, resolved})
-    resolved
-  end
-
-  defp resolve_schema(params) do
-    # Normalize atom keys/values (hand-written schemas) to JSON shape.
-    {:ok, params |> Jason.encode!() |> Jason.decode!() |> ExJsonSchema.Schema.resolve()}
-  rescue
-    _ -> :error
-  catch
-    _kind, _reason -> :error
+  defp argument_validator do
+    Application.get_env(:catalyst, :tool_argument_validator, &ExJsonSchema.Validator.validate/2)
   end
 
   defp reporter(tool_call, emit) do

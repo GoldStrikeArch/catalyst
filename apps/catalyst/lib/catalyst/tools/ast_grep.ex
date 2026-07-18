@@ -82,7 +82,7 @@ defmodule Catalyst.Tools.AstGrep do
         matches -> Enum.join(matches, "\n")
       end
 
-    {body, info} = Truncate.head_notice(text)
+    {body, info} = Truncate.listing(text, limited?: false, limit: 0, total: 0, noun: "matches")
 
     body =
       body

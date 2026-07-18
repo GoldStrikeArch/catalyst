@@ -2,8 +2,9 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
   use ExUnit.Case, async: true
 
   alias Catalyst.{Content, Message, Model}
+  alias Catalyst.Context.Tokens
   alias Catalyst.LLM.Context
-  alias Catalyst.LLM.OpenAICodex.Request
+  alias Catalyst.LLM.OpenAICodex.{Provider, Request}
 
   defmodule UnknownBlock do
     @moduledoc false
@@ -188,5 +189,27 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
     context = %Context{messages: [Message.user("hi")], tools: []}
     body = Request.build(model(), context, reasoning_effort: "high")
     assert body["reasoning"] == %{"effort" => "high", "summary" => "auto"}
+  end
+
+  test "semantic projection omits volatile assistant replay ids and remains stable" do
+    assistant = %Message.Assistant{content: Content.text("prior answer"), stop_reason: :stop}
+    context = %Context{messages: [assistant], tools: []}
+
+    assert [%{"id" => "msg_" <> _, "type" => "message"}] =
+             Request.input_items(context.messages, model())
+
+    assert [%{"type" => "message"} = semantic_message] =
+             Request.input_items(context.messages, model(), assistant_replay_ids: :omit)
+
+    refute Map.has_key?(semantic_message, "id")
+
+    first = Request.semantic_projection(model(), context, session_id: "session")
+    second = Request.semantic_projection(model(), context, session_id: "session")
+
+    assert first == second
+    assert Tokens.projection_digest(first) == Tokens.projection_digest(second)
+
+    assert {:ok, Tokens.projection_digest(first)} ==
+             Provider.context_fingerprint(model(), context, session_id: "session")
   end
 end

@@ -228,11 +228,17 @@ defmodule CatalystWeb.ShellLiveTest do
 
   test "a mid-stream replay seeds the bubble with the accumulated partial text",
        %{conn: conn} do
-    Application.put_env(:catalyst_web, :codex_provider_mod, SlowStreamProvider)
+    previous_provider = Catalyst.LLM.Registry.fetch_config("openai-codex-responses")
+    :ok = Catalyst.LLM.Registry.register_provider("openai-codex-responses", SlowStreamProvider)
     Application.put_env(:catalyst_web, :slow_provider_test, self())
 
     on_exit(fn ->
-      Application.put_env(:catalyst_web, :codex_provider_mod, Catalyst.LLM.Demo)
+      :ok =
+        Catalyst.LLM.Registry.register_provider(
+          "openai-codex-responses",
+          previous_provider
+        )
+
       Application.delete_env(:catalyst_web, :slow_provider_test)
     end)
 
@@ -383,6 +389,100 @@ defmodule CatalystWeb.ShellLiveTest do
     send(view.pid, {:agent_event, id, %Event.ToolExecutionEnd{call_id: "call-1"}})
 
     refute render(view) =~ "running"
+  end
+
+  test "context status updates the header meter without adding a chat block", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+
+    status = %Event.ContextStatus{
+      used_tokens: 12_500,
+      threshold: 20_000,
+      threshold_source: {:application, :context_thresholds, "gpt-5.4"},
+      anchored: true,
+      estimate_source: :provider,
+      context_digest: "context-digest"
+    }
+
+    send(view.pid, {:agent_event, id, status})
+
+    assert has_element?(view, "#context-meter")
+    assert has_element?(view, "#context-token-count", "12.5k / 20.0k")
+    assert has_element?(view, "#context-estimate-state", "anchored")
+    assert has_element?(view, "#context-threshold-source", "context_thresholds")
+    assert has_element?(view, "#chat-empty-state")
+    refute has_element?(view, "#message-stream > *")
+
+    send(view.pid, {:agent_event, id, %{status | anchored: false, estimate_source: :coarse}})
+    assert has_element?(view, "#context-estimate-state", "estimated")
+  end
+
+  test "context compaction resets and re-streams the authoritative replacement", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+
+    old_user = %Message.User{content: Content.text("OLD-CONTEXT-USER")}
+    old_assistant = %Message.Assistant{content: Content.text("OLD-CONTEXT-ASSISTANT")}
+
+    send(view.pid, {:agent_event, id, %Event.MessageEnd{message: old_user}})
+    send(view.pid, {:agent_event, id, %Event.MessageEnd{message: old_assistant}})
+
+    assert render(view) =~ "OLD-CONTEXT-USER"
+    assert render(view) =~ "OLD-CONTEXT-ASSISTANT"
+
+    replacement = [
+      %Message.User{content: Content.text("COMPACTED-SUMMARY")},
+      %Message.Assistant{content: Content.text("KEPT-AFTER-COMPACTION")}
+    ]
+
+    send(
+      view.pid,
+      {:agent_event, id,
+       %Event.ContextCompacted{
+         replacement: replacement,
+         summary: hd(replacement),
+         replaced_count: 2,
+         tokens_before: 1_000,
+         tokens_after: 400,
+         policy: Catalyst.Context.Window
+       }}
+    )
+
+    html = render(view)
+    refute html =~ "OLD-CONTEXT-USER"
+    refute html =~ "OLD-CONTEXT-ASSISTANT"
+    assert html =~ "COMPACTED-SUMMARY"
+    assert html =~ "KEPT-AFTER-COMPACTION"
+    refute has_element?(view, "#chat-empty-state")
+  end
+
+  test "a never-run session exposes a supervised read-only prompt preview", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert wait_until(fn -> has_element?(view, "#run-diagnostics") end)
+    assert has_element?(view, "#run-diagnostics-toggle[aria-expanded=false]")
+    refute has_element?(view, "#resolved-prompt-text")
+
+    view |> element("#run-diagnostics-toggle") |> render_click()
+
+    assert has_element?(view, "#run-diagnostics-toggle[aria-expanded=true]")
+    assert has_element?(view, "#run-diagnostics-panel")
+    assert has_element?(view, "#prompt-digest")
+    assert has_element?(view, "#prompt-provenance li")
+    assert has_element?(view, "#resolved-prompt-text[readonly]")
+  end
+
+  test "a completed run exposes model, workflow, and resolved prompt metadata", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    submit_prompt(view, "show run diagnostics")
+    assert wait_until(fn -> has_element?(view, "#run-diagnostics") end)
+
+    view |> element("#run-diagnostics-toggle") |> render_click()
+
+    assert has_element?(view, "#model-context-diagnostics")
+    assert has_element?(view, "#workflow-diagnostics")
+    assert has_element?(view, "#prompt-diagnostics", "Resolved run prompt")
   end
 
   test "an event tagged with another session's id is dropped, not rendered", %{conn: conn} do

@@ -79,8 +79,12 @@ defmodule CatalystWeb do
     quote do
       # HTML escaping functionality
       import Phoenix.HTML
-      # Core UI components
-      import CatalystWeb.CoreComponents
+      # Shared UI components, grouped by responsibility.
+      import CatalystWeb.CoreComponents,
+        only: [button: 1, flash: 1, header: 1, hide: 1, hide: 2, icon: 1, show: 1, show: 2]
+
+      import CatalystWeb.FormComponents
+      import CatalystWeb.DataComponents
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

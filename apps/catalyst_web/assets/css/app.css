@@ -18,8 +18,19 @@
 @custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
 @custom-variant phx-change-loading (.phx-change-loading&, .phx-change-loading &);
 
-/* Use the data attribute for dark mode */
-@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+/* Dark mode: explicit [data-theme=dark] wins; with no explicit choice
+   ("system", no data-theme attribute) follow the OS preference. An explicit
+   [data-theme=light] opts out of the media-query branch. */
+@custom-variant dark {
+    &:where([data-theme="dark"], [data-theme="dark"] *) {
+        @slot;
+    }
+    @media (prefers-color-scheme: dark) {
+        &:where(:not([data-theme="light"]):not([data-theme="light"] *)) {
+            @slot;
+        }
+    }
+}
 
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session],
@@ -33,9 +44,35 @@ html {
 html[data-theme="dark"] {
     color-scheme: dark;
 }
+@media (prefers-color-scheme: dark) {
+    html:not([data-theme="light"]) {
+        color-scheme: dark;
+    }
+}
 body {
     min-height: 100vh;
     margin: 0;
+}
+
+/* ---- Theme toggle active state ---------------------------------------------
+   The theme is client-owned (localStorage + html[data-theme], see app.js), so
+   the pressed segment is derived in CSS from the html attribute rather than a
+   server assign. No attribute means "system". */
+html[data-theme="light"] [data-phx-theme="light"],
+html[data-theme="dark"] [data-phx-theme="dark"],
+html:not([data-theme]) [data-phx-theme="system"] {
+    background: rgb(0 0 0 / 0.08);
+    color: var(--color-neutral-900);
+}
+html[data-theme="dark"] [data-phx-theme="dark"] {
+    background: rgb(255 255 255 / 0.15);
+    color: var(--color-white);
+}
+@media (prefers-color-scheme: dark) {
+    html:not([data-theme]) [data-phx-theme="system"] {
+        background: rgb(255 255 255 / 0.15);
+        color: var(--color-white);
+    }
 }
 
 /* ---- Quiet mode -----------------------------------------------------------

@@ -24,6 +24,227 @@ defmodule Catalyst.Extensions.BootGuardTest do
     refute BootGuard.crashed_last_boot?()
   end
 
+  test "a stale stabilization timer cannot bless a newly armed boot" do
+    old_token = BootGuard.arm()
+    BootGuard.mark_booting()
+
+    assert :ok = BootGuard.mark_ok(old_token)
+    assert BootGuard.crashed_last_boot?()
+
+    current_token = BootGuard.arm()
+    assert :ok = BootGuard.mark_ok(current_token)
+    refute BootGuard.crashed_last_boot?()
+  end
+
+  test "a non-clean boot status remains authoritative across a server generation change" do
+    status_key = {Extensions, :boot_status}
+    owner_key = {Extensions, :boot_status_owner}
+    previous_status = :persistent_term.get(status_key, :missing)
+    previous_owner = :persistent_term.get(owner_key, :missing)
+
+    on_exit(fn ->
+      restore_persistent_term(status_key, previous_status)
+      restore_persistent_term(owner_key, previous_owner)
+    end)
+
+    :persistent_term.put(status_key, {:safe_mode, :crash_detected})
+    :persistent_term.put(owner_key, self())
+
+    refute Process.whereis(Extensions) == self()
+    assert Extensions.boot_status() == {:safe_mode, :crash_detected}
+  end
+
+  test "an older boot result cannot overwrite a newer explicit load" do
+    assert {:ok, %{failed: []}} = Extensions.load_all()
+    status_key = {Extensions, :boot_status}
+    assert %{revision: stale_revision, status: :ok} = :persistent_term.get(status_key)
+
+    stale_ref = make_ref()
+
+    stale_task = %Task{
+      mfa: {__MODULE__, :stale_boot_result, 0},
+      owner: self(),
+      pid: self(),
+      ref: stale_ref
+    }
+
+    :sys.replace_state(Extensions, fn state ->
+      %{state | boot_task: stale_task, boot_status_revision: stale_revision}
+    end)
+
+    assert {:ok, %{failed: []}} = Extensions.load_all()
+    send(Extensions, {stale_ref, {:error, :stale_boot_failure}})
+    state = :sys.get_state(Extensions)
+
+    assert state.boot_task == nil
+    assert Extensions.boot_status() == :ok
+  end
+
+  test "queued boot work does not rerun setup after a newer explicit load" do
+    File.mkdir_p!(Extensions.dir())
+    path = Path.join(Extensions.dir(), "boot_revision_probe.ex")
+    previous_probe = Application.fetch_env(:catalyst, :boot_revision_probe_pid)
+    Application.put_env(:catalyst, :boot_revision_probe_pid, self())
+
+    File.write!(path, ~S"""
+    defmodule Catalyst.Ext.BootRevisionProbe do
+      use Catalyst.Extension
+
+      @impl true
+      def setup(_api) do
+        case Application.get_env(:catalyst, :boot_revision_probe_pid) do
+          pid when is_pid(pid) ->
+            send(pid, {:boot_revision_setup, self()})
+
+            receive do
+              :continue -> :ok
+            after
+              2_000 -> :ok
+            end
+
+          _missing ->
+            :ok
+        end
+      end
+    end
+    """)
+
+    on_exit(fn ->
+      File.rm(path)
+      restore_env(:boot_revision_probe_pid, previous_probe)
+      _ = Extensions.load_all()
+    end)
+
+    explicit =
+      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
+        Extensions.load_all()
+      end)
+
+    assert_receive {:boot_revision_setup, setup}
+
+    :sys.replace_state(Extensions, fn state ->
+      %{state | bootstrap: :pending, boot_task: nil}
+    end)
+
+    assert :ok = Extensions.bootstrap()
+    assert %Task{} = :sys.get_state(Extensions).boot_task
+
+    send(setup, :continue)
+    assert {:ok, %{failed: []}} = Task.await(explicit, 5_000)
+    assert_boot_completes_without_second_setup()
+    assert Extensions.boot_status() == :ok
+  end
+
+  test "a compiler from a dead generation cannot leave code live in safe mode" do
+    File.mkdir_p!(Extensions.dir())
+    path = Path.join(Extensions.dir(), "stale_compile_probe.ex")
+    token = make_ref()
+    previous_probe = Application.fetch_env(:catalyst, :stale_compile_probe)
+    previous_safe_mode = Application.fetch_env(:catalyst, :safe_mode)
+    Application.put_env(:catalyst, :stale_compile_probe, {self(), token})
+    Application.put_env(:catalyst, :safe_mode, false)
+
+    File.write!(path, ~S"""
+    {test, token} = Application.fetch_env!(:catalyst, :stale_compile_probe)
+    send(test, {:compile_paused, self(), token})
+
+    receive do
+      {:continue_compile, ^token} -> :ok
+    end
+
+    defmodule Catalyst.Ext.StaleCompileProbe do
+      def loaded?, do: true
+    end
+    """)
+
+    on_exit(fn ->
+      File.rm(path)
+      restore_env(:stale_compile_probe, previous_probe)
+      restore_env(:safe_mode, previous_safe_mode)
+      _ = Extensions.load_all()
+    end)
+
+    refute Code.ensure_loaded?(Catalyst.Ext.StaleCompileProbe)
+
+    load =
+      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
+        Extensions.load_file(path)
+      end)
+
+    assert_receive {:compile_paused, compiler, ^token}
+    Application.put_env(:catalyst, :safe_mode, true)
+
+    extensions = Process.whereis(Extensions)
+    ref = Process.monitor(extensions)
+    Process.exit(extensions, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^extensions, :killed}
+
+    replacement = wait_for_replacement!(extensions)
+    assert catch_exit(:sys.get_state(replacement, 50))
+
+    send(compiler, {:continue_compile, token})
+    assert {:error, :stale_extension_generation} = Task.await(load, 5_000)
+    assert %{bootstrap: :complete} = :sys.get_state(replacement, 5_000)
+    assert Extensions.boot_status() == {:safe_mode, :env}
+    refute Code.ensure_loaded?(Catalyst.Ext.StaleCompileProbe)
+  end
+
+  test "safe-mode restart drains modules from a killed boot compiler" do
+    File.mkdir_p!(Extensions.dir())
+    path = Path.join(Extensions.dir(), "boot_compile_leak_probe.ex")
+    token = make_ref()
+    previous_probe = Application.fetch_env(:catalyst, :boot_compile_leak_probe)
+    previous_safe_mode = Application.fetch_env(:catalyst, :safe_mode)
+    Application.put_env(:catalyst, :boot_compile_leak_probe, {self(), token})
+    Application.put_env(:catalyst, :safe_mode, false)
+
+    File.write!(path, ~S"""
+    defmodule Catalyst.Ext.BootCompileLeakProbe do
+      def loaded?, do: true
+    end
+
+    {test, token} = Application.fetch_env!(:catalyst, :boot_compile_leak_probe)
+    send(test, {:boot_compile_paused, self(), token})
+
+    receive do
+      {:continue_boot_compile, ^token} -> :ok
+    after
+      2_000 -> :ok
+    end
+    """)
+
+    on_exit(fn ->
+      File.rm(path)
+      restore_env(:boot_compile_leak_probe, previous_probe)
+      restore_env(:safe_mode, previous_safe_mode)
+      _ = Extensions.load_all()
+    end)
+
+    refute Code.ensure_loaded?(Catalyst.Ext.BootCompileLeakProbe)
+
+    :sys.replace_state(Extensions, fn state ->
+      %{state | bootstrap: :pending, boot_task: nil}
+    end)
+
+    assert :ok = Extensions.bootstrap()
+    assert_receive {:boot_compile_paused, compiler, ^token}
+    assert Code.ensure_loaded?(Catalyst.Ext.BootCompileLeakProbe)
+    compiler_ref = Process.monitor(compiler)
+
+    Application.put_env(:catalyst, :safe_mode, true)
+    extensions = Process.whereis(Extensions)
+    ref = Process.monitor(extensions)
+    Process.exit(extensions, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^extensions, :killed}
+
+    replacement = wait_for_replacement!(extensions)
+    assert %{bootstrap: :complete} = :sys.get_state(replacement, 5_000)
+    assert_receive {:DOWN, ^compiler_ref, :process, ^compiler, _reason}
+    assert Extensions.boot_status() == {:safe_mode, :env}
+    refute Catalyst.Extensions.CompilerTracer.provisional?()
+    refute Code.ensure_loaded?(Catalyst.Ext.BootCompileLeakProbe)
+  end
+
   test "a missing marker (first boot) is not a crash" do
     File.rm(BootGuard.marker_path())
     refute BootGuard.crashed_last_boot?()
@@ -55,6 +276,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
     # The previous boot was quit inside the stabilization window (desktop quit
     # is a halt — nothing marks clean): with nothing to load, safe mode would
     # protect nothing, so boot proceeds and the marker self-heals.
+    assert {:ok, %{failed: []}} = Extensions.load_all()
     File.rm_rf!(Extensions.dir())
     BootGuard.mark_booting()
 
@@ -120,6 +342,8 @@ defmodule Catalyst.Extensions.BootGuardTest do
       capture_log(fn ->
         restart_extensions()
         wait_until(fn -> match?({:load_failed, _reason}, Extensions.boot_status()) end)
+        _ = :sys.get_state(Extensions)
+        Logger.flush()
       end)
 
     assert {:load_failed, {:owner_collision, "boot_owner", paths}} = Extensions.boot_status()
@@ -176,6 +400,17 @@ defmodule Catalyst.Extensions.BootGuardTest do
     end)
   end
 
+  defp wait_for_replacement!(old_pid) do
+    wait_until(fn ->
+      case Process.whereis(Extensions) do
+        pid when is_pid(pid) and pid != old_pid -> true
+        _missing_or_old -> false
+      end
+    end)
+
+    Process.whereis(Extensions)
+  end
+
   defp wait_until(fun, tries \\ 100) do
     cond do
       fun.() -> :ok
@@ -184,8 +419,30 @@ defmodule Catalyst.Extensions.BootGuardTest do
     end
   end
 
+  defp assert_boot_completes_without_second_setup(tries \\ 100)
+
+  defp assert_boot_completes_without_second_setup(0),
+    do: flunk("queued boot task did not finish")
+
+  defp assert_boot_completes_without_second_setup(tries) do
+    receive do
+      {:boot_revision_setup, setup} ->
+        send(setup, :continue)
+        flunk("stale boot task ran extension setup a second time")
+    after
+      10 ->
+        case :sys.get_state(Extensions) do
+          %{bootstrap: :complete, boot_task: nil} -> :ok
+          _in_progress -> assert_boot_completes_without_second_setup(tries - 1)
+        end
+    end
+  end
+
   defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
   defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
+
+  defp restore_persistent_term(key, :missing), do: :persistent_term.erase(key)
+  defp restore_persistent_term(key, value), do: :persistent_term.put(key, value)
 
   test "a successful explicit load_all clears crash-detected safe mode" do
     BootGuard.mark_booting()
@@ -212,35 +469,6 @@ defmodule Catalyst.Extensions.BootGuardTest do
     end)
 
     # The broken extension is still in place — a relaunch must stay safe.
-    assert BootGuard.crashed_last_boot?()
-  end
-
-  test "reload_after_wiring skips and preserves crash-detected safe mode" do
-    on_exit(fn -> :persistent_term.put({Catalyst.Extensions, :boot_status}, :ok) end)
-
-    # Simulate the state after a crash-detected boot: marker stale, status set.
-    BootGuard.mark_booting()
-    :persistent_term.put({Catalyst.Extensions, :boot_status}, {:safe_mode, :crash_detected})
-
-    assert {:skipped, {:safe_mode, :crash_detected}} = Extensions.reload_after_wiring()
-
-    # Nothing was loaded and nothing was cleared: a relaunch still detects it.
-    assert BootGuard.crashed_last_boot?()
-    assert Extensions.boot_status() == {:safe_mode, :crash_detected}
-  end
-
-  test "reload_after_wiring loads on a clean boot but never marks the boot OK" do
-    on_exit(fn -> :persistent_term.put({Catalyst.Extensions, :boot_status}, :ok) end)
-    :persistent_term.put({Catalyst.Extensions, :boot_status}, :ok)
-    File.mkdir_p!(Extensions.dir())
-
-    # Pretend we're inside the stabilization window: marker still "booting".
-    BootGuard.mark_booting()
-
-    assert {:ok, %{loaded: _, failed: _}} = Extensions.reload_after_wiring()
-
-    # The marker is untouched — only the stabilization timer (or an explicit
-    # load_all) may flip it to ok.
     assert BootGuard.crashed_last_boot?()
   end
 end

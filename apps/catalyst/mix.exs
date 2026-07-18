@@ -11,6 +11,7 @@ defmodule Catalyst.MixProject do
       lockfile: "../../mix.lock",
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
+      test_ignore_filters: [&String.starts_with?(&1, "test/fixtures/")],
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps()

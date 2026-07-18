@@ -10,7 +10,7 @@ defmodule Catalyst.Debug do
   """
 
   alias Catalyst.Agent.Event
-  alias Catalyst.{Content, Message, Paths}
+  alias Catalyst.{Content, Message, Paths, Tasks}
   alias Catalyst.Tools.Truncate
 
   @max 4_000
@@ -78,6 +78,13 @@ defmodule Catalyst.Debug do
 
   def log(_session_id, _category, _message), do: :ok
 
+  @doc "Append a debug line in supervised background work."
+  @spec log_async(String.t() | nil, String.t(), String.t()) ::
+          {:ok, pid()} | {:error, term()}
+  def log_async(session_id, category, message) do
+    start_background(fn -> log(session_id, category, message) end)
+  end
+
   @doc "Log one agent-loop event (streaming deltas are skipped to keep the log readable)."
   @spec log_event(String.t() | nil, struct()) :: :ok
   def log_event(session_id, event) do
@@ -85,6 +92,12 @@ defmodule Catalyst.Debug do
       nil -> :ok
       text -> log(session_id, "event", text)
     end
+  end
+
+  @doc "Log an agent-loop event in supervised background work."
+  @spec log_event_async(String.t() | nil, struct()) :: {:ok, pid()} | {:error, term()}
+  def log_event_async(session_id, event) do
+    start_background(fn -> log_event(session_id, event) end)
   end
 
   @doc "Point `latest.log` at this session's log. Call on session start."
@@ -103,6 +116,12 @@ defmodule Catalyst.Debug do
     :ok
   rescue
     _ -> :ok
+  end
+
+  @doc "Update `latest.log` in supervised background work."
+  @spec mark_latest_async(String.t()) :: {:ok, pid()} | {:error, term()}
+  def mark_latest_async(session_id) when is_binary(session_id) do
+    start_background(fn -> mark_latest(session_id) end)
   end
 
   @doc "Truncate a binary or term for logging."
@@ -144,6 +163,8 @@ defmodule Catalyst.Debug do
     File.mkdir_p!(debug_dir)
     :persistent_term.put(@prepared_dir_key, debug_dir)
   end
+
+  defp start_background(fun), do: Tasks.start_background(fun)
 
   # ---- event formatting -----------------------------------------------------
 

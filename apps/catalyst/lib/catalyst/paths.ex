@@ -45,6 +45,14 @@ defmodule Catalyst.Paths do
   @spec system_prompt() :: Path.t()
   def system_prompt, do: join("system_prompt.md")
 
+  @doc "Default directory for purpose- and model-aware prompt markdown files."
+  @spec prompts() :: Path.t()
+  def prompts, do: join("prompts")
+
+  @doc "Default directory for file-backed child-agent definitions."
+  @spec agents() :: Path.t()
+  def agents, do: join("agents")
+
   @doc "Default extension boot marker."
   @spec boot_marker() :: Path.t()
   def boot_marker, do: join("boot_marker")

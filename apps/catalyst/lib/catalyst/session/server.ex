@@ -14,10 +14,21 @@ defmodule Catalyst.Session.Server do
   """
 
   use GenServer
+  require Logger
 
-  alias Catalyst.Agent.{Event, Loop}
+  alias Catalyst.Agent.Event
   alias Catalyst.{Message, Tasks}
-  alias Catalyst.Session.{Manager, Reducer, RunConfig, Snapshot, Store}
+
+  alias Catalyst.Session.{
+    EventSink,
+    Manager,
+    Reducer,
+    RunConfig,
+    RunContext,
+    Snapshot,
+    Store
+  }
+
   alias Catalyst.Session.Server.State
 
   # ---- public API -----------------------------------------------------------
@@ -65,10 +76,12 @@ defmodule Catalyst.Session.Server do
 
   @doc """
   Clear the transcript and abort any active run. A reset marker is appended to
-  the session file, so a crash-restarted (or resumed) session stays cleared.
+  the session file before live state changes, so a crash-restarted (or resumed)
+  session stays cleared. Returns a tagged persistence error without changing the
+  session when the marker cannot be appended.
   """
-  @spec reset(GenServer.server()) :: :ok
-  def reset(server), do: GenServer.cast(server, :reset)
+  @spec reset(GenServer.server()) :: :ok | {:error, term()}
+  def reset(server), do: GenServer.call(server, :reset)
 
   @doc """
   Reconfigure the session for subsequent runs: `:model` (a `%Catalyst.Model{}`),
@@ -76,7 +89,7 @@ defmodule Catalyst.Session.Server do
   value deletes the key). Takes effect on the NEXT run — an in-flight run keeps
   the config it started with (`RunConfig.build/3` reads state per run).
   """
-  @spec configure(GenServer.server(), keyword()) :: :ok
+  @spec configure(GenServer.server(), keyword()) :: :ok | {:error, term()}
   def configure(server, changes) when is_list(changes),
     do: GenServer.call(server, {:configure, changes})
 
@@ -87,23 +100,29 @@ defmodule Catalyst.Session.Server do
     Process.flag(:trap_exit, true)
 
     id = Keyword.fetch!(opts, :id)
-    cwd = Keyword.get(opts, :cwd, File.cwd!())
-    store = Store.new(cwd, id: id)
 
-    state = %State{
-      id: id,
-      cwd: cwd,
-      system_prompt: Keyword.get(opts, :system_prompt),
-      model: Keyword.get(opts, :model),
-      provider: Keyword.get(opts, :provider),
-      # Default to the live extension set (built-ins + runtime-loaded tools),
-      # resolved per turn by the loop. Pass an explicit list to pin tools.
-      tools: Keyword.get(opts, :tools, :extensions),
-      opts: opts |> Keyword.get(:opts, []) |> normalize_session_opts(),
-      store: store
-    }
+    with {:ok, cwd} <- session_cwd(opts),
+         {:ok, store} <- open_store(cwd, opts) do
+      state = %State{
+        id: id,
+        cwd: cwd,
+        system_prompt: Keyword.get(opts, :system_prompt),
+        model: Keyword.get(opts, :model),
+        provider: Keyword.get(opts, :provider),
+        # Default to the live extension set (built-ins + runtime-loaded tools),
+        # resolved per turn by the loop. Pass an explicit list to pin tools.
+        tools: Keyword.get(opts, :tools, :extensions),
+        opts: initial_session_opts(opts),
+        store: store,
+        parent_id: Keyword.get(opts, :parent_id),
+        root_session_id: Keyword.get(opts, :root_session_id, id),
+        agent_depth: Keyword.get(opts, :agent_depth, 0)
+      }
 
-    {:ok, state, {:continue, :load_state}}
+      {:ok, state, {:continue, :load_state}}
+    else
+      {:error, reason} -> {:stop, reason}
+    end
   end
 
   @impl true
@@ -111,22 +130,34 @@ defmodule Catalyst.Session.Server do
     # One disk fold restores both the transcript and the independent session
     # settings. Persisted changes win over caller defaults, including explicit
     # nil tombstones used to clear a previously selected model/effort.
-    loaded = Store.load_state(state.store.path)
+    case Store.load_state(state.store.path) do
+      {:ok, loaded} ->
+        # The previous incarnation may have died mid-run (graceful stop, VM crash)
+        # after persisting an assistant message whose tool calls never got results.
+        # Repair before the server handles mailbox messages so the next provider
+        # request cannot observe dangling tool calls.
+        state =
+          state
+          |> restore_persisted(loaded)
+          |> repair_transcript()
 
-    # The previous incarnation may have died mid-run (graceful stop, VM crash)
-    # after persisting an assistant message whose tool calls never got results.
-    # Repair before the server handles mailbox messages so the next provider
-    # request cannot observe dangling tool calls.
-    state =
-      state
-      |> restore_persisted(loaded)
-      |> repair_transcript()
+        case state.parent_id do
+          nil -> Catalyst.Debug.mark_latest_async(state.id)
+          _parent -> :ok
+        end
 
-    Catalyst.Debug.mark_latest(state.id)
-    # Fire-and-forget provider warmup (the Codex ws prewarm): the first turn
-    # can then ride a delta upload. RunConfig decides (hot-swappable) and the
-    # work runs in a supervised task — it never blocks or fails the session.
-    {:noreply, start_prewarm(state)}
+        # Fire-and-forget provider warmup (the Codex ws prewarm): the first turn
+        # can then ride a delta upload. RunConfig decides (hot-swappable) and the
+        # work runs in a supervised task — it never blocks or fails the session.
+        {:noreply, start_prewarm(state)}
+
+      {:error, reason} ->
+        Logger.error(
+          "[session:#{state.id}] failed to load state from #{state.store.path}: #{inspect(reason)}"
+        )
+
+        {:stop, {:load_failed, reason}, state}
+    end
   end
 
   @impl true
@@ -175,6 +206,38 @@ defmodule Catalyst.Session.Server do
 
   def handle_call({:drain_follow_up, _stale_ref}, _from, state), do: {:reply, [], state}
 
+  def handle_call(
+        {:register_run_resource, run_ref, resource},
+        _from,
+        %State{run_ref: run_ref} = state
+      )
+      when run_ref != nil do
+    {_resource, state} = track_run_resource(state, resource)
+    {:reply, :ok, state}
+  end
+
+  # Stale registrations must not reply :ok: the summarizer registers before
+  # opening the companion resource, and an :ok would let it create state after
+  # abort cleanup and then die without its after block.
+  def handle_call({:register_run_resource, _stale_ref, _resource}, _from, state) do
+    {:reply, {:error, :stale_run}, state}
+  end
+
+  # Durable events (ContextCompacted) are folded synchronously so the run task
+  # holds until the replacement is persisted before requesting the provider.
+  # Same-process casts sent earlier are already ordered before this call.
+  def handle_call({:persist_run_event, run_ref, event}, _from, %State{run_ref: run_ref} = state)
+      when run_ref != nil do
+    case persist_and_accept(state, event) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:persist_run_event, _stale_ref, _event}, _from, state) do
+    {:reply, {:error, :stale_run}, state}
+  end
+
   def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
 
   def handle_call({:configure, changes}, _from, %State{} = state) do
@@ -188,12 +251,31 @@ defmodule Catalyst.Session.Server do
           |> normalize_session_opts()
     }
 
-    persist_settings_changes(state, new_state)
+    case persist_settings_snapshot(state, new_state) do
+      :ok ->
+        # Changed model/options invalidate any prewarmed continuation's body
+        # probe. Cancel the previous warmup before starting its replacement so it
+        # cannot land stale state after the new configuration wins.
+        {:reply, :ok, restart_prewarm(new_state)}
 
-    # Changed model/options invalidate any prewarmed continuation's body
-    # probe. Cancel the previous warmup before starting its replacement so it
-    # cannot land stale state after the new configuration wins.
-    {:reply, :ok, restart_prewarm(new_state)}
+      {:error, reason} ->
+        log_persistence_failure(state, :settings_snapshot, reason)
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:reset, _from, state) do
+    # The reset marker is authoritative state, like a compaction replacement.
+    # Append it before killing the run or changing memory: on failure the live
+    # session continues unchanged and restart cannot resurrect cleared history.
+    case Store.append_reset(state.store) do
+      :ok ->
+        {:reply, :ok, install_reset(state)}
+
+      {:error, reason} ->
+        log_persistence_failure(state, :reset, reason)
+        {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
@@ -206,20 +288,24 @@ defmodule Catalyst.Session.Server do
   def handle_cast(:abort, %State{run: %Task{} = task} = state) do
     # Clear run_ref FIRST: events the killed task already cast are still queued
     # behind this message and must not fold into the post-abort state.
+    # Kill the run before releasing resources so it cannot recreate companion
+    # state after cleanup; finish_successful_run/handle_failure clean after.
     state = %{state | run_ref: nil}
+    result = shutdown_run(task)
+    state = %{state | run: nil}
 
     state =
-      case {shutdown_run(task), state.agent_ended} do
+      case {result, state.agent_ended} do
         # Task completed AND its AgentEnd was already folded — nothing was lost.
         {{:ok, _result}, true} ->
-          %{state | run: nil}
+          finish_successful_run(state)
 
         # Killed, or completed with its tail events (final MessageEnd/AgentEnd)
         # queued behind this abort and dropped as stale: synthesize the aborted
         # turn so streaming/pending state is reset and subscribers always get
         # an AgentEnd (the UI unlocks input on it).
         _ ->
-          handle_failure(%{state | run: nil}, :killed)
+          handle_failure(state, :killed)
       end
 
     {:noreply, state}
@@ -227,48 +313,16 @@ defmodule Catalyst.Session.Server do
 
   def handle_cast(:abort, state), do: {:noreply, state}
 
-  def handle_cast(:reset, state) do
-    state =
-      case state.run do
-        %Task{} = task ->
-          shutdown_run(task)
-          state = %{state | run: nil, run_ref: nil}
-          # Unlock subscribers waiting on the killed run. No aborted-turn
-          # marker is synthesized — the transcript is being cleared anyway.
-          broadcast(state, %Event.AgentEnd{messages: []})
-          state
-
-        _ ->
-          state
-      end
-
-    # Persist the reset: Store.load/1 discards everything before the marker,
-    # so a crash-restart or resume stays cleared.
-    Store.append_reset(state.store)
-
-    {:noreply,
-     %{
-       state
-       | messages: [],
-         streaming_message: nil,
-         streaming_text: [],
-         streaming_thinking: [],
-         pending_tool_calls: MapSet.new(),
-         error_message: nil,
-         agent_ended: false,
-         steering: :queue.new(),
-         follow_up: :queue.new(),
-         in_flight: []
-     }}
+  def handle_cast({:run_metadata, run_ref, metadata}, %State{run_ref: run_ref} = state)
+      when run_ref != nil do
+    {:noreply, %{state | current_run_metadata: metadata}}
   end
+
+  def handle_cast({:run_metadata, _stale_ref, _metadata}, state), do: {:noreply, state}
 
   def handle_cast({:agent_event, run_ref, event}, %State{run_ref: run_ref} = state)
       when run_ref != nil do
-    Catalyst.Debug.log_event(state.id, event)
-    persist(state, event)
-    state = Reducer.reduce(event, state)
-    broadcast(state, event)
-    {:noreply, track_agent_end(state, event)}
+    {:noreply, fold_run_event(state, event)}
   end
 
   # Stale event from an aborted/replaced run — drop it.
@@ -277,8 +331,14 @@ defmodule Catalyst.Session.Server do
   @impl true
   # Task returned normally — its events already drove the state (casts from the
   # task are ordered before its completion message).
-  def handle_info({ref, _result}, %State{run: %Task{ref: ref}} = state) do
+  def handle_info({ref, {:run_error, reason}}, %State{run: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
+    {:noreply, handle_failure(%{state | run_ref: nil}, reason)}
+  end
+
+  def handle_info({ref, {:workflow_result, _result}}, %State{run: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    state = finish_successful_run(state)
     {:noreply, %{state | run: nil, run_ref: nil}}
   end
 
@@ -288,8 +348,9 @@ defmodule Catalyst.Session.Server do
       ),
       do: {:noreply, %{state | prewarm: nil}}
 
-  def handle_info({:DOWN, ref, :process, _pid, :normal}, %State{run: %Task{ref: ref}} = state),
-    do: {:noreply, %{state | run: nil, run_ref: nil}}
+  def handle_info({:DOWN, ref, :process, _pid, :normal}, %State{run: %Task{ref: ref}} = state) do
+    {:noreply, handle_failure(%{state | run_ref: nil}, {:workflow_exit, :normal})}
+  end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %State{run: %Task{ref: ref}} = state),
     do: {:noreply, handle_failure(%{state | run_ref: nil}, reason)}
@@ -300,6 +361,7 @@ defmodule Catalyst.Session.Server do
   def terminate(_reason, %State{} = state) do
     _state = stop_prewarm(state)
     shutdown_terminating_run(state.run)
+    cleanup_run_resources(state)
     RunConfig.cleanup_session(state)
     :ok
   end
@@ -335,29 +397,63 @@ defmodule Catalyst.Session.Server do
   end
 
   defp start_run(state, prompts) do
+    # Terminal paths already released companions. Every compaction resource has
+    # a unique provider continuation id, so cleanup is independent per run.
+    state = cleanup_run_resources(state)
     server = self()
     run_ref = make_ref()
 
-    # Both resolve fresh per run, as data: the system prompt falls back to
-    # ~/.catalyst/system_prompt.md (then the built-in default), and the loop
-    # module comes from RunConfig (session opt → :agent_loop env → Agent.Loop) —
-    # so prompt edits and loop swaps take effect on the next run, no restart.
-    context = %{
-      system_prompt: state.system_prompt || Catalyst.SystemPrompt.get(),
-      messages: Enum.reverse(state.messages)
-    }
-
-    case RunConfig.build(state, server, run_ref) do
-      {:ok, config} ->
-        loop = Map.get(config, :loop, Loop)
+    # Provider availability remains a synchronous host-owned preflight. Prompt,
+    # workflow, catalog, and extension policy code starts only inside the task.
+    case RunConfig.resolve_provider(state) do
+      {:ok, provider} ->
         emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
 
-        task = Tasks.async(fn -> loop.run(prompts, context, config, emit) end)
+        task =
+          Tasks.async(fn ->
+            case RunContext.build(state, server, run_ref, provider) do
+              {:ok, run_context} ->
+                GenServer.cast(server, {:run_metadata, run_ref, run_context.metadata})
 
-        {:ok, %{state | run: task, run_ref: run_ref, agent_ended: false, error_message: nil}}
+                result =
+                  run_context.config.loop.run(
+                    prompts,
+                    run_context.context,
+                    run_context.config,
+                    emit
+                  )
 
-      {:error, _reason} = err ->
-        err
+                case result do
+                  {:ok, messages, final_context} = success
+                  when is_list(messages) and is_map(final_context) ->
+                    {:workflow_result, success}
+
+                  {:error, reason} ->
+                    {:run_error, reason}
+
+                  invalid ->
+                    {:run_error, {:invalid_workflow_result, invalid}}
+                end
+
+              {:error, reason} ->
+                {:run_error, reason}
+            end
+          end)
+
+        {:ok,
+         %{
+           state
+           | run: task,
+             run_ref: run_ref,
+             agent_ended: false,
+             run_final_assistant: nil,
+             error_message: nil,
+             current_run_metadata: nil,
+             run_resources: []
+         }}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -370,12 +466,54 @@ defmodule Catalyst.Session.Server do
 
   defp normalize_session_opts(opts), do: Keyword.delete(opts, :session_id)
 
+  defp initial_session_opts(opts) do
+    session_opts = opts |> Keyword.get(:opts, []) |> normalize_session_opts()
+
+    case Keyword.get(opts, :workflow) do
+      nil -> session_opts
+      workflow when is_binary(workflow) -> Keyword.put_new(session_opts, :workflow, workflow)
+      %{name: name} when is_binary(name) -> Keyword.put_new(session_opts, :workflow, name)
+      %{module: module} when is_atom(module) -> Keyword.put_new(session_opts, :loop, module)
+      module when is_atom(module) -> Keyword.put_new(session_opts, :loop, module)
+      _other -> session_opts
+    end
+  end
+
+  defp session_cwd(opts) do
+    case Keyword.fetch(opts, :cwd) do
+      {:ok, cwd} when is_binary(cwd) ->
+        {:ok, cwd}
+
+      {:ok, cwd} ->
+        {:error, {:invalid_cwd, cwd}}
+
+      :error ->
+        case File.cwd() do
+          {:ok, cwd} -> {:ok, cwd}
+          {:error, reason} -> {:error, {:cwd_failed, reason}}
+        end
+    end
+  end
+
+  defp open_store(cwd, opts) do
+    store_opts =
+      Keyword.take(opts, [:id, :parent_id, :root_session_id, :agent_depth])
+
+    case Keyword.get(opts, :create) do
+      :exclusive -> Store.create_new(cwd, store_opts)
+      _resume_or_create -> Store.open(cwd, store_opts)
+    end
+  end
+
   defp restore_persisted(%State{} = state, loaded) do
     %State{
       state
       | model: restore_model(state.model, loaded),
         opts: restore_thinking_level(state.opts, loaded),
-        messages: Enum.reverse(loaded.messages)
+        messages: Enum.reverse(loaded.messages),
+        parent_id: loaded.parent_id || state.parent_id,
+        root_session_id: loaded.root_session_id || state.root_session_id || state.id,
+        agent_depth: max(loaded.agent_depth, state.agent_depth)
     }
   end
 
@@ -391,6 +529,10 @@ defmodule Catalyst.Session.Server do
   defp restore_thinking_level(opts, _settings), do: opts
 
   defp persist(state, %Event.MessageEnd{message: m}), do: Store.append_message(state.store, m)
+
+  defp persist(state, %Event.ContextCompacted{} = event),
+    do: Store.append_compaction(state.store, event)
+
   defp persist(_state, _event), do: :ok
 
   # Synthesize and persist error ToolResults for tool calls left dangling by a
@@ -402,8 +544,60 @@ defmodule Catalyst.Session.Server do
         state
 
       results ->
-        Enum.each(results, &Store.append_message(state.store, &1))
+        Enum.each(results, fn result ->
+          append_best_effort(state, :transcript_repair, fn ->
+            Store.append_message(state.store, result)
+          end)
+        end)
+
         %{state | messages: Enum.reverse(results, state.messages)}
+    end
+  end
+
+  # Compaction is authoritative replacement state, so it is accepted only
+  # after its JSONL append succeeds. Ordinary MessageEnd events intentionally
+  # retain the prior best-effort persistence policy: a disk failure is surfaced
+  # in logs but does not crash or halt an otherwise live run.
+  defp fold_run_event(state, %Event.ContextCompacted{} = event) do
+    case persist_and_accept(state, event) do
+      {:ok, state} ->
+        state
+
+      {:error, reason} ->
+        log_persistence_failure(state, :compaction, reason)
+        state
+    end
+  end
+
+  defp fold_run_event(state, event) do
+    persist_best_effort(state, event)
+    accept_run_event(state, event)
+  end
+
+  defp persist_and_accept(state, event) do
+    case persist(state, event) do
+      :ok -> {:ok, accept_committed_event(state, event)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp accept_committed_event(state, event) do
+    state = Reducer.reduce(event, state)
+    :ok = EventSink.committed(event, state.id)
+    broadcast(state, event)
+    track_agent_end(state, event)
+  end
+
+  defp accept_run_event(state, event) do
+    state = Reducer.reduce(event, state)
+    broadcast(state, event)
+    track_agent_end(state, event)
+  end
+
+  defp persist_best_effort(state, event) do
+    case persist(state, event) do
+      :ok -> :ok
+      {:error, reason} -> log_persistence_failure(state, event_name(event), reason)
     end
   end
 
@@ -411,7 +605,9 @@ defmodule Catalyst.Session.Server do
   defp track_agent_end(state, _event), do: state
 
   defp handle_failure(state, reason) do
-    Catalyst.Debug.log(
+    state = cleanup_run_resources(state)
+
+    Catalyst.Debug.log_async(
       state.id,
       "error",
       "run failed: " <> Catalyst.Debug.truncate(reason, 8_000)
@@ -426,16 +622,22 @@ defmodule Catalyst.Session.Server do
           state
 
         results ->
-          Enum.each(results, fn r ->
-            Store.append_message(state.store, r)
-            broadcast(state, %Event.MessageEnd{message: r})
+          Enum.each(results, fn result ->
+            append_best_effort(state, :aborted_tool_result, fn ->
+              Store.append_message(state.store, result)
+            end)
+
+            synthetic_and_broadcast(state, %Event.MessageEnd{message: result})
           end)
 
           %{state | messages: Enum.reverse(results, state.messages)}
       end
 
     msg = Reducer.failure_message(state, reason)
-    Store.append_message(state.store, msg)
+
+    append_best_effort(state, :failure_message, fn ->
+      Store.append_message(state.store, msg)
+    end)
 
     state = %{
       state
@@ -446,6 +648,8 @@ defmodule Catalyst.Session.Server do
         streaming_message: nil,
         streaming_text: [],
         streaming_thinking: [],
+        current_run_metadata: nil,
+        run_final_assistant: nil,
         # Steering/follow-ups the dead run drained but never delivered go back
         # to the front of their queues, so the user's message isn't lost.
         steering: requeue(state.in_flight, :steering, state.steering),
@@ -453,8 +657,8 @@ defmodule Catalyst.Session.Server do
         in_flight: []
     }
 
-    broadcast(state, %Event.MessageEnd{message: msg})
-    broadcast(state, %Event.AgentEnd{messages: [msg]})
+    synthetic_and_broadcast(state, %Event.MessageEnd{message: msg})
+    synthetic_and_broadcast(state, %Event.AgentEnd{messages: [msg]})
     state
   end
 
@@ -463,6 +667,11 @@ defmodule Catalyst.Session.Server do
     |> Enum.filter(&match?({^kind, _}, &1))
     |> Enum.reverse()
     |> Enum.reduce(queue, fn {_kind, msg}, q -> :queue.in_r(msg, q) end)
+  end
+
+  defp synthetic_and_broadcast(state, event) do
+    EventSink.synthetic(event, state.id)
+    broadcast(state, event)
   end
 
   # Tagged with the session id so a subscriber that switched sessions can drop
@@ -475,27 +684,139 @@ defmodule Catalyst.Session.Server do
 
   defp drain_queue(q), do: {:queue.to_list(q), :queue.new()}
 
+  defp install_reset(state) do
+    state = stop_reset_run(state)
+
+    %{
+      state
+      | messages: [],
+        streaming_message: nil,
+        streaming_text: [],
+        streaming_thinking: [],
+        pending_tool_calls: MapSet.new(),
+        error_message: nil,
+        agent_ended: false,
+        run_final_assistant: nil,
+        steering: :queue.new(),
+        follow_up: :queue.new(),
+        in_flight: [],
+        current_run_metadata: nil,
+        run_resources: []
+    }
+  end
+
+  defp stop_reset_run(%State{run: %Task{} = task} = state) do
+    shutdown_run(task)
+
+    state =
+      state
+      |> cleanup_run_resources()
+      |> then(&%{&1 | run: nil, run_ref: nil})
+
+    # Unlock subscribers waiting on the killed run. No aborted-turn marker is
+    # synthesized because the successfully persisted reset clears the turn.
+    synthetic_and_broadcast(state, %Event.AgentEnd{messages: []})
+    state
+  end
+
+  defp stop_reset_run(state), do: cleanup_run_resources(state)
+
   defp normalize(%Message.User{} = m), do: m
   defp normalize(text) when is_binary(text), do: Message.user(text)
   defp normalize(content) when is_list(content), do: Message.user(content)
 
-  # PI's model_change / thinking_level_change session entries: persist setting
-  # switches so a resumed session keeps them (handle_continue folds them back).
-  defp persist_settings_changes(old, new) do
-    case new.model != old.model and
-           (is_nil(new.model) or match?(%Catalyst.Model{}, new.model)) do
-      true -> Store.append_model_change(new.store, new.model)
-      false -> :ok
+  # Persist a single replayable settings record before changing live state. The
+  # loader keeps decoding legacy model_change/thinking_level_change records.
+  defp persist_settings_snapshot(old, new) do
+    case persisted_settings_changed?(old, new) do
+      true ->
+        Store.append_settings_snapshot(
+          new.store,
+          new.model,
+          Keyword.get(new.opts, :reasoning_effort)
+        )
+
+      false ->
+        :ok
     end
+  end
 
-    old_level = Keyword.get(old.opts, :reasoning_effort)
-    new_level = Keyword.get(new.opts, :reasoning_effort)
+  defp persisted_settings_changed?(old, new) do
+    old.model != new.model or
+      Keyword.get(old.opts, :reasoning_effort) != Keyword.get(new.opts, :reasoning_effort)
+  end
 
-    case new_level != old_level and (is_nil(new_level) or is_binary(new_level)) do
-      true -> Store.append_thinking_level_change(new.store, new_level)
+  defp finish_successful_run(state) do
+    state = cleanup_run_resources(state)
+
+    case state.agent_ended and successful_final_assistant?(state.run_final_assistant) do
+      true ->
+        %{
+          state
+          | last_successful_run_metadata: state.current_run_metadata,
+            current_run_metadata: nil,
+            run_resources: [],
+            run_final_assistant: nil
+        }
+
+      false ->
+        %{state | current_run_metadata: nil, run_resources: [], run_final_assistant: nil}
+    end
+  end
+
+  defp successful_final_assistant?(%Message.Assistant{stop_reason: reason})
+       when reason not in [:error, :aborted],
+       do: true
+
+  defp successful_final_assistant?(_assistant), do: false
+
+  defp track_run_resource(state, resource) when is_map(resource) do
+    {resource, %{state | run_resources: [resource | state.run_resources || []]}}
+  end
+
+  defp cleanup_run_resources(state) do
+    Enum.each(state.run_resources || [], fn resource ->
+      Tasks.start_background(fn -> cleanup_resource_now(resource) end)
+    end)
+
+    %{state | run_resources: []}
+  end
+
+  defp cleanup_resource_now(%{provider: provider, session_id: session_id})
+       when is_atom(provider) and is_binary(session_id) do
+    case function_exported?(provider, :cleanup_session, 1) do
+      true -> provider.cleanup_session(session_id)
       false -> :ok
     end
 
     :ok
+  catch
+    kind, reason ->
+      Logger.warning(
+        "session resource cleanup #{inspect(provider)}/#{inspect(session_id)} " <>
+          "#{kind}: #{inspect(reason)}"
+      )
+
+      :ok
   end
+
+  defp cleanup_resource_now(_resource), do: :ok
+
+  defp append_best_effort(state, operation, append) when is_function(append, 0) do
+    case append.() do
+      :ok -> :ok
+      {:error, reason} -> log_persistence_failure(state, operation, reason)
+    end
+  end
+
+  defp log_persistence_failure(state, operation, reason) do
+    Logger.warning(
+      "session #{state.id}: failed to persist #{inspect(operation)} to #{state.store.path}: " <>
+        inspect(reason, limit: 20, printable_limit: 1_000)
+    )
+
+    :ok
+  end
+
+  defp event_name(%module{}), do: module
 end

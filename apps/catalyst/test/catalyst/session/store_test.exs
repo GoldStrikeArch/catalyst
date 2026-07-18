@@ -1,8 +1,7 @@
 defmodule Catalyst.Session.StoreTest do
   use ExUnit.Case, async: true
 
-  import ExUnit.CaptureLog
-
+  alias Catalyst.Agent.Event
   alias Catalyst.{Content, Message, Usage}
   alias Catalyst.Session.Store
 
@@ -111,15 +110,126 @@ defmodule Catalyst.Session.StoreTest do
     Store.append_model_change(store, nil)
     Store.append_thinking_level_change(store, nil)
 
-    assert %{
-             messages: [%Message.User{} = message],
-             model: nil,
-             model_set?: true,
-             thinking_level: nil,
-             thinking_level_set?: true
-           } = Store.load_state(store.path)
+    assert {:ok,
+            %{
+              messages: [%Message.User{} = message],
+              model: nil,
+              model_set?: true,
+              thinking_level: nil,
+              thinking_level_set?: true
+            }} = Store.load_state(store.path)
 
     assert Content.text_of(message.content) == "kept"
+  end
+
+  test "one mixed JSONL log folds every persisted entry type" do
+    store =
+      Store.new("/tmp/proj_every_entry",
+        parent_id: "parent",
+        root_session_id: "root",
+        agent_depth: 2
+      )
+
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    model = %Catalyst.Model{
+      id: "mixed-model",
+      api: "faux",
+      provider: "faux",
+      input: [:text],
+      context_window: 10_000
+    }
+
+    Store.append_message(store, Message.user("discarded by reset"))
+    Store.append_reset(store)
+    Store.append_model_change(store, model)
+    Store.append_thinking_level_change(store, "high")
+    Store.append_settings_snapshot(store, model, "high")
+    Store.append_message(store, Message.user("replaced by compaction"))
+
+    summary = Message.user("summary")
+    current = Message.user("current")
+
+    Store.append_compaction(store, %Event.ContextCompacted{
+      replacement: [summary, current],
+      summary: summary,
+      replaced_count: 1,
+      tokens_before: 1_000,
+      tokens_after: 200,
+      policy: Catalyst.Context.Window
+    })
+
+    Store.append_message(store, Message.user("later"))
+
+    assert {:ok, state} = Store.load_state(store.path)
+
+    assert Enum.map(state.messages, &Content.text_of(&1.content)) == [
+             "summary",
+             "current",
+             "later"
+           ]
+
+    assert state.model == model
+    assert state.model_set?
+    assert state.thinking_level == "high"
+    assert state.thinking_level_set?
+    assert state.parent_id == "parent"
+    assert state.root_session_id == "root"
+    assert state.agent_depth == 2
+
+    entry_types =
+      store.path
+      |> File.stream!()
+      |> Enum.map(fn line -> line |> Jason.decode!() |> Map.fetch!("type") end)
+      |> MapSet.new()
+
+    assert entry_types ==
+             MapSet.new(
+               ~w(session message reset model_change thinking_level_change compaction settings_snapshot)
+             )
+  end
+
+  test "settings_snapshot entry folds to the authoritative values" do
+    store = Store.new("/tmp/proj_settings_snapshot")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    m1 = %Catalyst.Model{id: "m-1", api: "faux", provider: "faux", input: [:text]}
+
+    Store.append_settings_snapshot(store, m1, "high")
+    settings = Store.load_settings(store.path)
+
+    assert settings.model.id == "m-1"
+    assert settings.thinking_level == "high"
+    assert settings.model_set?
+    assert settings.thinking_level_set?
+
+    Store.append_settings_snapshot(store, nil, nil)
+    settings = Store.load_settings(store.path)
+
+    assert settings.model == nil
+    assert settings.thinking_level == nil
+    assert settings.model_set?
+    assert settings.thinking_level_set?
+  end
+
+  test "open returns tagged errors for inaccessible roots" do
+    # Root that cannot be created (dir-as-file collision)
+    collision = "/tmp/catalyst_test_collision"
+    File.write!(collision, "not a dir")
+    on_exit(fn -> File.rm!(collision) end)
+
+    Application.put_env(:catalyst, :sessions_root, collision)
+    on_exit(fn -> Application.delete_env(:catalyst, :sessions_root) end)
+
+    assert {:error, {:mkdir_failed, :enotdir}} = Store.open("cwd")
+  end
+
+  test "load_state returns tagged errors for unreadable files" do
+    store = Store.new("/tmp/proj_unreadable")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    File.chmod!(store.path, 0o000)
+    assert {:error, {:read_failed, :eacces}} = Store.load_state(store.path)
   end
 
   test "reopening an existing session file preserves its transcript" do
@@ -150,6 +260,99 @@ defmodule Catalyst.Session.StoreTest do
     # A trailing reset leaves the session empty.
     Store.append_reset(store)
     assert Store.load(store.path) == []
+  end
+
+  test "a compaction entry replaces the logical transcript and later messages keep appending" do
+    store = Store.new("/tmp/proj_compaction")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    old = [Message.user("old one"), Message.user("old two")]
+    Enum.each(old, &Store.append_message(store, &1))
+
+    summary = Message.user("[Compacted context summary]\nsummary")
+    kept = Message.user("current")
+
+    event = %Event.ContextCompacted{
+      replacement: [summary, kept],
+      summary: summary,
+      replaced_count: 2,
+      tokens_before: 1_000,
+      tokens_after: 200,
+      policy: Catalyst.Context.Window
+    }
+
+    assert :ok = Store.append_compaction(store, event)
+    assert :ok = Store.append_message(store, Message.user("later"))
+
+    assert [loaded_summary, loaded_kept, loaded_later] = Store.load(store.path)
+    assert Content.text_of(loaded_summary.content) =~ "Compacted context summary"
+    assert Content.text_of(loaded_kept.content) == "current"
+    assert Content.text_of(loaded_later.content) == "later"
+  end
+
+  test "older readers degrade by ignoring compaction and replaying physical messages" do
+    store = Store.new("/tmp/proj_older_compaction")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    old = [Message.user("old one"), Message.user("old two")]
+    Enum.each(old, &Store.append_message(store, &1))
+
+    summary = Message.user("[Compacted context summary]\nsummary")
+    current = Message.user("current")
+
+    Store.append_compaction(store, %Event.ContextCompacted{
+      replacement: [summary, current],
+      summary: summary,
+      replaced_count: 2,
+      tokens_before: 1_000,
+      tokens_after: 200,
+      policy: Catalyst.Context.Window
+    })
+
+    Store.append_message(store, Message.user("later"))
+
+    assert Enum.map(Store.load(store.path), &Content.text_of(&1.content)) == [
+             "[Compacted context summary]\nsummary",
+             "current",
+             "later"
+           ]
+
+    assert Enum.map(old_build_load(store.path), &Content.text_of(&1.content)) == [
+             "old one",
+             "old two",
+             "later"
+           ]
+  end
+
+  test "a malformed compaction line preserves the prior fold and later valid lines continue" do
+    store = Store.new("/tmp/proj_malformed_compaction")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    Store.append_message(store, Message.user("before"))
+
+    File.write!(
+      store.path,
+      ~s({"type":"compaction","replacement":[{"role":"martian"}]}\n),
+      [:append]
+    )
+
+    orphan = %Message.ToolResult{
+      tool_call_id: "orphan",
+      tool_name: "read",
+      content: Content.text("invalid")
+    }
+
+    File.write!(
+      store.path,
+      Jason.encode!(%{"type" => "compaction", "replacement" => [Store.encode(orphan)]}) <> "\n",
+      [:append]
+    )
+
+    Store.append_message(store, Message.user("after"))
+
+    assert [before, after_message] = Store.load(store.path)
+    assert Content.text_of(before.content) == "before"
+    assert Content.text_of(after_message.content) == "after"
   end
 
   test "load skips corrupt or unknown lines instead of crashing" do
@@ -200,7 +403,7 @@ defmodule Catalyst.Session.StoreTest do
     assert Content.text_of(b.content) == inspect(%{weird: "block"})
   end
 
-  test "a write failure logs a warning instead of raising" do
+  test "append failures are returned as tagged errors instead of raising" do
     store = Store.new("/tmp/proj_unwritable")
     on_exit(fn -> File.rm_rf!(store.path) end)
 
@@ -208,13 +411,35 @@ defmodule Catalyst.Session.StoreTest do
     File.rm!(store.path)
     File.mkdir_p!(store.path)
 
-    log =
-      capture_log(fn ->
-        assert :ok = Store.append_message(store, Message.user("lost, but quietly"))
-        assert :ok = Store.append_reset(store)
-      end)
+    assert {:error, {:write_failed, _reason}} =
+             Store.append_message(store, Message.user("lost, but explicitly"))
 
-    assert log =~ store.id
-    assert log =~ "failed to append"
+    assert {:error, {:write_failed, _reason}} = Store.append_reset(store)
+  end
+
+  test "encoding failures are returned without appending a partial line" do
+    store = Store.new("/tmp/proj_unencodable")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+    invalid = %Message.User{content: [%Content.Text{text: <<255>>}]}
+
+    assert {:error, {:encode_failed, _reason}} = Store.append_message(store, invalid)
+    assert [_header] = File.read!(store.path) |> String.split("\n", trim: true)
+  end
+
+  defp old_build_load(path) do
+    path
+    |> File.stream!()
+    |> Enum.flat_map(fn line ->
+      case Jason.decode(String.trim(line)) do
+        {:ok, %{"type" => "message", "message" => message}} ->
+          case Store.decode(message) do
+            {:ok, decoded} -> [decoded]
+            {:error, _reason} -> []
+          end
+
+        _unknown_or_invalid ->
+          []
+      end
+    end)
   end
 end

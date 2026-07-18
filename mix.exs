@@ -69,7 +69,12 @@ defmodule Catalyst.Umbrella.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test, dialyzer: :dev]
+      preferred_envs: [
+        precommit: :test,
+        dialyzer: :dev,
+        "test.flex": :test,
+        "test.release": :test
+      ]
     ]
   end
 
@@ -296,11 +301,13 @@ defmodule Catalyst.Umbrella.MixProject do
     [
       # run `mix setup` in all child apps
       setup: ["cmd mix setup"],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
+      precommit: ["compile --warnings-as-errors", "deps.unlock --check-unused", "format", "test"],
       # flexibility tier only (it also runs as part of plain `mix test`)
-      "test.flex": ["test --only flexibility"],
+      "test.flex": [
+        "do --app catalyst --app catalyst_web cmd mix test --only flexibility"
+      ],
       # release smoke tier (excluded from plain `mix test`; builds a real release)
-      "test.release": ["test --only release"]
+      "test.release": ["do --app catalyst_cli cmd mix test --only release"]
     ]
   end
 end

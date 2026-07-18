@@ -13,6 +13,13 @@ defmodule Catalyst.LLM.Provider do
 
   @type sink :: (Catalyst.LLM.Event.t() -> any())
 
+  @doc """
+  Stream one model turn and return its final assistant message.
+
+  Deliver incremental `Catalyst.LLM.Event` values to `sink`. Request, model,
+  authentication, and transport failures must return an error/aborted assistant
+  inside `{:ok, assistant}`; reserve `{:error, reason}` for programmer errors.
+  """
   @callback stream(
               model :: Catalyst.Model.t(),
               context :: Catalyst.LLM.Context.t(),
@@ -20,7 +27,31 @@ defmodule Catalyst.LLM.Provider do
               sink :: sink()
             ) :: {:ok, Catalyst.Message.Assistant.t()} | {:error, term()}
 
+  @doc "Release provider resources retained for a session; optional providers may omit it."
   @callback cleanup_session(session_id :: String.t()) :: :ok
 
-  @optional_callbacks cleanup_session: 1
+  @doc """
+  Return a stable fingerprint of the exact provider-visible request semantics.
+
+  Generated transport values such as replay ids must not affect the result.
+  Return `:unsupported` when the provider cannot supply an exact projection.
+  """
+  @callback context_fingerprint(
+              model :: Catalyst.Model.t(),
+              context :: Catalyst.LLM.Context.t(),
+              opts :: keyword()
+            ) :: {:ok, binary()} | :unsupported
+
+  @doc """
+  Estimate the tokens in the exact provider-visible request projection.
+
+  Return `:unsupported` to use Catalyst's provider-neutral coarse estimate.
+  """
+  @callback estimate_tokens(
+              model :: Catalyst.Model.t(),
+              context :: Catalyst.LLM.Context.t(),
+              opts :: keyword()
+            ) :: {:ok, non_neg_integer()} | :unsupported
+
+  @optional_callbacks cleanup_session: 1, context_fingerprint: 3, estimate_tokens: 3
 end

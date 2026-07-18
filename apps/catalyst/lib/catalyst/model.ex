@@ -13,6 +13,10 @@ defmodule Catalyst.Model do
     reasoning: false,
     input: [:text],
     context_window: nil,
+    max_context_window: nil,
+    effective_context_window_percent: nil,
+    auto_compact_token_limit: nil,
+    context_window_source: nil,
     max_tokens: nil
   ]
 
@@ -25,6 +29,10 @@ defmodule Catalyst.Model do
           reasoning: boolean(),
           input: [:text | :image],
           context_window: pos_integer() | nil,
+          max_context_window: pos_integer() | nil,
+          effective_context_window_percent: number() | nil,
+          auto_compact_token_limit: pos_integer() | nil,
+          context_window_source: :session | :catalog | :persisted | :fallback | nil,
           max_tokens: pos_integer() | nil
         }
 end

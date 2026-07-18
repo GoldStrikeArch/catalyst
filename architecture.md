@@ -4,7 +4,7 @@ Catalyst is an Elixir/OTP reimplementation of **PI** (a minimal coding-agent har
 originally TypeScript — see `./tmp_pi`), delivered as a **native desktop GUI** via
 [`elixir-desktop/desktop`](https://github.com/elixir-desktop/desktop) (wxWidgets + Phoenix
 LiveView). It keeps PI's minimal agent surface but swaps in fast Rust tools and adds
-structural code editing:
+structural code editing, request-time context safety, and supervised child sessions:
 
 - **ripgrep** for grep, **fd** for find, **sd** for sed, **ast-grep** (tree-sitter) for
   structural/AST code edits.
@@ -15,10 +15,12 @@ structural code editing:
 > **available**, and `rg`/`fd`/`sd`/`ast-grep` all installed.
 
 **Beyond PI parity — "modify everything at runtime."** Catalyst leans on BEAM hot code loading
-to make the running app self-modifiable: *everything is a registry + hooks + hot-swap.* Tools,
-LLM providers, agent-loop hooks, and the UI (pages, renderers, panels, CSS/JS) are each an
-ETS-backed registry, seeded from built-ins at boot and writable at runtime through one unified
-`Catalyst.ExtensionAPI`. The agent compiles and loads new modules into the live VM (the Elixir
+to make the running app self-modifiable: _everything is a registry + hooks + hot-swap._ Tools,
+LLM providers, purpose-aware prompts, workflows, context policy, agent-loop hooks, and the UI
+(pages, renderers, panels, CSS/JS) are each an
+ETS-backed registry — most seeded from built-ins at boot, while the prompt/workflow/context
+registries hold runtime overlays over live application/file/built-in fallbacks (§11) — writable
+at runtime through one unified `Catalyst.ExtensionAPI`. The agent compiles and loads new modules into the live VM (the Elixir
 compiler ships in the release) and uses them on the next turn/render — **even inside the
 packaged `.app`**. This is the subject of **§11**; the rest of the document describes the PI
 core those registries sit on top of. The umbrella also carries a 4th app, **`catalyst_cli`**, a
@@ -43,7 +45,7 @@ PI is an npm monorepo: `agent` (core loop + state), `ai` (multi-provider LLM str
   function it invokes, and events fold back into state via `processEvents`.
 - **Tools** (`packages/coding-agent/src/core/tools/`): each =
   `{name, description, parameters (JSON schema), execute(id, params, signal, onUpdate) ->
-  {content, details, terminate?}}`. Built-ins: `read`, `write`, `edit` (oldText/newText
+{content, details, terminate?}}`. Built-ins: `read`, `write`, `edit` (oldText/newText
   fuzzy replace), `bash` (streaming, tail-truncate, process-tree kill), `grep` (`rg --json`),
   `find` (`fd`), `ls`. Thrown exceptions become error tool-results; output truncated to
   2000 lines / 50KB. Missing binaries auto-downloaded (`utils/tools-manager.ts`).
@@ -76,28 +78,34 @@ catalyst/                      # umbrella
     catalyst/                  # headless core — NO Phoenix dep (only phoenix_pubsub)
       lib/catalyst/
         message.ex content.ex model.ex usage.ex   # data model (mirror ai/src/types.ts)
-        tasks.ex paths.ex ids.ex                   # shared task, path, and identifier helpers
+        tasks.ex paths.ex ids.ex owned_index.ex    # shared task, path, id, and ownership helpers
         files/atomic_write.ex                      # shared atomic replacement + mode preservation
-        agent/{event.ex, loop.ex, tool_runner.ex}
+        agent/{event.ex, loop.ex, tool_runner.ex, children.ex}
         hooks.ex hooks/{table_owner.ex, observer_dispatcher.ex}
                                                    # hook registry + ordered bounded event observers (§11)
-        system_prompt.ex                           # system prompt as data (§11)
+        system_prompt.ex prompt.ex prompt/{request.ex,resolution.ex,config.ex,registry.ex}
+                                                   # purpose/model-aware prompt resolution (§11)
+        workflow.ex workflow/{registry.ex,support.ex}
+        context/{policy.ex,registry.ex,tokens.ex,window.ex,guard.ex,compaction.ex}
+                                                   # request guard + persistent compaction (§4/§9)
         extension.ex extension_api.ex              # extension behaviour + unified API (§11)
         extensions.ex                              # multi-kind loader (§11)
-        extensions/{versioning.ex, boot_guard.ex, processes.ex,
-                    installer.ex, loader.ex, compiler_tracer.ex, module_scan.ex}
+        extensions/{versioning.ex, boot_guard.ex, processes.ex, state.ex,
+                    transaction.ex, module_versions.ex, sources.ex,
+                    installer.ex, loader.ex, compiler_tracer.ex}
                                                    # git versioning + crash-safe boot + isolated loading
                                                    # + shared write→load→commit pipeline w/ self-mod kill switch (§11)
         debug.ex                                   # per-session debug log (§12)
-        session/{server.ex, manager.ex, store.ex,
-                 reducer.ex, run_config.ex, snapshot.ex,
+        session/{server.ex, manager.ex, store.ex, event_sink.ex,
+                 reducer.ex, run_config.ex, run_context.ex, snapshot.ex,
                  server/state.ex, store/codec.ex}  # thin server + extracted state/codec + hot-swap logic
         tools/{tool.ex, registry.ex, exec.ex, binaries.ex, truncate.ex, paths.ex, diff.ex,
                atomic_write.ex,                    # compatibility facade for files/atomic_write.ex
-               read.ex, write.ex, edit.ex, ls.ex, bash.ex,
+               context.ex, read.ex, write.ex, edit.ex, ls.ex, bash.ex,
                ripgrep.ex, fd.ex, sd.ex, ast_grep.ex,
                develop_tool.ex, install_extension.ex, reload_tool.ex,
-               rollback_tool.ex, read_log.ex}      # …+ self-modification tools (§11)
+               rollback_tool.ex, read_log.ex, list_agents.ex, spawn_agent.ex}
+                                                   # …+ self-modification and child-session tools (§5/§11)
         llm/{provider.ex, provider_config.ex, registry.ex, event.ex, context.ex,
              sse.ex, faux.ex, demo.ex, openai_codex.ex,
              openai_codex/{bounded_buffer.ex, catalog.ex, catalog_cache.ex, catalog_cache/state.ex,
@@ -128,7 +136,7 @@ catalyst/                      # umbrella
 The boundary is enforced by app dependencies: `catalyst` carries no Phoenix; `catalyst_web`
 depends on `catalyst`; `catalyst_desktop` depends on `catalyst_web`. This keeps the agent
 core runnable headless (iex/escript/tests) and lets the LLM core be extracted later. The core
-never references `catalyst_web` directly — UI extension *kinds* are dispatched through
+never references `catalyst_web` directly — UI extension _kinds_ are dispatched through
 `:persistent_term` (§11) so the dependency arrow only ever points web → core.
 
 ---
@@ -150,16 +158,22 @@ Catalyst.Application (top, in apps/catalyst)
 │   ├── Catalyst.Hooks                            # ETS agent-loop hook registry (§11)
 │   ├── Catalyst.Hooks.ObserverDispatcher         # ordered, bounded async event observers
 │   ├── Catalyst.LLM.Registry                     # ETS provider registry: built-ins + runtime (§11)
+│   ├── Catalyst.Prompt.Registry                  # purpose/model prompt + policy runtime overlay (§11)
+│   ├── Catalyst.Workflow.Registry                # named/default workflow runtime overlay (§11)
+│   ├── Catalyst.Context.Registry                 # policy + threshold runtime overlay (§4/§11)
 │   ├── {Registry, keys: :unique, name: Catalyst.Extensions.ProcessRegistry}  # owner -> ext supervisor (§11)
 │   ├── {DynamicSupervisor, name: Catalyst.Extensions.ProcessSupervisor}      # extension-owned processes (§11)
 │   └── Catalyst.Extensions                       # last: its load_all re-registers into the ones above (§11)
 ├── {Registry, keys: :unique, name: Catalyst.Session.Registry}
+├── AgentChildrenSupervisor (:rest_for_one)
+│   ├── Catalyst.Agent.Children.TableOwner          # lease/index ETS survives coordinator restarts
+│   └── Catalyst.Agent.Children                     # root-tree leases + rebuilt process monitors (§5)
 └── {DynamicSupervisor, name: Catalyst.Session.DynamicSupervisor}   # one Session.Server per session
                                                   # (outside the group: sessions ride out a registry restart)
 
 CatalystWeb.Application (in catalyst_web)
 ├── CatalystWeb.Telemetry
-├── CatalystWeb.UI.Registry                        # ETS UI registry: pages/renderers/components/commands (§11)
+├── CatalystWeb.UI.TableOwner / UI.Registry        # durable ETS UI registry: pages/renderers/components/commands (§11)
 └── CatalystWeb.Endpoint                           # + register_web_tools/0 after boot (rebuild_assets/reload_ui,
                                                    #   registered as an Extensions reseeder so restarts re-add them)
 
@@ -170,9 +184,11 @@ Catalyst.Desktop (Desktop.Window child)           # started by catalyst_desktop,
 # Catalyst.TaskSupervisor (abort = kill the run Task; linked tool Tasks + their Ports die).
 ```
 
-`Catalyst.Extensions`, `Catalyst.Hooks`, and `Catalyst.LLM.Registry` boot **before** any session
-so the very first turn sees built-ins; each is an ETS-backed GenServer read live on each use, so a
-runtime registration takes effect on the next turn/render with no restart (§11).
+The extension group, including the provider, prompt, workflow, and context registries, boots
+**before** any session so the very first turn sees built-ins. These registries hold only the
+owner-aware runtime overlay in ETS; their resolvers read application/file/built-in layers live.
+They start after `LLM.Registry` and before `Catalyst.Extensions`, so an extension reload can purge
+and rebuild all contributions coherently (§11).
 
 ---
 
@@ -181,13 +197,15 @@ runtime registration takes effect on the next turn/render with no restart (§11)
 - **`Session.Server`** = PI's `Agent`: the single writer of transcript / model / queues /
   pending state. API: `prompt/2`, `continue/1`, `steer/2`, `follow_up/2`, `abort/1`,
   `state/1`, `reset/1`. "Subscribe" = the caller subscribes to PubSub topic `"session:<id>"`.
-  The server is deliberately **thin**: event fold/reduce (`Session.Reducer`), run-config assembly +
-  provider resolution (`Session.RunConfig`), and snapshotting for late joiners (`Session.Snapshot`)
-  live in stateless, hot-swappable modules it delegates to — so deep behavior changes are module
-  reloads, not session restarts. The struct definition lives in `Session.Server.State`; the
+  The server is deliberately **thin**: event fold/reduce (`Session.Reducer`), host-side run
+  preflight/configuration (`Session.RunConfig`), worker-side run construction
+  (`Session.RunContext`), and snapshotting for late joiners (`Session.Snapshot`) live in stateless,
+  hot-swappable modules it delegates to — so deep behavior changes are module reloads, not session
+  restarts. The struct definition lives in `Session.Server.State`; the
   queues and state ownership remain in the GenServer callbacks (additive `%State{}` fields are
   free; destructive changes need `code_change/3` or a rebuild-from-JSONL).
-- **`Agent.Loop.run(prompts, context, config, emit)`** = `agent-loop.ts`: a plain recursive
+- **`Agent.Loop.run(prompts, context, config, emit)`** = `agent-loop.ts` and implements
+  `Catalyst.Workflow`: a plain recursive
   function run through `Catalyst.Tasks.async/1` under the shared task supervisor. `emit` casts
   a run-ref-scoped `{:agent_event, ...}`
   to `Session.Server`, which folds it into state (like `processEvents`), persists on
@@ -197,18 +215,92 @@ runtime registration takes effect on the next turn/render with no restart (§11)
   runs another turn instead of sitting queued); a tool batch terminates the loop only when
   **every** call asked to; a provider error/abort ends the run immediately **without**
   draining follow-ups; `prepare_next_turn`/`should_stop_after_turn` run after every turn, and
-  a `should_stop` veto also skips the follow-up queue. (There is no `get_api_key` config —
+  a `should_stop` veto also skips the follow-up queue. It uses `Workflow.Support` for observed
+  emission, live tool/capability resolution, and guarded provider requests. (There is no
+  `get_api_key` config —
   the Codex provider fetches a fresh token per attempt from `Auth.TokenStore` itself.)
 - **Cancellation = process kill** (no AbortSignal): `abort` kills the run Task; linked tool
   tasks die; their linked Ports / MuonTrap daemons kill the OS process group. On an abnormal
   `:DOWN`, `Session.Server` synthesizes an aborted/error Assistant turn (PI's
-  `handleRunFailure`).
+  `handleRunFailure`). A `spawn_agent` watchdog separately monitors the tool task and stops its
+  child session when that owner dies; `Session.Server.terminate/2` never synchronously cascades
+  through the shared `DynamicSupervisor`.
 - **`ToolRunner`**: sequential vs parallel batch (parity with PI — any tool with
   `execution_mode: :sequential`, or a config flag, forces sequential). Validates args against
   the tool's JSON schema (`ex_json_schema`), runs each tool in a supervised Task; a crash
   becomes an error tool-result (the "thrown becomes error result" rule). The `onUpdate`
   callback is a closure (`ctx.report`) that emits `ToolExecutionUpdate`; `bash` streams a
   bounded output tail through it, throttled in-tool to one report per 100ms.
+
+### Run boundary and request-time context guard
+
+`Session.Server` performs only host-owned acceptance checks synchronously (`:busy`, missing
+provider, unknown API), snapshots state, then starts a supervised run task. Inside that task,
+`Session.RunContext` resolves the effective catalog/model metadata, prompt, and workflow. Prompt
+or workflow extension callbacks therefore cannot block or crash the session GenServer. The
+resolution is pinned as run data and reported with the run reference: prompt text/digest/ordered
+sources, workflow name/module/source, and model context metadata. `current_run_metadata` is
+promoted to `last_successful_run_metadata` only after a normal `AgentEnd` whose final assistant is
+neither error nor aborted; stale, failed, reset, and aborted run metadata is discarded. Snapshots
+expose current metadata during a run and the last successful metadata otherwise, but never reuse
+it as future configuration.
+
+Before every ordinary provider request, a conforming workflow calls
+`Context.Guard.prepare_request/4`. The guard applies `transform_context` once, constructs the exact
+provider context (instructions, transformed messages, and current tool schemas), fingerprints and
+estimates it, resolves the context policy/threshold, and emits transient `ContextStatus`. If the
+request meets the threshold, it stages a policy-supplied chronological replacement, applies the
+transform once more to that candidate, and accepts it only after transcript validation, strict
+token progress, and a below-threshold re-estimate. Only then does it emit durable
+`ContextCompacted`. `Session.EventSink` synchronously appends it before the session folds or
+broadcasts the replacement, then hands the committed notification to ordered observer delivery;
+observer callbacks remain outside the Session GenServer. An append failure leaves both live and
+restored transcripts unchanged and aborts the provider request. A rejected candidate changes
+nothing. Internal summarizer requests bypass recursive guarding.
+
+`Context.Tokens` uses optional provider `context_fingerprint/3` and `estimate_tokens/3` adapters;
+otherwise it uses a deterministic provider-neutral SHA-256 projection and a conservative coarse
+estimate. `OpenAICodex.Request` owns both the Codex wire encoder and its stable semantic projection:
+the latter reuses the same message/tool conversion while omitting only generated assistant replay
+ids and normalizing JSON-equivalent schemas/arguments. A successful assistant usage total becomes
+an anchor only when a provider fingerprint adapter produced its digest and that digest still
+matches the current semantic prefix. A fallback digest remains useful for change detection but is
+never an anchor. Status therefore explicitly distinguishes provider/coarse and anchored/unanchored
+accounting.
+
+`Context.Window` resolves the policy runtime overlay → current `:context_policy` → built-in, and
+its threshold in this order: session `context_threshold`; runtime exact model id/API/`:default`;
+current `:context_thresholds` for those keys; then the lower of a valid catalog auto-compact limit
+and 85% of the usable window when anchored or 70% when unanchored. A positive integer is absolute,
+a ratio in `(0, 1]` is applied to the effective window, and `:none` explicitly disables Catalyst
+compaction (not the provider's hard limit). An absolute value above the usable window or a ratio
+without one is a tagged configuration error.
+
+### Parent and child session topology
+
+`list_agents` discovers validated markdown definitions under `~/.catalyst/agents/` on every call.
+`spawn_agent` reserves a root-tree lease in `Catalyst.Agent.Children`, exclusively creates a real
+child `Session.Server`, subscribes before prompting, and waits for its `AgentEnd`. The child has a
+fresh transcript and continuation, but inherits the parent's cwd, model, provider, sanitized run
+options, workflow, live `tool_source`, global hooks/permissions, root id, and incremented depth.
+It does not inherit messages or isolate the filesystem.
+
+```
+root Session.Server (root_session_id = own id, depth 0)
+├── child Session.Server (parent_id = root, same root id, depth 1)
+│   └── grandchild Session.Server (parent_id = child, same root id, depth 2)
+└── child Session.Server (parent_id = root, same root id, depth 1)
+```
+
+The root-wide lease count prevents fan-out limits from resetting at each depth. The final
+capability filter removes `SpawnAgent` at the configured depth even from extension or explicit
+tool sources. A supervised watchdog acts as each lease's cleanup keeper: caller death or startup
+timeout leaves capacity reserved until any in-flight child creation has completed and the child is
+stopped. The independently owned ETS table lets `Agent.Children` reconstruct those live leases and
+monitors after a coordinator restart. Child IDs use the parent plus a random 128-bit suffix;
+exclusive manager/store creation retries collisions without adopting an existing process or
+transcript. Normal completion stops the live child and preserves its JSONL; owner death, timeout,
+provider failure, abort, or a premature child exit is a tool error and triggers cleanup.
 
 ### Event flow to the UI
 
@@ -248,6 +340,10 @@ output tail streamed by `bash` via `ToolExecutionUpdate`. A header **Quiet** tog
 `data-quiet` on the transcript container; CSS rules in `app.css` then hide tool chips,
 tool-result cards, and thinking — CSS rather than re-render because stream/ignore regions
 never re-render on assign changes. Spinners stay visible; the session is never touched.
+`ContextCompacted` resets and re-streams the replacement transcript; `ContextStatus` updates
+header-only context diagnostics without adding a chat block. The header shows used tokens,
+effective threshold/source, anchored versus estimated state, and read-only prompt
+text/digest/provenance from the current or last-successful run.
 
 ---
 
@@ -261,7 +357,8 @@ defmodule Catalyst.Tools.Tool do
   @callback execution_mode() :: :parallel | :sequential
   @callback execute(args :: map(), ctx :: map()) ::
               %{content: [Catalyst.Content.t()], details: map(), terminate: boolean()}
-  # ctx = %{cwd, call_id, report: (partial -> :ok)}; raise on failure -> error tool-result
+  # ctx is Catalyst.Tools.Context: cwd, parent/root ids, model/provider, inheritable opts,
+  # workflow, original tool_source, depth, call_id, and report; raise -> error tool-result
 end
 ```
 
@@ -269,10 +366,11 @@ end
 
 - **`collect/3`** — plain `Port` `{:spawn_executable, ...}`, accumulate stdout, parse after
   exit, receive-after timeout. Used by the single-shot structured tools.
-- **`bash/2`** — the muontrap wrapper binary (driven directly over a Port) for reliable
-  process-group SIGKILL + timeout. Used by `bash`. Both modes accept `:on_output`
-  (crash-isolated per-chunk observer) — `bash` uses it to stream a throttled partial-output
-  tail through `ctx.report`.
+- **`bash/2`** — the muontrap wrapper binary for reliable process-group SIGKILL + timeout.
+  A dedicated supervised task exclusively owns the linked Port and relays one chunk at a time;
+  accumulation and the crash-isolated `:on_output` callback stay in the caller. Timeout, output
+  cap, callback failure, and caller failure all stop and fence that owner before returning.
+  `bash` uses the callback to stream a throttled partial-output tail through `ctx.report`.
 
 `Catalyst.Tools.Binaries` resolves `rg`/`fd`/`ast-grep`/`sd` from `~/.catalyst/bin`, the
 bundled `priv/bin` (packaged app), `PATH`, then Homebrew paths (cached in
@@ -282,23 +380,29 @@ today a missing binary raises with an install hint.
 `Catalyst.Tools.Registry` validates a tool's name/description/schema once at registration and
 caches the result under the module's BEAM fingerprint. Turn assembly reads that cache; a hot-code
 change invalidates the fingerprint and forces one bounded revalidation, rather than spawning a
-task for every tool on every turn. Invalid/stale metadata is logged and the tool is omitted.
+task for every tool on every turn. Each entry keeps the module, validated definition and execution
+mode, resolved schema, and (for `use Catalyst.Tools.Tool`) a local executor capture pinned to the
+same BEAM generation. `ToolRunner` therefore never re-enters extension metadata callbacks and
+cannot execute replacement code under an older schema/mode snapshot. A stale legacy tool without
+a pinnable executor returns a tagged error result instead of calling the new generation. Invalid
+metadata is logged and the tool is omitted.
 
 `Catalyst.Agent.ToolRunner` validates each call's args against the tool's declared JSON
 Schema (`ex_json_schema`) before executing — a malformed call (most common with
 self-developed tools) becomes a clean error tool-result the model can correct, not a
 crash inside `execute/2`. An unresolvable schema skips validation rather than blocking.
 
-| Tool | Backend | Notes |
-|---|---|---|
-| `read` `write` `ls` | pure Elixir `File` | line offset/limit, truncate 2000/50KB; image files (jpg/png/gif/webp by magic bytes) return base64+mime content blocks (≤5MB; no resizing) |
-| `edit` | pure Elixir | oldText/newText exact replace with PI's **fuzzy fallback** (NFKC + trailing-whitespace/smart-quote/dash/space normalization; any fuzzy edit rewrites the file in normalized space), unified diff (`Tools.Diff`) in content + `details` |
-| `bash` | MuonTrap | `bash -c` (fallback `sh -c`; no `-l` — no login-profile sourcing), tail-truncate, 100ms-throttled live output tail via `ctx.report` (temp-file spill deferred) |
-| `grep` | ripgrep `collect` | `rg --json --line-number --color=never --hidden [flags] -- PATTERN PATH`; parse `type:"match"`; cap at limit |
-| `find` | fd `collect` | `fd --color never [--hidden] [--glob] PATTERN PATH` |
-| `replace` | sd `collect` | `sd [--string-mode] PATTERN REPL FILE…`; unified diff (pre/post read) in content + `details` |
-| `ast_grep` | ast-grep `collect` | search: `ast-grep run --pattern P --lang L --json=stream PATH`; rewrite: add `--rewrite R --update-all`. Two sub-actions chosen by presence of a `rewrite` arg. Resolve the binary as `ast-grep` (not `sg`). |
-| `develop_tool` `install_extension` `reload_extensions` `rollback_extension` `read_log` | `Catalyst.Extensions` / `Debug` | **self-modification tools** (§11/§12): write+load a tool or any extension module, reload/rollback the extensions dir, read this session's debug log. Web boot also registers `rebuild_assets` + `reload_ui`. |
+| Tool                                                                                   | Backend                                   | Notes                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read` `write` `ls`                                                                    | pure Elixir `File`                        | line offset/limit, truncate 2000/50KB; image files (jpg/png/gif/webp by magic bytes) return base64+mime content blocks (≤5MB; no resizing)                                                                                             |
+| `edit`                                                                                 | pure Elixir                               | oldText/newText exact replace with PI's **fuzzy fallback** (NFKC + trailing-whitespace/smart-quote/dash/space normalization; any fuzzy edit rewrites the file in normalized space), unified diff (`Tools.Diff`) in content + `details` |
+| `bash`                                                                                 | MuonTrap                                  | `bash -c` (fallback `sh -c`; no `-l` — no login-profile sourcing), tail-truncate, 100ms-throttled live output tail via `ctx.report` (temp-file spill deferred)                                                                         |
+| `grep`                                                                                 | ripgrep `collect`                         | `rg --json --line-number --color=never --hidden [flags] -- PATTERN PATH`; parse `type:"match"`; cap at limit                                                                                                                           |
+| `find`                                                                                 | fd `collect`                              | `fd --color never [--hidden] [--glob] PATTERN PATH`                                                                                                                                                                                    |
+| `replace`                                                                              | sd `collect`                              | `sd [--string-mode] PATTERN REPL FILE…`; unified diff (pre/post read) in content + `details`                                                                                                                                           |
+| `ast_grep`                                                                             | ast-grep `collect`                        | search: `ast-grep run --pattern P --lang L --json=stream PATH`; rewrite: add `--rewrite R --update-all`. Two sub-actions chosen by presence of a `rewrite` arg. Resolve the binary as `ast-grep` (not `sg`).                           |
+| `list_agents` `spawn_agent`                                                            | `Agent.Children` + real `Session.Server`s | discover fresh file-backed agent prompts; run a named agent in an exclusively-created child session with root-wide depth/fan-out limits; return bounded final text flagged `untrusted` in structured details (harness metadata, not a provider-visible envelope)                                               |
+| `develop_tool` `install_extension` `reload_extensions` `rollback_extension` `read_log` | `Catalyst.Extensions` / `Debug`           | **self-modification tools** (§11/§12): write+load a tool or any extension module, reload/rollback the extensions dir, read this session's debug log. Web boot also registers `rebuild_assets` + `reload_ui`.                           |
 
 Tool path args are resolved via `Catalyst.Tools.Paths` (expand `~`, resolve relative to the
 session `cwd`). The default tool list lives in `Catalyst.Tools.Registry`; the **live** set per turn
@@ -322,8 +426,8 @@ end
 `Catalyst.LLM.Faux` replays scripted events (including tool calls) so the entire loop is
 testable with no network — built before the real provider. `Catalyst.LLM.Demo` is an offline,
 input-aware provider (runs a real `ls`/`grep`/`find` then word-streams a reply) with **no UI
-surface**: the app's only real provider is Codex; LiveView tests inject Demo as the session
-provider via `config :catalyst_web, :codex_provider_mod` to drive full turns offline.
+surface**: the app's only real provider is Codex; the LiveView test helper overrides the Codex API
+through `Catalyst.LLM.Registry` to drive full turns offline.
 
 Providers are resolved through **`Catalyst.LLM.Registry`** (ETS-GenServer), keyed by `api` name
 and seeded with the built-ins (`faux`, `openai-codex-responses`). A session resolves its provider
@@ -332,6 +436,7 @@ by module or by api-name; new providers are added at runtime with
 provider module changes behavior on the next `stream/4` with no restart (§11).
 
 **`Catalyst.LLM.OpenAICodex`** (verified against PI source + the Codex CLI, `openai/codex`):
+
 - URL `https://chatgpt.com/backend-api/codex/responses`.
 - **Model catalog** (`OpenAICodex.list_models/0`): `config :catalyst, :codex_models` override
   wins; else the **live list** from `GET <base>/codex/models?client_version=…` (fetched in a
@@ -344,6 +449,14 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   (default medium), all vision-capable (`input: [:text, :image]`). A custom `:codex_model` id
   is always included. The toolbar reads models plus defaults through one consistent
   `catalog_snapshot/0` call rather than several serialized cache calls per render.
+  Catalog entries carry `context_window`, `max_context_window`,
+  `effective_context_window_percent`, and `auto_compact_token_limit`. `RunContext` takes one
+  effective catalog snapshot at run start (configured models → live cache → bundled fallback) so
+  a mid-run refresh cannot mix limits. An explicit session window remains source `:session`;
+  otherwise a matching catalog entry refreshes legacy/persisted metadata, falling back to the
+  persisted values or Codex's 272,000-token default. `Store.Codec` persists the normalized fields
+  and `context_window_source`; it does not persist a live catalog object. Thus a catalog refresh
+  changes the next eligible run, while a deliberately fixed session override stays fixed.
 - **Run options** (session opts, set live from the header UI via `Session.Server.configure/2`,
   applied on the next run): `:reasoning_effort`, `:service_tier` (`"priority"` = **Fast mode**,
   ~1.5x speed / increased usage, gpt-5.5 & gpt-5.4 only), `:transport`. `:session_id` is reserved:
@@ -401,7 +514,7 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
 ## 7. OAuth + token storage
 
 - `Catalyst.Auth.PKCE`: verifier = `Base.url_encode64(strong_rand_bytes(32), padding:
-  false)`; challenge = `Base.url_encode64(sha256(verifier), padding: false)`; state = random
+false)`; challenge = `Base.url_encode64(sha256(verifier), padding: false)`; state = random
   hex.
 - `Catalyst.Auth.OpenAIOAuth`: constants verbatim from PI; authorize URL adds
   `id_token_add_organizations=true`, `codex_cli_simplified_flow=true`, `originator`.
@@ -480,21 +593,40 @@ root-owned `/Applications`).
 
 `Catalyst.Session.Store`: append-only JSONL per session at
 `~/.catalyst/sessions/<cwd-hash>/<uuid>.jsonl` — a header line, `message` entries, `reset`
-markers, and PI's **`model_change` / `thinking_level_change`** entries (appended by
+markers, durable `compaction` replacements, and PI's **`model_change` /
+`thinking_level_change`** entries (appended by
 `configure/2` when the model/effort actually changes; `load_state/1` folds transcript and settings
 in one pass so a crash-restarted session resumes with the settings it was switched to, independent
 of transcript resets). `active_tools_change` is still skipped — tools resolve live per turn.
-Skip compaction/branching initially. Append on each `message_end`; rebuild into a
+Append on each `message_end`. A `ContextCompacted` entry stores the complete chronological
+replacement; folding it replaces the logical transcript, while later message lines continue from
+that state. Append/encoding failures are tagged; ordinary message persistence remains explicitly
+best-effort, while compaction is accepted only after a successful append. Reset is authoritative
+too: its marker is appended before an active run is stopped or live state is cleared, and a failed
+append returns a tagged error while leaving the run and transcript untouched. Persisted message
+decoding also returns tagged results rather than using exceptions for line skipping. Malformed
+lines, including malformed compactions, leave the prior accumulator intact
+and later valid lines still fold. Older builds ignore the unknown entry and replay the physical
+pre-compaction messages, a non-destructive but potentially oversized fallback. Rebuild into a
 `%Context{}` by folding lines
 (port `buildSessionContext`), tolerating corrupt/unknown lines. `Session.Server` calls the
 `Store` module directly (a future `ecto_sqlite3` backend means introducing a behaviour then —
 it is not behind one today; swapping stores is still just a module hot-swap, §11).
 
+Root and child sessions use the same store. Headers include optional `parentId`,
+`rootSessionId`, and `agentDepth`; the exclusive create-new path fails when either a live session
+or an on-disk transcript already owns the requested child id. These fields survive resume and keep
+the depth capability restriction intact. Run prompt/workflow/context diagnostics and transient
+`ContextStatus` are intentionally not JSONL configuration; they repopulate on the next run.
+
 `Catalyst.Paths.home/0` is the shared root for default auth, session, debug, system-prompt,
-guide, boot-marker, and downloaded-binary paths. `config :catalyst, :home` relocates that root
-explicitly. The narrower `:extensions_dir` override affects only extension source discovery; it
-does not silently move credentials or transcripts. Consumer-specific overrides such as
-`:auth_path`, `:sessions_root`, and `:system_prompt_path` still win.
+purpose-aware prompt, file-backed agent, guide, boot-marker, and downloaded-binary paths.
+Resolution is explicit app
+`config :catalyst, :home` → `CATALYST_HOME` → `~/.catalyst`; the environment variable gives a
+packaged release a configuration-free isolation/relocation seam. The narrower `:extensions_dir`
+override affects only extension source discovery; it does not silently move credentials or
+transcripts. Consumer-specific overrides such as `:auth_path`, `:sessions_root`,
+`:system_prompt_path`, `:prompts_dir`, `:agents_dir`, and `:boot_marker_path` still win.
 
 ---
 
@@ -513,14 +645,16 @@ does not silently move credentials or transcripts. Consumer-specific overrides s
 
 ## 11. Runtime extensibility (registries + hooks + hot-swap)
 
-*Everything is a registry + hooks + hot-swap.* Each extension point is an ETS-backed registry,
-seeded from built-ins at boot, written through owner-aware registration APIs (extension setup uses
-the unified facade), and read live on each use.
+_Everything is a registry + hooks + hot-swap._ Extension points use ETS-backed registries, are
+written through owner-aware registration APIs (extension setup uses the unified facade), and are
+read live on each use. Seeded registries contain their built-ins at boot; the Prompt, Workflow, and
+Context registries instead store runtime overlays only and resolve live application/built-in
+fallbacks after those overlays.
 The enabler is BEAM hot code loading: behavior lives in plain modules the loop/UI call fresh, so
 loading a new version changes behavior on the next call/render — even in the packaged release (the
 Elixir compiler ships in it). Self-modification is **auto-allowed**; the safety net is **bounded
 compile with exact accepted-BEAM restoration + git versioning + safe-mode boot (manual AND
-automatic, see below)** (no approval cards — an approval gate can be added *as an extension* via
+automatic, see below)** (no approval cards — an approval gate can be added _as an extension_ via
 the `before_tool_call` hook). Compilation occurs in the live VM, so it is not a side-effect-free
 dry run: emitted modules are immediately installed and must be restored if a later expression in
 the file fails.
@@ -528,8 +662,10 @@ the file fails.
 **Unified API.** `Catalyst.Extension` is a behaviour (`setup(api) :: :ok | {:error, term}`, plus
 optional `metadata/0` — merged into `Extensions.list_loaded/0` and shown on the `/extensions`
 panel). `Catalyst.ExtensionAPI` is the facade an extension's `setup/1` receives —
-`register_tool` / `register_provider` / `register_hook` / `on` / `register_renderer` /
-`register_component` / `register_page` / `register_command` / `start_child` — each tagged with the
+`register_tool` / `register_provider` / `register_prompt` / `register_prompt_policy` /
+`register_workflow` / `register_context_policy` / `register_context_threshold` /
+`register_hook` / `on` / `register_renderer` / `register_component` / `register_page` /
+`register_command` / `start_child` — each tagged with the
 owning file's `ext_id`. Web-only kinds (renderers/components/pages/commands) are dispatched through
 `:persistent_term` so **core never depends on `catalyst_web`**. Direct host registrations use the
 reserved `:host` owner; they may refresh their own names but cannot detach or replace an
@@ -540,6 +676,10 @@ home for long-lived processes (watchers, pollers, client connections): each owne
 `DynamicSupervisor` (started on demand under `Catalyst.Extensions.ProcessSupervisor`, registered by
 `ext_id` in `Catalyst.Extensions.ProcessRegistry`), so purging/reloading the extension terminates
 its **whole subtree** — including children the per-owner supervisor restarted in the meantime.
+Teardown takes nonblocking link snapshots rather than querying a potentially wedged owner
+supervisor; graceful termination is bounded, then the owner and extension-child links are killed
+without touching the shared Registry partition. This also recovers from a child `start_link`
+callback that never returns.
 
 **Loader.** `Catalyst.Extensions` (ETS live registry) loads `.ex` files from
 `~/.catalyst/extensions/`: compile → classify each module (`setup/1`-exporting extension vs
@@ -557,6 +697,30 @@ compiled definition live.
 `rollback_extension` is a `git revert` + reload. Loads, installs, reload/disable/enable and
 `uninstall` all serialize on one per-process-requester `:global` load lock; the installer's
 whole write → load → commit runs as a single critical section (`Extensions.locked/1`).
+The stable facade delegates typed state, load transactions, accepted BEAM stacks, and source-path
+rules to `Extensions.State`, `Transaction`, `ModuleVersions`, and `Sources`. Web-capable hosts wire
+their UI kinds and publish live registry/application leases before invoking the idempotent
+`Extensions.bootstrap/0`; headless hosts bootstrap directly, so arbitrary `setup/1` side effects
+execute once rather than once in core and again in web. Bootstrap begins only after both web leases
+are alive and only after the web-owned tool reseeder is installed. The UI ETS table has an
+independent `UI.TableOwner`, preserving accepted contributions across a normal registry restart.
+`UI.Contributions` serializes the exact live page, renderer, component, and command entries and
+mirrors them in `:persistent_term`; after table-owner or contribution-log process loss, the
+registry replays those values directly. Recovery never reads edited source, recompiles modules,
+or re-runs arbitrary `setup/1` side effects. Each load transaction and `ExtensionAPI` handle is
+pinned to the `Catalyst.Extensions` server generation that created it, so work that outlives a
+restart is rejected instead of committing into the replacement runtime. Before a new generation
+publishes readiness—including a safe-mode boot—it revokes the prior generation's recorded owners
+and restores or removes their accepted modules. A dedicated generation gate serializes that
+transition with extension API registration. Replacement first waits for the prior load lock and
+then takes the generation gate, matching the load/setup → dispatch lock order; a load that finds
+its captured generation stale restores every compiler-traced candidate before releasing the lock.
+Compiler workers are reserved before their start gate and provisional emissions are journaled in
+restart-stable state. Replacement kills and waits for any abandoned compiler, drains that journal,
+and uses managed-source metadata as a final pre-commit fallback before publishing readiness. No old
+compiler can therefore introduce untracked BEAM code after safe-mode purge. Boot-result revisions
+prevent an older asynchronous bootstrap result from running after, or overwriting, a newer explicit
+load result.
 
 **Crash-safe boot (`Catalyst.Extensions.BootGuard`).** `CATALYST_SAFE_MODE=1` skips loading
 manually; the boot marker makes it **automatic**: a marker file is set to `booting` before
@@ -568,11 +732,41 @@ state is sticky until an explicit, successful `reload_extensions` marks the boot
 load/preflight failure is recorded as `{:load_failed, reason}`, logged, shown in the extensions
 panel, and deliberately leaves the marker armed; it is never silently marked clean.
 
-**The loop and the system prompt are data.** `Session.RunConfig.resolve_loop/1` picks the loop
-module per run (session `opts[:loop]` → `:agent_loop` app env → `Catalyst.Agent.Loop`), and
-`Catalyst.SystemPrompt.get/0` resolves the system prompt per run (session override →
-`~/.catalyst/system_prompt.md` → built-in default). Both are live on the next run and reverted by
-deleting the env/file — the two most identity-defining knobs need no module redefinition at all.
+**Prompts and workflows are data.** `Catalyst.Prompt.Registry` selects a runtime prompt policy,
+then the live `:prompt_policy`, then `Catalyst.SystemPrompt`. The built-in policy resolves system
+text by session override → runtime exact model id/API/default → live `:prompts` → model/API files
+under `~/.catalyst/prompts/` → `system_prompt.md` → built-in, then adds nonblank `append.md`.
+Compaction has its own runtime/application/model-file/`compaction.md`/built-in chain and never uses
+the session system override or append file. Each result includes final UTF-8 text, SHA-256 digest,
+and ordered provenance. Files have no watcher: prewarm and the run resolve independently; the run
+caches system resolutions by model key; compaction resolves when attempted. Dynamic prompt text
+is permitted but invalidates request probes and provider delta reuse.
+
+`Catalyst.Workflow.Registry` selects a session `opts[:loop]` module, named
+`opts[:workflow]`, runtime/application default, live `:agent_loop`, then `Catalyst.Agent.Loop`.
+Unknown explicit names fail rather than falling through. Selection data is pinned per run, but
+ordinary BEAM semantics still apply if the selected module is hot-reloaded. A conforming workflow
+uses `Workflow.Support`; guarded successful provider responses come back with a provider-accurate
+context digest when the provider implements the fingerprint adapter, and the workflow emits the
+shared post-persistence anchor status after its `MessageEnd`. A sovereign workflow that calls the
+provider directly bypasses context guarding and observer/capability helpers and is unsupported. It
+must emit one initial `AgentStart`,
+`MessageEnd` for every persistable user/assistant/tool-result message, normally balanced tool
+boundaries/results, and one final `AgentEnd`. Normal return does not synthesize missing lifecycle
+events; brutal task cancellation can interrupt a boundary pair.
+
+**Executable proof boundary.** The serial `:flexibility` tier composes these seams in the normal
+test VM, exercises real sessions/renders, explicitly reverts controlled effects, and compares the
+result with a suite-wide registry/module/process/path/config baseline. It also fingerprints every
+Elixir block in the bundled guide and executes or statically validates each classified example.
+The opt-in `:release` tier builds a plain headless `catalyst_cli` OTP release into a temporary path,
+then proves runtime compilation, a scripted persisted session, `CATALYST_HOME` isolation, and
+crash-marker safe mode in fresh release VMs. This does not claim that arbitrary file/network/
+external side effects are reversible, and the headless artifact contains no Phoenix/HEEx/assets;
+packaged GUI and runtime asset rebuilding remain the manual `.app` verification described in §8.
+The CLI self-test creates one exclusive, uniquely named source under the OS temporary directory and
+loads it directly under the extension transaction lock; it never rewrites `CATALYST_HOME`, the live
+extension directory, or the boot-marker path, and removes only its own contribution/source.
 
 **Hook points (`Catalyst.Hooks`, ETS bag).** Six PI-style points, wired into `agent/loop.ex` +
 `tool_runner.ex`, **no-op when empty**. Decision/filter handlers run in isolated supervised tasks
@@ -580,22 +774,40 @@ with a deadline. Read-only observers are delivered by `ObserverDispatcher`: one 
 supervised callback process at a time per session, ordered within a session and concurrent across
 sessions. A crashing or hanging callback is logged, killed, and skipped. Per-session admission is
 bounded; streamed `MessageUpdate`/`ToolExecutionUpdate` events may be dropped at saturation, while
-structural events evict an older queued update or apply backpressure, so `MessageEnd`/`AgentEnd`
-cannot disappear. Admission and enqueue are one GenServer call, eliminating leaked pre-cast
-reservations. The ETS handler table lives in a separate `TableOwner` process inside a
-`:rest_for_one` group, so a registry crash restores rather than silently emptying the hooks:
+ordinary structural events evict an older queued update or apply backpressure. Successfully
+persisted compactions wait for a ready hook-runtime generation, freeze the first complete handler
+snapshot, and are admitted losslessly to an ordered waiting lane before broadcast, without running
+observer callbacks in the Session GenServer. Direct dispatcher downtime retries only admission
+against that frozen snapshot. Queue overload never drops an admitted compaction, but a dispatcher
+crash after acknowledgement can lose queued callback work and an ambiguous failed admission can
+be retried, so observers must tolerate both process loss and duplicate delivery. Host-synthesized
+failure/abort lifecycle
+events use bounded non-blocking admission: they evict a queued update when possible and otherwise
+may be dropped from observer delivery under saturation (PubSub delivery is unaffected). Admission
+and enqueue are one GenServer operation, eliminating leaked pre-cast reservations. The dispatcher
+is supervised outside the extension-runtime group so admitted queues survive registry recovery.
+The ETS handler table lives in a separate `TableOwner` process inside a `:rest_for_one` group, and
+generation tokens prevent a stale runtime from publishing readiness, so recovery cannot silently
+observe a fresh but incomplete handler table:
 
-| Point | Where | Power |
-|---|---|---|
-| `transform_context` | before converting `context.messages` | rewrite/compact/redact context |
-| `before_tool_call` | between tool fetch and execute | `{:block, reason}` → error result, tool not run |
-| `after_tool_call` | after execute, before `ToolExecutionEnd` | rewrite the result tuple |
-| `prepare_next_turn` | after `TurnEnd` (every turn, incl. the natural stop) | return `%{context, config}` for the next turn |
-| `should_stop_after_turn` | after every turn | force-stop the loop AND skip the follow-up queue |
-| `on` / `notify` | `emit` wrapper at `run/4` | ordered bounded read-only observers; stream updates are lossy under overload, lifecycle events are preserved |
+| Point                    | Where                                                | Power                                                                                                        |
+| ------------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `transform_context`      | before converting `context.messages`                 | request-only rewrite/redact; it does **not** persist compaction                                              |
+| `before_tool_call`       | between tool fetch and execute                       | `{:block, reason}` → error result, tool not run                                                              |
+| `after_tool_call`        | after execute, before `ToolExecutionEnd`             | rewrite the result tuple                                                                                     |
+| `prepare_next_turn`      | after `TurnEnd` (every turn, incl. the natural stop) | return `%{context, config}` for the next turn                                                                |
+| `should_stop_after_turn` | after every turn                                     | force-stop the loop AND skip the follow-up queue                                                             |
+| `on` / `notify`          | `emit` wrapper + durable/synthetic event sinks        | ordered observers; lossy updates, lossless committed compactions, bounded synthetic lifecycle admission       |
 
-**Registries that resolve live.** `Catalyst.LLM.Registry` (§6) for providers;
-`CatalystWeb.UI.Registry` for **pages / renderers / components / commands**.
+**Registries that resolve live.** `Catalyst.LLM.Registry` (§6) resolves providers;
+`Catalyst.Prompt.Registry`, `Catalyst.Workflow.Registry`, and `Catalyst.Context.Registry` hold
+owner-aware runtime overlays for prompt policy/text, named/default workflows, and context
+policy/thresholds. Their common collision/detach/purge bookkeeping uses the pure
+`Catalyst.OwnedIndex`; each registry retains its own validation, ETS shape, fallback layers, and
+domain error tuples. Each lookup reads the runtime entry first, then current application
+configuration, then its documented file/built-in layers; deleting an overlay never re-seeds a
+stale boot value. Their `runtime_entries/0` results expose `key`, `value`, and `owner` fields for rollback and
+diagnostics. `CatalystWeb.UI.Registry` resolves **pages / renderers / components / commands**.
 `CatalystWeb.UI.MessageRenderer` dispatches transcript rendering to registered renderers
 (newest-first, `match_fun`) falling back to built-ins. Routing is **catch-all**: one
 `CatalystWeb.ShellLive` is mounted at `/` and `/:page` (router ships this once), and
@@ -605,10 +817,12 @@ the commands registry is dogfooded the same way: `/cd` is a seeded built-in comm
 `/name [arg]` chat message dispatches through `UI.Registry.fetch_command/1` (crash-isolated
 handlers; unknown names flash the known list).
 
-**Apply-cost matrix.** new tool/provider/hook/renderer/page/panel → registry write (live, next
-turn/render); system prompt → write `~/.catalyst/system_prompt.md` (next run); agent loop →
-`:agent_loop` app env (next run); background process → `start_child` (immediate, purged with its
-owner); markup/layout change → hot-swap + reload (`reload_ui`); CSS/Tailwind or new JS
+**Apply-cost matrix.** new tool/provider/prompt/workflow/context-policy/hook/renderer/page/panel →
+registry write (live at the next relevant run/request/render); system/compaction prompt → write
+the corresponding file under `~/.catalyst/` (at the next documented resolution boundary);
+workflow → `:workflows` or legacy `:agent_loop` app env (next run); background process →
+`start_child` (immediate, purged with its owner); markup/layout change → hot-swap + reload
+(`reload_ui`); CSS/Tailwind or new JS
 hook → `CatalystWeb.Assets.rebuild/0` (runs the bundled tailwind+esbuild, §8) then a webview
 reload broadcast over the `"ui"` PubSub topic.
 
@@ -626,8 +840,10 @@ dogfoods the page registry). It renders a data snapshot (`panel_data/0`, rebuilt
 on navigation, after each action, and at `AgentEnd`) of: loaded extensions
 (`Extensions.list_loaded/0` — owner/file/tools/modules + process count), disabled extensions
 (`Extensions.list_disabled/0`), boot status with a "Load extensions now" recovery button, and
-every live registry (tools, providers, hooks via `Hooks.handlers/1`, pages/commands and the new
-`UI.Registry.list_renderers/0`/`list_components/0`). Per-extension buttons: **reload**
+every live registry. Prompt/workflow/context runtime owner rows are separate from the effective
+ordered values/provenance for the current model; panel snapshots never call an extension's
+optional `describe/0` unsafely. Tools, providers, hooks via `Hooks.handlers/1`, pages/commands, and
+`UI.Registry.list_renderers/0`/`list_components/0` remain listed. Per-extension buttons: **reload**
 (`Extensions.reload/1`), **roll back** (`Versioning.rollback_file/2` + `load_all`), **disable** /
 **enable** (`Extensions.disable/1` renames the source to `.ex.disabled` under the load lock and
 purges the owner — skipped by `load_all` and at boot; `enable/1` renames back and loads; both
@@ -648,7 +864,8 @@ API rejects disable instead of renaming a file that `list_disabled/0` could neve
 symlink to the most recent session). It captures structural/final agent-loop events (streaming
 deltas are intentionally skipped), each **tool call + result**, and the **truncated Codex request
 (+byte size) / response / error** — written from
-`Session.Server` (per event; full reason on failure) and the `OpenAICodex.Provider`. Toggle with
+`Session.EventSink`/background tasks (full reason on failure) and the `OpenAICodex.Provider`, so
+default-on file IO does not run in `Session.Server` callbacks. Toggle with
 `CATALYST_DEBUG=0`. Log/tool text is scrubbed to valid UTF-8 after byte bounds are applied, and a
 deleted cached debug directory is revalidated and recreated on the next write. The `read_log` tool
 lets the agent read its own canonical session log, and the system

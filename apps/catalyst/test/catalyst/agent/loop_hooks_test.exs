@@ -190,6 +190,154 @@ defmodule Catalyst.Agent.LoopHooksTest do
            end)
   end
 
+  test "a prepare-next-turn model change is guarded before the next request", %{
+    tmp: tmp,
+    owner: owner
+  } do
+    File.write!(Path.join(tmp, "model-change.txt"), "fixture")
+    next_model = %Model{id: "faux-next", api: "faux", provider: "faux"}
+
+    Hooks.register(
+      :prepare_next_turn,
+      fn {context, config}, ctx ->
+        case ctx.cwd == tmp and config.model.id == "faux" do
+          true -> {:ok, {context, Map.put(config, :model, next_model)}}
+          false -> {:ok, {context, config}}
+        end
+      end,
+      owner: owner
+    )
+
+    initial_model = %Model{id: "faux", api: "faux", provider: "faux"}
+
+    config = %{
+      provider: Catalyst.LLM.Faux,
+      model: initial_model,
+      active_model_identity: {"faux", "faux", "faux"},
+      active_prompt: nil,
+      cwd: tmp,
+      tools: Registry.default_tools(),
+      opts: [
+        script: [
+          {:tool, "read", %{"path" => "model-change.txt"}},
+          {:text, "changed model answer"}
+        ]
+      ]
+    }
+
+    {:ok, events_agent} = Agent.start_link(fn -> [] end)
+    emit = fn event -> Agent.update(events_agent, &[event | &1]) end
+
+    assert {:ok, messages, _context} =
+             Loop.run(
+               [Message.user("go")],
+               %{system_prompt: nil, messages: []},
+               config,
+               emit
+             )
+
+    events = Agent.get(events_agent, &Enum.reverse/1)
+    Agent.stop(events_agent)
+
+    assert List.last(messages).model == "faux-next"
+    assert_guard_before_each_turn(events, 2)
+  end
+
+  test "prepare-next-turn config changes reach a queued follow-up", %{tmp: tmp, owner: owner} do
+    next_model = %Model{id: "faux-follow-up", api: "faux", provider: "faux"}
+
+    Hooks.register(
+      :prepare_next_turn,
+      fn {context, config}, ctx ->
+        case ctx.cwd == tmp and config.model.id == "faux" do
+          true -> {:ok, {context, Map.put(config, :model, next_model)}}
+          false -> {:ok, {context, config}}
+        end
+      end,
+      owner: owner
+    )
+
+    follow_up_count =
+      start_supervised!({Agent, fn -> 0 end}, id: {:follow_up_count, make_ref()})
+
+    get_follow_up = fn ->
+      case Agent.get_and_update(follow_up_count, fn count -> {count, count + 1} end) do
+        0 -> [Message.user("queued follow-up")]
+        _later -> []
+      end
+    end
+
+    config = %{
+      provider: Catalyst.LLM.Faux,
+      model: %Model{id: "faux", api: "faux", provider: "faux"},
+      cwd: tmp,
+      tools: [],
+      opts: [script: [{:text, "first"}, {:text, "second"}]],
+      get_follow_up: get_follow_up
+    }
+
+    assert {:ok, messages, _context} =
+             Loop.run(
+               [Message.user("go")],
+               %{system_prompt: nil, messages: []},
+               config,
+               fn _event -> :ok end
+             )
+
+    assert Enum.map(Enum.filter(messages, &match?(%Message.Assistant{}, &1)), & &1.model) == [
+             "faux",
+             "faux-follow-up"
+           ]
+  end
+
+  test "prepare-next-turn tools change overrides the retained tool source", %{
+    tmp: tmp,
+    owner: owner
+  } do
+    File.write!(Path.join(tmp, "tools-change.txt"), "fixture")
+
+    Hooks.register(
+      :prepare_next_turn,
+      fn {context, config}, ctx ->
+        case ctx.cwd == tmp do
+          true -> {:ok, {context, Map.put(config, :tools, [])}}
+          false -> {:ok, {context, config}}
+        end
+      end,
+      owner: owner
+    )
+
+    # Turn 1 executes `read` normally; the hook then empties the tool set, so
+    # turn 2's identical call must fail as an unknown tool instead of running
+    # against the stale retained `:tool_source`.
+    script = [
+      {:tool, "read", %{"path" => "tools-change.txt"}},
+      {:tool, "read", %{"path" => "tools-change.txt"}},
+      {:text, "done"}
+    ]
+
+    config = %{
+      provider: Catalyst.LLM.Faux,
+      model: %Model{id: "faux", api: "faux", provider: "faux"},
+      cwd: tmp,
+      tools: Registry.default_tools(),
+      opts: [script: script]
+    }
+
+    assert {:ok, messages, _context} =
+             Loop.run(
+               [Message.user("go")],
+               %{system_prompt: nil, messages: []},
+               config,
+               fn _event -> :ok end
+             )
+
+    assert [first, second] = Enum.filter(messages, &match?(%Message.ToolResult{}, &1))
+    refute first.is_error
+    assert second.is_error
+    assert Content.text_of(second.content) =~ "unknown tool"
+  end
+
   test "prepare_next_turn also runs on a toolless (natural-stop) turn", %{tmp: tmp, owner: owner} do
     parent = self()
 
@@ -247,5 +395,21 @@ defmodule Catalyst.Agent.LoopHooksTest do
 
     assert_receive {:obs, %Event.AgentStart{}}
     assert_receive {:obs, %Event.AgentEnd{}}
+  end
+
+  defp assert_guard_before_each_turn(events, expected_count) do
+    statuses = event_indexes(events, Event.ContextStatus)
+    turns = event_indexes(events, Event.TurnStart)
+
+    assert length(statuses) == expected_count
+    assert length(turns) == expected_count
+    assert Enum.zip(statuses, turns) |> Enum.all?(fn {status, turn} -> status < turn end)
+  end
+
+  defp event_indexes(events, module) do
+    events
+    |> Enum.with_index()
+    |> Enum.filter(fn {event, _index} -> event.__struct__ == module end)
+    |> Enum.map(&elem(&1, 1))
   end
 end

@@ -7,7 +7,17 @@ defmodule Catalyst.DebugTest do
 
   setup do
     sid = "dbgtest_#{System.unique_integer([:positive])}"
-    on_exit(fn -> File.rm_rf(Debug.path(sid)) end)
+    path = Debug.path(sid)
+
+    on_exit(fn ->
+      File.rm_rf(path)
+
+      case File.read_link(Debug.latest_path()) do
+        {:ok, ^path} -> File.rm(Debug.latest_path())
+        _other -> :ok
+      end
+    end)
+
     {:ok, sid: sid}
   end
 
@@ -25,6 +35,21 @@ defmodule Catalyst.DebugTest do
     assert content =~ "[test] hello world"
     assert content =~ "agent_start"
     assert content =~ "tool_start read"
+  end
+
+  test "background debug writes complete outside the caller", %{sid: sid} do
+    assert {:ok, log_pid} = Debug.log_async(sid, "async", "background line")
+    assert {:ok, event_pid} = Debug.log_event_async(sid, %Event.AgentStart{})
+    assert {:ok, latest_pid} = Debug.mark_latest_async(sid)
+
+    await_background(log_pid)
+    await_background(event_pid)
+    await_background(latest_pid)
+
+    content = File.read!(Debug.path(sid))
+    assert content =~ "background line"
+    assert content =~ "agent_start"
+    assert File.read_link(Debug.latest_path()) == {:ok, Debug.path(sid)}
   end
 
   test "read_log returns the tail for this session", %{sid: sid} do
@@ -98,5 +123,12 @@ defmodule Catalyst.DebugTest do
       ReadLog.execute(%{}, %{cwd: ".", call_id: "c", session_id: nil, report: fn _ -> :ok end})
 
     assert Content.text_of(res.content) =~ "no session id"
+  end
+
+  defp await_background(pid) do
+    ref = Process.monitor(pid)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 1_000
+    assert reason in [:normal, :noproc]
   end
 end

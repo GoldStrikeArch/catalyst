@@ -6,8 +6,11 @@ defmodule CatalystWeb.ExtensionsPageTest do
   import Phoenix.LiveViewTest
 
   alias Catalyst.Agent.Event
+  alias Catalyst.Context.Registry, as: ContextRegistry
   alias Catalyst.Extensions
+  alias Catalyst.Model
   alias Catalyst.Session.Server
+  alias CatalystWeb.Pages.ExtensionsPage
 
   @probe_source ~S'''
   defmodule Catalyst.Ext.PanelProbeTool do
@@ -77,6 +80,120 @@ defmodule CatalystWeb.ExtensionsPageTest do
     # The nav now has two built-in pages.
     assert html =~ "Chat"
     assert html =~ "Extensions"
+  end
+
+  test "the panel separates owned runtime overlays from effective diagnostics", %{conn: conn} do
+    owner = "ui_runtime_overlay"
+
+    assert :ok =
+             Catalyst.Prompt.Registry.register_prompt(
+               "ui-panel-model",
+               "PANEL-RUNTIME-PROMPT",
+               owner: owner
+             )
+
+    assert :ok =
+             Catalyst.Workflow.Registry.register_workflow(
+               "ui-panel-workflow",
+               Catalyst.Agent.Loop,
+               owner: owner
+             )
+
+    assert :ok =
+             Catalyst.Context.Registry.register_threshold(
+               "ui-panel-model",
+               12_345,
+               owner: owner
+             )
+
+    on_exit(fn ->
+      Catalyst.Prompt.Registry.unregister_owner(owner)
+      Catalyst.Workflow.Registry.unregister_owner(owner)
+      Catalyst.Context.Registry.unregister_owner(owner)
+    end)
+
+    {:ok, view, html} = live(conn, "/extensions")
+
+    assert html =~ "Effective diagnostics"
+    assert html =~ "Owned runtime overlays"
+
+    assert has_element?(
+             view,
+             ~s([data-runtime-registry="Prompt registry"] code),
+             "ui-panel-model"
+           )
+
+    assert has_element?(
+             view,
+             ~s([data-runtime-registry="Workflow registry"] code),
+             "ui-panel-workflow"
+           )
+
+    assert has_element?(
+             view,
+             ~s([data-runtime-registry="Context registry"] code),
+             "ui-panel-model"
+           )
+
+    assert html =~ owner
+    assert html =~ "PANEL-RUNTIME-PROMPT"
+    assert html =~ "ui-panel-workflow"
+    assert html =~ "12345"
+  end
+
+  test "custom context policies defer threshold diagnostics without invoking callbacks" do
+    previous_policy =
+      Enum.find(ContextRegistry.runtime_entries(), &(&1.key == {:policy, :default}))
+
+    ContextRegistry.unregister_policy()
+
+    on_exit(fn ->
+      ContextRegistry.unregister_policy()
+
+      case previous_policy do
+        nil -> :ok
+        entry -> ContextRegistry.register_policy(entry.value, owner: entry.owner)
+      end
+    end)
+
+    assert :ok =
+             ContextRegistry.register_policy(CatalystWeb.Test.ContextDiagnosticsPolicy,
+               owner: :extensions_page_test
+             )
+
+    model = %Model{id: "diagnostic-model", api: "diagnostic", context_window: 100_000}
+    panel = ExtensionsPage.panel_data(model, [])
+    policy = Enum.find(panel.effective, &(&1.label == "Context policy"))
+    threshold = Enum.find(panel.effective, &(&1.label == "Context threshold"))
+
+    assert policy.value == CatalystWeb.Test.ContextDiagnosticsPolicy
+    assert threshold.value == "resolved per request by custom policy"
+    assert threshold.source == policy.source
+
+    ContextRegistry.unregister_policy()
+    builtin = ExtensionsPage.panel_data(model, [])
+    builtin_threshold = Enum.find(builtin.effective, &(&1.label == "Context threshold"))
+
+    assert is_integer(builtin_threshold.value)
+    assert builtin_threshold.source == :builtin
+    assert builtin_threshold.note =~ "unanchored baseline"
+
+    with_request =
+      ExtensionsPage.panel_data(model, [], %{
+        context_status: %{
+          threshold: 85_000,
+          threshold_source: :builtin,
+          anchored: true
+        },
+        run_metadata: %{context: %{model_id: "run-snapshot-model"}}
+      })
+
+    request_threshold =
+      Enum.find(with_request.effective, &(&1.label == "Last request threshold"))
+
+    assert request_threshold.value == 85_000
+    assert request_threshold.source == :builtin
+    assert request_threshold.note == "anchored for run-snapshot-model"
   end
 
   test "safe mode shows the shell banner and 'Load extensions now' recovers", %{conn: conn} do

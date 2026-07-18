@@ -361,6 +361,29 @@ defmodule Catalyst.AuthTest do
     assert_received {:refresh_called, "ref_1"}
   end
 
+  test "TokenStore put and delete propagate persistence errors" do
+    provider = "unwritable-provider"
+    path = Application.fetch_env!(:catalyst, :auth_path)
+    on_exit(fn -> File.rm_rf!(path) end)
+
+    # Make auth path unwritable (replace with a directory)
+    File.rm_rf!(path)
+    File.mkdir_p!(path)
+
+    creds = %{access: "a", refresh: "r", expires: 0, account_id: "id"}
+    assert {:error, _} = TokenStore.put(provider, creds)
+    # Even if put failed to persist, it shouldn't have clobbered memory with bad state?
+    # Actually our implementation currently returns error and keeps OLD state.
+
+    # Now fix it, put something, then break it again for delete.
+    File.rm_rf!(path)
+    assert :ok = TokenStore.put(provider, creds)
+
+    File.rm!(path)
+    File.mkdir_p!(path)
+    assert {:error, _} = TokenStore.delete(provider)
+  end
+
   defp resume_if_suspended(server) do
     case Process.whereis(server) do
       pid when is_pid(pid) -> resume_pid_if_suspended(pid)

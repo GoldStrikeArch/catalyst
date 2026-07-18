@@ -54,6 +54,75 @@ defmodule Catalyst.LLM.OpenAICodexTest do
     assert OpenAICodex.model("unknown-id").name == "unknown-id"
   end
 
+  test "live catalog parsing keeps every context field but never invents max_tokens" do
+    [entry] =
+      OpenAICodex.parse_live_models([
+        %{
+          "slug" => "context-model",
+          "display_name" => "Context model",
+          "visibility" => "list",
+          "context_window" => 300_000,
+          "max_context_window" => 400_000,
+          "effective_context_window_percent" => 95,
+          "auto_compact_token_limit" => 250_000
+        }
+      ])
+
+    assert entry.context_window == 300_000
+    assert entry.max_context_window == 400_000
+    assert entry.effective_context_window_percent == 95
+    assert entry.auto_compact_token_limit == 250_000
+    refute Map.has_key?(entry, :max_tokens)
+
+    [invalid] =
+      OpenAICodex.parse_live_models([
+        %{
+          "slug" => "invalid-context",
+          "visibility" => "list",
+          "context_window" => 0,
+          "max_context_window" => -1,
+          "effective_context_window_percent" => 101,
+          "auto_compact_token_limit" => "large"
+        }
+      ])
+
+    assert invalid.context_window == nil
+    assert invalid.max_context_window == nil
+    # Missing or invalid percentages normalize to Codex's documented 95%
+    # default at the catalog boundary, per qq.md §2a.
+    assert invalid.effective_context_window_percent == 95
+    assert invalid.auto_compact_token_limit == nil
+  end
+
+  test "model/2 uses effective catalog metadata, including max-window-only entries" do
+    Application.put_env(:catalyst, :codex_models, [
+      %{
+        id: "max-only",
+        max_context_window: 400_000,
+        effective_context_window_percent: 90,
+        auto_compact_token_limit: 350_000
+      }
+    ])
+
+    on_exit(fn -> Application.delete_env(:catalyst, :codex_models) end)
+
+    model = OpenAICodex.model("max-only")
+    assert model.context_window == 400_000
+    assert model.max_context_window == 400_000
+    assert model.effective_context_window_percent == 90
+    assert model.auto_compact_token_limit == 350_000
+    assert model.context_window_source == :catalog
+    assert model.max_tokens == 128_000
+
+    explicit = OpenAICodex.model("max-only", context_window: 123_000)
+    assert explicit.context_window == 123_000
+    assert explicit.context_window_source == :session
+
+    invalid_override = OpenAICodex.model("max-only", context_window: 0)
+    assert invalid_override.context_window == 400_000
+    assert invalid_override.context_window_source == :catalog
+  end
+
   # Shaped like codex-rs models-manager/models.json entries.
   @live_payload [
     %{

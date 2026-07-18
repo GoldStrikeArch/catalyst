@@ -1,0 +1,26 @@
+defmodule Catalyst.Context.Policy do
+  @moduledoc """
+  Behaviour for request-time context thresholds and persistent compaction.
+
+  Both callbacks run in a supervised workflow task.  A policy returns the full
+  chronological replacement list; `Catalyst.Context.Guard` remains the authority
+  that validates, estimates, emits, and installs it.
+  """
+
+  @doc """
+  Resolve the request-time token threshold for a model and policy context.
+
+  Return `:none` to let the next lower-precedence threshold source decide.
+  """
+  @callback threshold(Catalyst.Model.t() | nil, map()) ::
+              {:ok, pos_integer()} | :none | {:error, term()}
+
+  @doc """
+  Build a chronological replacement for an oversized transcript.
+
+  The guard validates transcript structure, progress, and token size before it
+  persists or installs the returned compaction.
+  """
+  @callback compact([Catalyst.Message.t()], map()) ::
+              {:ok, Catalyst.Context.Compaction.t()} | {:error, term()}
+end

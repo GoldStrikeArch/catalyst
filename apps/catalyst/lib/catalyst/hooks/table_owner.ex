@@ -27,6 +27,8 @@ defmodule Catalyst.Hooks.TableOwner do
 
   @impl true
   def init(:ok) do
+    Catalyst.Hooks.invalidate_runtime_generation()
+
     # Idempotent: a restart of this process after a supervisor-level restart
     # (or a test that created the table first) must not crash on a clash.
     case :ets.whereis(@table) do

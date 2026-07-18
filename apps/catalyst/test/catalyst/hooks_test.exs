@@ -9,8 +9,10 @@ defmodule Catalyst.HooksTest do
   alias Catalyst.Agent.Event
   alias Catalyst.Hooks
   alias Catalyst.Hooks.ObserverDispatcher
+  alias Catalyst.Session.EventSink
 
   setup do
+    wait_for_runtime_ready!()
     owner = "hooks_test_#{System.unique_integer([:positive])}"
     on_exit(fn -> Hooks.unregister(owner) end)
     {:ok, owner: owner}
@@ -102,15 +104,19 @@ defmodule Catalyst.HooksTest do
     # after_tool_call as a 4-tuple and prepare_next_turn as a 2-tuple).
     Hooks.register(:after_tool_call, fn _v, _ctx -> {:ok, :done} end, owner: owner, priority: 10)
 
-    Hooks.register(:after_tool_call, fn {c, d, e, t}, _ctx -> {:ok, {c <> "!", d, e, t}} end,
+    Hooks.register(
+      :after_tool_call,
+      fn {_content, details, error?, terminate?}, _ctx ->
+        {:ok, {Catalyst.Content.text("out!"), details, error?, terminate?}}
+      end,
       owner: owner,
       priority: 20
     )
 
     log =
       capture_log(fn ->
-        assert Hooks.after_tool_call({"out", %{}, false, false}, %{}) ==
-                 {"out!", %{}, false, false}
+        assert Hooks.after_tool_call({Catalyst.Content.text("out"), %{}, false, false}, %{}) ==
+                 {Catalyst.Content.text("out!"), %{}, false, false}
       end)
 
     assert log =~ "malformed"
@@ -124,11 +130,13 @@ defmodule Catalyst.HooksTest do
   end
 
   test "after_tool_call rejects non-boolean error and terminate fields", %{owner: owner} do
-    original = {"out", %{}, false, false}
+    original = {Catalyst.Content.text("out"), %{}, false, false}
 
     Hooks.register(
       :after_tool_call,
-      fn _value, _ctx -> {:ok, {"poisoned", %{}, :not_boolean, "also-not-boolean"}} end,
+      fn _value, _ctx ->
+        {:ok, {Catalyst.Content.text("poisoned"), %{}, :not_boolean, "also-not-boolean"}}
+      end,
       owner: owner
     )
 
@@ -368,26 +376,186 @@ defmodule Catalyst.HooksTest do
     refute Map.has_key?(dispatcher_state.sessions, session)
   end
 
+  test "async lifecycle admission stays bounded without blocking an OTP producer", %{
+    owner: owner
+  } do
+    put_app_env(:hook_observer_queue_limit, 1)
+    parent = self()
+    session = {:async_lifecycle, make_ref()}
+
+    Hooks.on(
+      fn event ->
+        send(parent, {:async_observer, event, self()})
+
+        receive do
+          {:release, ^event} -> :ok
+        end
+      end,
+      owner: owner
+    )
+
+    first = %Event.MessageEnd{message: :first}
+    terminal = %Event.AgentEnd{messages: []}
+
+    assert :ok = Hooks.notify(first, session)
+    assert_receive {:async_observer, ^first, first_pid}, 1_000
+    assert :ok = Hooks.notify_async(terminal, session)
+
+    # Synchronize with the cast. With the sole bounded slot active and no
+    # update available to evict, the synthetic lifecycle event is dropped
+    # instead of growing an unbounded waiting queue.
+    dispatcher_state = :sys.get_state(ObserverDispatcher)
+    dispatcher_session = dispatcher_state.sessions[session]
+    assert :queue.is_empty(dispatcher_session.waiting)
+    assert dispatcher_session.pending == 1
+    assert dispatcher_session.dropped == 1
+
+    send(first_pid, {:release, first})
+    assert :ok = Hooks.await_observers(session)
+    refute_receive {:async_observer, ^terminal, _terminal_pid}
+  end
+
+  test "committed lifecycle admission is acknowledged and remains ordered at capacity", %{
+    owner: owner
+  } do
+    put_app_env(:hook_observer_queue_limit, 1)
+    parent = self()
+    session = {:committed_lifecycle, make_ref()}
+
+    Hooks.on(
+      fn event ->
+        send(parent, {:committed_observer, event, self()})
+
+        receive do
+          {:release, ^event} -> :ok
+        end
+      end,
+      owner: owner
+    )
+
+    first = %Event.MessageEnd{message: :first}
+    committed = %Event.ContextCompacted{replacement: [:committed]}
+
+    assert :ok = Hooks.notify(first, session)
+    assert_receive {:committed_observer, ^first, first_pid}, 1_000
+    assert :ok = EventSink.committed(committed, session)
+
+    dispatcher_state = :sys.get_state(ObserverDispatcher)
+    assert :queue.len(dispatcher_state.sessions[session].waiting) == 1
+
+    send(first_pid, {:release, first})
+    assert_receive {:committed_observer, ^committed, committed_pid}, 1_000
+    send(committed_pid, {:release, committed})
+    assert :ok = Hooks.await_observers(session)
+  end
+
+  test "committed admission waits through a dispatcher restart", %{owner: owner} do
+    parent = self()
+    session = {:committed_restart, make_ref()}
+    event = %Event.ContextCompacted{replacement: [:restart_safe]}
+
+    Hooks.on(fn observed -> send(parent, {:restart_observer, observed}) end, owner: owner)
+
+    dispatcher = Process.whereis(ObserverDispatcher)
+    supervisor = parent_supervisor(dispatcher)
+    dispatcher_ref = Process.monitor(dispatcher)
+    :sys.suspend(supervisor)
+
+    try do
+      Process.exit(dispatcher, :kill)
+      assert_receive {:DOWN, ^dispatcher_ref, :process, ^dispatcher, :killed}
+
+      _task =
+        start_supervised!(
+          {Task,
+           fn -> send(parent, {:committed_admission, EventSink.committed(event, session)}) end}
+        )
+
+      refute_receive {:committed_admission, _result}, 50
+    after
+      :sys.resume(supervisor)
+    end
+
+    _new_dispatcher = wait_for_restart!(ObserverDispatcher, dispatcher, supervisor)
+    assert_receive {:committed_admission, :ok}, 1_000
+    assert_receive {:restart_observer, ^event}, 1_000
+    assert :ok = Hooks.await_observers(session)
+  end
+
+  test "a committed retry keeps its first ready handler snapshot", %{owner: owner} do
+    parent = self()
+    session = {:committed_snapshot, make_ref()}
+    event = %Event.ContextCompacted{replacement: [:stable_handlers]}
+    replacement_owner = owner <> "_replacement"
+    on_exit(fn -> Hooks.unregister(replacement_owner) end)
+
+    Hooks.on(fn observed -> send(parent, {:original_snapshot, observed}) end, owner: owner)
+
+    dispatcher = Process.whereis(ObserverDispatcher)
+    supervisor = parent_supervisor(dispatcher)
+    dispatcher_ref = Process.monitor(dispatcher)
+    :sys.suspend(dispatcher)
+
+    _task =
+      start_supervised!(
+        {Task, fn -> send(parent, {:snapshot_admission, EventSink.committed(event, session)}) end}
+      )
+
+    wait_for_committed_call!(dispatcher, session, event)
+    Hooks.unregister(owner)
+
+    Hooks.on(fn observed -> send(parent, {:replacement_snapshot, observed}) end,
+      owner: replacement_owner
+    )
+
+    Process.exit(dispatcher, :kill)
+    assert_receive {:DOWN, ^dispatcher_ref, :process, ^dispatcher, :killed}
+
+    _new_dispatcher = wait_for_restart!(ObserverDispatcher, dispatcher, supervisor)
+    assert_receive {:snapshot_admission, :ok}, 1_000
+    assert_receive {:original_snapshot, ^event}, 1_000
+    refute_receive {:replacement_snapshot, ^event}, 0
+    assert :ok = Hooks.await_observers(session)
+  end
+
+  test "only the current ready runtime generation can publish handler snapshots", %{
+    owner: owner
+  } do
+    runtime_key = {Hooks, :runtime_ready}
+    previous = :persistent_term.get(runtime_key, :missing)
+    on_exit(fn -> restore_persistent_term(runtime_key, previous) end)
+
+    Hooks.on(fn _event -> :ok end, owner: owner)
+
+    stale = Hooks.begin_runtime_generation()
+    assert {:error, :registry_unavailable} = Hooks.fetch_ready_handlers(:event)
+
+    Hooks.mark_runtime_ready(stale)
+    assert {:ok, [_entry | _rest]} = Hooks.fetch_ready_handlers(:event)
+
+    current = Hooks.begin_runtime_generation()
+    Hooks.mark_runtime_ready(stale)
+    assert {:error, :registry_unavailable} = Hooks.fetch_ready_handlers(:event)
+
+    Hooks.mark_runtime_ready(current)
+    assert {:ok, [_entry | _rest]} = Hooks.fetch_ready_handlers(:event)
+  end
+
   test "registered handlers survive a Hooks crash (table owned by TableOwner)", %{owner: owner} do
     Hooks.register(:test_filter, fn v, _ctx -> {:ok, v <> "survived"} end, owner: owner)
+    table_owner = Process.whereis(Catalyst.Hooks.TableOwner)
+    assert Enum.any?(Hooks.handlers(:test_filter), &(&1.owner == owner))
 
     pid = Process.whereis(Hooks)
     assert pid, "expected Catalyst.Hooks to be running under the app supervisor"
+    supervisor = parent_supervisor(pid)
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
     assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
 
-    # Wait for the supervisor to restart it.
-    new_pid =
-      Enum.find_value(1..200, fn _ ->
-        case Process.whereis(Hooks) do
-          nil -> Process.sleep(10) && nil
-          p when p == pid -> Process.sleep(10) && nil
-          p -> p
-        end
-      end)
-
-    assert new_pid, "expected the supervisor to restart Catalyst.Hooks"
+    new_pid = wait_for_restart!(Hooks, pid, supervisor)
+    assert Process.whereis(Catalyst.Hooks.TableOwner) == table_owner
+    _ = :sys.get_state(new_pid)
 
     # The table outlived the crash: the handler registered before still fires...
     assert Hooks.run_filter(:test_filter, "", %{}) == "survived"
@@ -406,4 +574,71 @@ defmodule Catalyst.HooksTest do
 
   defp restore_app_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
   defp restore_app_env(key, :error), do: Application.delete_env(:catalyst, key)
+
+  defp parent_supervisor(pid) do
+    {:dictionary, dictionary} = Process.info(pid, :dictionary)
+    dictionary |> Keyword.fetch!(:"$ancestors") |> List.first()
+  end
+
+  defp wait_for_runtime_ready!(attempts \\ 400)
+
+  defp wait_for_runtime_ready!(0), do: flunk("hook runtime never became ready")
+
+  defp wait_for_runtime_ready!(attempts) do
+    case Hooks.runtime_ready?() do
+      true ->
+        :ok
+
+      false ->
+        receive do
+        after
+          5 -> wait_for_runtime_ready!(attempts - 1)
+        end
+    end
+  end
+
+  defp wait_for_committed_call!(dispatcher, session, event, attempts \\ 200)
+
+  defp wait_for_committed_call!(_dispatcher, _session, _event, 0),
+    do: flunk("expected a committed dispatcher call")
+
+  defp wait_for_committed_call!(dispatcher, session, event, attempts) do
+    {:messages, messages} = Process.info(dispatcher, :messages)
+
+    queued? =
+      Enum.any?(messages, fn
+        {:"$gen_call", _from, {:enqueue_committed, ^session, ^event, _entries}} -> true
+        _other -> false
+      end)
+
+    case queued? do
+      true ->
+        :ok
+
+      false ->
+        receive do
+        after
+          1 -> wait_for_committed_call!(dispatcher, session, event, attempts - 1)
+        end
+    end
+  end
+
+  defp restore_persistent_term(key, :missing), do: :persistent_term.erase(key)
+  defp restore_persistent_term(key, value), do: :persistent_term.put(key, value)
+
+  defp wait_for_restart!(name, old_pid, supervisor, attempts \\ 200)
+
+  defp wait_for_restart!(_name, _old_pid, _supervisor, 0),
+    do: flunk("expected the supervisor to restart Catalyst.Hooks")
+
+  defp wait_for_restart!(name, old_pid, supervisor, attempts) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) and pid != old_pid ->
+        pid
+
+      _not_restarted ->
+        _ = :sys.get_state(supervisor)
+        wait_for_restart!(name, old_pid, supervisor, attempts - 1)
+    end
+  end
 end

@@ -2,6 +2,7 @@ defmodule Catalyst.Tools.RegistryTest do
   use ExUnit.Case, async: true
 
   import ExUnit.CaptureLog
+  import ExUnit.CaptureIO, only: [with_io: 2]
 
   alias Catalyst.Tools.Registry
 
@@ -31,6 +32,28 @@ defmodule Catalyst.Tools.RegistryTest do
     def execute(_args, _ctx), do: :ok
   end
 
+  defmodule RaisingMode do
+    def name, do: "raising_mode"
+    def description, do: "raises while declaring its execution mode"
+    def parameters, do: %{"type" => "object"}
+    def execution_mode, do: raise("mode failed")
+    def execute(_args, _ctx), do: :ok
+  end
+
+  defmodule HangingMode do
+    def name, do: "hanging_mode"
+    def description, do: "hangs while declaring its execution mode"
+    def parameters, do: %{"type" => "object"}
+
+    def execution_mode do
+      receive do
+        :never -> :parallel
+      end
+    end
+
+    def execute(_args, _ctx), do: :ok
+  end
+
   test "fetch/2 returns {:ok, module} for a known name and :error for an unknown one" do
     tools = Registry.default_tools()
 
@@ -45,11 +68,15 @@ defmodule Catalyst.Tools.RegistryTest do
     assert :error = Registry.fetch(index, "no_such_tool")
   end
 
-  test "index/1 maps every tool name to its module" do
+  test "index/1 maps every tool name to its validated entry" do
     index = Registry.index(Registry.default_tools())
 
     assert map_size(index) == length(Registry.default_tools())
-    assert Enum.all?(Registry.default_tools(), &(index[&1.name()] == &1))
+
+    assert Enum.all?(Registry.default_tools(), fn module ->
+             entry = index[module.name()]
+             entry.module == module and entry.definition.name == module.name()
+           end)
   end
 
   test "to_provider_tools/1 serializes name, description, and parameters" do
@@ -67,6 +94,11 @@ defmodule Catalyst.Tools.RegistryTest do
 
     assert {:error, {:tool_metadata_timeout, HangingParameters}} =
              Registry.definition(HangingParameters, timeout: 10)
+
+    assert {:error, {:bad_tool_mode, "mode failed"}} = Registry.definition(RaisingMode)
+
+    assert {:error, {:tool_metadata_timeout, HangingMode}} =
+             Registry.definition(HangingMode, timeout: 10)
   end
 
   test "provider serialization skips invalid tool modules" do
@@ -101,7 +133,7 @@ defmodule Catalyst.Tools.RegistryTest do
     assert_receive {:metadata_callback, :description}
     assert_receive {:metadata_callback, :parameters}
 
-    assert %{"registry_fixture" => ^module} = Registry.index([module])
+    assert %{"registry_fixture" => %{module: ^module}} = Registry.index([module])
     assert [%{name: "registry_fixture"}] = Registry.to_provider_tools([module])
     refute_receive {:metadata_callback, _callback}, 0
 
@@ -110,5 +142,82 @@ defmodule Catalyst.Tools.RegistryTest do
     assert_receive {:metadata_callback, :name}
     assert_receive {:metadata_callback, :description}
     assert_receive {:metadata_callback, :parameters}
+  end
+
+  test "entries carry a resolved schema and fetch/2 keeps returning the module" do
+    index = Registry.index([Catalyst.Tools.Read])
+
+    assert {:ok,
+            %{
+              module: Catalyst.Tools.Read,
+              fingerprint: fingerprint,
+              definition: %{execution_mode: :parallel},
+              resolved_schema: {:ok, %ExJsonSchema.Schema.Root{}},
+              executor: executor
+            }} = Registry.fetch_entry(index, "read")
+
+    assert is_binary(fingerprint)
+    assert is_function(executor, 2)
+    assert {:ok, Catalyst.Tools.Read} = Registry.fetch(index, "read")
+  end
+
+  test "a hot reload refreshes both execution mode and resolved schema" do
+    module = Catalyst.Test.ReloadedRegistryTool
+
+    on_exit(fn ->
+      Registry.invalidate(module)
+      :code.purge(module)
+      :code.delete(module)
+    end)
+
+    compile_reloadable_tool(:sequential, "text")
+
+    assert {:ok,
+            %{
+              definition: %{execution_mode: :sequential},
+              resolved_schema: {:ok, first_schema},
+              executor: :external
+            } = first_entry} = Registry.cached_entry(module)
+
+    assert Registry.entry_current?(first_entry)
+    assert :ok = ExJsonSchema.Validator.validate(first_schema, %{"text" => "ok"})
+    assert {:error, _errors} = ExJsonSchema.Validator.validate(first_schema, %{})
+
+    compile_reloadable_tool(:parallel, "count")
+
+    refute Registry.entry_current?(first_entry)
+
+    assert {:error, {:stale_tool_entry, ^module}} =
+             Registry.execution_target(first_entry)
+
+    assert {:ok,
+            %{
+              definition: %{execution_mode: :parallel},
+              resolved_schema: {:ok, reloaded_schema}
+            }} = Registry.cached_entry(module)
+
+    assert :ok = ExJsonSchema.Validator.validate(reloaded_schema, %{"count" => "ok"})
+    assert {:error, _errors} = ExJsonSchema.Validator.validate(reloaded_schema, %{})
+  end
+
+  defp compile_reloadable_tool(mode, required) do
+    source = """
+    defmodule Catalyst.Test.ReloadedRegistryTool do
+      def name, do: "reloaded_registry_tool"
+      def description, do: "reload metadata probe"
+      def parameters do
+        %{
+          "type" => "object",
+          "properties" => %{#{inspect(required)} => %{"type" => "string"}},
+          "required" => [#{inspect(required)}]
+        }
+      end
+      def execution_mode, do: #{inspect(mode)}
+      def execute(_args, _context), do: %{content: [], details: %{}, terminate: false}
+    end
+    """
+
+    {_compiled, _stderr} = with_io(:stderr, fn -> Code.compile_string(source) end)
+    :ok
   end
 end

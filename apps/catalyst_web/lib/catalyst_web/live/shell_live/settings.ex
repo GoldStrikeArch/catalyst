@@ -1,0 +1,152 @@
+defmodule CatalystWeb.ShellLive.Settings do
+  @moduledoc """
+  Loads, persists, and applies shell-level Codex and display preferences.
+
+  Preferences intentionally use the historical `ShellLive` persistent-term keys
+  so remounts and existing cleanup code keep the same behavior. Codex settings
+  are applied to the current session for its next run; display settings never
+  configure the session.
+  """
+
+  import Phoenix.Component, only: [assign: 2]
+
+  alias Catalyst.LLM.OpenAICodex
+  alias Catalyst.Session.Server
+
+  @codex_prefs_ptr {CatalystWeb.ShellLive, :codex_prefs}
+  @ui_prefs_ptr {CatalystWeb.ShellLive, :ui_prefs}
+
+  @type codex_prefs :: %{
+          model: String.t(),
+          effort: String.t(),
+          fast: boolean(),
+          transport: String.t()
+        }
+  @type ui_prefs :: %{quiet: boolean()}
+  @type socket :: Phoenix.LiveView.Socket.t()
+
+  @doc "Loads persisted Codex controls over the current application defaults."
+  @spec load_codex() :: codex_prefs()
+  def load_codex do
+    defaults = %{
+      model: OpenAICodex.default_model_id(),
+      effort: OpenAICodex.default_effort(),
+      fast: false,
+      transport: "auto"
+    }
+
+    case :persistent_term.get(@codex_prefs_ptr, nil) do
+      %{} = saved -> Map.merge(defaults, saved)
+      _not_saved -> defaults
+    end
+  end
+
+  @doc "Loads persisted display preferences over their defaults."
+  @spec load_ui() :: ui_prefs()
+  def load_ui do
+    defaults = %{quiet: false}
+
+    case :persistent_term.get(@ui_prefs_ptr, nil) do
+      %{} = saved -> Map.merge(defaults, saved)
+      _not_saved -> defaults
+    end
+  end
+
+  @doc "Merges a Codex controls form submission and enforces model capabilities."
+  @spec update_codex(codex_prefs(), map()) :: codex_prefs()
+  def update_codex(prefs, params) do
+    prefs
+    |> put_if_present(:model, params["model"])
+    |> put_if_present(:effort, params["effort"])
+    |> put_if_present(:transport, params["transport"])
+    |> clamp_fast()
+  end
+
+  @doc "Toggles fast mode and clamps it off for models that do not support it."
+  @spec toggle_fast(codex_prefs()) :: codex_prefs()
+  def toggle_fast(prefs), do: prefs |> Map.update!(:fast, &(!&1)) |> clamp_fast()
+
+  @doc "Persists and applies Codex controls to the attached session, when present."
+  @spec apply_codex(socket(), codex_prefs()) :: socket()
+  def apply_codex(socket, prefs) do
+    persist(@codex_prefs_ptr, prefs)
+    socket = assign(socket, codex_prefs: prefs)
+
+    case socket.assigns.session_pid do
+      pid when is_pid(pid) -> configure_session(socket, pid, prefs)
+      _no_session -> socket
+    end
+  end
+
+  @doc "Toggles and persists quiet mode without touching the agent session."
+  @spec toggle_quiet(socket()) :: socket()
+  def toggle_quiet(socket) do
+    prefs = Map.update!(socket.assigns.ui_prefs, :quiet, &(!&1))
+    persist(@ui_prefs_ptr, prefs)
+    assign(socket, ui_prefs: prefs)
+  end
+
+  @doc "Builds the registry-resolved provider selection and model used to start a session."
+  @spec provider_config(codex_prefs()) :: {nil, Catalyst.Model.t()}
+  def provider_config(prefs), do: {nil, OpenAICodex.model(prefs.model)}
+
+  @doc "Converts Codex controls into session run options."
+  @spec run_opts(codex_prefs()) :: keyword()
+  def run_opts(prefs) do
+    service_tier =
+      case prefs.fast do
+        true -> "priority"
+        false -> nil
+      end
+
+    [
+      reasoning_effort: prefs.effort,
+      service_tier: service_tier,
+      transport: prefs.transport
+    ]
+  end
+
+  @doc "Synchronizes controls from an attached session, which is the source of truth."
+  @spec sync_from_session(socket()) :: socket()
+  def sync_from_session(socket) do
+    model = socket.assigns.session_model || OpenAICodex.model(socket.assigns.codex_prefs.model)
+    opts = socket.assigns.session_opts || []
+
+    prefs =
+      clamp_fast(%{
+        model: model.id,
+        effort: opts[:reasoning_effort] || OpenAICodex.default_effort(),
+        fast: opts[:service_tier] == "priority",
+        transport: to_string(opts[:transport] || "auto")
+      })
+
+    persist(@codex_prefs_ptr, prefs)
+    assign(socket, codex_prefs: prefs)
+  end
+
+  defp configure_session(socket, pid, prefs) do
+    model = OpenAICodex.model(prefs.model)
+    opts = run_opts(prefs)
+
+    try do
+      :ok = Server.configure(pid, model: model, opts: opts)
+      assign(socket, session_model: model, session_opts: opts)
+    catch
+      # The session can die during a control change. The monitor callback will
+      # reattach, while the persisted preferences apply to the next session.
+      :exit, _reason -> socket
+    end
+  end
+
+  defp put_if_present(prefs, _key, nil), do: prefs
+  defp put_if_present(prefs, key, value), do: Map.put(prefs, key, value)
+
+  defp clamp_fast(prefs) do
+    case OpenAICodex.catalog_entry(prefs.model).fast? do
+      true -> prefs
+      false -> %{prefs | fast: false}
+    end
+  end
+
+  defp persist(key, prefs), do: :persistent_term.put(key, prefs)
+end

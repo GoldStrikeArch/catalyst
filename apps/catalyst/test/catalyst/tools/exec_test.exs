@@ -11,6 +11,17 @@ defmodule Catalyst.Tools.ExecTest do
     refute Map.has_key?(res, :truncated)
   end
 
+  test "collect preserves output order across many port chunks" do
+    command = "i=1; while [ $i -le 5000 ]; do printf '%05d\\n' $i; i=$((i + 1)); done"
+
+    assert {:ok, %{out: out, status: 0}} = Exec.collect(sh(), ["-c", command])
+    lines = String.split(out, "\n", trim: true)
+
+    assert hd(lines) == "00001"
+    assert List.last(lines) == "05000"
+    assert length(lines) == 5_000
+  end
+
   test "collect timeout kills the child and drains port messages from the mailbox" do
     assert {:error, :timeout} =
              Exec.collect(sh(), ["-c", "while true; do echo spam; done"], timeout: 100)
@@ -30,8 +41,18 @@ defmodule Catalyst.Tools.ExecTest do
   end
 
   test "bash runs under real bash so bashisms work" do
-    assert {:ok, %{out: out, status: 0}} = Exec.bash("[[ -n yes ]] && echo BASHISM_OK")
+    caller = self()
+
+    assert {:ok, %{out: out, status: 0}} =
+             Exec.bash("[[ -n yes ]] && echo BASHISM_OK",
+               on_output: fn _data ->
+                 send(caller, {:exec_callback, self(), Process.info(self(), :links)})
+               end
+             )
+
     assert out =~ "BASHISM_OK"
+    assert_receive {:exec_callback, ^caller, {:links, links}}
+    refute Enum.any?(links, &is_port/1)
   end
 
   test "bash caps runaway output instead of buffering it until the timeout" do
@@ -63,6 +84,16 @@ defmodule Catalyst.Tools.ExecTest do
     # ~500ms) its child — poll until the recorded pid is gone.
     pid = pidfile |> File.read!() |> String.trim()
     assert wait_until_dead(pid)
+  end
+
+  test "invalid public options return tagged errors before spawning" do
+    assert {:error, {:invalid_option, :timeout, 1.5}} = Exec.bash("sleep 300", timeout: 1.5)
+
+    assert {:error, {:invalid_option, :max_output_bytes, -1}} =
+             Exec.collect(sh(), ["-c", "sleep 300"], max_output_bytes: -1)
+
+    assert {:error, {:invalid_option, :on_output, :invalid}} =
+             Exec.bash("sleep 300", on_output: :invalid)
   end
 
   defp wait_until_dead(pid, tries \\ 50) do

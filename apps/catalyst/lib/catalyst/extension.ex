@@ -37,6 +37,11 @@ defmodule Catalyst.Extension do
 
   @metadata_timeout 1_000
 
+  @doc """
+  Register this extension's contributions through the owner-scoped API.
+
+  Return `:ok` after successful setup or `{:error, reason}` to reject the load.
+  """
   @callback setup(api :: Catalyst.ExtensionAPI.t()) :: :ok | {:error, term()}
 
   @doc """

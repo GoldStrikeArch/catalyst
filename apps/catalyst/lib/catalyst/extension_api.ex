@@ -2,7 +2,9 @@ defmodule Catalyst.ExtensionAPI do
   @moduledoc """
   The facade passed to `Catalyst.Extension.setup/1`. It carries the extension's
   provenance (`owner`, `source_path`) and exposes `register_*` functions for every
-  extension kind.
+  extension kind. Handles also capture the originating extension server and
+  runtime generation. Registration through a stale handle is rejected, including
+  a generation change that races a subsystem handler call.
 
   Decoupling: each *kind* is backed by a handler registered at boot by the
   subsystem that owns it — so `apps/catalyst` (core) never has to depend on
@@ -16,22 +18,31 @@ defmodule Catalyst.ExtensionAPI do
 
   require Logger
 
-  defstruct [:owner, :source_path, :load_ref]
+  defstruct [:owner, :source_path, :load_ref, :generation, :server]
 
   @type t :: %__MODULE__{
           owner: String.t() | nil,
           source_path: String.t() | nil,
-          load_ref: reference() | nil
+          load_ref: reference() | nil,
+          generation: reference() | nil,
+          server: GenServer.server()
         }
 
   @doc "Build an API handle for `owner` (the extension id) and its source file."
   @spec new(String.t() | nil, String.t() | nil, reference() | nil) :: t()
-  def new(owner, source_path \\ nil, load_ref \\ nil),
-    do: %__MODULE__{owner: owner, source_path: source_path, load_ref: load_ref}
+  def new(owner, source_path \\ nil, load_ref \\ nil) do
+    %__MODULE__{
+      owner: owner,
+      source_path: source_path,
+      load_ref: load_ref,
+      generation: Catalyst.Extensions.Transaction.generation(),
+      server: Catalyst.Extensions.Transaction.server()
+    }
+  end
 
   # ---- kind wiring (called by subsystems at boot) ---------------------------
 
-  @doc "Wire a `register_<kind>` handler. `handler` is `(api, ...args) -> term`."
+  @doc "Wire a `register_<kind>` handler. Use a named external capture `(api, ...args) -> term` so it remains valid across hot reloads."
   @spec register_kind(atom(), function()) :: :ok
   def register_kind(kind, handler) when is_atom(kind) and is_function(handler) do
     :persistent_term.put({__MODULE__, :kind, kind}, handler)
@@ -111,6 +122,41 @@ defmodule Catalyst.ExtensionAPI do
     remember_owner_collision(api, result)
   end
 
+  @doc "Register purpose-aware prompt text for an exact model key."
+  @spec register_prompt(t(), String.t() | :default, String.t(), keyword()) :: term()
+  def register_prompt(api, model_key, text, opts \\ []) do
+    result = dispatch(api, :prompt, [model_key, text, opts])
+    remember_owner_collision(api, result)
+  end
+
+  @doc "Register the runtime-default prompt policy."
+  @spec register_prompt_policy(t(), module(), keyword()) :: term()
+  def register_prompt_policy(api, module, opts \\ []) do
+    result = dispatch(api, :prompt_policy, [module, opts])
+    remember_owner_collision(api, result)
+  end
+
+  @doc "Register a named workflow (use `:default` for the runtime default)."
+  @spec register_workflow(t(), String.t() | :default, module(), keyword()) :: term()
+  def register_workflow(api, name, module, opts \\ []) do
+    result = dispatch(api, :workflow, [name, module, opts])
+    remember_owner_collision(api, result)
+  end
+
+  @doc "Register the runtime-default context policy."
+  @spec register_context_policy(t(), module(), keyword()) :: term()
+  def register_context_policy(api, module, opts \\ []) do
+    result = dispatch(api, :context_policy, [module, opts])
+    remember_owner_collision(api, result)
+  end
+
+  @doc "Register a context threshold for an exact model key."
+  @spec register_context_threshold(t(), String.t() | :default, term(), keyword()) :: term()
+  def register_context_threshold(api, model_key, value, opts \\ []) do
+    result = dispatch(api, :context_threshold, [model_key, value, opts])
+    remember_owner_collision(api, result)
+  end
+
   @doc "Register a loop hook at `point` (e.g. `:before_tool_call`)."
   @spec register_hook(t(), atom(), function(), keyword()) :: term()
   def register_hook(api, point, fun, opts \\ []), do: dispatch(api, :hook, [point, fun, opts])
@@ -146,15 +192,68 @@ defmodule Catalyst.ExtensionAPI do
   def start_child(api, child_spec), do: dispatch(api, :process, [child_spec])
 
   defp dispatch(%__MODULE__{} = api, kind, args) do
-    case :persistent_term.get({__MODULE__, :kind, kind}, nil) do
-      nil -> {:error, {:unsupported_kind, kind}}
-      handler -> apply(handler, [api | args])
+    Catalyst.Extensions.Transaction.with_generation_gate(fn ->
+      case Catalyst.Extensions.generation_current?(api.generation) do
+        true -> dispatch_current(api, kind, args)
+        false -> {:error, :stale_extension_generation}
+      end
+    end)
+  end
+
+  defp dispatch_current(api, kind, args) do
+    result =
+      case :persistent_term.get({__MODULE__, :kind, kind}, nil) do
+        nil -> {:error, {:unsupported_kind, kind}}
+        handler -> apply(handler, [api | args])
+      end
+
+    case Catalyst.Extensions.generation_current?(api.generation) do
+      true -> result
+      false -> purge_stale_registration(api.owner)
     end
+  end
+
+  defp purge_stale_registration(owner) do
+    purge_owner(owner)
+    {:error, :stale_extension_generation}
   end
 
   defp remember_owner_collision(
          api,
          {:error, {:tool_owner_collision, _name, _existing, _attempted} = reason} = error
+       ) do
+    record_owner_collision(api, reason)
+    error
+  end
+
+  defp remember_owner_collision(
+         api,
+         {:error, {:prompt_owner_collision, _key, _existing, _attempted} = reason} = error
+       ) do
+    record_owner_collision(api, reason)
+    error
+  end
+
+  defp remember_owner_collision(
+         api,
+         {:error, {:workflow_owner_collision, _name, _existing, _attempted} = reason} = error
+       ) do
+    record_owner_collision(api, reason)
+    error
+  end
+
+  defp remember_owner_collision(
+         api,
+         {:error, {:context_policy_owner_collision, _existing, _attempted} = reason} = error
+       ) do
+    record_owner_collision(api, reason)
+    error
+  end
+
+  defp remember_owner_collision(
+         api,
+         {:error, {:context_threshold_owner_collision, _key, _existing, _attempted} = reason} =
+           error
        ) do
     record_owner_collision(api, reason)
     error
@@ -171,11 +270,11 @@ defmodule Catalyst.ExtensionAPI do
   defp remember_owner_collision(_api, result), do: result
 
   defp record_owner_collision(api, reason) do
-    record_load_collision(api.load_ref, reason)
+    record_load_collision(api, reason)
   end
 
-  defp record_load_collision(nil, _reason), do: :ok
+  defp record_load_collision(%__MODULE__{load_ref: nil}, _reason), do: :ok
 
-  defp record_load_collision(load_ref, reason),
-    do: Catalyst.Extensions.record_setup_collision(load_ref, reason)
+  defp record_load_collision(%__MODULE__{server: server, load_ref: load_ref}, reason),
+    do: Catalyst.Extensions.record_setup_collision(server, load_ref, reason)
 end

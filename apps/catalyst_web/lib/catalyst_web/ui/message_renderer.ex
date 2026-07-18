@@ -65,7 +65,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   defp message(%{msg: %Message.User{}} = assigns) do
     ~H"""
     <div data-message-role="user" class="flex justify-end">
-      <div class="max-w-[82%] rounded-3xl rounded-br-md bg-slate-950 px-4 py-3 text-sm leading-6 text-white shadow-lg shadow-slate-900/15 dark:bg-indigo-500 dark:shadow-indigo-950/20">
+      <div class="max-w-[82%] rounded-2xl bg-neutral-200/70 px-4 py-2.5 text-sm leading-6 text-neutral-900 dark:bg-white/10 dark:text-neutral-100">
         <img
           :for={img <- user_images(@msg.content)}
           src={"data:#{img.mime_type};base64,#{img.data}"}
@@ -81,7 +81,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   defp message(%{msg: %Message.Assistant{}} = assigns) do
     ~H"""
     <div :if={@msg.content != []} data-message-role="assistant" class="flex justify-start">
-      <div class="max-w-[82%] rounded-3xl rounded-bl-md border border-slate-200 bg-white/85 px-4 py-3 text-sm leading-6 text-slate-700 shadow-sm shadow-slate-200/50 backdrop-blur dark:border-white/10 dark:bg-white/10 dark:text-slate-100 dark:shadow-black/20">
+      <div class="w-full min-w-0 px-1 py-1 text-sm leading-6 text-neutral-800 dark:text-neutral-200">
         <%= for b <- @msg.content do %>
           {render_block(%{block: b})}
         <% end %>
@@ -94,11 +94,11 @@ defmodule CatalystWeb.UI.MessageRenderer do
     ~H"""
     <div data-message-role="tool-result" data-tool-error={to_string(@msg.is_error)} class="px-2">
       <div class={[
-        "overflow-hidden rounded-2xl border text-xs font-mono shadow-sm backdrop-blur",
+        "overflow-hidden rounded-xl border text-xs font-mono",
         @msg.is_error &&
-          "border-rose-200 bg-rose-50/90 text-rose-950 dark:border-rose-400/20 dark:bg-rose-500/10 dark:text-rose-100",
+          "border-rose-200 bg-rose-50 text-rose-950 dark:border-rose-400/20 dark:bg-rose-500/10 dark:text-rose-100",
         !@msg.is_error &&
-          "border-slate-200 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/10 dark:text-slate-200"
+          "border-neutral-200 bg-white text-neutral-600 dark:border-white/10 dark:bg-white/5 dark:text-neutral-300"
       ]}>
         <div class="flex items-center gap-2 border-b border-current/10 px-3 py-1.5 font-semibold">
           <span>{@msg.tool_name}</span>
@@ -125,7 +125,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     ~H"""
     <div
       data-block-kind="text"
-      class="space-y-2 text-sm leading-6 text-slate-700 dark:text-slate-100"
+      class="space-y-2 text-sm leading-6 text-neutral-800 dark:text-neutral-200"
     >
       <%= for block <- @blocks do %>
         <.formatted_block block={block} />
@@ -138,9 +138,9 @@ defmodule CatalystWeb.UI.MessageRenderer do
     ~H"""
     <details
       data-block-kind="thinking"
-      class="my-1 rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 text-xs italic text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400"
+      class="my-1 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs italic text-neutral-500 dark:border-white/10 dark:bg-white/5 dark:text-neutral-400"
     >
-      <summary class="cursor-pointer font-medium not-italic text-slate-500 dark:text-slate-300">
+      <summary class="cursor-pointer font-medium not-italic text-neutral-500 dark:text-neutral-300">
         thinking
       </summary>
       <div class="mt-2 whitespace-pre-wrap">{@block.thinking}</div>
@@ -152,9 +152,9 @@ defmodule CatalystWeb.UI.MessageRenderer do
     ~H"""
     <div
       data-block-kind="tool-call"
-      class="my-1 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs text-indigo-700 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-200"
+      class="my-1 inline-flex items-center gap-2 rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs text-neutral-600 dark:border-white/10 dark:bg-white/5 dark:text-neutral-300"
     >
-      <span class="rounded-full bg-indigo-600 px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-white dark:bg-indigo-400 dark:text-indigo-950">
+      <span class="rounded-full bg-neutral-200/80 px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-600 dark:bg-white/10 dark:text-neutral-300">
         tool
       </span>
       <code>{@block.name}({short_args(@block.arguments)})</code>
@@ -183,7 +183,10 @@ defmodule CatalystWeb.UI.MessageRenderer do
       |> Map.put(:inlines, inlines)
 
     ~H"""
-    <p class={["mt-4 first:mt-0 font-semibold text-slate-950 dark:text-white", heading_class(@level)]}>
+    <p class={[
+      "mt-4 first:mt-0 font-semibold text-neutral-950 dark:text-white",
+      heading_class(@level)
+    ]}>
       <.formatted_inlines inlines={@inlines} />
     </p>
     """
@@ -193,7 +196,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :items, items)
 
     ~H"""
-    <ul class="my-2 ml-5 list-disc space-y-1 marker:text-slate-400 dark:marker:text-slate-500">
+    <ul class="my-2 ml-5 list-disc space-y-1 marker:text-neutral-400 dark:marker:text-neutral-500">
       <li :for={item <- @items}>
         <.formatted_inlines inlines={item} />
       </li>
@@ -205,7 +208,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :items, items)
 
     ~H"""
-    <ol class="my-2 ml-5 list-decimal space-y-1 marker:text-slate-400 dark:marker:text-slate-500">
+    <ol class="my-2 ml-5 list-decimal space-y-1 marker:text-neutral-400 dark:marker:text-neutral-500">
       <li :for={item <- @items}>
         <.formatted_inlines inlines={item} />
       </li>
@@ -217,7 +220,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :blocks, blocks)
 
     ~H"""
-    <blockquote class="my-3 border-l-2 border-indigo-300 pl-3 text-slate-600 dark:border-indigo-400/60 dark:text-slate-300">
+    <blockquote class="my-3 border-l-2 border-neutral-300 pl-3 text-neutral-600 dark:border-white/20 dark:text-neutral-300">
       <%= for block <- @blocks do %>
         <.formatted_block block={block} />
       <% end %>
@@ -232,10 +235,10 @@ defmodule CatalystWeb.UI.MessageRenderer do
       |> Map.put(:code, code)
 
     ~H"""
-    <div class="my-3 overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 text-slate-100 shadow-sm dark:border-white/10 dark:bg-black/40">
+    <div class="my-3 overflow-hidden rounded-xl border border-neutral-200 bg-neutral-950 text-neutral-100 dark:border-white/10 dark:bg-neutral-950">
       <div
         :if={@lang}
-        class="border-b border-white/10 px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-wide text-slate-400"
+        class="border-b border-white/10 px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-400"
       >
         {@lang}
       </div>
@@ -246,7 +249,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp formatted_block(%{block: :hr} = assigns) do
     ~H"""
-    <hr class="my-4 border-slate-200 dark:border-white/10" />
+    <hr class="my-4 border-neutral-200 dark:border-white/10" />
     """
   end
 
@@ -270,7 +273,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :code, code)
 
     ~H"""
-    <code class="rounded-md bg-slate-100 px-1 py-0.5 font-mono text-[0.85em] text-slate-900 dark:bg-white/10 dark:text-slate-100">
+    <code class="rounded-md bg-neutral-100 px-1 py-0.5 font-mono text-[0.85em] text-neutral-900 dark:bg-white/10 dark:text-neutral-100">
       {@code}
     </code>
     """
@@ -280,7 +283,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :inlines, inlines)
 
     ~H"""
-    <strong class="font-semibold text-slate-950 dark:text-white">
+    <strong class="font-semibold text-neutral-950 dark:text-white">
       <.formatted_inlines inlines={@inlines} />
     </strong>
     """

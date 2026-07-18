@@ -71,6 +71,9 @@ defmodule Catalyst.Session.ReducerTest do
 
     snapshot = Catalyst.Session.Snapshot.of(state)
 
+    assert state.streaming_text == ["lo", "hel"]
+    assert state.streaming_thinking == ["hm"]
+
     assert [%Content.Thinking{thinking: "hm"}, %Content.Text{text: "hello"}] =
              snapshot.streaming_message.content
 
@@ -78,6 +81,31 @@ defmodule Catalyst.Session.ReducerTest do
     done = Reducer.reduce(%Event.MessageEnd{message: a}, state)
     assert done.streaming_text == []
     assert done.streaming_thinking == []
+  end
+
+  test "snapshot accepts the pre-upgrade nested iodata accumulator", %{state: state} do
+    assistant = %Message.Assistant{content: [], timestamp: Message.now()}
+
+    legacy = %{
+      state
+      | streaming_message: assistant,
+        streaming_text: [[[] | "hel"] | "lo"],
+        streaming_thinking: []
+    }
+
+    assert [%Content.Text{text: "hello"}] =
+             Catalyst.Session.Snapshot.of(legacy).streaming_message.content
+
+    migrated =
+      Reducer.reduce(
+        %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{delta: "!"}},
+        legacy
+      )
+
+    assert migrated.streaming_text == ["!", "hello"]
+
+    assert [%Content.Text{text: "hello!"}] =
+             Catalyst.Session.Snapshot.of(migrated).streaming_message.content
   end
 
   test "a provider-error assistant surfaces in error_message", %{state: state} do
@@ -107,6 +135,52 @@ defmodule Catalyst.Session.ReducerTest do
 
     state = Reducer.reduce(%Event.ToolExecutionEnd{call_id: "c1"}, state)
     refute MapSet.member?(state.pending_tool_calls, "c1")
+  end
+
+  test "ContextStatus updates only active run metadata and remains non-persistent", %{
+    state: state
+  } do
+    status = %Event.ContextStatus{
+      used_tokens: 123,
+      threshold: 456,
+      threshold_source: :builtin,
+      anchored: true,
+      estimate_source: :provider,
+      context_digest: String.duplicate("a", 64)
+    }
+
+    assert Reducer.reduce(status, state) == state
+
+    active = %{state | current_run_metadata: %{prompt: %{digest: "prompt"}}}
+    reduced = Reducer.reduce(status, active)
+
+    assert reduced.current_run_metadata.context_status == Map.from_struct(status)
+    assert reduced.messages == active.messages
+    assert Store.load(state.store.path) == []
+  end
+
+  test "ContextCompacted replaces only messages and keeps active run fields", %{state: state} do
+    replacement = [Message.user("summary"), Message.user("current")]
+
+    state = %{
+      state
+      | messages: [Message.user("old")],
+        steering: :queue.in(Message.user("steer"), :queue.new()),
+        follow_up: :queue.in(Message.user("later"), :queue.new()),
+        in_flight: [{:steering, Message.user("active")}],
+        pending_tool_calls: MapSet.new(["call"]),
+        streaming_message: %Message.Assistant{}
+    }
+
+    reduced =
+      Reducer.reduce(%Event.ContextCompacted{replacement: replacement}, state)
+
+    assert reduced.messages == Enum.reverse(replacement)
+    assert reduced.steering == state.steering
+    assert reduced.follow_up == state.follow_up
+    assert reduced.in_flight == state.in_flight
+    assert reduced.pending_tool_calls == state.pending_tool_calls
+    assert reduced.streaming_message == state.streaming_message
   end
 
   test "failure_message builds an aborted/error assistant", %{state: state} do

@@ -730,6 +730,69 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     assert length(frame3["input"]) == 5
   end
 
+  test "compacted history forces a full request and the next stable turn re-anchors" do
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    session_id = "compaction-delta-test"
+
+    on_exit(fn ->
+      TokenStore.delete("openai-codex")
+      Catalyst.LLM.OpenAICodex.ConnCache.drop(session_id)
+    end)
+
+    server =
+      start_supervised!(
+        {Bandit,
+         plug: {PrivatePlug, {ContinuationRouter, self()}},
+         scheme: :http,
+         port: 0,
+         ip: {127, 0, 0, 1},
+         startup_log: false}
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    opts = [transport: :websocket, session_id: session_id]
+    sink = fn _event -> :ok end
+
+    original = %Context{system_prompt: "sys", messages: [Message.user("old")], tools: []}
+    assert {:ok, first} = OpenAICodex.Provider.stream(model, original, opts, sink)
+    assert_receive {:ws_request, first_frame}
+    refute Map.has_key?(first_frame, "previous_response_id")
+
+    compacted = %Context{
+      system_prompt: "sys",
+      messages: [Message.user("summary"), Message.user("after compaction")],
+      tools: []
+    }
+
+    assert {:ok, second} = OpenAICodex.Provider.stream(model, compacted, opts, sink)
+    assert_receive {:ws_request, second_frame}
+    refute Map.has_key?(second_frame, "previous_response_id")
+    assert length(second_frame["input"]) == 2
+
+    stable = %{
+      compacted
+      | messages: compacted.messages ++ [second, Message.user("stable follow-up")]
+    }
+
+    assert {:ok, _third} = OpenAICodex.Provider.stream(model, stable, opts, sink)
+    assert_receive {:ws_request, third_frame}
+    assert third_frame["previous_response_id"] == "resp_2"
+
+    assert [%{"role" => "user", "content" => [%{"text" => "stable follow-up"} | _]}] =
+             third_frame["input"]
+
+    assert first.response_id == "resp_1"
+  end
+
   test "the connection and continuation survive across runs (different processes)" do
     :ok =
       TokenStore.put("openai-codex", %{
@@ -839,6 +902,57 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     assert [%{"role" => "user", "content" => [%{"text" => "hi"} | _]}] = frame1["input"]
 
     Catalyst.LLM.OpenAICodex.ConnCache.drop("warm-test")
+  end
+
+  test "a prewarm prompt mismatch retains the websocket but sends a full request" do
+    :ok =
+      TokenStore.put("openai-codex", %{
+        access: "tok_ok",
+        refresh: "ref_1",
+        expires: System.system_time(:millisecond) + 3_600_000,
+        account_id: "acct"
+      })
+
+    session_id = "warm-mismatch-test"
+
+    on_exit(fn ->
+      TokenStore.delete("openai-codex")
+      Catalyst.LLM.OpenAICodex.ConnCache.drop(session_id)
+    end)
+
+    server =
+      start_supervised!(
+        {Bandit,
+         plug: {PrivatePlug, {ContinuationRouter, self()}},
+         scheme: :http,
+         port: 0,
+         ip: {127, 0, 0, 1},
+         startup_log: false}
+      )
+
+    {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+
+    model = OpenAICodex.model("gpt-test", base_url: "http://127.0.0.1:#{port}")
+    opts = [transport: :websocket, session_id: session_id]
+    warm_context = %Context{system_prompt: "prewarm prompt", messages: [], tools: []}
+
+    assert :ok = OpenAICodex.Provider.prewarm(model, warm_context, opts)
+    assert_receive {:ws_request, %{"generate" => false}}
+
+    run_context = %Context{
+      system_prompt: "changed run prompt",
+      messages: [Message.user("hi")],
+      tools: []
+    }
+
+    assert {:ok, assistant} =
+             OpenAICodex.Provider.stream(model, run_context, opts, fn _event -> :ok end)
+
+    assert_receive {:ws_request, frame}
+    refute Map.has_key?(frame, "previous_response_id")
+    assert length(frame["input"]) == 1
+    assert frame["instructions"] == "changed run prompt"
+    assert Content.text_of(assistant.content) == "answer 2"
   end
 
   test "a failed prewarm response is never cached as a continuation anchor" do

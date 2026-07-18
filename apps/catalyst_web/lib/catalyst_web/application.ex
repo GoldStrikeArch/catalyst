@@ -16,6 +16,12 @@ defmodule CatalystWeb.Application do
 
     children = [
       CatalystWeb.Telemetry,
+      # Serializes and retains the exact live UI contribution replay log. It
+      # starts before the table owner so rest-for-one table recovery keeps it.
+      CatalystWeb.UI.Contributions,
+      # Owns the ETS table independently so UI registrations survive a
+      # CatalystWeb.UI.Registry process restart.
+      CatalystWeb.UI.TableOwner,
       # Runtime UI registry: pages, renderers, components, commands.
       CatalystWeb.UI.Registry,
       # Start to serve requests, typically the last entry
@@ -24,16 +30,38 @@ defmodule CatalystWeb.Application do
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
-    opts = [strategy: :one_for_one, name: CatalystWeb.Supervisor]
-    result = Supervisor.start_link(children, opts)
-    register_web_tools()
-    # Re-registered on every Catalyst.Extensions restart: a registry-chain
-    # restart re-seeds only built-ins and extension files, and this app's
-    # start/2 won't run again to put the web tools back.
-    Catalyst.Extensions.register_reseeder(__MODULE__, :register_web_tools)
-    reload_extensions()
+    opts = [
+      strategy: :rest_for_one,
+      name: CatalystWeb.Supervisor,
+      max_restarts: ui_runtime_max_restarts()
+    ]
+
+    children
+    |> Supervisor.start_link(opts)
+    |> complete_start(fn supervisor ->
+      register_web_tools()
+
+      # Re-registered on every Catalyst.Extensions restart: a registry-chain
+      # restart re-seeds only built-ins and extension files, and this app's
+      # start/2 won't run again to put the web tools back.
+      Catalyst.Extensions.register_reseeder(__MODULE__, :register_web_tools)
+
+      # Publish host readiness last. This notification may start the deferred
+      # extension bootstrap immediately, so host-owned tool claims and their
+      # restart reseeder must already be installed.
+      Catalyst.Extensions.register_host(:web, :application, supervisor)
+      bootstrap_extensions()
+    end)
+  end
+
+  @doc false
+  @spec complete_start(Supervisor.on_start(), (pid() -> term())) :: Supervisor.on_start()
+  def complete_start({:ok, supervisor} = result, after_start) do
+    after_start.(supervisor)
     result
   end
+
+  def complete_start({:error, _reason} = error, _after_start), do: error
 
   @doc false
   # Register the web-side self-modification tools into the core tool registry.
@@ -50,30 +78,23 @@ defmodule CatalystWeb.Application do
     e -> Logger.warning("web tool registration failed: #{Exception.message(e)}")
   end
 
-  # The boot-time extension load in :catalyst ran before this app wired the UI
-  # kinds (:renderer/:component/:page) into ExtensionAPI, so any UI
-  # registrations from extensions were dropped. Reload now that they resolve.
-  # reload_after_wiring/0 no-ops in safe mode (env or crash-detected) and never
-  # clears the BootGuard marker — only an explicit reload_extensions does that.
-  defp reload_extensions do
-    case Catalyst.Extensions.reload_after_wiring() do
+  # Core defers its one boot load in web-capable releases until the UI kinds
+  # have been wired. bootstrap/0 is idempotent, so setup/1 runs once even if
+  # this application or its supervisor is restarted.
+  defp bootstrap_extensions do
+    case Catalyst.Extensions.bootstrap() do
       {:skipped, status} ->
-        Logger.info("extension reload skipped: #{inspect(status)}")
+        Logger.info("extension bootstrap skipped: #{inspect(status)}")
 
-      {:ok, %{failed: []}} ->
+      :ok ->
         :ok
-
-      {:ok, %{failed: failed}} ->
-        Logger.warning("extension reload after UI wiring: #{length(failed)} file(s) failed")
-
-      {:error, reason} ->
-        Logger.warning(
-          "extension reload after UI wiring failed: " <>
-            Catalyst.Extensions.format_error(reason)
-        )
     end
   rescue
-    e -> Logger.warning("extension reload after UI wiring failed: #{Exception.message(e)}")
+    e -> Logger.warning("extension bootstrap failed: #{Exception.message(e)}")
+  end
+
+  defp ui_runtime_max_restarts do
+    Application.get_env(:catalyst_web, :ui_runtime_max_restarts, 3)
   end
 
   # Tell Phoenix to update the endpoint configuration

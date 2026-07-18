@@ -27,6 +27,7 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
 
   alias Catalyst.{Content, Debug, Message}
   alias Catalyst.Auth.TokenStore
+  alias Catalyst.Context.Tokens
 
   alias Catalyst.LLM.OpenAICodex.{
     ConnCache,
@@ -56,6 +57,24 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
       {:error, message} ->
         {:ok, error_assistant(model, message)}
     end
+  end
+
+  @doc "Deterministic semantic request fingerprint used for context anchors."
+  @impl true
+  @spec context_fingerprint(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) ::
+          {:ok, binary()}
+  def context_fingerprint(model, context, opts) do
+    {:ok, request_digest(model, context, opts)}
+  end
+
+  @doc "Coarse-but-provider-semantic estimate of the exact Codex projection."
+  @impl true
+  @spec estimate_tokens(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) ::
+          {:ok, non_neg_integer()}
+  def estimate_tokens(model, context, opts) do
+    projection = Request.semantic_projection(model, context, opts)
+
+    {:ok, Tokens.estimate_projection(projection)}
   end
 
   # The Codex backend requires the `chatgpt-account-id` header; without a
@@ -113,7 +132,11 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
           continuation = %{
             response_id: parser.response_id,
             covered_count: length(context.messages),
-            covered_hash: :erlang.phash2(context.messages),
+            # `body_probe` already guards every non-message request option.
+            # Keep the covered-prefix digest scoped to the semantic context so
+            # it compares identically when a later request carries different
+            # transport/runtime-only options.
+            covered_hash: covered_hash(model, context, []),
             body_probe: Map.delete(base_body, "input")
           }
 
@@ -362,7 +385,12 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
       is_binary(cont.response_id) and cont.response_id != "" and
         suffix != [] and
         cont.body_probe == req.body_probe and
-        :erlang.phash2(Enum.take(messages, cont.covered_count)) == cont.covered_hash
+        covered_hash(
+          req.model,
+          %{req.context | messages: Enum.take(messages, cont.covered_count)},
+          []
+        ) ==
+          cont.covered_hash
 
     case delta_ok? do
       true ->
@@ -393,7 +421,7 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
     %{
       response_id: assistant.response_id,
       covered_count: length(covered),
-      covered_hash: :erlang.phash2(covered),
+      covered_hash: covered_hash(req.model, %{req.context | messages: covered}, []),
       body_probe: req.body_probe
     }
   end
@@ -512,4 +540,14 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
   end
 
   defp random_id, do: Catalyst.Ids.hex(16)
+
+  defp covered_hash(model, context, opts) do
+    request_digest(model, context, opts)
+  end
+
+  defp request_digest(model, context, opts) do
+    model
+    |> Request.semantic_projection(context, opts)
+    |> Tokens.projection_digest()
+  end
 end

@@ -1,7 +1,7 @@
 defmodule Catalyst.Session.Store.CodecTest do
   use ExUnit.Case, async: true
 
-  alias Catalyst.{Content, Message, Usage}
+  alias Catalyst.{Content, Message, Model, Usage}
   alias Catalyst.Session.Store
   alias Catalyst.Session.Store.Codec
 
@@ -33,7 +33,8 @@ defmodule Catalyst.Session.Store.CodecTest do
         cache_read: 3,
         cache_write: 2,
         total_tokens: 23,
-        cost: 0.5
+        cost: 0.5,
+        context_digest: String.duplicate("a", 64)
       },
       stop_reason: :tool_use,
       error_message: nil,
@@ -61,8 +62,54 @@ defmodule Catalyst.Session.Store.CodecTest do
     message = %Message.User{content: [%Content.Text{text: "shim"}], timestamp: 104}
 
     assert Store.encode(message) == Codec.encode(message)
-    assert message |> Store.encode() |> Store.decode() == message
+    assert {:ok, ^message} = message |> Store.encode() |> Store.decode()
   end
 
-  defp round_trip(message), do: message |> Codec.encode() |> Codec.decode()
+  test "context model metadata round-trips independently from max_tokens" do
+    model = %Model{
+      id: "gpt-test",
+      api: "openai-codex-responses",
+      provider: "openai-codex",
+      context_window: 272_000,
+      max_context_window: 300_000,
+      effective_context_window_percent: 95,
+      auto_compact_token_limit: 240_000,
+      context_window_source: :catalog,
+      max_tokens: 128_000
+    }
+
+    encoded = Codec.encode_model(model)
+
+    assert encoded["contextWindow"] == 272_000
+    assert encoded["maxContextWindow"] == 300_000
+    assert encoded["effectiveContextWindowPercent"] == 95
+    assert encoded["autoCompactTokenLimit"] == 240_000
+    assert encoded["contextWindowSource"] == "catalog"
+    assert encoded["maxTokens"] == 128_000
+    assert {:ok, ^model} = Codec.decode_model(encoded)
+  end
+
+  test "legacy usage without contextDigest remains valid and unanchored" do
+    assistant = %Message.Assistant{usage: %Usage{total_tokens: 12}}
+
+    encoded =
+      assistant |> Codec.encode() |> Map.update!("usage", &Map.delete(&1, "contextDigest"))
+
+    assert {:ok, %Message.Assistant{usage: %Usage{total_tokens: 12, context_digest: nil}}} =
+             Codec.decode(encoded)
+  end
+
+  test "invalid persisted messages return tagged decode errors" do
+    assert {:error, {:unknown_role, "martian"}} = Codec.decode(%{"role" => "martian"})
+
+    assert {:error, {:invalid_content_block, %{"type" => "future"}}} =
+             Codec.decode(%{"role" => "user", "content" => [%{"type" => "future"}]})
+
+    assert {:error, {:invalid_message, :not_a_map}} = Codec.decode(:not_a_map)
+  end
+
+  defp round_trip(message) do
+    assert {:ok, decoded} = message |> Codec.encode() |> Codec.decode()
+    decoded
+  end
 end

@@ -15,6 +15,7 @@ defmodule Catalyst.LLM.Registry do
 
   alias Catalyst.ExtensionAPI
   alias Catalyst.LLM.ProviderConfig
+  alias Catalyst.OwnedIndex
 
   @table :catalyst_llm_providers
   @host_owner :host
@@ -93,47 +94,59 @@ defmodule Catalyst.LLM.Registry do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
     Enum.each(seed_map(), fn {api, cfg} -> :ets.insert(@table, {api, cfg}) end)
     wire()
-    {:ok, %{contrib: %{}, owners: %{}}}
+    {:ok, OwnedIndex.new()}
   end
 
   @impl true
   def handle_call({:register, api, config, opts}, _from, state) do
     owner = normalize_owner(opts[:owner])
 
-    case Map.get(state.owners, api) do
-      nil ->
-        :ets.insert(@table, {api, config})
-        {:reply, :ok, track(api, owner, state)}
+    case validate_provider_module(config.module) do
+      :ok ->
+        case OwnedIndex.claim(state, api, owner, track_owner: owner != @host_owner) do
+          {:ok, state} ->
+            :ets.insert(@table, {api, config})
+            {:reply, :ok, state}
 
-      ^owner ->
-        :ets.insert(@table, {api, config})
-        {:reply, :ok, track(api, owner, state)}
+          {:error, existing_owner} ->
+            error = {:provider_owner_collision, api, existing_owner, owner}
+            {:reply, {:error, error}, state}
+        end
 
-      existing_owner ->
-        error = {:provider_owner_collision, api, existing_owner, owner}
-        {:reply, {:error, error}, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:unregister, api}, _from, state) do
     drop(api)
-    {:reply, :ok, detach(api, state)}
+    {:reply, :ok, OwnedIndex.release(state, api)}
   end
 
   def handle_call({:unregister_owner, owner}, _from, state) do
-    apis = Map.get(state.contrib, owner, MapSet.new())
+    {apis, state} = OwnedIndex.release_owner(state, owner)
+    Enum.each(apis, &drop/1)
+    {:reply, :ok, state}
+  end
 
-    Enum.each(apis, fn api ->
-      case Map.get(state.owners, api) do
-        ^owner -> drop(api)
-        _other -> :ok
-      end
-    end)
+  defp validate_provider_module(module) do
+    cond do
+      not is_atom(module) ->
+        {:error, :invalid_provider_module}
 
-    owners =
-      Map.reject(state.owners, fn {api, api_owner} -> api_owner == owner and api in apis end)
+      not Code.ensure_loaded?(module) ->
+        {:error, {:module_not_found, module}}
 
-    {:reply, :ok, %{state | contrib: Map.delete(state.contrib, owner), owners: owners}}
+      not function_exported?(module, :stream, 4) ->
+        {:error, {:missing_stream_4, module}}
+
+      true ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # ---- internals ------------------------------------------------------------
@@ -157,27 +170,6 @@ defmodule Catalyst.LLM.Registry do
     end
   end
 
-  defp track(api, @host_owner, state) do
-    state = detach(api, state)
-    put_in(state.owners[api], @host_owner)
-  end
-
-  defp track(api, owner, state) do
-    state = detach(api, state)
-    apis = Map.get(state.contrib, owner, MapSet.new())
-
-    state
-    |> put_in([:contrib, owner], MapSet.put(apis, api))
-    |> put_in([:owners, api], owner)
-  end
-
-  defp detach(api, state) do
-    contrib =
-      Map.new(state.contrib, fn {owner, apis} -> {owner, MapSet.delete(apis, api)} end)
-
-    %{state | contrib: contrib, owners: Map.delete(state.owners, api)}
-  end
-
   defp normalize_owner(nil), do: @host_owner
   defp normalize_owner(owner), do: owner
 
@@ -196,11 +188,15 @@ defmodule Catalyst.LLM.Registry do
   defp normalize(%ProviderConfig{} = c), do: c
   defp normalize(module) when is_atom(module), do: %ProviderConfig{module: module}
 
-  defp wire do
-    ExtensionAPI.register_kind(:provider, fn api_handle, api, config ->
-      register_provider(api, config, owner: api_handle.owner)
-    end)
+  @doc false
+  @spec register_extension_provider(ExtensionAPI.t(), String.t(), ProviderConfig.t() | module()) ::
+          :ok | {:error, term()}
+  def register_extension_provider(%ExtensionAPI{owner: owner}, api, config) do
+    register_provider(api, config, owner: owner)
+  end
 
-    ExtensionAPI.register_purger(&unregister_owner/1)
+  defp wire do
+    ExtensionAPI.register_kind(:provider, &__MODULE__.register_extension_provider/3)
+    ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
   end
 end

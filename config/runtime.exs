@@ -23,7 +23,11 @@ if config_env() == :prod do
       # get_dynamic_port/1 via server_info/1, and Desktop.Window resolves the
       # real URL through &CatalystWeb.Endpoint.url/0 once the listener is
       # bound. Set PORT to pin a fixed port instead.
-      port = String.to_integer(System.get_env("PORT", "0"))
+      port =
+        case System.get_env("PORT", "0") |> Integer.parse() do
+          {p, ""} when p >= 0 and p <= 65535 -> p
+          _ -> 0
+        end
 
       config :catalyst_web, CatalystWeb.Endpoint,
         http: [ip: {127, 0, 0, 1}, port: port],

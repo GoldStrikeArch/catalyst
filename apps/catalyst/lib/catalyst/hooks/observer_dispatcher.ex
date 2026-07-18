@@ -2,17 +2,22 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
   @moduledoc """
   Ordered, bounded delivery for read-only agent-event observers.
 
-  Each session has at most `:hook_observer_queue_limit` accepted events
-  (default 256), counting its active event and queue. Events for one session
-  run in notification order; different sessions run concurrently. Each
-  observer callback runs in one supervised process under the normal hook
-  deadline, without an additional per-event task or ownership watchdog.
+  Each session's active queue has at most `:hook_observer_queue_limit` events
+  (default 256), counting its active event and queue. Committed events are not
+  dropped for queue capacity and may wait outside that active bound;
+  host-synthesized events may not. Events
+  for one session run in notification order; different sessions run
+  concurrently. Each observer callback runs in one supervised process under
+  the normal hook deadline, without an additional per-event task or ownership
+  watchdog.
 
-  Stream update events are lossy under overload. Structural lifecycle events
-  are not: they replace an older queued update when possible, or backpressure
-  that session's producer until capacity becomes available. Admission and
-  enqueue happen in the same GenServer call, so a killed notifier cannot strand
-  a reservation that was never queued.
+  Stream update events are lossy under overload. Ordinary structural lifecycle
+  events replace an older queued update when possible, or backpressure that
+  session's producer until capacity becomes available. Committed events are
+  acknowledged into ordered waiting state without waiting for a callback.
+  Host-synthesized structural events never backpressure their OTP producer: at
+  capacity they replace a queued update, otherwise the newest synthetic event
+  is dropped. This keeps the synthetic path bounded.
   """
 
   use GenServer
@@ -26,7 +31,7 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
   @type enqueue_result :: :ok | {:dropped, :queue_full | :dispatcher_unavailable}
 
   @type queued_event :: %{event: term(), entries: [map()]}
-  @type waiting_event :: %{from: GenServer.from(), event: queued_event()}
+  @type waiting_event :: %{from: GenServer.from() | nil, event: queued_event()}
 
   @doc "Start the singleton observer dispatcher."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -45,6 +50,48 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
     GenServer.call(__MODULE__, {:enqueue, session_key, event, entries}, :infinity)
   catch
     :exit, _reason -> {:dropped, :dispatcher_unavailable}
+  end
+
+  @doc """
+  Acknowledge ordered admission of a committed event without waiting for an
+  observer callback or queue capacity.
+
+  Committed events are rare, run-serialized durability boundaries. If the
+  bounded active queue is full they wait in order and are never displaced by
+  synthetic events. This guarantee covers live-dispatcher admission and queue
+  overload; a dispatcher process crash can lose already acknowledged work, and
+  an ambiguous failed call may be retried by the caller.
+  """
+  @spec enqueue_committed(session_key(), term(), [map()]) ::
+          :ok | {:error, :dispatcher_unavailable}
+  def enqueue_committed(session_key, event, entries),
+    do: enqueue_committed(session_key, event, entries, :infinity)
+
+  @doc false
+  @spec enqueue_committed(session_key(), term(), [map()], timeout()) ::
+          :ok | {:error, :dispatcher_unavailable}
+  def enqueue_committed(_session_key, _event, [], _timeout), do: :ok
+
+  def enqueue_committed(session_key, event, entries, timeout) do
+    GenServer.call(__MODULE__, {:enqueue_committed, session_key, event, entries}, timeout)
+  catch
+    :exit, _reason -> {:error, :dispatcher_unavailable}
+  end
+
+  @doc """
+  Admit an event without backpressuring the caller.
+
+  This is reserved for host-synthesized lifecycle events emitted from OTP
+  callbacks. At capacity, structural events replace a queued update or drop the
+  newest synthetic event; stream updates retain the normal drop policy.
+  """
+  @spec enqueue_async(session_key(), term(), [map()]) :: :ok
+  def enqueue_async(_session_key, _event, []), do: :ok
+
+  def enqueue_async(session_key, event, entries) do
+    GenServer.cast(__MODULE__, {:enqueue_async, session_key, event, entries})
+  catch
+    :exit, _reason -> :ok
   end
 
   @doc "Wait until all events accepted for `session_key` have finished."
@@ -69,6 +116,11 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
     end
   end
 
+  def handle_call({:enqueue_committed, session_key, event, entries}, _from, state) do
+    queued = %{event: event, entries: entries}
+    {:reply, :ok, admit_committed(state, session_key, queued)}
+  end
+
   def handle_call({:await_idle, session_key}, from, state) do
     case Map.fetch(state.sessions, session_key) do
       :error ->
@@ -78,6 +130,12 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
         session = %{session | idle_waiters: [from | session.idle_waiters]}
         {:noreply, put_session(state, session_key, session)}
     end
+  end
+
+  @impl true
+  def handle_cast({:enqueue_async, session_key, event, entries}, state) do
+    queued = %{event: event, entries: entries}
+    {:noreply, admit_async(state, session_key, queued)}
   end
 
   @impl true
@@ -154,6 +212,81 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
 
       false ->
         admit_structural(state, session_key, session, queued, from)
+    end
+  end
+
+  defp admit_async(state, session_key, queued) do
+    case Map.fetch(state.sessions, session_key) do
+      :error ->
+        state |> put_session(session_key, new_session(queued)) |> start_handler(session_key)
+
+      {:ok, session} ->
+        case session.pending < queue_limit() do
+          true -> put_session(state, session_key, enqueue_event(session, queued))
+          false -> admit_async_at_capacity(state, session_key, session, queued)
+        end
+    end
+  end
+
+  defp admit_committed(state, session_key, queued) do
+    case Map.fetch(state.sessions, session_key) do
+      :error ->
+        state |> put_session(session_key, new_session(queued)) |> start_handler(session_key)
+
+      {:ok, session} ->
+        case session.pending < queue_limit() do
+          true ->
+            put_session(state, session_key, enqueue_event(session, queued))
+
+          false ->
+            admit_committed_at_capacity(state, session_key, session, queued)
+        end
+    end
+  end
+
+  defp admit_committed_at_capacity(state, session_key, session, queued) do
+    case evict_queued_update(session.queue) do
+      {:ok, queue} ->
+        Logger.warning(
+          "[hooks] observer queue full for #{inspect(session_key)}; " <>
+            "evicted a queued update to preserve a committed event"
+        )
+
+        session = %{session | queue: :queue.in(queued, queue), dropped: session.dropped + 1}
+        put_session(state, session_key, session)
+
+      :error ->
+        waiting = :queue.in(%{from: nil, event: queued}, session.waiting)
+        put_session(state, session_key, %{session | waiting: waiting})
+    end
+  end
+
+  defp admit_async_at_capacity(state, session_key, session, queued) do
+    case update_event?(queued.event) do
+      true ->
+        log_dropped(session_key, session.dropped + 1)
+        put_session(state, session_key, %{session | dropped: session.dropped + 1})
+
+      false ->
+        queue_async_structural(state, session_key, session, queued)
+    end
+  end
+
+  defp queue_async_structural(state, session_key, session, queued) do
+    case evict_queued_update(session.queue) do
+      {:ok, queue} ->
+        Logger.warning(
+          "[hooks] observer queue full for #{inspect(session_key)}; " <>
+            "evicted a queued update to preserve a lifecycle event"
+        )
+
+        session = %{session | queue: :queue.in(queued, queue), dropped: session.dropped + 1}
+        put_session(state, session_key, session)
+
+      :error ->
+        dropped = session.dropped + 1
+        log_dropped_synthetic(session_key, dropped)
+        put_session(state, session_key, %{session | dropped: dropped})
     end
   end
 
@@ -253,12 +386,15 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
         }
 
         {session, replies} = admit_waiting(session)
-        {session, [waiting.from | replies]}
+        {session, maybe_add_reply(replies, waiting.from)}
 
       _full_or_empty ->
         {session, []}
     end
   end
+
+  defp maybe_add_reply(replies, nil), do: replies
+  defp maybe_add_reply(replies, from), do: [from | replies]
 
   defp finish_session(state, session_key, %{pending: 0, waiting: waiting} = session) do
     case :queue.is_empty(waiting) do
@@ -312,6 +448,19 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
         Logger.warning(
           "[hooks] observer queue full for #{inspect(session_key)}; " <>
             "dropped newest update (#{dropped} dropped)"
+        )
+
+      false ->
+        :ok
+    end
+  end
+
+  defp log_dropped_synthetic(session_key, dropped) do
+    case dropped == 1 or power_of_two?(dropped) do
+      true ->
+        Logger.warning(
+          "[hooks] observer queue full for #{inspect(session_key)}; " <>
+            "dropped newest synthetic lifecycle event (#{dropped} dropped)"
         )
 
       false ->

@@ -2,8 +2,8 @@ defmodule Catalyst.Session.ServerTest do
   use ExUnit.Case, async: false
 
   alias Catalyst.Agent.Event
-  alias Catalyst.{Content, Message, Model}
-  alias Catalyst.Session.{Manager, Server, Store}
+  alias Catalyst.{Content, Hooks, Message, Model}
+  alias Catalyst.Session.{EventSink, Manager, Server, Store}
 
   setup do
     tmp = Path.join(System.tmp_dir!(), "catalyst_session_#{System.unique_integer([:positive])}")
@@ -189,12 +189,29 @@ defmodule Catalyst.Session.ServerTest do
 
   test "abort kills the run and synthesizes an aborted turn", %{tmp: tmp, model: model} do
     script = [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}]
-    {_id, pid} = start(tmp, model, script)
+    {id, pid} = start(tmp, model, script)
+    owner = make_ref()
+    test_pid = self()
+
+    :ok =
+      Hooks.on(
+        fn
+          %Event.AgentEnd{} = event -> send(test_pid, {:observed_agent_end, event})
+          _event -> :ok
+        end,
+        owner: owner
+      )
+
+    on_exit(fn -> Hooks.unregister(owner) end)
 
     assert :ok = Server.prompt(pid, "long task")
     Server.abort(pid)
 
     assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
+    assert :ok = Hooks.await_observers(id)
+    assert_receive {:observed_agent_end, %Event.AgentEnd{}}, 1_000
+    refute_receive {:observed_agent_end, %Event.AgentEnd{}}
+
     snap = Server.state(pid)
     assert snap.error_message == "Run aborted."
     assert Enum.any?(snap.messages, &match?(%Message.Assistant{stop_reason: :aborted}, &1))
@@ -314,6 +331,37 @@ defmodule Catalyst.Session.ServerTest do
     assert Server.state(pid2).messages == []
   end
 
+  test "a failed reset marker leaves the live transcript and run untouched", %{
+    tmp: tmp,
+    model: model
+  } do
+    script = [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}]
+    {_id, pid} = start(tmp, model, script)
+
+    assert :ok = Server.prompt(pid, "do not clear or stop")
+    assert_receive {:agent_event, _, %Event.ToolExecutionStart{}}, 5_000
+
+    before = Server.state(pid)
+    assert before.running
+
+    File.rm!(before.store_path)
+    File.mkdir_p!(before.store_path)
+
+    assert {:error, {:write_failed, _reason}} = Server.reset(pid)
+    after_failed_reset = Server.state(pid)
+
+    assert after_failed_reset.messages == before.messages
+    assert after_failed_reset.running == before.running
+    assert after_failed_reset.pending_tool_calls == before.pending_tool_calls
+
+    # Restore a writable append target before aborting the intentionally long
+    # command, so the test leaves no live worker or noisy persistence failures.
+    File.rm_rf!(before.store_path)
+    File.write!(before.store_path, "")
+    Server.abort(pid)
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5_000
+  end
+
   test "configure applies model/opts to the next run without restarting", %{
     tmp: tmp,
     model: model
@@ -366,6 +414,86 @@ defmodule Catalyst.Session.ServerTest do
     assert Server.state(pid).messages == before
   end
 
+  test "a durable compaction appends and folds before observers see it", %{
+    tmp: tmp,
+    model: model
+  } do
+    {id, pid} = start(tmp, model, [])
+    run_ref = install_run_ref(pid)
+    owner = make_ref()
+    test_pid = self()
+
+    :ok = Hooks.on(fn event -> send(test_pid, {:observed, event}) end, owner: owner)
+    on_exit(fn -> Hooks.unregister(owner) end)
+
+    event = %Event.ContextCompacted{replacement: [Message.user("durable replacement")]}
+
+    assert :ok = EventSink.persist(pid, run_ref, id, event)
+    assert_receive {:agent_event, ^id, ^event}
+    assert :ok = Hooks.await_observers(id)
+    assert_receive {:observed, ^event}
+    refute_receive {:observed, ^event}
+
+    assert [message] = Server.state(pid).messages
+    assert Content.text_of(message.content) == "durable replacement"
+    assert [persisted] = Store.load(Server.state(pid).store_path)
+    assert Content.text_of(persisted.content) == "durable replacement"
+  end
+
+  test "durable observer admission survives the persistence caller exiting", %{
+    tmp: tmp,
+    model: model
+  } do
+    {id, pid} = start(tmp, model, [])
+    run_ref = install_run_ref(pid)
+    owner = make_ref()
+    test_pid = self()
+
+    :ok = Hooks.on(fn event -> send(test_pid, {:observed_after_exit, event}) end, owner: owner)
+    on_exit(fn -> Hooks.unregister(owner) end)
+
+    event = %Event.ContextCompacted{replacement: [Message.user("committed before exit")]}
+
+    caller =
+      start_supervised!(
+        {Task,
+         fn ->
+           :ok = EventSink.persist(pid, run_ref, id, event)
+         end}
+      )
+
+    caller_ref = Process.monitor(caller)
+    assert_receive {:DOWN, ^caller_ref, :process, ^caller, :normal}, 1_000
+    assert :ok = Hooks.await_observers(id)
+    assert_receive {:observed_after_exit, ^event}
+    refute_receive {:observed_after_exit, ^event}
+  end
+
+  test "a failed durable compaction is neither folded, broadcast, nor observed", %{
+    tmp: tmp,
+    model: model
+  } do
+    {id, pid} = start(tmp, model, [])
+    run_ref = install_run_ref(pid)
+    owner = make_ref()
+    test_pid = self()
+    store_path = Server.state(pid).store_path
+
+    :ok = Hooks.on(fn event -> send(test_pid, {:observed, event}) end, owner: owner)
+    on_exit(fn -> Hooks.unregister(owner) end)
+
+    File.rm!(store_path)
+    File.mkdir_p!(store_path)
+
+    event = %Event.ContextCompacted{replacement: [Message.user("must not install")]}
+
+    assert {:error, {:write_failed, _reason}} = EventSink.persist(pid, run_ref, id, event)
+    assert Server.state(pid).messages == []
+    refute_receive {:agent_event, ^id, ^event}
+    assert :ok = Hooks.await_observers(id)
+    refute_receive {:observed, ^event}
+  end
+
   test "a stale drain is a no-op: queued steering survives for the next run", %{
     tmp: tmp,
     model: model
@@ -409,5 +537,11 @@ defmodule Catalyst.Session.ServerTest do
 
     assert "change of plan" in user_texts
     assert "and after that" in user_texts
+  end
+
+  defp install_run_ref(pid) do
+    run_ref = make_ref()
+    :sys.replace_state(pid, &%{&1 | run_ref: run_ref})
+    run_ref
   end
 end

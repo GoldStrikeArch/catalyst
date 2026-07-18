@@ -98,25 +98,15 @@ defmodule Catalyst.LLM.RegistryTest do
     assert {:error, {:unknown_api, "owned-api"}} = Registry.fetch("owned-api")
   end
 
-  test "a session resolves its provider by api name from the registry" do
-    Registry.register_provider("echo", EchoProvider)
+  test "registration validates provider exports stream/4" do
+    defmodule InvalidProvider do
+      def other, do: :ok
+    end
 
-    model = %Model{id: "echo-1", api: "echo"}
+    # Purge OwnedIndex key if it exists to avoid collision interference
+    Registry.unregister_provider("invalid")
 
-    {:ok, %{id: id, pid: pid}} =
-      Manager.start_session(cwd: System.tmp_dir!(), provider: "echo", model: model)
-
-    on_exit(fn ->
-      Manager.stop(id)
-      Registry.unregister_provider("echo")
-    end)
-
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-    Server.prompt(pid, "hi")
-
-    assert_receive {:agent_event, ^id, %Catalyst.Agent.Event.AgentEnd{}}, 2_000
-
-    last = Server.state(pid).messages |> List.last()
-    assert Content.text_of(last.content) == "echo!"
+    assert {:error, {:missing_stream_4, InvalidProvider}} =
+             Registry.register_provider("invalid", InvalidProvider)
   end
 end

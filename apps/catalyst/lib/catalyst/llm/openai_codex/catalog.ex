@@ -9,16 +9,17 @@ defmodule Catalyst.LLM.OpenAICodex.Catalog do
 
   @efforts ~w(low medium high xhigh)
   @default_effort "medium"
+  @default_percent 95
 
   # Mirrors codex-rs/models-manager/models.json (visibility: list) as of
   # 2026-06: slug, display name, priority-tier ("Fast") support. All share a
   # 272k context window and low/medium/high/xhigh efforts (default medium).
   @models [
-    %{id: "gpt-5.5", name: "GPT-5.5", fast?: true},
-    %{id: "gpt-5.4", name: "GPT-5.4", fast?: true},
-    %{id: "gpt-5.4-mini", name: "GPT-5.4 mini", fast?: false},
-    %{id: "gpt-5.3-codex", name: "GPT-5.3 Codex", fast?: false},
-    %{id: "gpt-5.2", name: "GPT-5.2", fast?: false}
+    %{id: "gpt-5.5", name: "GPT-5.5", fast?: true, context_window: 272_000},
+    %{id: "gpt-5.4", name: "GPT-5.4", fast?: true, context_window: 272_000},
+    %{id: "gpt-5.4-mini", name: "GPT-5.4 mini", fast?: false, context_window: 272_000},
+    %{id: "gpt-5.3-codex", name: "GPT-5.3 Codex", fast?: false, context_window: 272_000},
+    %{id: "gpt-5.2", name: "GPT-5.2", fast?: false, context_window: 272_000}
   ]
 
   @typedoc "One normalized catalog entry (UI metadata, not a request model)."
@@ -27,7 +28,11 @@ defmodule Catalyst.LLM.OpenAICodex.Catalog do
           name: String.t(),
           fast?: boolean(),
           efforts: [String.t()],
-          default_effort: String.t()
+          default_effort: String.t(),
+          context_window: pos_integer() | nil,
+          max_context_window: pos_integer() | nil,
+          effective_context_window_percent: number(),
+          auto_compact_token_limit: pos_integer() | nil
         }
 
   @doc "Return the normalized bundled fallback catalog."
@@ -44,7 +49,12 @@ defmodule Catalyst.LLM.OpenAICodex.Catalog do
       name: Map.get(entry, :name, id),
       fast?: Map.get(entry, :fast?, false),
       efforts: Map.get(entry, :efforts, @efforts),
-      default_effort: Map.get(entry, :default_effort, @default_effort)
+      default_effort: Map.get(entry, :default_effort, @default_effort),
+      context_window: positive(Map.get(entry, :context_window)),
+      max_context_window: positive(Map.get(entry, :max_context_window)),
+      effective_context_window_percent:
+        percent(Map.get(entry, :effective_context_window_percent)),
+      auto_compact_token_limit: positive(Map.get(entry, :auto_compact_token_limit))
     }
   end
 
@@ -83,7 +93,11 @@ defmodule Catalyst.LLM.OpenAICodex.Catalog do
       name: entry["display_name"] || entry["slug"],
       fast?: live_fast?(entry),
       efforts: live_efforts(entry),
-      default_effort: entry["default_reasoning_level"] || @default_effort
+      default_effort: entry["default_reasoning_level"] || @default_effort,
+      context_window: positive(entry["context_window"]),
+      max_context_window: positive(entry["max_context_window"]),
+      effective_context_window_percent: percent(entry["effective_context_window_percent"]),
+      auto_compact_token_limit: positive(entry["auto_compact_token_limit"])
     }
   end
 
@@ -100,4 +114,13 @@ defmodule Catalyst.LLM.OpenAICodex.Catalog do
   end
 
   defp live_efforts(_entry), do: @efforts
+
+  defp positive(value) when is_integer(value) and value > 0, do: value
+  defp positive(_value), do: nil
+
+  # Codex's documented default: a missing or invalid effective percentage
+  # normalizes to 95 at the catalog boundary rather than in each consumer.
+  defp percent(value) when is_integer(value) and value > 0 and value <= 100, do: value
+  defp percent(value) when is_float(value) and value > 0.0 and value <= 100.0, do: value
+  defp percent(_value), do: @default_percent
 end
