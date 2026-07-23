@@ -4,16 +4,18 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
   (ported from PI's `buildRequestBody` + `convertResponsesMessages` /
   `convertResponsesTools`).
 
-  The system prompt goes in `instructions` (not in `input`). Messages convert to
-  Responses `input` items; reasoning blocks are replayed from their stored
-  signature; tool-call ids carry `"<call_id>|<item_id>"` and are split apart.
-  The semantic projection reuses the same encoder while omitting generated
-  assistant replay ids, so request fingerprints never depend on random values.
+  The resolved system prompt and a host-owned exact model-identity note go in
+  `instructions` (not in `input`). Messages convert to Responses `input` items;
+  reasoning blocks are replayed from their stored signature; tool-call ids carry
+  `"<call_id>|<item_id>"` and are split apart. The semantic projection reuses the
+  same encoder while omitting generated assistant replay ids, so request
+  fingerprints never depend on random values.
   """
 
   alias Catalyst.{Content, Message}
 
   @provider_module "Elixir.Catalyst.LLM.OpenAICodex.Provider"
+  @default_instructions "You are a helpful assistant."
 
   @typedoc "Whether generated assistant replay item ids are emitted."
   @type assistant_replay_ids :: :generate | :omit
@@ -64,7 +66,7 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
       "model" => model.id,
       "store" => false,
       "stream" => true,
-      "instructions" => context.system_prompt || "You are a helpful assistant.",
+      "instructions" => instructions(context.system_prompt, model.id),
       "text" => %{"verbosity" => Keyword.get(opts, :text_verbosity, "low")},
       "include" => ["reasoning.encrypted_content"],
       "tool_choice" => "auto",
@@ -76,6 +78,17 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
     |> maybe_put("service_tier", opts[:service_tier])
     |> maybe_put_tools(context.tools)
     |> maybe_put_reasoning(opts[:reasoning_effort], opts[:reasoning_summary])
+  end
+
+  defp instructions(system_prompt, model_id) do
+    prompt = system_prompt || @default_instructions
+    encoded_id = Jason.encode!(model_id)
+
+    prompt <>
+      "\n\nRuntime model identity: this request is using the exact model identifier " <>
+      encoded_id <>
+      ". If asked which model is in use, report that identifier exactly; " <>
+      "do not infer or substitute a different model name."
   end
 
   @doc """
@@ -203,10 +216,16 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
     end
   end
 
-  # Reasoning items are replayed verbatim from their stored signature.
+  # Reasoning items are replayed from their stored signature, minus the
+  # stream-position bookkeeping the websocket events attach: the backend
+  # rejects a replayed `output_index` with a 400 `unknown_parameter`
+  # (verified live), so an aborted run's transcript would poison every later
+  # full upload. Stripping at replay also repairs already-persisted sessions.
+  @non_replayable_reasoning_fields ~w(output_index sequence_number)
+
   defp assistant_block(%Content.Thinking{signature: sig}, _replay_ids) when is_binary(sig) do
     case Jason.decode(sig) do
-      {:ok, item} -> [item]
+      {:ok, %{} = item} -> [Map.drop(item, @non_replayable_reasoning_fields)]
       _ -> []
     end
   end

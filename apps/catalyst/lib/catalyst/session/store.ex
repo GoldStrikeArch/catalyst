@@ -68,7 +68,6 @@ defmodule Catalyst.Session.Store do
 
   def open(cwd, _opts), do: {:error, {:invalid_cwd, cwd}}
 
-
   @doc """
   Legacy wrapper for `open/2` that raises on failure. Prefer `open/2`.
   """

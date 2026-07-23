@@ -12,9 +12,33 @@ defmodule Catalyst.LLM.OpenAICodex.Catalog do
   @default_percent 95
 
   # Mirrors codex-rs/models-manager/models.json (visibility: list) as of
-  # 2026-06: slug, display name, priority-tier ("Fast") support. All share a
-  # 272k context window and low/medium/high/xhigh efforts (default medium).
+  # 2026-07: slug, display name, priority-tier ("Fast") support, reasoning
+  # efforts, and defaults. All bundled Codex entries use a 272k context window.
   @models [
+    %{
+      id: "gpt-5.6-sol",
+      name: "GPT-5.6-Sol",
+      fast?: true,
+      efforts: ~w(low medium high xhigh max ultra),
+      default_effort: "low",
+      context_window: 272_000
+    },
+    %{
+      id: "gpt-5.6-terra",
+      name: "GPT-5.6-Terra",
+      fast?: true,
+      efforts: ~w(low medium high xhigh max ultra),
+      default_effort: "medium",
+      context_window: 272_000
+    },
+    %{
+      id: "gpt-5.6-luna",
+      name: "GPT-5.6-Luna",
+      fast?: true,
+      efforts: ~w(low medium high xhigh max),
+      default_effort: "medium",
+      context_window: 272_000
+    },
     %{id: "gpt-5.5", name: "GPT-5.5", fast?: true, context_window: 272_000},
     %{id: "gpt-5.4", name: "GPT-5.4", fast?: true, context_window: 272_000},
     %{id: "gpt-5.4-mini", name: "GPT-5.4 mini", fast?: false, context_window: 272_000},

@@ -471,11 +471,17 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   priority, Fast from `service_tiers`, efforts from `supported_reasoning_levels`; disabled by
   `:codex_live_models, false` — set in test). Freshness follows the CLI's **`x-models-etag`**
   signal: every /responses response (SSE headers and the ws upgrade) is checked — a matching
-  etag just renews the cache TTL, a new one forces a background refetch. Else the bundled list — gpt-5.5 / gpt-5.4 (both
-  "Fast"-capable) / gpt-5.4-mini / gpt-5.3-codex / gpt-5.2, efforts low/medium/high/xhigh
-  (default medium), all vision-capable (`input: [:text, :image]`). A custom `:codex_model` id
-  is always included. The toolbar reads models plus defaults through one consistent
-  `catalog_snapshot/0` call rather than several serialized cache calls per render.
+  etag just renews the cache TTL, a new one forces a background refetch. Else the bundled list —
+  gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna, then gpt-5.5 / gpt-5.4 /
+  gpt-5.4-mini / gpt-5.3-codex / gpt-5.2. The three GPT-5.6 models are Fast-capable and use
+  Codex's 272,000-token working window; Sol/Terra support low/medium/high/xhigh/max/ultra,
+  Luna supports low/medium/high/xhigh/max, and their defaults are low/medium/medium.
+  Older entries support low/medium/high/xhigh (default medium). All are vision-capable
+  (`input: [:text, :image]`). A custom `:codex_model` id is always included. The toolbar reads
+  models plus defaults through one consistent
+  `catalog_snapshot/0` call rather than several serialized cache calls per render; a selected
+  id missing from the catalog (e.g. picked from the bundled fallback before the live list
+  replaced it) is appended as a bare entry so the model `<select>` always contains its value.
   Catalog entries carry `context_window`, `max_context_window`,
   `effective_context_window_percent`, and `auto_compact_token_limit`. `RunContext` takes one
   effective catalog snapshot at run start (configured models → live cache → bundled fallback) so
@@ -486,7 +492,8 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   changes the next eligible run, while a deliberately fixed session override stays fixed.
 - **Run options** (session opts, set live from the header UI via `Session.Server.configure/2`,
   applied on the next run): `:reasoning_effort`, `:service_tier` (`"priority"` = **Fast mode**,
-  ~1.5x speed / increased usage, gpt-5.5 & gpt-5.4 only), `:transport`. `:session_id` is reserved:
+  ~1.5x speed / increased usage, the GPT-5.6 family plus gpt-5.5 and gpt-5.4), `:transport`.
+  `:session_id` is reserved:
   `Session.Server` strips nested caller values and `RunConfig` always installs the validated
   `state.id`, so cache/header/debug/tool identities cannot diverge.
 - **Transports** (`opts[:transport]` | `config :catalyst, :codex_transport`, default `:auto`):
@@ -532,9 +539,12 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   `openai-responses-shared.ts`): `response.output_text.delta` → TextDelta; reasoning deltas →
   ThinkingDelta; `function_call` item add / `arguments.delta` / done → ToolCall
   start/delta/end; `response.completed` → Done (fill usage, set `:tool_use` if tool calls);
-  `response.failed`/`error` → Error. Reasoning item id + `reasoning.encrypted_content` are
-  round-tripped on the next request. Retry/usage-limit parsing ported from
-  `parseErrorResponse`.
+  `response.failed`/`error` → Error (`error` accepts both the SSE top-level and the
+  websocket nested `{"error": %{...}, "status": ...}` shapes, never finalizing blank).
+  Reasoning item id + `reasoning.encrypted_content` are round-tripped on the next request;
+  replay strips the stream-position fields (`output_index`, `sequence_number`) a websocket
+  stream attaches to the stored item — the backend 400s on replayed `output_index`.
+  Retry/usage-limit parsing ported from `parseErrorResponse`.
 
 ---
 

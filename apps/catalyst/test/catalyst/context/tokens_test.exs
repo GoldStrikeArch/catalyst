@@ -4,7 +4,7 @@ defmodule Catalyst.Context.TokensTest do
   alias Catalyst.{Content, Message, Model, Usage}
   alias Catalyst.Context.Tokens
   alias Catalyst.LLM.Context, as: LLMContext
-  alias Catalyst.LLM.OpenAICodex.{Provider, Request}
+  alias Catalyst.LLM.OpenAICodex.Request
 
   setup do
     _ = Task.Supervisor.start_link(name: Catalyst.LLM.AdapterSupervisor)

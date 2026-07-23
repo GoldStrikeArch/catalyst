@@ -92,12 +92,26 @@ defmodule Catalyst.LLM.OpenAICodex do
     id |> catalog_snapshot() |> Map.fetch!(:selected)
   end
 
-  @doc "Read the catalog once and resolve `id` from that same consistent snapshot."
+  @doc """
+  Read the catalog once and resolve `id` from that same consistent snapshot.
+
+  An `id` missing from the catalog (e.g. selected from the bundled fallback
+  before the live list replaced it) is appended as a bare entry, so a `<select>`
+  rendered from `models` always contains the selected value instead of silently
+  displaying whatever option the browser picks when none is selected.
+  """
   @spec catalog_snapshot(String.t()) :: catalog_snapshot()
   def catalog_snapshot(id) do
     models = list_models()
-    selected = Enum.find(models, &(&1.id == id)) || Catalog.normalize(%{id: id})
-    %{models: models, selected: selected}
+
+    case Enum.find(models, &(&1.id == id)) do
+      nil ->
+        selected = Catalog.normalize(%{id: id})
+        %{models: models ++ [selected], selected: selected}
+
+      selected ->
+        %{models: models, selected: selected}
+    end
   end
 
   @doc "Supported reasoning efforts, lowest to highest."

@@ -239,7 +239,10 @@ defmodule Catalyst.Test.Codex do
     @impl true
     def terminate(_reason, _state), do: :ok
 
-    defp frames(%{"generate" => false, "instructions" => "fail warmup"}, turn) do
+    defp frames(
+           %{"generate" => false, "instructions" => "fail warmup" <> _runtime_identity},
+           turn
+         ) do
       [
         text(%{"type" => "response.created", "response" => %{"id" => "resp_#{turn}"}}),
         text(%{

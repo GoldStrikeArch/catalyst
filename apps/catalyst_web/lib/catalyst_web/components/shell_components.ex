@@ -41,12 +41,17 @@ defmodule CatalystWeb.ShellComponents do
       >
         <%!-- relative + z-40: the header must own a stacking context above the
           page content, or the absolutely-positioned diagnostics popover paints
-          underneath later siblings (main renders after the header). --%>
+          underneath later siblings (main renders after the header).
+
+          The status and control regions use separate grid tracks. Below 2xl
+          they stack, giving the fixed-width run controls a full row; above 2xl
+          they share the row. This keeps either region from painting through
+          the other when desktop windows are narrower than their contents. --%>
         <header
           id="shell-header"
-          class="relative z-40 flex min-h-12 items-center gap-3 border-b border-neutral-200 bg-neutral-50 px-3 dark:border-white/10 dark:bg-neutral-900"
+          class="relative z-40 grid min-h-12 grid-cols-1 items-center gap-x-3 gap-y-1.5 border-b border-neutral-200 bg-neutral-50 px-3 py-1.5 2xl:grid-cols-[minmax(0,1fr)_auto] dark:border-white/10 dark:bg-neutral-900"
         >
-          <div class="flex min-w-0 flex-1 items-center gap-2">
+          <div id="shell-header-status" class="flex min-w-0 items-center gap-2">
             <span :if={@running} class="flex items-center gap-1" aria-label="Agent running">
               <span class="size-1.5 animate-pulse rounded-full bg-indigo-500"></span>
               <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-150"></span>
@@ -71,10 +76,11 @@ defmodule CatalystWeb.ShellComponents do
             </nav>
 
             <span
-              class="ml-2 truncate font-mono text-xs text-neutral-400 dark:text-neutral-500"
-              title="Working directory — change with /cd <path>"
+              id="header-cwd"
+              class="ml-2 min-w-0 flex-1 truncate font-mono text-xs text-neutral-400 dark:text-neutral-500"
+              title={"#{@cwd} — change with /cd <path>"}
             >
-              {@cwd}
+              {short_cwd(@cwd)}
             </span>
 
             <.context_meter :if={@context_status} status={@context_status} />
@@ -87,7 +93,10 @@ defmodule CatalystWeb.ShellComponents do
             />
           </div>
 
-          <div class="flex flex-none items-center gap-1.5">
+          <div
+            id="shell-header-controls"
+            class="flex w-full min-w-0 flex-wrap items-center gap-1.5 sm:justify-end 2xl:w-auto 2xl:justify-self-end"
+          >
             {PageRenderer.render_components(:header_extra, assigns)}
 
             <button
@@ -100,12 +109,15 @@ defmodule CatalystWeb.ShellComponents do
               <.icon name="hero-eye-slash" class="size-3.5" /> Quiet
             </button>
 
-            <div class="flex items-center gap-1.5">
+            <div
+              id="codex-control-group"
+              class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
+            >
               <.form
                 for={@codex_form}
                 id="codex-opts"
                 phx-change="codex_opts"
-                class="flex items-center gap-1.5"
+                class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
               >
                 <.input
                   field={@codex_form[:model]}
@@ -229,7 +241,7 @@ defmodule CatalystWeb.ShellComponents do
     ~H"""
     <div
       id="context-meter"
-      class="ml-2 hidden min-w-40 items-center gap-2 rounded-full border border-neutral-200 px-2.5 py-1 text-[0.65rem] text-neutral-500 sm:flex dark:border-white/10 dark:text-neutral-400"
+      class="ml-2 hidden shrink-0 items-center gap-2 whitespace-nowrap rounded-full border border-neutral-200 px-2.5 py-1 text-[0.65rem] text-neutral-500 sm:flex dark:border-white/10 dark:text-neutral-400"
       title={"Context threshold source: #{@source_label}"}
     >
       <.icon
@@ -241,7 +253,7 @@ defmodule CatalystWeb.ShellComponents do
         id="context-progress"
         value={min(@used, @threshold)}
         max={@threshold}
-        class="h-1.5 w-16 overflow-hidden rounded-full accent-indigo-500"
+        class="hidden h-1.5 w-16 overflow-hidden rounded-full accent-indigo-500 xl:block"
       >
         {@used} / {@threshold}
       </progress>
@@ -262,7 +274,7 @@ defmodule CatalystWeb.ShellComponents do
       </span>
       <span
         id="context-threshold-source"
-        class="max-w-24 truncate text-neutral-400 dark:text-neutral-500"
+        class="hidden max-w-24 truncate text-neutral-400 xl:inline dark:text-neutral-500"
       >
         {@source_label}
       </span>
@@ -282,7 +294,7 @@ defmodule CatalystWeb.ShellComponents do
       :if={@prompt || @workflow || @context || @preview == :loading || match?({:error, _}, @preview)}
       id="run-diagnostics"
       data-open={to_string(@open)}
-      class="group relative ml-1 hidden md:block"
+      class="group relative ml-1 hidden shrink-0 md:block"
     >
       <button
         id="run-diagnostics-toggle"
@@ -290,7 +302,7 @@ defmodule CatalystWeb.ShellComponents do
         phx-click="toggle_diagnostics"
         aria-expanded={to_string(@open)}
         aria-controls="run-diagnostics-panel"
-        class="flex cursor-pointer items-center gap-1 rounded-full border border-neutral-200 px-2.5 py-1 text-[0.65rem] font-medium text-neutral-500 transition hover:border-neutral-300 hover:text-neutral-900 dark:border-white/10 dark:text-neutral-400 dark:hover:border-white/20 dark:hover:text-white"
+        class="flex max-w-full cursor-pointer items-center gap-1 overflow-hidden whitespace-nowrap rounded-full border border-neutral-200 px-2.5 py-1 text-[0.65rem] font-medium text-neutral-500 transition hover:border-neutral-300 hover:text-neutral-900 dark:border-white/10 dark:text-neutral-400 dark:hover:border-white/20 dark:hover:text-white"
       >
         <.icon name="hero-document-text-micro" class="size-3.5" />
         <%= cond do %>
@@ -395,6 +407,18 @@ defmodule CatalystWeb.ShellComponents do
 
   defp metadata_value(%{} = metadata, key), do: Map.get(metadata, key)
   defp metadata_value(_metadata, _key), do: nil
+
+  # The header shows only the tail of the working directory (the full path is
+  # in the tooltip and the empty state) — a full absolute path starves the
+  # rest of the header row of space.
+  defp short_cwd(cwd) when is_binary(cwd) do
+    case Path.split(cwd) do
+      parts when length(parts) > 3 -> "…/" <> (parts |> Enum.take(-2) |> Path.join())
+      _parts -> cwd
+    end
+  end
+
+  defp short_cwd(cwd), do: to_string(cwd)
 
   defp digest_prefix(digest) when is_binary(digest), do: String.slice(digest, 0, 8)
   defp digest_prefix(_digest), do: "unknown"

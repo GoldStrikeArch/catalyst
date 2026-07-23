@@ -205,19 +205,45 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
   end
 
   defp do_handle("error", ev, s, _sink),
-    do: %{s | error: "Error #{ev["code"]}: #{ev["message"]}", stop_reason: :error, done: true}
+    do: %{s | error: error_event_message(ev), stop_reason: :error, done: true}
 
   defp do_handle("response.failed", %{"response" => resp}, s, _sink) do
     msg =
       case resp["error"] do
-        %{} = error -> "#{error["code"] || "unknown"}: #{error["message"]}"
-        _ -> "response failed"
+        %{} = error ->
+          "#{present(error["code"]) || present(error["type"]) || "unknown"}: " <>
+            (present(error["message"]) || Jason.encode!(error))
+
+        _ ->
+          "response failed"
       end
 
     %{s | error: msg, stop_reason: :error, done: true}
   end
 
   defp do_handle(_type, _ev, s, _sink), do: s
+
+  # SSE puts code/message at the top level; the websocket frame nests them
+  # under "error" (plus an HTTP "status"). Never produce a blank message —
+  # an unrecognized shape falls back to the raw event.
+  defp error_event_message(ev) do
+    nested = ev["error"] || %{}
+    code = present(ev["code"]) || present(nested["code"]) || present(nested["type"])
+    message = present(ev["message"]) || present(nested["message"])
+
+    case {code, message} do
+      {nil, nil} -> "Error: #{ev |> Jason.encode!() |> String.slice(0, 600)}"
+      {code, nil} -> "Error #{code}#{status_suffix(ev)}"
+      {nil, message} -> "Error#{status_suffix(ev)}: #{message}"
+      {code, message} -> "Error #{code}#{status_suffix(ev)}: #{message}"
+    end
+  end
+
+  defp present(value) when is_binary(value) and value != "", do: value
+  defp present(_value), do: nil
+
+  defp status_suffix(%{"status" => status}) when is_integer(status), do: " (HTTP #{status})"
+  defp status_suffix(_ev), do: ""
 
   @doc "Build the final assistant message."
   @spec finalize(t(), Catalyst.Model.t()) :: Message.Assistant.t()

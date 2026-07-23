@@ -244,17 +244,24 @@ defmodule Catalyst.Session.Store.Codec do
 
   defp decode_block(invalid), do: {:error, {:invalid_content_block, invalid}}
 
-  defp decode_reason(reason) when reason in ~w(stop length tool_use error aborted),
-    do: String.to_existing_atom(reason)
-
+  # Explicit clauses, not `String.to_existing_atom/1`: in an interactive
+  # (lazily loaded) VM the target atom only exists once some module using it
+  # has been loaded, so whitelist+to_existing_atom crashes on load order —
+  # which made `Store.load_state/1` return `{:error, {:read_failed, ...}}`
+  # and resume an empty transcript.
+  defp decode_reason("stop"), do: :stop
+  defp decode_reason("length"), do: :length
+  defp decode_reason("tool_use"), do: :tool_use
+  defp decode_reason("error"), do: :error
+  defp decode_reason("aborted"), do: :aborted
   defp decode_reason(_reason), do: :stop
 
   defp encode_context_window_source(nil), do: nil
   defp encode_context_window_source(source), do: to_string(source)
 
-  defp decode_context_window_source(source)
-       when source in ~w(session catalog persisted fallback),
-       do: String.to_existing_atom(source)
-
+  defp decode_context_window_source("session"), do: :session
+  defp decode_context_window_source("catalog"), do: :catalog
+  defp decode_context_window_source("persisted"), do: :persisted
+  defp decode_context_window_source("fallback"), do: :fallback
   defp decode_context_window_source(_source), do: nil
 end

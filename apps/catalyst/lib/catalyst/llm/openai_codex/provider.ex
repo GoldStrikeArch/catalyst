@@ -361,7 +361,11 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
           next_continuation(req, assistant)
         )
 
-        Debug.log(req.session_id, "codex.response", "ws ok")
+        case parser.error do
+          nil -> Debug.log(req.session_id, "codex.response", "ws ok")
+          error -> Debug.log(req.session_id, "codex.error", "ws server error: #{error}")
+        end
+
         {:ok, assistant}
 
       {:error, reason, parser, _decoded} ->

@@ -82,6 +82,18 @@ defmodule CatalystWeb.ShellLiveTest do
     assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
   end
 
+  test "the shell header keeps status and wrapping controls in separate regions", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(view, "#shell-header.grid")
+    assert has_element?(view, "#shell-header > #shell-header-status.min-w-0")
+    assert has_element?(view, "#shell-header-status #header-cwd.min-w-0.flex-1")
+    assert has_element?(view, "#shell-header > #shell-header-controls.flex-wrap")
+    assert has_element?(view, "#shell-header-controls #codex-control-group.flex-wrap")
+    assert has_element?(view, "#codex-control-group #codex-opts.flex-wrap")
+    assert has_element?(view, "#shell-header-controls #new-session-button")
+  end
+
   test "the chat starts empty and renders messages through a LiveView stream", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
     assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
@@ -368,7 +380,8 @@ defmodule CatalystWeb.ShellLiveTest do
 
     send(view.pid, {:agent_event, id, status})
 
-    assert has_element?(view, "#context-meter")
+    assert has_element?(view, "#shell-header-status #context-meter.shrink-0")
+    refute has_element?(view, "#context-meter.overflow-hidden")
     assert has_element?(view, "#context-token-count", "12.5k / 20.0k")
     assert has_element?(view, "#context-estimate-state", "anchored")
     assert has_element?(view, "#context-threshold-source", "context_thresholds")

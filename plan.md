@@ -204,10 +204,12 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   blank. Verified in the dev server (panel renders all sections; nav shows Chat/Extensions).
   **`mix test`: 218 (catalyst) + 3 (cli) + 37 (web) + 2 (desktop) = 260 green.**
 - **P5a — DONE ✅ (Codex run settings + websocket transport).** Researched against the real
-  Codex CLI (`openai/codex`), which is authoritative over this PI fork: current models are
-  gpt-5.5 / gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex / gpt-5.2 (so the "future-dated ids" caveat
-  from P2 is obsolete); reasoning efforts low/medium/high/xhigh (default medium); "Fast" =
-  `service_tier: "priority"` (~1.5x speed, increased usage; gpt-5.5/5.4 only); every model says
+  Codex CLI (`openai/codex`), which is authoritative over this PI fork. The bundled fallback
+  now lists gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna ahead of gpt-5.5 / gpt-5.4 /
+  gpt-5.4-mini / gpt-5.3-codex / gpt-5.2 (so the "future-dated ids" caveat from P2 is
+  obsolete). Sol/Terra expose low/medium/high/xhigh/max/ultra reasoning, Luna through max,
+  and older entries through xhigh; "Fast" = `service_tier: "priority"` (~1.5x speed,
+  increased usage; the GPT-5.6 family plus gpt-5.5/5.4); every model says
   `prefer_websockets: true`. (1) **Model catalog** — `OpenAICodex.list_models/0` (+
   `catalog_entry/1`, `efforts/0`) mirroring the CLI's bundled list, overridable via
   `config :catalyst, :codex_models`; custom `:codex_model` ids always included. (2) **Run
@@ -344,6 +346,21 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   the observed-path debug append deliberately remains a synchronous `File.write!` in the run task
   before the event is accepted by the session — moving observation behind an accepted-event
   pipeline is a known design option, explicitly deferred.
+- **Codex hardening (post-GPT-5.6 rollout) — DONE ✅.** Three field bugs root-caused from the
+  debug log + a live `generate: false` replay repro: (1) **model picker desync** — selecting a
+  bundled-fallback model (e.g. gpt-5.6-terra) and then having the background live-catalog
+  refresh replace the options list left the `<select>` with no selected option, so the browser
+  silently displayed another model; `catalog_snapshot/1` now appends a missing selected id as a
+  bare entry. (2) **post-abort 400 shown as blank "Error : "** — websocket-streamed reasoning
+  items store `output_index` in the Thinking signature; replaying it on the next full upload is
+  rejected by the backend (`unknown_parameter`, verified live), and the ws error frame nests
+  `code`/`message` under `"error"` which the parser read at the top level, blanking the message.
+  Replay now strips `output_index`/`sequence_number` (repairs existing transcripts too), the
+  parser handles both error shapes and never finalizes blank, and a server error carried by an
+  otherwise-clean ws exchange is debug-logged. (3) **session resume `:badarg`** — `Store.Codec`
+  decoded enums via whitelist + `String.to_existing_atom/1`, which crashes when no loaded module
+  references the atom yet (lazily loaded VM), making `load_state` fail and resume come back
+  empty; replaced with explicit total mappings. `mix precommit` (582+4+114+2 green) + dialyzer.
 - **Next options:** notarize for distribution (the launcher step must then re-sign inside-out +
   re-sign the dmg); replace the placeholder icon; optional approval gate as an extension via the
   `before_tool_call` hook (a panel toggle could install it); optional `self_test/0` extension

@@ -268,6 +268,34 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParserTest do
     assert assistant.usage.output == 3
   end
 
+  # The websocket error frame nests code/message under "error" (the shape the
+  # backend sends for a 400 on a replayed transcript); it used to finalize as
+  # the blank "Error : ".
+  test "a websocket-shaped error event surfaces the nested message" do
+    events = [
+      %{
+        "type" => "error",
+        "status" => 400,
+        "error" => %{
+          "type" => "invalid_request_error",
+          "message" => "Unknown parameter: 'input[1].output_index'."
+        }
+      }
+    ]
+
+    assistant = run(events)
+    assert assistant.stop_reason == :error
+    assert assistant.error_message =~ "invalid_request_error"
+    assert assistant.error_message =~ "Unknown parameter"
+    assert assistant.error_message =~ "400"
+  end
+
+  test "an unrecognized error event shape never finalizes blank" do
+    assistant = run([%{"type" => "error"}])
+    assert assistant.stop_reason == :error
+    assert assistant.error_message =~ ~s({"type":"error"})
+  end
+
   test "a late response.completed does not mask a prior error event" do
     events = [
       %{"type" => "error", "code" => "boom", "message" => "exploded"},

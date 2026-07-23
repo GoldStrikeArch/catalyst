@@ -373,6 +373,37 @@ defmodule Catalyst.Session.StoreTest do
     assert [%Message.User{}, %Message.Assistant{stop_reason: :stop}] = loaded
   end
 
+  # Regression: decode used whitelist + String.to_existing_atom/1, which
+  # crashes in a lazily loaded VM when no module referencing the atom has been
+  # loaded yet — load_state then reported {:read_failed, {:error, :badarg}}
+  # and resume came back empty. Every persisted enum value must decode.
+  test "every persisted stop reason and context-window source decodes" do
+    store = Store.new("/tmp/proj_enum_decode")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    for reason <- ~w(stop length tool_use error aborted) do
+      File.write!(
+        store.path,
+        ~s({"type":"message","message":{"role":"assistant","stopReason":"#{reason}"}}\n),
+        [:append]
+      )
+    end
+
+    reasons = store.path |> Store.load() |> Enum.map(& &1.stop_reason)
+    assert reasons == [:stop, :length, :tool_use, :error, :aborted]
+
+    for source <- ~w(session catalog persisted fallback) do
+      snapshot =
+        ~s({"type":"settings_snapshot","model":{"id":"m","contextWindowSource":"#{source}"},) <>
+          ~s("thinking_level":null}\n)
+
+      File.write!(store.path, snapshot, [:append])
+
+      assert {:ok, %{model: %{context_window_source: decoded}}} = Store.load_state(store.path)
+      assert decoded == String.to_atom(source)
+    end
+  end
+
   test "unexpected content shapes degrade to text instead of crashing the append" do
     store = Store.new("/tmp/proj_duck_typed")
     on_exit(fn -> File.rm_rf!(store.path) end)

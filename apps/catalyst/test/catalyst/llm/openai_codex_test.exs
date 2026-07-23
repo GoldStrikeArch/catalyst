@@ -21,8 +21,26 @@ defmodule Catalyst.LLM.OpenAICodexTest do
     models = OpenAICodex.list_models()
     ids = Enum.map(models, & &1.id)
 
+    assert Enum.take(ids, 3) == ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna)
     assert "gpt-5.4" in ids
     assert "gpt-5.5" in ids
+
+    sol = Enum.find(models, &(&1.id == "gpt-5.6-sol"))
+    assert sol.name == "GPT-5.6-Sol"
+    assert sol.fast?
+    assert sol.efforts == ~w(low medium high xhigh max ultra)
+    assert sol.default_effort == "low"
+    assert sol.context_window == 272_000
+
+    terra = Enum.find(models, &(&1.id == "gpt-5.6-terra"))
+    assert terra.fast?
+    assert terra.efforts == ~w(low medium high xhigh max ultra)
+    assert terra.default_effort == "medium"
+
+    luna = Enum.find(models, &(&1.id == "gpt-5.6-luna"))
+    assert luna.fast?
+    assert luna.efforts == ~w(low medium high xhigh max)
+    assert luna.default_effort == "medium"
 
     gpt54 = Enum.find(models, &(&1.id == "gpt-5.4"))
     assert gpt54.fast?
@@ -200,6 +218,20 @@ defmodule Catalyst.LLM.OpenAICodexTest do
 
     assert_receive {:trace, ^cache, :receive, {:"$gen_call", _from, :models}}
     refute_receive {:trace, ^cache, :receive, {:"$gen_call", _from, :models}}
+  end
+
+  # Selecting a bundled-fallback model and then having the live catalog replace
+  # the list (without that id) must not desync the model picker: the selected
+  # entry stays in the options list, so the UI keeps rendering the true value.
+  test "catalog_snapshot appends a selected id missing from the catalog" do
+    Application.put_env(:catalyst, :codex_models, [%{id: "live-only-model"}])
+    on_exit(fn -> Application.delete_env(:catalyst, :codex_models) end)
+
+    %{models: models, selected: selected} = OpenAICodex.catalog_snapshot("gpt-5.6-terra")
+
+    assert selected.id == "gpt-5.6-terra"
+    assert selected in models
+    assert List.last(models).id == "gpt-5.6-terra"
   end
 
   defmodule ModelsStub do

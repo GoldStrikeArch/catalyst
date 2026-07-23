@@ -38,7 +38,8 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
 
     body = Request.build(model(), context, session_id: "sess-1")
 
-    assert body["instructions"] == "You are Catalyst."
+    assert String.starts_with?(body["instructions"], "You are Catalyst.\n\n")
+    assert body["instructions"] =~ ~s(exact model identifier "gpt-5.4")
     assert body["include"] == ["reasoning.encrypted_content"]
     assert body["prompt_cache_key"] == "sess-1"
     assert body["store"] == false
@@ -85,13 +86,65 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
     assert [%{"type" => "function", "name" => "grep", "strict" => nil}] = body["tools"]
   end
 
+  # Websocket streams attach stream-position bookkeeping to reasoning items;
+  # replaying `output_index` is rejected by the backend with a 400
+  # `unknown_parameter`, so it must never reach the wire (including from
+  # transcripts persisted before this fix).
+  test "reasoning replay strips stream-position fields from the stored signature" do
+    stored = %{
+      "type" => "reasoning",
+      "id" => "rs_1",
+      "encrypted_content" => "ENC",
+      "summary" => [%{"type" => "summary_text", "text" => "thinking"}],
+      "output_index" => 0,
+      "sequence_number" => 7
+    }
+
+    messages = [
+      %Message.Assistant{
+        content: [%Content.Thinking{thinking: "...", signature: Jason.encode!(stored)}],
+        stop_reason: :tool_use
+      }
+    ]
+
+    assert [replayed] = Request.input_items(messages, model())
+    assert replayed == Map.drop(stored, ["output_index", "sequence_number"])
+  end
+
   test "omits tools and reasoning when not provided; defaults instructions" do
     context = %Context{system_prompt: nil, messages: [Message.user("hi")], tools: []}
     body = Request.build(model(), context, [])
 
-    assert body["instructions"] == "You are a helpful assistant."
+    assert String.starts_with?(body["instructions"], "You are a helpful assistant.\n\n")
+    assert body["instructions"] =~ ~s(exact model identifier "gpt-5.4")
     refute Map.has_key?(body, "tools")
     refute Map.has_key?(body, "reasoning")
+  end
+
+  test "instructions identify the selected request model without injecting a stale default" do
+    selected = %Model{
+      model()
+      | id: "gpt-5.6-luna",
+        name: "GPT-5.6-Luna"
+    }
+
+    context = %Context{
+      system_prompt: "Keep this custom prompt byte-for-byte.",
+      messages: [],
+      tools: []
+    }
+
+    body = Request.build(selected, context)
+
+    assert String.starts_with?(
+             body["instructions"],
+             "Keep this custom prompt byte-for-byte.\n\nRuntime model identity:"
+           )
+
+    assert body["instructions"] =~ ~s(exact model identifier "gpt-5.6-luna")
+    assert body["instructions"] =~ "report that identifier exactly"
+    refute body["instructions"] =~ "gpt-5.4"
+    assert body["model"] == "gpt-5.6-luna"
   end
 
   test "tool-result images ship as an input_image part list for vision models" do

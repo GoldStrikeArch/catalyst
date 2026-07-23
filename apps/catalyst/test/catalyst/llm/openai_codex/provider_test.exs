@@ -408,7 +408,8 @@ defmodule Catalyst.LLM.OpenAICodex.ProviderTest do
     assert_receive {:ws_request, frame}
     refute Map.has_key?(frame, "previous_response_id")
     assert length(frame["input"]) == 1
-    assert frame["instructions"] == "changed run prompt"
+    assert String.starts_with?(frame["instructions"], "changed run prompt\n\n")
+    assert frame["instructions"] =~ ~s(exact model identifier "gpt-test")
     assert Content.text_of(assistant.content) == "answer 2"
   end
 

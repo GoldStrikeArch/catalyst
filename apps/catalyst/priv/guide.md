@@ -89,6 +89,22 @@ Inside the bundle — resolve at runtime, don't hardcode:
   extension), `reload_extensions`, the **Extensions panel** at `/extensions` (per-extension
   reload / roll back / disable buttons), or restart with `CATALYST_SAFE_MODE=1` (built-ins only).
 
+### Choosing a Codex model
+
+The model picker prefers the live catalog served by your ChatGPT subscription. If that catalog
+is temporarily unavailable, Catalyst's bundled fallback includes the GPT-5.6 family:
+
+| Model | Best fit | Reasoning efforts | Default | Fast |
+| --- | --- | --- | --- | --- |
+| `gpt-5.6-sol` | Frontier capability for complex coding work | low, medium, high, xhigh, max, ultra | low | Yes |
+| `gpt-5.6-terra` | Balanced everyday coding | low, medium, high, xhigh, max, ultra | medium | Yes |
+| `gpt-5.6-luna` | Fast, affordable coding work | low, medium, high, xhigh, max | medium | Yes |
+
+The bundled Codex metadata gives each model a 272,000-token working context. A newer live catalog
+always wins when available. Changing the model or effort in the header configures the next run
+without discarding the current transcript; **Fast** sends the subscription's priority service tier
+and increases usage.
+
 ### Worked example: make the app background white
 
 The canonical runtime UI change — edits the bundled CSS source via `app_dir` (no hardcoded path)
