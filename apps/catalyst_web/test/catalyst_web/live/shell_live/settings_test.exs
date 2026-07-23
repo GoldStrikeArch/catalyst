@@ -26,6 +26,13 @@ defmodule CatalystWeb.ShellLive.SettingsTest do
   end
 
   describe "toggle_fast/1" do
+    test "enables priority for every GPT-5.6 model" do
+      Enum.each(~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna), fn model_id ->
+        prefs = %{@base_prefs | model: model_id}
+        assert Settings.toggle_fast(prefs).fast
+      end)
+    end
+
     test "enables priority only for models that support it" do
       assert Settings.toggle_fast(@base_prefs).fast
 

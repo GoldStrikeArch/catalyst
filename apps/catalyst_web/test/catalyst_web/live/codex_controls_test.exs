@@ -5,11 +5,13 @@ defmodule CatalystWeb.CodexControlsTest do
   import Phoenix.LiveViewTest
 
   alias Catalyst.LLM.OpenAICodex
+  alias Catalyst.LLM.OpenAICodex.CatalogCache
   alias Catalyst.LLM.Registry
   alias Catalyst.Session.{Manager, Server}
 
   @codex_api "openai-codex-responses"
   @capture_pid_env :model_request_capture_pid
+  @codex_prefs_ptr {CatalystWeb.ShellLive, :codex_prefs}
 
   defmodule RequestCaptureProvider do
     @moduledoc false
@@ -40,13 +42,39 @@ defmodule CatalystWeb.CodexControlsTest do
   end
 
   setup do
-    on_exit(fn -> :persistent_term.erase({CatalystWeb.ShellLive, :codex_prefs}) end)
+    previous_models = CatalogCache.models()
+    previous_prefs = :persistent_term.get(@codex_prefs_ptr, :not_set)
+    :ok = CatalogCache.reset()
+
+    on_exit(fn ->
+      restore_prefs(previous_prefs)
+      restore_catalog(previous_models)
+    end)
+
     :ok
   end
 
   defp session_pid(view) do
     {:ok, pid} = Manager.whereis(session_id(view))
     pid
+  end
+
+  defp restore_prefs(:not_set), do: :persistent_term.erase(@codex_prefs_ptr)
+  defp restore_prefs(prefs), do: :persistent_term.put(@codex_prefs_ptr, prefs)
+
+  defp restore_catalog([]), do: CatalogCache.reset()
+
+  defp restore_catalog(models) do
+    :ok = CatalogCache.reset()
+    CatalogCache.store(models)
+  end
+
+  defp model_option_values(view) do
+    view
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#codex-opts select[name='model'] option")
+    |> LazyHTML.attribute("value")
   end
 
   test "the run controls reconfigure the live session in place", %{conn: conn} do
@@ -88,6 +116,31 @@ defmodule CatalystWeb.CodexControlsTest do
     assert session_pid(view) == pid
   end
 
+  test "Fast remains available for every GPT-5.6 model omitted by the live catalog", %{
+    conn: conn
+  } do
+    live =
+      OpenAICodex.parse_live_models([
+        %{"slug" => "gpt-5.5", "visibility" => "list", "priority" => 0},
+        %{"slug" => "gpt-5.4", "visibility" => "list", "priority" => 1}
+      ])
+
+    :ok = CatalogCache.store(live)
+    {:ok, view, _html} = live(conn, "/")
+    pid = session_pid(view)
+
+    Enum.each(~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna), fn model_id ->
+      view |> form("#codex-opts") |> render_change(%{"model" => model_id})
+
+      assert has_element?(view, "#codex-fast-toggle")
+      view |> element("#codex-fast-toggle") |> render_click()
+      assert Server.state(pid).opts[:service_tier] == "priority"
+
+      view |> element("#codex-fast-toggle") |> render_click()
+      refute Keyword.has_key?(Server.state(pid).opts, :service_tier)
+    end)
+  end
+
   test "fast is clamped off when switching to a model without the priority tier", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
     pid = session_pid(view)
@@ -126,5 +179,86 @@ defmodule CatalystWeb.CodexControlsTest do
     assert body["model"] == "gpt-5.6-luna"
     assert body["instructions"] =~ ~s(exact model identifier "gpt-5.6-luna")
     refute body["instructions"] =~ "gpt-5.4"
+  end
+
+  test "New preserves the selected model and ordered picker after a live catalog refresh", %{
+    conn: conn
+  } do
+    :ok = CatalogCache.reset()
+    {:ok, view, _html} = live(conn, "/")
+
+    assert Enum.take(model_option_values(view), 5) ==
+             ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5 gpt-5.4)
+
+    view
+    |> form("#codex-opts")
+    |> render_change(%{
+      "model" => "gpt-5.6-luna",
+      "effort" => "max",
+      "transport" => "sse"
+    })
+
+    view |> element("#codex-fast-toggle") |> render_click()
+    previous_pid = session_pid(view)
+
+    live =
+      OpenAICodex.parse_live_models([
+        %{
+          "slug" => "gpt-5.5",
+          "display_name" => "GPT-5.5",
+          "visibility" => "list",
+          "priority" => 0
+        },
+        %{
+          "slug" => "gpt-5.4",
+          "display_name" => "GPT-5.4",
+          "visibility" => "list",
+          "priority" => 1
+        },
+        %{
+          "slug" => "gpt-5.4-mini",
+          "display_name" => "GPT-5.4 mini",
+          "visibility" => "list",
+          "priority" => 2
+        },
+        %{
+          "slug" => "gpt-5.3-codex-spark",
+          "display_name" => "GPT-5.3 Codex Spark",
+          "visibility" => "list",
+          "priority" => 3
+        }
+      ])
+
+    :ok = CatalogCache.store(live)
+    view |> element("#new-session-button") |> render_click()
+
+    refute session_pid(view) == previous_pid
+    snapshot = Server.state(session_pid(view))
+    assert snapshot.model.id == "gpt-5.6-luna"
+    assert snapshot.opts[:reasoning_effort] == "max"
+    assert snapshot.opts[:service_tier] == "priority"
+    assert snapshot.opts[:transport] == "sse"
+
+    assert Enum.take(model_option_values(view), 5) ==
+             ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5 gpt-5.4)
+
+    assert has_element?(
+             view,
+             "#codex-opts select[name='model'] option[value='gpt-5.6-luna'][selected]",
+             "GPT-5.6-Luna"
+           )
+
+    assert has_element?(
+             view,
+             "#codex-opts select[name='effort'] option[value='max'][selected]"
+           )
+
+    assert has_element?(
+             view,
+             "#codex-opts select[name='transport'] option[value='sse'][selected]"
+           )
+
+    assert has_element?(view, "#codex-opts option[value='gpt-5.5']", "GPT-5.5")
+    assert has_element?(view, "#codex-opts option[value='gpt-5.4']", "GPT-5.4")
   end
 end

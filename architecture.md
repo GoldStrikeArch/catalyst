@@ -466,12 +466,15 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
 
 - URL `https://chatgpt.com/backend-api/codex/responses`.
 - **Model catalog** (`OpenAICodex.list_models/0`): `config :catalyst, :codex_models` override
-  wins; else the **live list** from `GET <base>/codex/models?client_version=…` (fetched in a
-  background task when authenticated, 5-min TTL, `visibility: "list"` models sorted by
-  priority, Fast from `service_tiers`, efforts from `supported_reasoning_levels`; disabled by
-  `:codex_live_models, false` — set in test). Freshness follows the CLI's **`x-models-etag`**
-  signal: every /responses response (SSE headers and the ws upgrade) is checked — a matching
-  etag just renews the cache TTL, a new one forces a background refetch. Else the bundled list —
+  wins; otherwise the GPT-5.6 Sol/Terra/Luna entries are pinned first, followed by the **live
+  list** from `GET <base>/codex/models?client_version=…` (fetched in a background task when
+  authenticated, 5-min TTL, `visibility: "list"` models sorted by priority, Fast from
+  `service_tiers`, efforts from `supported_reasoning_levels`; disabled by
+  `:codex_live_models, false` — set in test). A duplicate live GPT-5.6 entry supplies live
+  metadata without changing the trio's order or known Fast support. Freshness follows the CLI's
+  **`x-models-etag`** signal: every /responses response (SSE headers and the ws upgrade) is
+  checked — a matching etag just renews the cache TTL, a new one forces a background refetch.
+  When no live entries are cached, the complete bundled list is used —
   gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna, then gpt-5.5 / gpt-5.4 /
   gpt-5.4-mini / gpt-5.3-codex / gpt-5.2. The three GPT-5.6 models are Fast-capable and use
   Codex's 272,000-token working window; Sol/Terra support low/medium/high/xhigh/max/ultra,
@@ -480,12 +483,14 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   (`input: [:text, :image]`). A custom `:codex_model` id is always included. The toolbar reads
   models plus defaults through one consistent
   `catalog_snapshot/0` call rather than several serialized cache calls per render; a selected
-  id missing from the catalog (e.g. picked from the bundled fallback before the live list
-  replaced it) is appended as a bare entry so the model `<select>` always contains its value.
+  id missing from the effective catalog (for example an unpinned bundled model selected before
+  a live refresh, or an explicit override omission) is appended as a bare entry so the model
+  `<select>` always contains its value.
   Catalog entries carry `context_window`, `max_context_window`,
   `effective_context_window_percent`, and `auto_compact_token_limit`. `RunContext` takes one
-  effective catalog snapshot at run start (configured models → live cache → bundled fallback) so
-  a mid-run refresh cannot mix limits. An explicit session window remains source `:session`;
+  effective catalog snapshot at run start (configured models → pinned GPT-5.6 plus live cache →
+  bundled fallback) so a mid-run refresh cannot mix limits. An explicit session window remains
+  source `:session`;
   otherwise a matching catalog entry refreshes legacy/persisted metadata, falling back to the
   persisted values or Codex's 272,000-token default. `Store.Codec` persists the normalized fields
   and `context_window_source`; it does not persist a live catalog object. Thus a catalog refresh

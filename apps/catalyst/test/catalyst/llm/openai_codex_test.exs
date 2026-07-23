@@ -193,6 +193,7 @@ defmodule Catalyst.LLM.OpenAICodexTest do
     :ok = CatalogCache.store(OpenAICodex.parse_live_models(@live_payload))
 
     ids = OpenAICodex.list_models() |> Enum.map(& &1.id)
+    assert Enum.take(ids, 3) == ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna)
     assert "gpt-6" in ids
     # The configured default id is still appended.
     assert "gpt-5.4" in ids
@@ -203,6 +204,54 @@ defmodule Catalyst.LLM.OpenAICodexTest do
     ids = OpenAICodex.list_models() |> Enum.map(& &1.id)
     assert "pinned-model" in ids
     refute "gpt-6" in ids
+    refute "gpt-5.6-sol" in ids
+  end
+
+  test "a live catalog keeps current models first and uses live metadata without duplicates" do
+    live =
+      OpenAICodex.parse_live_models([
+        %{
+          "slug" => "gpt-5.5",
+          "display_name" => "GPT-5.5",
+          "visibility" => "list",
+          "priority" => 0
+        },
+        %{
+          "slug" => "gpt-5.4",
+          "display_name" => "GPT-5.4",
+          "visibility" => "list",
+          "priority" => 1
+        },
+        %{
+          "slug" => "gpt-5.3-codex-spark",
+          "display_name" => "GPT-5.3 Codex Spark",
+          "visibility" => "list",
+          "priority" => 2
+        },
+        %{
+          "slug" => "gpt-5.6-luna",
+          "display_name" => "GPT-5.6 Luna (live)",
+          "visibility" => "list",
+          "priority" => 99,
+          "context_window" => 400_000
+        }
+      ])
+
+    :ok = CatalogCache.store(live)
+    models = OpenAICodex.list_models()
+    ids = Enum.map(models, & &1.id)
+
+    assert Enum.take(ids, 5) ==
+             ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5 gpt-5.4)
+
+    assert Enum.count(ids, &(&1 == "gpt-5.6-luna")) == 1
+    luna = Enum.find(models, &(&1.id == "gpt-5.6-luna"))
+    assert luna.name == "GPT-5.6 Luna (live)"
+    assert luna.context_window == 400_000
+    assert luna.fast?
+    assert List.last(ids) == "gpt-5.3-codex-spark"
+    refute "gpt-5.2" in ids
+    refute "gpt-5.3-codex" in ids
   end
 
   test "catalog_snapshot resolves the selected entry with one cache read" do
@@ -220,10 +269,9 @@ defmodule Catalyst.LLM.OpenAICodexTest do
     refute_receive {:trace, ^cache, :receive, {:"$gen_call", _from, :models}}
   end
 
-  # Selecting a bundled-fallback model and then having the live catalog replace
-  # the list (without that id) must not desync the model picker: the selected
-  # entry stays in the options list, so the UI keeps rendering the true value.
-  test "catalog_snapshot appends a selected id missing from the catalog" do
+  # An explicit catalog override can intentionally omit the selected id. Keep
+  # that value in the options list so the picker never displays another model.
+  test "catalog_snapshot appends a selected id missing from an explicit catalog" do
     Application.put_env(:catalyst, :codex_models, [%{id: "live-only-model"}])
     on_exit(fn -> Application.delete_env(:catalyst, :codex_models) end)
 

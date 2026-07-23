@@ -21,6 +21,7 @@ defmodule Catalyst.LLM.OpenAICodex do
   alias Catalyst.Model
 
   @base_url "https://chatgpt.com/backend-api"
+  @pinned_live_model_ids ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna)
 
   @typedoc "One catalog entry (UI metadata, not the request `%Model{}`)."
   @type catalog_entry :: Catalog.entry()
@@ -30,11 +31,14 @@ defmodule Catalyst.LLM.OpenAICodex do
 
   @doc """
   The Codex model catalog: `config :catalyst, :codex_models` override wins,
-  else the live list fetched from `GET <base>/codex/models` (refreshed in the
-  background when authenticated — see `refresh_live_models/0`), else the
-  built-in list. The configured default model id is always present (appended
-  as a bare entry when it isn't in the catalog, so a custom `:codex_model`
-  still shows up in pickers).
+  else the three current GPT-5.6 models remain pinned ahead of the live list
+  fetched from `GET <base>/codex/models` (refreshed in the background when
+  authenticated — see `refresh_live_models/0`). Live metadata wins for a
+  duplicate pinned id while their known Fast capability remains enabled. When
+  no live list is available, the complete built-in fallback is used. The
+  configured default model id is always present (appended as a bare entry when
+  it isn't in the catalog, so a custom `:codex_model` still shows up in
+  pickers).
   """
   @spec list_models() :: [catalog_entry()]
   def list_models do
@@ -163,8 +167,23 @@ defmodule Catalyst.LLM.OpenAICodex do
   defp live_or_built_in do
     case CatalogCache.models() do
       [] -> Catalog.built_in()
-      entries -> entries
+      entries -> pin_current_models(entries, Catalog.built_in())
     end
+  end
+
+  defp pin_current_models(live, built_in) do
+    live_by_id = Map.new(live, &{&1.id, &1})
+    pinned = built_in |> pinned_models() |> Enum.map(&merge_pinned_model(&1, live_by_id))
+
+    pinned ++ Enum.reject(live, &(&1.id in @pinned_live_model_ids))
+  end
+
+  defp pinned_models(models), do: Enum.filter(models, &(&1.id in @pinned_live_model_ids))
+
+  defp merge_pinned_model(fallback, live_by_id) do
+    live_by_id
+    |> Map.get(fallback.id, fallback)
+    |> Map.put(:fast?, fallback.fast?)
   end
 
   defp positive(value), do: Model.positive_int(value)
