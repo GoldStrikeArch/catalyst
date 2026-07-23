@@ -6,17 +6,16 @@ defmodule CatalystWeb.UI.MessageRenderer do
   a custom card for a particular tool result or message type at runtime.
   """
   use CatalystWeb, :html
-  require Logger
 
   alias Catalyst.{Content, Message}
-  alias CatalystWeb.UI.{Markdown, Registry}
+  alias CatalystWeb.UI.{Markdown, Registry, SafeRender}
 
   @doc "Render a message: a registered `:message` renderer if one matches, else built-in."
   @spec render_message(map()) :: Phoenix.LiveView.Rendered.t() | Phoenix.HTML.safe()
   def render_message(assigns) do
     case Registry.renderer(:message, assigns.msg) do
-      nil -> message(assigns)
-      fun -> safe_render(fun, assigns, &message/1)
+      :error -> message(assigns)
+      {:ok, fun} -> safe_render(fun, assigns, &message/1)
     end
   end
 
@@ -24,8 +23,8 @@ defmodule CatalystWeb.UI.MessageRenderer do
   @spec render_block(map()) :: Phoenix.LiveView.Rendered.t() | Phoenix.HTML.safe()
   def render_block(assigns) do
     case Registry.renderer(:block, assigns.block) do
-      nil -> block(assigns)
-      fun -> safe_render(fun, assigns, &block/1)
+      :error -> block(assigns)
+      {:ok, fun} -> safe_render(fun, assigns, &block/1)
     end
   end
 
@@ -42,22 +41,15 @@ defmodule CatalystWeb.UI.MessageRenderer do
   # A broken extension renderer must not crash-loop the LiveView on every
   # render of the transcript (recovery — asking the agent to reload_extensions
   # — needs the chat UI it would take down). Every fun reaching here is
-  # extension-registered (the built-in clauses below never pass through), and
-  # calling a ~H fun only BUILDS a lazy %Phoenix.LiveView.Rendered{} whose
-  # dynamics would otherwise run later in the diff engine, outside this rescue
-  # — so the template is forced to iodata INSIDE the guard. raise/throw/exit
-  # (e.g. a bad assign or a GenServer call in the template) all fall back to
-  # built-in rendering, which stays on the normal lazy/diffable path.
+  # extension-registered (the built-in clauses below never pass through);
+  # SafeRender forces the template to iodata inside the guard and any
+  # raise/throw/exit falls back to built-in rendering.
   defp safe_render(fun, assigns, fallback) do
-    {:safe, Phoenix.HTML.Safe.to_iodata(fun.(assigns))}
-  rescue
-    e ->
-      Logger.warning("[ui] extension renderer raised: #{Exception.message(e)} — using built-in")
-      fallback.(assigns)
-  catch
-    kind, reason ->
-      Logger.warning("[ui] extension renderer #{kind}: #{inspect(reason)} — using built-in")
-      fallback.(assigns)
+    SafeRender.forced_iodata(
+      fn -> fun.(assigns) end,
+      "extension renderer",
+      fn -> fallback.(assigns) end
+    )
   end
 
   # ---- built-in message rendering -------------------------------------------

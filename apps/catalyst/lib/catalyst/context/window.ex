@@ -6,20 +6,20 @@ defmodule Catalyst.Context.Window do
   application configuration, then a conservative catalog/window fallback.  The
   compactor removes only a complete old prefix and returns a staged replacement;
   `Catalyst.Context.Guard` performs the authoritative transformed-request check
-  before anything is emitted or persisted.
+  before anything is emitted or persisted.  Transcript structure rules live in
+  `Catalyst.Context.Transcript`; provider-backed summarization lives in
+  `Catalyst.Context.Summarizer`.
   """
 
   @behaviour Catalyst.Context.Policy
 
-  alias Catalyst.{Content, Message, Tasks}
-  alias Catalyst.Context.{Compaction, Registry}
-  alias Catalyst.LLM.Context, as: LLMContext
-  alias Catalyst.Tools.Truncate
+  alias Catalyst.Message
+  alias Catalyst.Context.{Compaction, Registry, Summarizer, Transcript}
 
-  @summary_prefix "[Compacted context summary]\n"
-  @summary_result_limit 16_000
-  @tool_result_limit 2_000
-  @default_policy_timeout 30_000
+  # Ordered threshold resolution: the first source producing a value wins and
+  # is normalized against the model's effective window. This literal list is
+  # the resolution order.
+  @threshold_sources [:session, :registry, :builtin]
 
   @impl true
   @spec threshold(Catalyst.Model.t() | nil, map()) ::
@@ -33,16 +33,28 @@ defmodule Catalyst.Context.Window do
     end
   end
 
-  @doc "Resolve a threshold together with the winning provenance layer."
+  @doc """
+  Resolve a threshold together with the winning provenance layer.
+
+  Sources are consulted in order (session option, runtime/application
+  registry, built-in catalog/ratio fallback); each returns
+  `{:ok, raw, source} | :missing | {:error, reason}`.  A raw `:none` means the
+  winning source explicitly disabled compaction and keeps that source's
+  provenance; a bare `:none` return means every source was missing — no window
+  and no catalog limit exist, so no threshold can apply.
+  """
   @spec threshold_with_source(Catalyst.Model.t() | nil, map()) ::
           {:ok, pos_integer() | :none, term()} | :none | {:error, term()}
   def threshold_with_source(model, context) do
     window = effective_window(model)
 
-    case session_threshold(context) do
-      :missing -> registry_or_builtin(model, window, Map.get(context, :anchored, false))
-      {:ok, value} -> normalize_threshold(value, window, {:session, :context_threshold})
-    end
+    Enum.reduce_while(@threshold_sources, :none, fn source, none ->
+      case threshold_source(source, model, window, context) do
+        {:ok, raw, provenance} -> {:halt, normalize_threshold(raw, window, provenance)}
+        :missing -> {:cont, none}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
   end
 
   @doc "The effective usable model window after the provider percentage contract."
@@ -62,10 +74,10 @@ defmodule Catalyst.Context.Window do
   @impl true
   @spec compact([Message.t()], map()) :: {:ok, Compaction.t()} | {:error, term()}
   def compact(messages, context) when is_list(messages) do
-    with :ok <- validate_transcript(messages),
+    with :ok <- Transcript.validate_transcript(messages),
          {:ok, threshold} <- fetch_positive(context, :threshold),
          {:ok, before} <- tokens_before(messages, context),
-         units when length(units) > 1 <- message_units(messages),
+         units when length(units) > 1 <- Transcript.message_units(messages),
          {:ok, removed, kept, protected_count} <- initial_cut(units, threshold, context),
          {:ok, compaction} <-
            build_compaction(removed, kept, protected_count, before, threshold, context) do
@@ -76,76 +88,43 @@ defmodule Catalyst.Context.Window do
     end
   end
 
-  @doc "Validate the tool-call grouping invariants of a chronological transcript."
-  @spec validate_transcript([Message.t()]) :: :ok | {:error, term()}
-  def validate_transcript(messages) when is_list(messages) do
-    with :ok <- validate_messages(messages) do
-      validate_groups(messages)
-    end
-  end
-
-  def validate_transcript(other), do: {:error, {:invalid_transcript, other}}
-
-  @doc "True when a chronological list is a structurally valid request transcript."
-  @spec valid_transcript?([Message.t()]) :: boolean()
-  def valid_transcript?(messages), do: validate_transcript(messages) == :ok
-
-  @doc "Stable prefix used for a persisted summary-shaped user message."
-  @spec summary_prefix() :: String.t()
-  def summary_prefix, do: @summary_prefix
-
   @doc "Unique provider continuation namespace for one compaction attempt."
   @spec companion_id(String.t()) :: String.t()
-  def companion_id(session_id) when is_binary(session_id) do
-    digest = :crypto.hash(:sha256, session_id) |> Base.url_encode64(padding: false)
-    attempt = System.unique_integer([:positive, :monotonic]) |> Integer.to_string(36)
-    "@compact:" <> digest <> ":" <> attempt
-  end
-
-  defp registry_or_builtin(model, window, anchored?) do
-    case Registry.threshold(model) do
-      {:ok, value, source} -> normalize_threshold(value, window, source)
-      :missing -> builtin_threshold_for_window(model, window, anchored?)
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp builtin_threshold_for_window(model, window, anchored?) do
-    catalog_limit = catalog_limit(model, window)
-    ratio_limit = ratio_limit(window, anchored?)
-
-    case Enum.filter([catalog_limit, ratio_limit], &positive_integer?/1) do
-      [] -> :none
-      limits -> {:ok, Enum.min(limits), :builtin}
-    end
-  end
+  defdelegate companion_id(session_id), to: Summarizer
 
   @doc false
   @spec builtin_threshold(Catalyst.Model.t() | nil, boolean()) ::
-          {:ok, pos_integer(), :builtin} | :none
-  def builtin_threshold(model, anchored?) do
-    window = effective_window(model)
-    catalog_limit = catalog_limit(model, window)
-    ratio_limit = ratio_limit(window, anchored?)
+          {:ok, pos_integer(), :builtin} | :missing
+  def builtin_threshold(model, anchored?),
+    do: builtin_source(model, effective_window(model), anchored?)
 
-    case Enum.filter([catalog_limit, ratio_limit], &positive_integer?/1) do
-      [] -> :none
-      limits -> {:ok, Enum.min(limits), :builtin}
-    end
-  end
-
-  defp session_threshold(context) do
+  defp threshold_source(:session, _model, _window, context) do
     opts = Map.get(context, :opts, []) || []
 
     cond do
       Map.has_key?(context, :context_threshold) ->
-        {:ok, context.context_threshold}
+        {:ok, context.context_threshold, {:session, :context_threshold}}
 
       is_list(opts) and Keyword.has_key?(opts, :context_threshold) ->
-        {:ok, Keyword.fetch!(opts, :context_threshold)}
+        {:ok, Keyword.fetch!(opts, :context_threshold), {:session, :context_threshold}}
 
       true ->
         :missing
+    end
+  end
+
+  defp threshold_source(:registry, model, _window, _context), do: Registry.threshold(model)
+
+  defp threshold_source(:builtin, model, window, context),
+    do: builtin_source(model, window, Map.get(context, :anchored, false))
+
+  defp builtin_source(model, window, anchored?) do
+    case Enum.filter(
+           [catalog_limit(model, window), ratio_limit(window, anchored?)],
+           &positive_integer?/1
+         ) do
+      [] -> :missing
+      limits -> {:ok, Enum.min(limits), :builtin}
     end
   end
 
@@ -230,7 +209,7 @@ defmodule Catalyst.Context.Window do
   end
 
   defp initial_cut(units, threshold, context) do
-    protected_count = min(length(units), protected_unit_count(units, context))
+    protected_count = min(length(units), automatic_protected_unit_count(units))
 
     case length(units) > protected_count do
       false ->
@@ -260,35 +239,18 @@ defmodule Catalyst.Context.Window do
 
   defp build_compaction(removed, kept, protected_count, before, threshold, context) do
     target = max(1, floor(threshold * 0.75))
-    summary = summarize(removed, context)
-    original = removed ++ kept
+    summary = Summarizer.summarize(removed, context)
 
     case fit_candidate(summary, kept, protected_count, before, target, threshold, context) do
-      {:ok, replacement, accepted_summary, after_tokens} ->
-        {:ok,
-         %Compaction{
-           replacement: replacement,
-           summary: accepted_summary,
-           replaced_count: replaced_count(original, replacement),
-           tokens_before: before,
-           tokens_after: after_tokens,
-           policy: __MODULE__
-         }}
+      {:ok, replacement, accepted_summary, _after_tokens} ->
+        {:ok, %Compaction{replacement: replacement, summary: accepted_summary}}
 
       {:error, _reason} ->
         # A failed/oversized summary is not fatal.  Retry the same deterministic
         # whole-unit tightening without it before declaring the suffix irreducible.
         case fit_candidate(nil, kept, protected_count, before, target, threshold, context) do
-          {:ok, replacement, nil, after_tokens} ->
-            {:ok,
-             %Compaction{
-               replacement: replacement,
-               summary: nil,
-               replaced_count: replaced_count(original, replacement),
-               tokens_before: before,
-               tokens_after: after_tokens,
-               policy: __MODULE__
-             }}
+          {:ok, replacement, nil, _after_tokens} ->
+            {:ok, %Compaction{replacement: replacement}}
 
           {:error, _reason} ->
             {:error, :irreducible_context}
@@ -303,27 +265,25 @@ defmodule Catalyst.Context.Window do
 
   defp do_fit_candidate(summary, kept, protected, before, target, threshold, context) do
     replacement = List.wrap(summary) ++ kept
-    after_tokens = estimate_replacement(replacement, context)
-    valid? = after_tokens < before and valid_transcript?(replacement)
 
-    cond do
-      valid? and after_tokens <= target ->
-        {:ok, replacement, summary, after_tokens}
+    case {fit_tokens(replacement, before, context), summary, kept == protected} do
+      {{:ok, tokens}, _summary, _protected_only?} when tokens <= target ->
+        {:ok, replacement, summary, tokens}
 
-      not is_nil(summary) ->
+      {_fit, summary, _protected_only?} when not is_nil(summary) ->
         {:error, :summary_missed_target}
 
-      kept == protected and valid? and after_tokens < threshold ->
-        {:ok, replacement, nil, after_tokens}
+      {{:ok, tokens}, nil, true} when tokens < threshold ->
+        {:ok, replacement, nil, tokens}
 
-      kept == protected ->
+      {_fit, nil, true} ->
         {:error, :irreducible_context}
 
-      true ->
-        [_drop | tighter] = message_units(kept)
+      {_fit, nil, false} ->
+        [_drop | tighter] = Transcript.message_units(kept)
 
         do_fit_candidate(
-          summary,
+          nil,
           List.flatten(tighter),
           protected,
           before,
@@ -334,278 +294,52 @@ defmodule Catalyst.Context.Window do
     end
   end
 
+  # A candidate fits only when its estimate succeeded, shrinks the transcript,
+  # and the replacement stays structurally valid. A failed estimate is a
+  # tagged miss (`:unfit`) rather than a huge sentinel token count.
+  defp fit_tokens(replacement, before, context) do
+    with {:ok, tokens} when tokens < before <- estimate_replacement(replacement, context),
+         true <- Transcript.valid_transcript?(replacement) do
+      {:ok, tokens}
+    else
+      _oversized_invalid_or_failed -> :unfit
+    end
+  end
+
   defp protected_suffix(messages, count) do
     messages
-    |> message_units()
+    |> Transcript.message_units()
     |> Enum.take(-count)
     |> List.flatten()
   end
 
   defp estimate_replacement(messages, context) do
     case Map.get(context, :estimate_replacement) do
-      fun when is_function(fun, 1) -> fun.(messages)
-      fun when is_function(fun, 2) -> fun.(messages, context)
-      _none -> estimate_messages(messages, context)
+      fun when is_function(fun, 1) -> normalize_estimate(fun.(messages))
+      fun when is_function(fun, 2) -> normalize_estimate(fun.(messages, context))
+      _none -> {:ok, estimate_messages(messages, context)}
     end
   end
+
+  # Estimator seams may return a raw count (tests, simple policies) or the
+  # tagged `Catalyst.Context.Tokens.estimate_tokens/3` result (the guard).
+  defp normalize_estimate({:ok, tokens}) when is_integer(tokens) and tokens >= 0,
+    do: {:ok, tokens}
+
+  defp normalize_estimate(tokens) when is_integer(tokens) and tokens >= 0, do: {:ok, tokens}
+  defp normalize_estimate({:error, _reason} = error), do: error
+  defp normalize_estimate(invalid), do: {:error, {:invalid_replacement_estimate, invalid}}
 
   defp estimate_messages(messages, context) do
     base = Map.get(context, :base_tokens, 0)
 
     bytes =
       messages
-      |> Enum.map(&render_message/1)
+      |> Enum.map(&Summarizer.render_message/1)
       |> IO.iodata_to_binary()
       |> byte_size()
 
     base + div(bytes + 3, 4)
-  end
-
-  defp summarize([], _context), do: nil
-
-  defp summarize(removed, context) do
-    task = Tasks.async(fn -> run_summarizer(removed, context) end)
-    timeout = Map.get(context, :compaction_timeout, policy_timeout())
-
-    case Tasks.await(task, timeout) do
-      {:ok, {:ok, text}} -> summary_message(text)
-      {:ok, text} when is_binary(text) -> summary_message(text)
-      _failure -> nil
-    end
-  end
-
-  defp run_summarizer(removed, context) do
-    case Map.get(context, :summary_fun) do
-      fun when is_function(fun, 2) -> normalize_summary(fun.(removed, context))
-      fun when is_function(fun, 1) -> normalize_summary(fun.(removed))
-      _none -> provider_summary(removed, context)
-    end
-  end
-
-  defp provider_summary(removed, context) do
-    provider = Map.get(context, :provider)
-    model = Map.get(context, :model)
-
-    case is_atom(provider) and not is_nil(provider) and function_exported?(provider, :stream, 4) and
-           not is_nil(model) do
-      true -> stream_summary(provider, model, removed, context)
-      false -> {:error, :no_summarizer}
-    end
-  end
-
-  defp stream_summary(provider, model, removed, context) do
-    session_id = companion_id(to_string(Map.get(context, :session_id, "unknown")))
-    source = removed |> render_messages() |> bound_summary_source(model)
-
-    with :ok <- register_resource(context, provider, session_id) do
-      try do
-        with {:ok, prompt} <- compaction_prompt(model, context) do
-          llm_context = %LLMContext{
-            system_prompt: prompt,
-            messages: [Message.user(source)],
-            tools: []
-          }
-
-          opts = context |> Map.get(:opts, []) |> Keyword.put(:session_id, session_id)
-
-          case provider.stream(model, llm_context, opts, fn _event -> :ok end) do
-            {:ok, %Message.Assistant{stop_reason: reason} = assistant}
-            when reason in [:stop, :length] ->
-              normalize_summary(Content.text_of(assistant.content))
-
-            {:ok, _invalid} ->
-              {:error, :invalid_summary}
-
-            {:error, _reason} = error ->
-              error
-          end
-        end
-      after
-        cleanup_provider(provider, session_id)
-      end
-    end
-  end
-
-  defp compaction_prompt(model, context) do
-    request =
-      struct(Catalyst.Prompt.Request,
-        purpose: :compaction,
-        model: model,
-        cwd: Map.get(context, :cwd),
-        session_id: Map.get(context, :session_id),
-        opts: Map.get(context, :opts, [])
-      )
-
-    case Catalyst.Prompt.resolve_bounded(request) do
-      {:ok, resolution} -> {:ok, resolution.text}
-      {:error, _reason} = error -> error
-    end
-  rescue
-    error -> {:error, {:compaction_prompt_exception, Exception.message(error)}}
-  end
-
-  defp register_resource(context, provider, session_id) do
-    resource = %{provider: provider, session_id: session_id}
-
-    case Map.get(context, :register_resource) do
-      fun when is_function(fun, 1) -> normalize_resource_registration(fun.(resource))
-      _none -> :ok
-    end
-  end
-
-  defp normalize_resource_registration({:error, _reason} = error), do: error
-  defp normalize_resource_registration(_result), do: :ok
-
-  defp cleanup_provider(provider, session_id) do
-    case function_exported?(provider, :cleanup_session, 1) do
-      true -> provider.cleanup_session(session_id)
-      false -> :ok
-    end
-  catch
-    _kind, _reason -> :ok
-  end
-
-  defp normalize_summary({:ok, text}), do: normalize_summary(text)
-
-  defp normalize_summary(text) when is_binary(text) do
-    text = Truncate.scrub_utf8(text)
-
-    case byte_size(text) > @summary_result_limit do
-      true -> {:error, :summary_too_large}
-      false -> normalize_trimmed_summary(String.trim(text))
-    end
-  end
-
-  defp normalize_summary(_invalid), do: {:error, :invalid_summary}
-
-  defp normalize_trimmed_summary(""), do: {:error, :blank_summary}
-  defp normalize_trimmed_summary(text), do: {:ok, text}
-
-  defp summary_message({:ok, text}), do: summary_message(text)
-
-  defp summary_message(text) when is_binary(text) do
-    case String.trim(text) do
-      "" -> nil
-      value -> Message.user(@summary_prefix <> value)
-    end
-  end
-
-  defp summary_message(_invalid), do: nil
-
-  defp bound_summary_source(source, model) do
-    max_bytes =
-      case effective_window(model) do
-        {:ok, window} -> max(1, min(200_000, floor(window * 0.50) * 4))
-        :error -> 120_000
-      end
-
-    elem(Truncate.head(source, max_bytes: max_bytes), 0)
-  end
-
-  defp render_messages(messages), do: Enum.map_join(messages, "\n\n", &render_message/1)
-
-  defp render_message(%Message.User{content: content}),
-    do: "User: " <> render_content(content)
-
-  defp render_message(%Message.Assistant{content: content}),
-    do: "Assistant: " <> render_content(content)
-
-  defp render_message(%Message.ToolResult{tool_name: name, content: content}) do
-    text =
-      content |> render_content() |> Truncate.scrub_utf8() |> String.slice(0, @tool_result_limit)
-
-    "Tool result (#{name}): " <> text
-  end
-
-  defp render_message(other), do: inspect(other, limit: 20, printable_limit: 2_000)
-
-  defp render_content(content) do
-    Enum.map_join(List.wrap(content), "", fn
-      %Content.Text{text: text} ->
-        text
-
-      %Content.Thinking{thinking: thinking} ->
-        "[thinking: #{thinking}]"
-
-      %Content.Image{mime_type: mime} ->
-        "[image: #{mime}]"
-
-      %Content.ToolCall{name: name, arguments: args} ->
-        "[tool call: #{name} #{inspect(args, limit: 20, printable_limit: 1_000)}]"
-
-      other ->
-        inspect(other, limit: 10, printable_limit: 500)
-    end)
-  end
-
-  # Each assistant tool-call and its complete immediately-following result set
-  # is one indivisible unit.  Ordinary messages are single-message units.
-  defp message_units(messages), do: do_units(messages, []) |> Enum.reverse()
-
-  defp do_units([], acc), do: acc
-
-  defp do_units([%Message.Assistant{} = assistant | rest], acc) do
-    calls = Message.tool_calls(assistant)
-
-    case calls do
-      [] ->
-        do_units(rest, [[assistant] | acc])
-
-      _ ->
-        {results, tail} = Enum.split_while(rest, &match?(%Message.ToolResult{}, &1))
-        do_units(tail, [[assistant | results] | acc])
-    end
-  end
-
-  defp do_units([message | rest], acc), do: do_units(rest, [[message] | acc])
-
-  defp validate_groups(messages), do: do_validate_groups(messages)
-
-  defp validate_messages(messages) do
-    case Enum.find(messages, &(not message?(&1))) do
-      nil -> :ok
-      invalid -> {:error, {:invalid_transcript_message, invalid}}
-    end
-  end
-
-  defp message?(%Message.User{}), do: true
-  defp message?(%Message.Assistant{}), do: true
-  defp message?(%Message.ToolResult{}), do: true
-  defp message?(_other), do: false
-
-  defp do_validate_groups([]), do: :ok
-
-  defp do_validate_groups([%Message.ToolResult{} | _rest]),
-    do: {:error, :orphan_tool_result}
-
-  defp do_validate_groups([%Message.Assistant{} = assistant | rest]) do
-    calls = Message.tool_calls(assistant)
-
-    case calls do
-      [] -> do_validate_groups(rest)
-      _ -> validate_assistant_group(calls, rest)
-    end
-  end
-
-  defp do_validate_groups([_message | rest]), do: do_validate_groups(rest)
-
-  defp validate_assistant_group(calls, rest) do
-    {results, tail} = Enum.split_while(rest, &match?(%Message.ToolResult{}, &1))
-    expected = calls |> Enum.map(& &1.id) |> MapSet.new()
-    actual = results |> Enum.map(& &1.tool_call_id) |> MapSet.new()
-
-    case expected == actual and length(calls) == MapSet.size(expected) and
-           length(results) == MapSet.size(actual) do
-      true -> do_validate_groups(tail)
-      false -> {:error, {:invalid_tool_result_group, expected, actual}}
-    end
-  end
-
-  defp protected_unit_count(units, context) do
-    case Map.get(context, :protected_units) do
-      count when is_integer(count) and count > 0 -> count
-      _automatic -> automatic_protected_unit_count(units)
-    end
   end
 
   defp automatic_protected_unit_count([]), do: 0
@@ -638,19 +372,6 @@ defmodule Catalyst.Context.Window do
 
   defp user_unit?([%Message.User{}]), do: true
   defp user_unit?(_unit), do: false
-
-  defp replaced_count(original, replacement) do
-    retained = common_suffix_length(Enum.reverse(original), Enum.reverse(replacement), 0)
-    max(1, length(original) - retained)
-  end
-
-  defp common_suffix_length([message | original], [message | replacement], count),
-    do: common_suffix_length(original, replacement, count + 1)
-
-  defp common_suffix_length(_original, _replacement, count), do: count
-
-  defp policy_timeout,
-    do: Application.get_env(:catalyst, :context_policy_timeout, @default_policy_timeout)
 
   defp positive_integer?(value), do: is_integer(value) and value > 0
 end

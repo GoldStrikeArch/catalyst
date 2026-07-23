@@ -1,12 +1,9 @@
 defmodule Catalyst.Tools.Ripgrep do
   @moduledoc "Content search via ripgrep (`grep` tool). Respects .gitignore; returns `path:line: text`."
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.{Binaries, Exec, Paths, Truncate}
+  alias Catalyst.Tools.{Binaries, Exec, Listing, Paths}
 
   @default_limit 100
-  # rg has no global output cap; bound the child's stdout so a pathological
-  # match set (huge lines, vendored blobs) can't be accumulated unboundedly.
-  @max_output_bytes 8 * 1024 * 1024
 
   @impl true
   def name, do: "grep"
@@ -61,6 +58,9 @@ defmodule Catalyst.Tools.Ripgrep do
     rg = Binaries.path!(:rg)
     target = Paths.resolve(args["path"] || ".", ctx.cwd)
     limit = args["limit"] || @default_limit
+    # rg has no global output cap; bound the child's stdout so a pathological
+    # match set (huge lines, vendored blobs) can't be accumulated unboundedly.
+    max_output_bytes = Listing.max_output_bytes()
 
     # --hidden un-hides dotfiles, so explicitly re-exclude .git internals.
     rg_args =
@@ -76,7 +76,7 @@ defmodule Catalyst.Tools.Ripgrep do
       res =
       Exec.collect!("ripgrep", rg, rg_args,
         cwd: ctx.cwd,
-        max_output_bytes: @max_output_bytes,
+        max_output_bytes: max_output_bytes,
         ok_statuses: [0, 1, 2]
       )
 
@@ -97,25 +97,19 @@ defmodule Catalyst.Tools.Ripgrep do
         _ -> Enum.join(shown, "\n")
       end
 
-    {text, info} =
-      Truncate.listing(text,
+    {text, details} =
+      Listing.render(text,
+        count: min(total_matches, limit),
+        noun: "matches",
         limited?: limited?,
         limit: limit,
         total: known_total(total_matches, capped?),
-        noun: "matches"
+        capped?: capped?,
+        max_output_bytes: max_output_bytes,
+        note: error_note(status == 2, out)
       )
 
-    text =
-      text
-      |> Exec.append_capped_notice(capped?, @max_output_bytes, "narrow the pattern or path")
-      |> append_error_note(status == 2, out)
-
-    result(text, %{
-      match_count: min(total_matches, limit),
-      match_limit_reached: limited?,
-      output_capped: capped?,
-      truncation: info
-    })
+    result(text, details)
   end
 
   # When the child's output was capped, total_matches is only a lower bound.
@@ -125,16 +119,16 @@ defmodule Catalyst.Tools.Ripgrep do
   # Status 2 with salvaged matches: tell the model the result set may be
   # incomplete. The sample is the first stderr line (non-JSON in rg's
   # otherwise JSON-lines output).
-  defp append_error_note(text, false = _partial_error?, _out), do: text
+  defp error_note(false = _partial_error?, _out), do: nil
 
-  defp append_error_note(text, true = _partial_error?, out) do
+  defp error_note(true = _partial_error?, out) do
     sample =
       out
       |> String.split("\n", trim: true)
       |> Enum.find("", &match?({:error, _}, Jason.decode(&1)))
       |> String.slice(0, 200)
 
-    text <> "\n... [some paths could not be searched: #{sample}]"
+    "... [some paths could not be searched: #{sample}]"
   end
 
   defp flags(args) do
@@ -150,22 +144,17 @@ defmodule Catalyst.Tools.Ripgrep do
   defp add_kv(acc, nil, _flag), do: acc
   defp add_kv(acc, value, flag), do: acc ++ [flag, value]
 
-  defp parse_entries(out) do
-    out
-    |> String.split("\n", trim: true)
-    |> Enum.flat_map(&decode_entry/1)
-  end
+  defp parse_entries(out), do: Listing.decode_json_lines(out, &decode_entry/1)
 
   # With --json, the lines requested via --context arrive as separate
   # "context" records; render them grep-style (`path-line- text`) and keep
   # them from counting toward the match limit.
-  defp decode_entry(line) do
-    case Jason.decode(line) do
-      {:ok, %{"type" => "match", "data" => data}} -> [{:match, format_line(data, ":")}]
-      {:ok, %{"type" => "context", "data" => data}} -> [{:context, format_line(data, "-")}]
-      _ -> []
-    end
-  end
+  defp decode_entry(%{"type" => "match", "data" => data}), do: [{:match, format_line(data, ":")}]
+
+  defp decode_entry(%{"type" => "context", "data" => data}),
+    do: [{:context, format_line(data, "-")}]
+
+  defp decode_entry(_other), do: []
 
   defp format_line(data, sep) do
     path = get_in(data, ["path", "text"])

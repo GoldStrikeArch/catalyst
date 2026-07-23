@@ -92,10 +92,9 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
     convert_messages(messages, image_input?(model), replay_id_mode(opts))
   end
 
-  @doc "Whether the model accepts image input (nil model → assume yes)."
-  @spec image_input?(Catalyst.Model.t() | nil) :: boolean()
-  def image_input?(nil), do: true
-  def image_input?(model), do: :image in List.wrap(model.input)
+  # Whether the model accepts image input (nil model → assume yes).
+  defp image_input?(nil), do: true
+  defp image_input?(model), do: :image in List.wrap(model.input)
 
   defp maybe_put(body, _key, nil), do: body
   defp maybe_put(body, key, value), do: Map.put(body, key, value)

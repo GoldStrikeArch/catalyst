@@ -9,8 +9,6 @@ defmodule CatalystWeb.ShellLive.RunDiagnostics do
 
   import Phoenix.Component, only: [assign: 2]
 
-  alias Catalyst.LLM.OpenAICodex
-  alias Catalyst.Model
   alias Catalyst.Prompt.Resolution
   alias Catalyst.Session.{RunContext, Server}
 
@@ -24,7 +22,10 @@ defmodule CatalystWeb.ShellLive.RunDiagnostics do
     task =
       Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
         snapshot = Server.state(pid)
-        model = effective_preview_model(snapshot.model)
+        # The shared pre-request resolver: a custom prompt policy reading
+        # model limits must preview against the same effective metadata the
+        # next run will resolve, not the raw persisted snapshot model.
+        model = RunContext.effective_model(snapshot.model)
 
         case RunContext.resolve_prompt(snapshot, model) do
           {:ok, %Resolution{} = resolution} ->
@@ -102,18 +103,6 @@ defmodule CatalystWeb.ShellLive.RunDiagnostics do
   end
 
   defp cancel_preview(socket), do: socket
-
-  # Mirror RunContext's pre-request catalog refresh: a custom prompt policy
-  # reading model limits must preview against the same effective metadata the
-  # next run will resolve, not the raw persisted snapshot model.
-  defp effective_preview_model(%Model{api: "openai-codex-responses", id: id} = model) do
-    # resolve_epoch_model/2 cannot error on a %Model{} input; the type checker
-    # rejects an unreachable {:error, _} fallback clause here.
-    {:ok, resolved} = RunContext.resolve_epoch_model(model, OpenAICodex.catalog_snapshot(id))
-    resolved
-  end
-
-  defp effective_preview_model(model), do: model
 
   defp preview_map(resolution, model) do
     %{

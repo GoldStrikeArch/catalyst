@@ -215,15 +215,7 @@ defmodule Catalyst.SystemPrompt do
     end)
   end
 
-  defp model_keys(nil), do: [:default]
-
-  defp model_keys(model) when is_map(model) do
-    [Map.get(model, :id), Map.get(model, :api), :default]
-    |> Enum.filter(&Config.valid_model_key?/1)
-    |> Enum.uniq()
-  end
-
-  defp model_keys(_model), do: [:default]
+  defp model_keys(model), do: Config.model_keys(model)
 
   defp read_nonblank(path) do
     with {:ok, text} <- File.read(path),

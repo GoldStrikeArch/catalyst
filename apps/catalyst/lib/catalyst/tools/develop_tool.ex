@@ -13,6 +13,8 @@ defmodule Catalyst.Tools.DevelopTool do
 
   alias Catalyst.Extensions.Installer
 
+  import Catalyst.Tools.SelfModReport, only: [append_warning: 2]
+
   @impl true
   def execution_mode, do: :sequential
 
@@ -67,7 +69,4 @@ defmodule Catalyst.Tools.DevelopTool do
         raise "Failed to create the new tool: #{Catalyst.Extensions.format_error(reason)}"
     end
   end
-
-  defp append_warning(text, nil), do: text
-  defp append_warning(text, warning), do: text <> " Warning: #{warning}"
 end

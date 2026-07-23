@@ -10,7 +10,7 @@ defmodule Catalyst.Session.Store do
 
   require Logger
 
-  alias Catalyst.Context.Window
+  alias Catalyst.Context.Transcript
   alias Catalyst.Message
   alias Catalyst.Session.Store.Codec
 
@@ -38,8 +38,18 @@ defmodule Catalyst.Session.Store do
         }
 
   @doc "Root directory for all session logs (override with `config :catalyst, :sessions_root`)."
+  @spec root() :: String.t()
   def root,
     do: Application.get_env(:catalyst, :sessions_root) || Catalyst.Paths.sessions()
+
+  @doc """
+  Absolute path of the session JSONL for a `{cwd, id}` pair, without touching
+  disk. `Catalyst.Session.Catalog` uses it to prune entries whose transcripts
+  were deleted.
+  """
+  @spec path_for(String.t(), String.t()) :: Path.t()
+  def path_for(cwd, id) when is_binary(cwd) and is_binary(id),
+    do: Path.join([root(), cwd_hash(cwd), id <> ".jsonl"])
 
   @doc """
   Open the session file for an id, creating it with a header line if it does
@@ -57,6 +67,7 @@ defmodule Catalyst.Session.Store do
   end
 
   def open(cwd, _opts), do: {:error, {:invalid_cwd, cwd}}
+
 
   @doc """
   Legacy wrapper for `open/2` that raises on failure. Prefer `open/2`.
@@ -174,13 +185,12 @@ defmodule Catalyst.Session.Store do
     append_line(handle, fn -> %{"type" => "thinking_level_change", "level" => level} end)
   end
 
-  @doc """
-  Fold the settings entries: the LAST persisted model/thinking level plus flags
-  recording whether each setting has ever been written. A written `nil` is an
-  explicit clear tombstone, distinct from a fresh session with no entry.
-  Deliberately independent of `reset` markers — a transcript reset does not
-  undo a model choice.
-  """
+  # test seam. Folds the settings entries: the LAST persisted model/thinking
+  # level plus flags recording whether each setting has ever been written. A
+  # written nil is an explicit clear tombstone, distinct from a fresh session
+  # with no entry. Deliberately independent of `reset` markers — a transcript
+  # reset does not undo a model choice.
+  @doc false
   @spec load_settings(String.t()) :: %{
           model: Catalyst.Model.t() | nil,
           model_set?: boolean(),
@@ -205,10 +215,10 @@ defmodule Catalyst.Session.Store do
     Map.take(empty_loaded_state(), [:model, :model_set?, :thinking_level, :thinking_level_set?])
   end
 
-  defp append_line(%{path: path}, build) do
+  defp append_line(handle, build) do
     with {:ok, entry} <- build_entry(build),
          {:ok, encoded} <- encode_entry(entry),
-         :ok <- write_entry(path, encoded) do
+         :ok <- write_entry(handle, encoded) do
       :ok
     end
   end
@@ -224,7 +234,7 @@ defmodule Catalyst.Session.Store do
   defp encode_entry(entry) do
     case Jason.encode(entry) do
       {:ok, encoded} -> {:ok, encoded}
-      {:error, reason} -> {:error, {:encode_failed, reason}}
+      {:error, _reason} -> encode_entry_without_details(entry)
     end
   rescue
     error -> {:error, {:encode_failed, error}}
@@ -232,7 +242,24 @@ defmodule Catalyst.Session.Store do
     kind, reason -> {:error, {:encode_failed, {kind, reason}}}
   end
 
-  defp write_entry(path, encoded) do
+  # Details are best-effort JSON: when the full line fails to encode, retry once
+  # with the tool-result details dropped rather than losing the whole message.
+  defp encode_entry_without_details(%{"message" => %{"details" => details} = message} = entry)
+       when not is_nil(details) do
+    case Jason.encode(%{entry | "message" => %{message | "details" => nil}}) do
+      {:ok, encoded} -> {:ok, encoded}
+      {:error, reason} -> {:error, {:encode_failed, reason}}
+    end
+  end
+
+  defp encode_entry_without_details(entry), do: {:error, {:encode_failed, {:invalid_json, entry}}}
+
+  # Deliberately re-opens the file per append: a held raw device keeps
+  # "succeeding" into the unlinked inode after the JSONL is deleted or
+  # replaced, silently reporting durable success for writes that are lost —
+  # the exact failure the tagged {:write_failed, _} contract exists to surface
+  # (pinned by the server_test failed-reset/failed-compaction tests).
+  defp write_entry(%{path: path}, encoded) do
     case File.write(path, encoded <> "\n", [:append]) do
       :ok -> :ok
       {:error, reason} -> {:error, {:write_failed, reason}}
@@ -327,7 +354,8 @@ defmodule Catalyst.Session.Store do
   @spec encode(Message.t()) :: map()
   defdelegate encode(message), to: Codec
 
-  @doc "Decode a persisted JSON message map back into a session message."
+  # test seam: decode a persisted JSON message map back into a session message.
+  @doc false
   @spec decode(term()) :: {:ok, Message.t()} | {:error, Codec.decode_error()}
   defdelegate decode(message), to: Codec
 
@@ -392,7 +420,7 @@ defmodule Catalyst.Session.Store do
   defp fold_entry(%{"type" => "compaction", "replacement" => replacement}, state)
        when is_list(replacement) and replacement != [] do
     with {:ok, decoded} <- decode_messages(replacement),
-         :ok <- Window.validate_transcript(decoded) do
+         :ok <- Transcript.validate_transcript(decoded) do
       %{state | messages: Enum.reverse(decoded)}
     else
       {:error, _reason} -> state

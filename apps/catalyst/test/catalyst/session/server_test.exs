@@ -1,6 +1,8 @@
 defmodule Catalyst.Session.ServerTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [wait_until: 1]
+
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Hooks, Message, Model}
   alias Catalyst.Session.{EventSink, Manager, Server, Store}
@@ -97,14 +99,6 @@ defmodule Catalyst.Session.ServerTest do
     snap = Server.state(pid2)
     assert [%Message.User{}, %Message.Assistant{} = a] = snap.messages
     assert Content.text_of(a.content) == "first reply"
-  end
-
-  defp wait_until(fun, tries \\ 50) do
-    cond do
-      fun.() -> :ok
-      tries == 0 -> flunk("condition never became true")
-      true -> Process.sleep(10) && wait_until(fun, tries - 1)
-    end
   end
 
   test "a resumed session keeps its configured model and thinking level", %{
@@ -428,7 +422,7 @@ defmodule Catalyst.Session.ServerTest do
 
     event = %Event.ContextCompacted{replacement: [Message.user("durable replacement")]}
 
-    assert :ok = EventSink.persist(pid, run_ref, id, event)
+    assert :ok = EventSink.persist(pid, run_ref, event)
     assert_receive {:agent_event, ^id, ^event}
     assert :ok = Hooks.await_observers(id)
     assert_receive {:observed, ^event}
@@ -458,7 +452,7 @@ defmodule Catalyst.Session.ServerTest do
       start_supervised!(
         {Task,
          fn ->
-           :ok = EventSink.persist(pid, run_ref, id, event)
+           :ok = EventSink.persist(pid, run_ref, event)
          end}
       )
 
@@ -487,7 +481,7 @@ defmodule Catalyst.Session.ServerTest do
 
     event = %Event.ContextCompacted{replacement: [Message.user("must not install")]}
 
-    assert {:error, {:write_failed, _reason}} = EventSink.persist(pid, run_ref, id, event)
+    assert {:error, {:write_failed, _reason}} = EventSink.persist(pid, run_ref, event)
     assert Server.state(pid).messages == []
     refute_receive {:agent_event, ^id, ^event}
     assert :ok = Hooks.await_observers(id)

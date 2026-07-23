@@ -1,12 +1,10 @@
 defmodule Catalyst.Tools.Binaries do
   @moduledoc """
   Resolves the fast-tool binaries (`rg`, `fd`, `sd`, `ast-grep`) once and caches
-  the path. Resolution order: `~/.catalyst/bin`, then `$PATH`.
-
-  This is the single seam for PI's `ensureTool` auto-download behaviour. P1
-  resolves already-installed binaries; `download/1` (the on-demand fetch into
-  `~/.catalyst/bin`) is wired for P4 packaging — until then a missing binary
-  raises with an install hint.
+  the path. Resolution order: `~/.catalyst/bin`, then the bundled `priv/bin`
+  (shipped in the release/.app), then `$PATH`, then the common Homebrew
+  locations (a GUI .app inherits a minimal PATH). A missing binary raises with
+  an install hint.
   """
 
   alias Catalyst.Paths
@@ -51,7 +49,6 @@ defmodule Catalyst.Tools.Binaries do
 
     case discover(spec.exe) do
       nil ->
-        # P4: attempt download(tool) here before failing.
         {:error, {:missing, tool, install_hint(tool, spec)}}
 
       found ->
@@ -85,7 +82,7 @@ defmodule Catalyst.Tools.Binaries do
     end
   end
 
-  @doc "Directory for on-demand downloaded binaries."
+  @doc "Directory for user-installed tool binaries (`~/.catalyst/bin`)."
   @spec bin_dir() :: String.t()
   def bin_dir, do: Paths.join("bin")
 
@@ -103,11 +100,7 @@ defmodule Catalyst.Tools.Binaries do
 
   defp install_hint(tool, spec) do
     "fast-tool #{inspect(tool)} (#{spec.exe}) not found on PATH or in #{bin_dir()}. " <>
-      "Install it (e.g. `brew install #{spec.brew}`) or wait for auto-download (P4). " <>
+      "Install it (e.g. `brew install #{spec.brew}`). " <>
       "Releases: https://github.com/#{spec.repo}/releases"
   end
-
-  @doc false
-  # P4: download the correct release asset for the host OS/arch into bin_dir().
-  def download(tool), do: {:error, {:not_implemented, tool}}
 end

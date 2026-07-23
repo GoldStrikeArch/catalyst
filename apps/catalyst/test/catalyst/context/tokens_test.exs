@@ -209,16 +209,18 @@ defmodule Catalyst.Context.TokensTest do
   end
 
   defmodule TimeoutAdapter do
+    @moduledoc false
     @behaviour Catalyst.LLM.Provider
     @impl true
     def stream(_, _, _, _), do: {:error, :not_used}
+
+    # Deliberately slower than the 10ms adapter deadline the test configures —
+    # this simulates a wedged adapter, it is not a test-synchronization sleep.
     @impl true
-    def estimate_tokens(_, _, _),
-      do:
-        (
-          Process.sleep(100)
-          {:ok, 100}
-        )
+    def estimate_tokens(_, _, _) do
+      Process.sleep(100)
+      {:ok, 100}
+    end
   end
 
   defmodule CrashAdapter do

@@ -35,4 +35,13 @@ defmodule Catalyst.Model do
           context_window_source: :session | :catalog | :persisted | :fallback | nil,
           max_tokens: pos_integer() | nil
         }
+
+  @doc """
+  Normalize an untrusted window/limit value: a positive integer passes through,
+  anything else becomes `nil`. Shared by catalog decoding, option handling, and
+  UI display so the "positive int or absent" rule can't drift.
+  """
+  @spec positive_int(term()) :: pos_integer() | nil
+  def positive_int(value) when is_integer(value) and value > 0, do: value
+  def positive_int(_value), do: nil
 end

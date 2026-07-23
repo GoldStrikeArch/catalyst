@@ -10,7 +10,8 @@ defmodule Catalyst.Tools.RollbackTool do
   use Catalyst.Tools.Tool
 
   alias Catalyst.Extensions
-  alias Catalyst.Extensions.Versioning
+
+  import Catalyst.Tools.SelfModReport, only: [failures_section: 2]
 
   @impl true
   def execution_mode, do: :sequential
@@ -44,13 +45,18 @@ defmodule Catalyst.Tools.RollbackTool do
     }
   end
 
+  # Presentation only — the lock → revert → reload orchestration is the
+  # tagged `Extensions.rollback/1` domain operation.
   @impl true
   def execute(args, _ctx) do
-    case rollback_and_reload(args["name"]) do
-      {:ok, loaded, failed} ->
+    name = normalize_name(args["name"])
+
+    case Extensions.rollback(name) do
+      {:ok, %{loaded: loaded, failed: failed}} ->
         result(
-          "Rolled back the most recent non-reverted extension change#{scope_label(args["name"])} " <>
-            "and reloaded #{length(loaded)} file(s)." <> failures_section(failed),
+          "Rolled back the most recent non-reverted extension change#{scope_label(name)} " <>
+            "and reloaded #{length(loaded)} file(s)." <>
+            failures_section(failed, "FAILED to load after the revert"),
           %{files: length(loaded), failed: length(failed)}
         )
 
@@ -62,6 +68,9 @@ defmodule Catalyst.Tools.RollbackTool do
         raise "Rollback failed: no extension source file found for that name. " <>
                 "Loaded extensions: #{Enum.join(loaded_owners(), ", ")}"
 
+      {:error, {:reload_failed, reason}} ->
+        raise "Rollback applied, but the reload failed: #{Extensions.format_error(reason)}"
+
       {:error, reason} ->
         # Includes "nothing to revert" cases (e.g. only the empty init commit
         # exists): git's message is surfaced so the agent can tell them apart.
@@ -69,23 +78,8 @@ defmodule Catalyst.Tools.RollbackTool do
     end
   end
 
-  defp rollback_and_reload(name) do
-    Extensions.locked(fn ->
-      with :ok <- do_rollback(name),
-           {:ok, %{loaded: loaded, failed: failed}} <- Extensions.load_all() do
-        {:ok, loaded, failed}
-      end
-    end)
-  end
-
-  defp do_rollback(name) when is_binary(name) and name != "" do
-    case Extensions.source_file(name) do
-      {:ok, path} -> Versioning.rollback_file(Extensions.dir(), path)
-      :error -> {:error, :no_file}
-    end
-  end
-
-  defp do_rollback(_none), do: Versioning.rollback(Extensions.dir())
+  defp normalize_name(name) when is_binary(name) and name != "", do: name
+  defp normalize_name(_none), do: nil
 
   defp scope_label(name) when is_binary(name) and name != "", do: " to #{name}"
   defp scope_label(_none), do: ""
@@ -95,14 +89,5 @@ defmodule Catalyst.Tools.RollbackTool do
       [] -> ["(none)"]
       owners -> owners
     end
-  end
-
-  defp failures_section([]), do: ""
-
-  defp failures_section(failed) do
-    "\n#{length(failed)} file(s) FAILED to load after the revert:\n" <>
-      Enum.map_join(failed, "\n", fn {path, reason} ->
-        "  - #{path}: #{Extensions.format_error(reason)}"
-      end)
   end
 end

@@ -30,6 +30,7 @@ defmodule Catalyst.LLM.OpenAICodex.ConnCache do
   require Logger
 
   alias Catalyst.LLM.OpenAICodex.WebSocket
+  alias Catalyst.Tasks
   require WebSocket
 
   @default_idle_ttl_ms 600_000
@@ -132,7 +133,7 @@ defmodule Catalyst.LLM.OpenAICodex.ConnCache do
          pending: %{},
          idle_ttl_ms: idle_ttl_ms,
          max_entries: max_entries,
-         clock: Keyword.get(opts, :clock, &monotonic_ms/0),
+         clock: Keyword.get(opts, :clock, &Tasks.monotonic_ms/0),
          close: Keyword.get(opts, :close, &WebSocket.close/1),
          sequence: 0,
          expiry_timer: nil
@@ -227,7 +228,7 @@ defmodule Catalyst.LLM.OpenAICodex.ConnCache do
 
   # Socket traffic for idle connections: answer pings, evict on close/error.
   @impl true
-  def handle_info(msg, state) when WebSocket.socket_message?(msg) do
+  def handle_info(msg, state) when WebSocket.is_socket_message(msg) do
     state = state |> evict_expired() |> route_socket_message(msg) |> reschedule_expiry()
     {:noreply, state}
   end
@@ -406,5 +407,4 @@ defmodule Catalyst.LLM.OpenAICodex.ConnCache do
   defp validate_max_entries(value), do: {:error, {:invalid_max_entries, value}}
 
   defp now(state), do: state.clock.()
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

@@ -61,7 +61,7 @@ defmodule CatalystWeb.Flex.UIEverythingFlexTest do
     |> form("#chat-form", %{"message" => "/flex-status"})
     |> render_submit()
 
-    assert render(view) =~ "FLEX-STATUS tool=1 observer="
+    assert has_element?(view, "#flash-info, #flash-error", "FLEX-STATUS tool=1 observer=")
 
     view |> element("a", "Everything") |> render_click()
     assert has_element?(view, "#flex-everything-page")
@@ -85,7 +85,7 @@ defmodule CatalystWeb.Flex.UIEverythingFlexTest do
 
     _new_id = fresh_session!(view)
     submit_prompt!(view, "list files")
-    refute render(view) =~ "FLEX-EVERYTHING"
+    refute has_element?(view, "#catalyst-shell", "FLEX-EVERYTHING")
 
     restore_persistent_map(previous_persistent)
   end

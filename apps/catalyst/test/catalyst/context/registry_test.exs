@@ -1,6 +1,8 @@
 defmodule Catalyst.Context.RegistryTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2]
+
   alias Catalyst.Context.Registry
   alias Catalyst.Model
 
@@ -15,8 +17,8 @@ defmodule Catalyst.Context.RegistryTest do
   end
 
   setup do
-    previous_policy = Application.get_env(:catalyst, :context_policy)
-    previous_thresholds = Application.get_env(:catalyst, :context_thresholds)
+    previous_policy = Application.fetch_env(:catalyst, :context_policy)
+    previous_thresholds = Application.fetch_env(:catalyst, :context_thresholds)
 
     Registry.unregister_owner(:host)
     Registry.unregister_owner("registry-test-a")
@@ -80,13 +82,14 @@ defmodule Catalyst.Context.RegistryTest do
     assert :ok = Registry.register_policy(Policy, owner: "registry-test-a")
     assert {:ok, Policy, {:extension, "registry-test-a", {:policy, :default}}} = Registry.policy()
 
-    assert {:error, {:context_policy_owner_collision, "registry-test-a", "registry-test-b"}} =
+    assert {:error,
+            {:owner_collision, :context_policy, nil, "registry-test-a", "registry-test-b"}} =
              Registry.register_policy(Policy, owner: "registry-test-b")
 
     assert :ok = Registry.register_threshold("model", 100, owner: "registry-test-a")
 
     assert {:error,
-            {:context_threshold_owner_collision, "model", "registry-test-a", "registry-test-b"}} =
+            {:owner_collision, :context_threshold, "model", "registry-test-a", "registry-test-b"}} =
              Registry.register_threshold("model", 200, owner: "registry-test-b")
   end
 
@@ -102,7 +105,4 @@ defmodule Catalyst.Context.RegistryTest do
     assert {:error, {:invalid_configuration, :context_thresholds, {"model", 0}}} =
              Registry.threshold(%Model{id: "model", api: "api"})
   end
-
-  defp restore_env(key, nil), do: Application.delete_env(:catalyst, key)
-  defp restore_env(key, value), do: Application.put_env(:catalyst, key, value)
 end

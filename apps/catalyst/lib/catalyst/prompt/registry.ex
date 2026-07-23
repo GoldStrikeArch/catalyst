@@ -10,11 +10,10 @@ defmodule Catalyst.Prompt.Registry do
   use GenServer
 
   alias Catalyst.ExtensionAPI
-  alias Catalyst.OwnedIndex
+  alias Catalyst.Extensions.Owner
   alias Catalyst.Prompt.Config
 
   @table :catalyst_prompt_registry
-  @host_owner :host
   @policy_key {:policy, :default}
 
   @type model_key :: Config.model_key()
@@ -36,10 +35,6 @@ defmodule Catalyst.Prompt.Registry do
     register({:text, purpose, model_key}, text, opts)
   end
 
-  @doc "Alias for register_prompt/3 used by host code."
-  @spec register_text(model_key(), binary(), keyword()) :: :ok | {:error, term()}
-  def register_text(model_key, text, opts \\ []), do: register_prompt(model_key, text, opts)
-
   @doc "Register the runtime-default prompt policy."
   @spec register_policy(module(), keyword()) :: :ok | {:error, term()}
   def register_policy(module, opts \\ []), do: register(@policy_key, module, opts)
@@ -47,12 +42,6 @@ defmodule Catalyst.Prompt.Registry do
   @doc "Remove one runtime overlay, revealing the current lower-precedence layer."
   @spec unregister(key()) :: :ok
   def unregister(key), do: GenServer.call(__MODULE__, {:unregister, key})
-
-  @doc "Remove one model prompt runtime overlay."
-  @spec unregister_prompt(model_key(), keyword()) :: :ok
-  def unregister_prompt(model_key, opts \\ []) do
-    unregister({:text, Keyword.get(opts, :purpose, :system), model_key})
-  end
 
   @doc "Remove the runtime prompt-policy overlay."
   @spec unregister_policy() :: :ok
@@ -62,13 +51,11 @@ defmodule Catalyst.Prompt.Registry do
   @spec unregister_owner(term()) :: :ok
   def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
 
-  @doc """
-  Resolve one text layer through runtime and live application configuration.
-
-  Built-in policy file and text fallbacks are intentionally handled by
-  Catalyst.SystemPrompt so its documented file layers can sit between
-  application configuration and built-in text.
-  """
+  # test seam. Resolves one text layer through runtime and live application
+  # configuration. Built-in policy file and text fallbacks are intentionally
+  # handled by Catalyst.SystemPrompt so its documented file layers can sit
+  # between application configuration and built-in text.
+  @doc false
   @spec lookup_text(purpose(), model_key()) ::
           {:ok, binary(), source()} | :error | {:error, term()}
   def lookup_text(purpose, model_key) do
@@ -99,7 +86,8 @@ defmodule Catalyst.Prompt.Registry do
     end
   end
 
-  @doc "Compatibility projection returning only the effective policy module."
+  # test seam: compatibility projection returning only the effective policy module.
+  @doc false
   @spec fetch_policy() :: {:ok, module()} | {:error, term()}
   def fetch_policy do
     case policy() do
@@ -111,27 +99,30 @@ defmodule Catalyst.Prompt.Registry do
   @doc "Return sorted owner-aware runtime registrations; fallback layers are excluded."
   @spec runtime_entries() :: [%{key: key(), value: term(), owner: term()}]
   def runtime_entries do
-    @table
-    |> :ets.tab2list()
-    |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
-    |> Enum.sort_by(&inspect(&1.key))
-  rescue
-    ArgumentError -> []
+    case table_rows() do
+      {:ok, rows} ->
+        rows
+        |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
+        |> Enum.sort_by(&inspect(&1.key))
+
+      :error ->
+        []
+    end
   end
 
   @impl true
   def init(:ok) do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
     wire_extension_api()
-    {:ok, OwnedIndex.new()}
+    {:ok, :ok}
   end
 
   @impl true
   def handle_call({:register, key, value, opts}, _from, state) do
-    owner = normalize_owner(Keyword.get(opts, :owner))
+    owner = opts |> Keyword.get(:owner) |> Owner.normalize()
 
     with :ok <- validate_registration(key, value),
-         {:ok, state} <- claim(key, owner, state) do
+         :ok <- claim(key, owner) do
       :ets.insert(@table, {key, value, owner})
       {:reply, :ok, state}
     else
@@ -141,12 +132,11 @@ defmodule Catalyst.Prompt.Registry do
 
   def handle_call({:unregister, key}, _from, state) do
     :ets.delete(@table, key)
-    {:reply, :ok, OwnedIndex.release(state, key)}
+    {:reply, :ok, state}
   end
 
   def handle_call({:unregister_owner, owner}, _from, state) do
-    {keys, state} = OwnedIndex.release_owner(state, owner)
-    Enum.each(keys, &:ets.delete(@table, &1))
+    :ets.match_delete(@table, {:_, :_, owner})
     {:reply, :ok, state}
   end
 
@@ -154,10 +144,23 @@ defmodule Catalyst.Prompt.Registry do
     do: GenServer.call(__MODULE__, {:register, key, value, opts})
 
   defp lookup_runtime(key) do
-    case :ets.lookup(@table, key) do
+    case lookup_row(key) do
       [{^key, value, owner}] -> {:ok, value, owner}
       _missing -> :error
     end
+  end
+
+  # The rescues wrap only the :ets call: readers keep their documented
+  # fallback while the table is absent; a malformed row must not silently
+  # read as "no overlays".
+  defp lookup_row(key) do
+    :ets.lookup(@table, key)
+  rescue
+    ArgumentError -> []
+  end
+
+  defp table_rows do
+    {:ok, :ets.tab2list(@table)}
   rescue
     ArgumentError -> :error
   end
@@ -203,13 +206,13 @@ defmodule Catalyst.Prompt.Registry do
   defp invalid_registration(key, value),
     do: {:error, {:invalid_registration, key, value}}
 
-  defp claim(key, owner, state) do
-    case OwnedIndex.claim(state, key, owner) do
-      {:ok, state} ->
-        {:ok, state}
-
-      {:error, existing_owner} ->
-        {:error, {:prompt_owner_collision, key, existing_owner, owner}}
+  # Ownership lives in ETS column 3 (single writer: this process), so a claim
+  # is a plain lookup — no second bookkeeping structure to desync.
+  defp claim(key, owner) do
+    case lookup_runtime(key) do
+      :error -> :ok
+      {:ok, _value, ^owner} -> :ok
+      {:ok, _value, existing} -> {:error, {:owner_collision, :prompt, key, existing, owner}}
     end
   end
 
@@ -218,9 +221,6 @@ defmodule Catalyst.Prompt.Registry do
   end
 
   defp valid_policy?(_module), do: false
-
-  defp normalize_owner(nil), do: @host_owner
-  defp normalize_owner(owner), do: owner
 
   @doc false
   @spec register_extension_prompt(ExtensionAPI.t(), model_key(), binary(), keyword()) ::

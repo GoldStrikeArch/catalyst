@@ -181,9 +181,9 @@ defmodule CatalystWeb.UI.Markdown do
     {quote_lines, rest} = Enum.split_while(lines, &blockquote?/1)
 
     inner_text =
-      quote_lines
-      |> Enum.map(fn line -> @blockquote |> Regex.run(line) |> List.last() end)
-      |> Enum.join("\n")
+      Enum.map_join(quote_lines, "\n", fn line ->
+        @blockquote |> Regex.run(line) |> List.last()
+      end)
 
     {{:blockquote, parse(inner_text)}, rest}
   end
@@ -204,10 +204,7 @@ defmodule CatalystWeb.UI.Markdown do
   defp take_paragraph(lines) do
     {paragraph_lines, rest} = Enum.split_while(lines, &(not blank?(&1) and not block_start?(&1)))
 
-    text =
-      paragraph_lines
-      |> Enum.map(&String.trim/1)
-      |> Enum.join(" ")
+    text = Enum.map_join(paragraph_lines, " ", &String.trim/1)
 
     {{:paragraph, parse_inlines(text)}, rest}
   end

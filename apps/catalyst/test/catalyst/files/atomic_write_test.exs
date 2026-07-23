@@ -72,13 +72,6 @@ defmodule Catalyst.Files.AtomicWriteTest do
     assert temp_files(root, path) == []
   end
 
-  test "the former tools module remains a raising compatibility facade", %{root: root} do
-    path = Path.join(root, "compat.txt")
-
-    assert :ok = Catalyst.Tools.AtomicWrite.write!(path, "compatible")
-    assert File.read!(path) == "compatible"
-  end
-
   defp file_mode(path) do
     {:ok, %File.Stat{mode: mode}} = File.stat(path)
     band(mode, 0o7777)

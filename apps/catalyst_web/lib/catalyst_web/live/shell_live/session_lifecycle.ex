@@ -12,27 +12,36 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   import Phoenix.Component, only: [assign: 2]
   import Phoenix.LiveView, only: [put_flash: 3]
 
-  alias Catalyst.Session.{Manager, Server}
+  alias Catalyst.Session.{Catalog, Manager, Server}
   alias CatalystWeb.ShellLive.{ChatInput, Conversation, Settings}
 
   @session_ptr {CatalystWeb.ShellLive, :current_session}
+  @attach_retries 5
+  @attach_retry_delay_ms 20
   @type socket :: Phoenix.LiveView.Socket.t()
 
   @doc "Returns the initial working directory for development or a packaged release."
   @spec default_cwd() :: String.t()
   def default_cwd do
-    case System.get_env("RELEASE_NAME") do
-      nil -> File.cwd!()
-      _release -> System.user_home!()
+    case Catalyst.Paths.default_cwd() do
+      {:ok, cwd} -> cwd
+      {:error, reason} -> raise "no usable default working directory: #{inspect(reason)}"
     end
   end
 
-  @doc "Reattaches to the remembered live session or starts a replacement."
+  @doc """
+  Reattaches to the remembered live session or starts a replacement.
+
+  The lookup is two-tiered: `:persistent_term` finds the session while the VM
+  that started it is still running; after a full VM restart the persisted
+  `Catalyst.Session.Catalog` supplies the `{id, cwd}` pair the store needs to
+  resume the transcript from disk.
+  """
   @spec attach_or_start(socket()) :: socket()
   def attach_or_start(socket) do
-    case remembered_session() do
-      %{id: id} -> attach_remembered(socket, id)
-      _none -> start(socket)
+    case reattach_enabled?() do
+      true -> attach_or_resume(socket)
+      false -> start(socket)
     end
   end
 
@@ -41,12 +50,11 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   def start(socket) do
     stop_attached_session(socket)
 
-    {provider, model} = Settings.provider_config(socket.assigns.codex_prefs)
+    model = Settings.provider_config(socket.assigns.codex_prefs)
     run_opts = Settings.run_opts(socket.assigns.codex_prefs)
 
     case Manager.start_session(
            cwd: socket.assigns.cwd,
-           provider: provider,
            model: model,
            opts: run_opts
          ) do
@@ -75,30 +83,85 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
     end
   end
 
-  defp attach_remembered(socket, id) do
-    case await_session(id) do
+  @doc """
+  Retries attaching to a remembered session that was not yet registered.
+
+  Called by ShellLive when a `{:retry_session_attach, id, retries_left}` timer
+  message (scheduled below) arrives; retries stay bounded and the final miss
+  falls back to a fresh session.
+  """
+  @spec retry_attach(socket(), String.t(), non_neg_integer()) :: socket()
+  def retry_attach(socket, id, retries_left), do: try_attach(socket, id, retries_left)
+
+  defp attach_or_resume(socket) do
+    case :persistent_term.get(@session_ptr, nil) do
+      %{id: id} -> attach_remembered(socket, id)
+      _cold -> resume_from_catalog(socket)
+    end
+  end
+
+  # After a full VM restart the :persistent_term pointer is gone but the
+  # catalog still knows the {id, cwd} pair the store derives its path from.
+  # Any miss (empty or unreadable catalog, deleted cwd) starts fresh.
+  defp resume_from_catalog(socket) do
+    case Catalog.most_recent() do
+      {:ok, %{id: id, cwd: cwd}} -> resume_persisted(socket, id, cwd)
+      {:error, _empty_or_unreadable} -> start(socket)
+    end
+  end
+
+  defp resume_persisted(socket, id, cwd) do
+    case File.dir?(cwd) do
+      true -> restart_persisted_session(socket, id, cwd)
+      false -> start(socket)
+    end
+  end
+
+  # Manager.start_session/1 with an explicit id adopts the process when it is
+  # somehow still alive and otherwise reopens the on-disk transcript, so this
+  # one call covers both the warm and the restarted-VM case.
+  defp restart_persisted_session(socket, id, cwd) do
+    model = Settings.provider_config(socket.assigns.codex_prefs)
+    run_opts = Settings.run_opts(socket.assigns.codex_prefs)
+
+    case Manager.start_session(id: id, cwd: cwd, model: model, opts: run_opts) do
+      {:ok, %{id: ^id, pid: pid}} ->
+        remember_session(id, cwd)
+
+        socket
+        |> assign(cwd: cwd)
+        |> reattach(id, pid)
+
+      {:error, reason} ->
+        Logger.warning("[shell] could not resume cataloged session #{id}: #{inspect(reason)}")
+        start(socket)
+    end
+  end
+
+  defp attach_remembered(socket, id), do: try_attach(socket, id, @attach_retries)
+
+  defp try_attach(socket, id, retries_left) do
+    case Manager.whereis(id) do
       {:ok, pid} ->
         reattach(socket, id, pid)
+
+      :error when retries_left > 0 ->
+        # The remembered server may still be (re)registering. Schedule a
+        # bounded retry through the mailbox instead of sleep-polling inside
+        # the LiveView process; ShellLive routes the message back here.
+        Process.send_after(
+          self(),
+          {:retry_session_attach, id, retries_left - 1},
+          @attach_retry_delay_ms
+        )
+
+        socket
 
       :error ->
         # A crashed child can re-register under the abandoned id after this
         # lookup. Stop it before moving the UI to a new session.
         Manager.stop(id)
         start(socket)
-    end
-  end
-
-  defp await_session(id, retries \\ 5)
-  defp await_session(id, 0), do: Manager.whereis(id)
-
-  defp await_session(id, retries) do
-    case Manager.whereis(id) do
-      :error ->
-        Process.sleep(20)
-        await_session(id, retries - 1)
-
-      {:ok, _pid} = found ->
-        found
     end
   end
 
@@ -120,7 +183,7 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
 
   defp attach_new_session(socket, id, pid, model, run_opts) do
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-    remember_session(id)
+    remember_session(id, socket.assigns.cwd)
 
     socket
     |> monitor(pid)
@@ -171,12 +234,21 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   defp demonitor(nil), do: :ok
   defp demonitor(ref), do: Process.demonitor(ref, [:flush])
 
-  defp remember_session(id), do: :persistent_term.put(@session_ptr, %{id: id})
+  # The :persistent_term pointer serves same-VM reconnects; the write-through
+  # to the persisted catalog is what makes resume survive a VM restart. A
+  # catalog write failure only degrades restart-resume, so it is logged, not
+  # propagated.
+  defp remember_session(id, cwd) do
+    :persistent_term.put(@session_ptr, %{id: id})
 
-  defp remembered_session do
-    case Application.get_env(:catalyst_web, :reattach_sessions, true) do
-      true -> :persistent_term.get(@session_ptr, nil)
-      false -> nil
+    case Catalog.remember(id, cwd) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[shell] could not persist session catalog entry: #{inspect(reason)}")
     end
   end
+
+  defp reattach_enabled?, do: Application.get_env(:catalyst_web, :reattach_sessions, true)
 end

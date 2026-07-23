@@ -28,10 +28,15 @@ defmodule Catalyst.Tools.ContextTest do
     assert context[:tool_source] == :extensions
     assert context.agent_depth == 1
 
-    updated = put_in(context[:session_id], "new-parent")
-    assert updated.parent_session_id == "new-parent"
-    assert updated.session_id == "new-parent"
-    assert Map.get(updated, :session_id) == "new-parent"
+    # The context is read-only after new/1: reads via Access are a published
+    # compatibility promise, writes raise so the aliased fields cannot desync.
+    assert_raise ArgumentError, ~r/read-only after new\/1/, fn ->
+      put_in(context[:session_id], "new-parent")
+    end
+
+    assert_raise ArgumentError, ~r/read-only after new\/1/, fn ->
+      pop_in(context[:session_id])
+    end
   end
 
   test "explicit roots win over the parent default" do

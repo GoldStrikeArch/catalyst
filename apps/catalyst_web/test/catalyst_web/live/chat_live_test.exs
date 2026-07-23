@@ -3,32 +3,10 @@ defmodule CatalystWeb.ChatLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Catalyst.Agent.Event
-  alias Catalyst.Session.Server
-
-  defp session_id(view) do
-    html = view |> element("#catalyst-shell") |> render()
-    [_, id] = Regex.run(~r/data-session-id="([^"]+)"/, html)
-    id
-  end
-
-  defp submit_prompt(view, prompt) do
-    id = session_id(view)
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-
-    view
-    |> form("#chat-form", %{"message" => prompt})
-    |> render_submit()
-
-    # Broadcasts are tagged with the broadcasting session's id.
-    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
-    render(view)
-  end
-
   test "renders the chat shell with the Codex run controls", %{conn: conn} do
-    {:ok, view, html} = live(conn, ~p"/")
-    assert html =~ "codex-opts"
-    refute html =~ "Demo (offline)"
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert has_element?(view, "#codex-opts")
+    refute has_element?(view, "#catalyst-shell", "Demo (offline)")
     assert has_element?(view, "#chat-empty-state")
     assert has_element?(view, "#chat-form")
   end
@@ -36,11 +14,11 @@ defmodule CatalystWeb.ChatLiveTest do
   test "sending a prompt streams a reply with a tool result (offline provider)", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 
-    html = submit_prompt(view, "list the files")
+    submit_prompt(view, "list the files")
 
-    assert html =~ "list the files"
-    assert html =~ "offline Demo provider"
-    assert html =~ "ls"
+    assert has_element?(view, "#message-stream", "list the files")
+    assert has_element?(view, "#message-stream", "offline Demo provider")
+    assert has_element?(view, "#message-stream code", "ls")
     refute has_element?(view, "#chat-empty-state")
   end
 
@@ -57,16 +35,16 @@ defmodule CatalystWeb.ChatLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
     id = session_id(view)
-    assert submit_prompt(view, "list the files") =~ "list the files"
+    submit_prompt(view, "list the files")
+    assert has_element?(view, "#message-stream", "list the files")
 
     # A reconnect/refresh mounts a fresh LiveView; it must pick up the same
     # session and replay the conversation instead of starting over.
     {:ok, view2, _html} = live(conn, ~p"/")
     assert session_id(view2) == id
 
-    html = render(view2)
-    assert html =~ "list the files"
-    assert html =~ "offline Demo provider"
+    assert has_element?(view2, "#message-stream", "list the files")
+    assert has_element?(view2, "#message-stream", "offline Demo provider")
     refute has_element?(view2, "#chat-empty-state")
   end
 
@@ -80,21 +58,21 @@ defmodule CatalystWeb.ChatLiveTest do
 
     on_exit(fn -> Application.delete_env(:catalyst_web, :login_fun) end)
 
-    {:ok, view, html} = live(conn, ~p"/")
-    assert html =~ "Sign in to ChatGPT"
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert has_element?(view, "#login-button", "Sign in to ChatGPT")
     id = session_id(view)
-    assert submit_prompt(view, "hello there") =~ "hello there"
+    submit_prompt(view, "hello there")
+    assert has_element?(view, "#message-stream", "hello there")
 
-    view |> element("button", "Sign in to ChatGPT") |> render_click()
+    view |> element("#login-button") |> render_click()
     assert_receive :login_called, 1_000
 
-    html = render(view)
-    refute html =~ "Sign in to ChatGPT"
-    assert html =~ "Sign out of ChatGPT"
+    refute has_element?(view, "#login-button")
+    assert has_element?(view, ~s(#logout-button[title="Sign out of ChatGPT"]))
 
     # The token is fetched per turn — signing in must NOT restart the session
     # or wipe the conversation.
     assert session_id(view) == id
-    assert render(view) =~ "hello there"
+    assert has_element?(view, "#message-stream", "hello there")
   end
 end

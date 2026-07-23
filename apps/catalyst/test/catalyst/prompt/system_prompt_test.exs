@@ -1,6 +1,8 @@
 defmodule Catalyst.Prompt.SystemPromptTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2]
+
   alias Catalyst.{Model, SystemPrompt}
   alias Catalyst.Prompt.{Registry, Request, Resolution}
 
@@ -280,7 +282,4 @@ defmodule Catalyst.Prompt.SystemPromptTest do
         :ok
     end
   end
-
-  defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
-  defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
 end

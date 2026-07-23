@@ -44,8 +44,19 @@ defmodule Catalyst.Prompt do
     end
   end
 
-  defp normalize_resolution(%Resolution{text: text, sources: sources})
-       when is_binary(text) and is_list(sources) do
+  @doc """
+  Validate and canonicalize a prompt resolution.
+
+  The single home for resolution validation (`Session.RunContext` calls it for
+  hook-installed prompts too): scrubs invalid UTF-8 from the text, rejects
+  blank text with `{:error, :blank_prompt_resolution}`, and rejects bad
+  provenance with `{:error, {:invalid_prompt_provenance, source}}` carrying the
+  first invalid source. Non-resolutions return
+  `{:error, {:invalid_prompt_resolution, value}}`.
+  """
+  @spec normalize_resolution(term()) :: {:ok, Resolution.t()} | {:error, term()}
+  def normalize_resolution(%Resolution{text: text, sources: sources})
+      when is_binary(text) and is_list(sources) do
     resolution = Resolution.new(Tools.Truncate.scrub_utf8(text), sources)
 
     cond do
@@ -55,7 +66,7 @@ defmodule Catalyst.Prompt do
     end
   end
 
-  defp normalize_resolution(resolution),
+  def normalize_resolution(resolution),
     do: {:error, {:invalid_prompt_resolution, resolution}}
 
   defp invalid_provenance(sources) do

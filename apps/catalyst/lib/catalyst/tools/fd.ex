@@ -1,13 +1,10 @@
 defmodule Catalyst.Tools.Fd do
   @moduledoc "Filename search via fd (`find` tool). Glob mode; respects .gitignore."
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.{Binaries, Exec, Paths, Truncate}
+  alias Catalyst.Tools.{Binaries, Exec, Listing, Paths}
 
   @default_limit 1000
   @max_limit 10_000
-  # Belt to --max-results' suspenders: a huge single line (or an fd flag
-  # regression) can't accumulate unbounded output.
-  @max_output_bytes 8 * 1024 * 1024
 
   @impl true
   def name, do: "find"
@@ -61,15 +58,20 @@ defmodule Catalyst.Tools.Fd do
         target
       ]
 
-    case Exec.collect!("fd", fd, fd_args,
-           cwd: ctx.cwd,
-           ok_statuses: [0, 1],
-           max_output_bytes: @max_output_bytes
-         ) do
+    res =
+      Exec.collect!("fd", fd, fd_args,
+        cwd: ctx.cwd,
+        ok_statuses: [0, 1],
+        max_output_bytes: max_output_bytes()
+      )
+
+    capped? = Map.get(res, :truncated, false)
+
+    case res do
       # fd exits 0 on a clean run (even with zero matches) — unlike rg,
       # where 1 means "no matches".
       %{out: out, status: 0} ->
-        respond(String.split(out, "\n", trim: true), limit, nil)
+        respond(String.split(out, "\n", trim: true), limit, nil, capped?)
 
       # fd exits 1 when ANY error occurred (missing/unreadable search path),
       # possibly alongside real results. The errors are stderr "[fd error]"
@@ -84,7 +86,7 @@ defmodule Catalyst.Tools.Fd do
             raise "fd error (status 1): #{String.slice(Enum.join(error_lines, "\n"), 0, 200)}"
 
           _ ->
-            respond(results, limit, error_note(error_lines))
+            respond(results, limit, error_note(error_lines), capped?)
         end
     end
   end
@@ -100,7 +102,7 @@ defmodule Catalyst.Tools.Fd do
     |> Enum.split_with(&String.starts_with?(&1, "[fd error]"))
   end
 
-  defp respond(results, limit, note) do
+  defp respond(results, limit, note, capped?) do
     limited? = length(results) > limit
     shown = Enum.take(results, limit)
 
@@ -111,26 +113,29 @@ defmodule Catalyst.Tools.Fd do
       end
 
     # Total is :unknown — fd's output was capped at limit + 1 results.
-    {text, info} =
-      Truncate.listing(text,
+    {text, details} =
+      Listing.render(text,
+        count: length(shown),
+        noun: "results",
         limited?: limited?,
         limit: limit,
-        total: :unknown,
-        noun: "results"
+        capped?: capped?,
+        max_output_bytes: max_output_bytes(),
+        note: note
       )
 
-    result(append_note(text, note), %{
-      result_count: length(shown),
-      result_limit_reached: limited?,
-      truncation: info
-    })
+    result(text, details)
   end
+
+  # Belt to --max-results' suspenders: a huge single line (or an fd flag
+  # regression) can't accumulate unbounded output. Test seam: the capped-output
+  # regression test lowers the cap so a small tree can exercise the Exec
+  # kill-at-cap path.
+  defp max_output_bytes,
+    do: Application.get_env(:catalyst, :fd_max_output_bytes, Listing.max_output_bytes())
 
   defp error_note([]), do: "... [some paths could not be searched]"
 
   defp error_note([sample | _]),
     do: "... [some paths could not be searched: #{String.slice(sample, 0, 200)}]"
-
-  defp append_note(text, nil), do: text
-  defp append_note(text, note), do: text <> "\n" <> note
 end

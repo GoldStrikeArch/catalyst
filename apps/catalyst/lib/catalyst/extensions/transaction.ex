@@ -7,8 +7,7 @@ defmodule Catalyst.Extensions.Transaction do
   compilation, and commit under one lock. Each outer transaction captures the
   current `Catalyst.Extensions` server and runtime generation; nested API calls
   remain pinned to that generation instead of accidentally mutating a server
-  that restarted while the transaction was in flight. Monitored boot work can
-  use the inline form so the boot worker itself owns the lock and generation.
+  that restarted while the transaction was in flight.
 
   Extension API dispatch uses a separate generation gate. That gate serializes
   an in-flight registration with generation publication and prior-owner purge,
@@ -30,26 +29,6 @@ defmodule Catalyst.Extensions.Transaction do
     case Process.get(@context_key, false) do
       true -> fun.()
       false -> run_task(fun)
-    end
-  end
-
-  @doc false
-  @spec run_inline((-> result)) :: result when result: term()
-  def run_inline(fun) when is_function(fun, 0) do
-    run_inline(
-      Process.whereis(Catalyst.Extensions) || Catalyst.Extensions,
-      Catalyst.Extensions.generation_token(),
-      fun
-    )
-  end
-
-  @doc false
-  @spec run_inline(GenServer.server(), reference() | nil, (-> result)) :: result
-        when result: term()
-  def run_inline(server, generation, fun) when is_function(fun, 0) do
-    case Process.get(@context_key, false) do
-      true -> fun.()
-      false -> with_lock(server, generation, fun)
     end
   end
 

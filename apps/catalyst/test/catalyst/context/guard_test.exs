@@ -1,6 +1,8 @@
 defmodule Catalyst.Context.GuardTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2]
+
   import ExUnit.CaptureLog
 
   alias Catalyst.Agent.Event
@@ -35,11 +37,7 @@ defmodule Catalyst.Context.GuardTest do
       {:ok,
        %Compaction{
          replacement: context.replacement,
-         summary: Map.get(context, :summary),
-         replaced_count: 0,
-         tokens_before: 0,
-         tokens_after: 999_999,
-         policy: __MODULE__
+         summary: Map.get(context, :summary)
        }}
     end
   end
@@ -333,7 +331,4 @@ defmodule Catalyst.Context.GuardTest do
       owner: owner
     )
   end
-
-  defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
-  defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
 end

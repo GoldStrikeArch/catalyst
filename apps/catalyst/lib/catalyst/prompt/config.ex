@@ -52,6 +52,23 @@ defmodule Catalyst.Prompt.Config do
   @spec valid_purpose?(term()) :: boolean()
   def valid_purpose?(purpose), do: purpose in @purposes
 
+  @doc """
+  Ordered lookup keys for a model: its id, its api, then `:default`.
+
+  Shared by every model-keyed overlay resolution (system prompts, context
+  thresholds) so the precedence can't drift between subsystems.
+  """
+  @spec model_keys(term()) :: [term()]
+  def model_keys(nil), do: [:default]
+
+  def model_keys(model) when is_map(model) do
+    [Map.get(model, :id), Map.get(model, :api), :default]
+    |> Enum.filter(&valid_model_key?/1)
+    |> Enum.uniq()
+  end
+
+  def model_keys(_model), do: [:default]
+
   @doc false
   @spec valid_model_key?(term()) :: boolean()
   def valid_model_key?(:default), do: true

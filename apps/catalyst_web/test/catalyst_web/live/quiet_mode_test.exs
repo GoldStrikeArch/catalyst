@@ -13,43 +13,25 @@ defmodule CatalystWeb.QuietModeTest do
     :ok
   end
 
-  defp session_id(view) do
-    html = view |> element("#catalyst-shell") |> render()
-    [_, id] = Regex.run(~r/data-session-id="([^"]+)"/, html)
-    id
-  end
-
   defp session_pid(view) do
     {:ok, pid} = Manager.whereis(session_id(view))
     pid
-  end
-
-  defp submit_prompt(view, prompt) do
-    id = session_id(view)
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-
-    view
-    |> form("#chat-form", %{"message" => prompt})
-    |> render_submit()
-
-    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
-    render(view)
   end
 
   test "the header toggle flips the transcript's data-quiet attribute", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
     refute has_element?(view, "#messages[data-quiet]")
 
-    view |> element("button", "Quiet") |> render_click()
+    view |> element("#quiet-toggle") |> render_click()
     assert has_element?(view, "#messages[data-quiet]")
 
-    view |> element("button", "Quiet") |> render_click()
+    view |> element("#quiet-toggle") |> render_click()
     refute has_element?(view, "#messages[data-quiet]")
   end
 
   test "quiet persists across a remount like other header prefs", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
-    view |> element("button", "Quiet") |> render_click()
+    view |> element("#quiet-toggle") |> render_click()
 
     {:ok, view2, _html} = live(conn, "/")
     assert has_element?(view2, "#messages[data-quiet]")
@@ -65,16 +47,16 @@ defmodule CatalystWeb.QuietModeTest do
     pid = session_pid(view)
 
     # Demo-provider run: a tool-call chip, then a tool-result card.
-    html = submit_prompt(view, "list the files")
-    assert html =~ ~s(data-block-kind="tool-call")
-    assert has_element?(view, ~s([data-message-role="tool-result"]))
+    submit_prompt(view, "list the files")
+    assert has_element?(view, ~s(#messages [data-block-kind="tool-call"]))
+    assert has_element?(view, ~s(#messages [data-message-role="tool-result"]))
 
     snap_before = Server.state(pid)
-    view |> element("button", "Quiet") |> render_click()
+    view |> element("#quiet-toggle") |> render_click()
 
     assert has_element?(view, "#messages[data-quiet]")
-    assert render(view) =~ ~s(data-block-kind="tool-call")
-    assert has_element?(view, ~s([data-message-role="tool-result"]))
+    assert has_element?(view, ~s(#messages [data-block-kind="tool-call"]))
+    assert has_element?(view, ~s(#messages [data-message-role="tool-result"]))
 
     # UI-only: same session process, same model/opts — no Server.configure ran.
     snap_after = Server.state(pid)
@@ -87,7 +69,7 @@ defmodule CatalystWeb.QuietModeTest do
     {:ok, view, _html} = live(conn, "/")
     id = session_id(view)
 
-    view |> element("button", "Quiet") |> render_click()
+    view |> element("#quiet-toggle") |> render_click()
 
     msg = %Message.Assistant{
       content: [
@@ -103,9 +85,8 @@ defmodule CatalystWeb.QuietModeTest do
 
     send(view.pid, {:agent_event, id, %Event.MessageEnd{message: msg}})
 
-    html = render(view)
-    assert html =~ ~s(data-block-kind="thinking")
-    assert html =~ ~s(data-block-kind="tool-call")
+    assert has_element?(view, ~s(#messages [data-block-kind="thinking"]))
+    assert has_element?(view, ~s(#messages [data-block-kind="tool-call"]))
     assert has_element?(view, "#messages[data-quiet]")
   end
 

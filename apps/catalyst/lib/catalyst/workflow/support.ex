@@ -176,7 +176,7 @@ defmodule Catalyst.Workflow.Support do
   defp anchored_threshold(%Event.ContextStatus{threshold_source: :builtin} = status, model) do
     case Window.builtin_threshold(model, true) do
       {:ok, value, :builtin} -> {value, :builtin}
-      :none -> {status.threshold, status.threshold_source}
+      :missing -> {status.threshold, status.threshold_source}
     end
   end
 

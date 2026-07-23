@@ -10,13 +10,12 @@ defmodule Catalyst.Context.Guard do
 
   alias Catalyst.Agent.Event
   alias Catalyst.{Hooks, Tasks}
-  alias Catalyst.Context.{Compaction, Registry, Tokens, Window}
+  alias Catalyst.Context.{Compaction, Registry, Tokens, Transcript, Window}
   alias Catalyst.LLM.Context, as: LLMContext
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @default_timeout 30_000
   @compaction_timeout_ratio 0.8
-  @failed_replacement_estimate 1_152_921_504_606_846_976
 
   @typedoc "Successful guarded request assembly."
   @type prepared :: %{
@@ -52,13 +51,10 @@ defmodule Catalyst.Context.Guard do
         true ->
           compact_request(
             policy,
-            policy_source,
             context,
             config,
             llm_context,
-            estimate,
-            threshold,
-            threshold_source,
+            %{estimate: estimate, threshold: threshold, source: threshold_source},
             emit,
             guard_opts
           )
@@ -130,8 +126,13 @@ defmodule Catalyst.Context.Guard do
     case policy do
       Window ->
         case Window.threshold_with_source(model, policy_context) do
+          # `{:ok, :none, source}` means a source explicitly disabled
+          # compaction and keeps that source's provenance; a bare `:none`
+          # means no source resolved anything — no window and no catalog
+          # limit exist, so the request is tagged `:unlimited` instead of
+          # inheriting the policy's provenance.
           {:ok, value, threshold_source} -> {:ok, value, threshold_source}
-          :none -> {:ok, :none, source}
+          :none -> {:ok, :none, :unlimited}
           {:error, _reason} = error -> error
         end
 
@@ -157,13 +158,10 @@ defmodule Catalyst.Context.Guard do
 
   defp compact_request(
          policy,
-         policy_source,
          context,
          config,
          llm_context,
-         estimate,
-         threshold,
-         threshold_source,
+         %{estimate: estimate, threshold: threshold, source: threshold_source},
          emit,
          guard_opts
        ) do
@@ -197,7 +195,7 @@ defmodule Catalyst.Context.Guard do
            replaced_count: replaced_count(Map.get(context, :messages, []), candidate.replacement),
            tokens_before: estimate.tokens,
            tokens_after: staged_estimate.tokens,
-           policy: candidate.policy || policy_source
+           policy: policy
          },
          :ok <- persist_durable(guard_opts, emit, event) do
       status = status_event(staged_estimate, threshold, threshold_source)
@@ -285,7 +283,7 @@ defmodule Catalyst.Context.Guard do
         {:error, :compaction_summary_not_in_replacement}
 
       true ->
-        Window.validate_transcript(candidate.replacement)
+        Transcript.validate_transcript(candidate.replacement)
     end
   end
 
@@ -296,24 +294,17 @@ defmodule Catalyst.Context.Guard do
   defp validate_progress(_before, after_tokens, threshold),
     do: {:error, {:context_compaction_still_oversized, after_tokens, threshold}}
 
-  defp replaced_count(original, replacement) do
-    retained = common_suffix_length(Enum.reverse(original), Enum.reverse(replacement), 0)
-    length(original) - retained
-  end
+  # Unlike Window's user-facing accounting, this may legitimately be zero:
+  # a zero count is how `validate_candidate/2` detects no progress.
+  defp replaced_count(original, replacement),
+    do: length(original) - Transcript.common_suffix_length(original, replacement)
 
-  defp common_suffix_length([message | original], [message | replacement], count),
-    do: common_suffix_length(original, replacement, count + 1)
-
-  defp common_suffix_length(_original, _replacement, count), do: count
-
+  # The estimator returns the tagged `Tokens.estimate_tokens/3` result as-is;
+  # the policy treats `{:error, reason}` as an unfit candidate.
   defp replacement_estimator(llm_context, config) do
     fn messages ->
       replacement = %{llm_context | messages: messages}
-
-      case Tokens.estimate_tokens(Map.get(config, :model), replacement, token_opts(config)) do
-        {:ok, value} -> value
-        {:error, _reason} -> @failed_replacement_estimate
-      end
+      Tokens.estimate_tokens(Map.get(config, :model), replacement, token_opts(config))
     end
   end
 

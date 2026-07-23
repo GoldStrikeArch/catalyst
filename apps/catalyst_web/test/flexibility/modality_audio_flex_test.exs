@@ -76,7 +76,12 @@ defmodule CatalystWeb.Flex.ModalityAudioFlexTest do
       ])
 
     assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
-    assert render(view) =~ "FLEX-UNKNOWN-REQUEST types=input_text text=unknown-block-probe"
+
+    assert has_element?(
+             view,
+             "#message-stream",
+             "FLEX-UNKNOWN-REQUEST types=input_text text=unknown-block-probe"
+           )
 
     restore_codex_provider(previous_provider)
     remove_installed_fixture!("ui_audio_probe")

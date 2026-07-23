@@ -10,23 +10,23 @@ defmodule CatalystWeb.ShellComponents do
 
   use CatalystWeb, :html
 
-  alias Catalyst.LLM.OpenAICodex
-  alias CatalystWeb.UI.{PageRenderer, Registry}
+  alias CatalystWeb.UI.PageRenderer
 
-  @doc "Renders the complete shell around the currently selected page."
+  @doc """
+  Renders the complete shell around the currently selected page.
+
+  Expects `@codex_catalog`, `@selected_codex_entry`, and `@shell_pages` to be
+  assigned by `CatalystWeb.ShellLive` at its refresh points — they are not
+  recomputed per render.
+  """
   @spec render(map()) :: Phoenix.LiveView.Rendered.t()
   def render(assigns) do
-    catalog = OpenAICodex.catalog_snapshot(assigns.codex_prefs.model)
-
     assigns =
       assign(assigns,
-        codex_catalog: catalog.models,
         codex_form: codex_form(assigns.codex_prefs),
         diagnostic_prompt: diagnostic_prompt(assigns),
         diagnostic_workflow: metadata_value(assigns.run_metadata, :workflow),
-        diagnostic_context: metadata_value(assigns.run_metadata, :context),
-        selected_codex_entry: catalog.selected,
-        shell_pages: Registry.list_pages()
+        diagnostic_context: metadata_value(assigns.run_metadata, :context)
       )
 
     ~H"""
@@ -193,7 +193,7 @@ defmodule CatalystWeb.ShellComponents do
           id="extension-boot-status"
           class="border-b border-amber-300/60 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200"
         >
-          ⚠ {boot_status_heading(@boot_status)} — {boot_status_reason(@boot_status)}. Recover from the
+          ⚠ {boot_status_heading(@boot_status)} — {boot_status_reason(@boot_status)} Recover from the
           <.link patch={~p"/extensions"} class="font-semibold underline">Extensions panel</.link>
           (disable or roll back the offender, then load again), or ask the agent to run <code class="font-mono">reload_extensions</code>.
         </div>
@@ -406,8 +406,7 @@ defmodule CatalystWeb.ShellComponents do
   defp nonnegative(value) when is_integer(value) and value >= 0, do: value
   defp nonnegative(_value), do: 0
 
-  defp positive(value) when is_integer(value) and value > 0, do: value
-  defp positive(_value), do: nil
+  defp positive(value), do: Catalyst.Model.positive_int(value)
 
   defp format_tokens(tokens) when is_integer(tokens) and tokens >= 1_000,
     do: :erlang.float_to_binary(tokens / 1_000, decimals: 1) <> "k"
@@ -418,20 +417,12 @@ defmodule CatalystWeb.ShellComponents do
   defp format_threshold(value) when is_integer(value), do: format_tokens(value)
   defp format_threshold(value), do: to_string(value)
 
-  defp boot_status_heading({:load_failed, _reason}), do: "Extension boot load failed"
-  defp boot_status_heading(_status), do: "Extensions were not loaded"
+  # Single boot-status presenter — core owns the sum type's wording.
+  defp boot_status_heading(status),
+    do: status |> Catalyst.Extensions.describe_boot_status() |> elem(0)
 
-  defp boot_status_reason({:safe_mode, :env}), do: "CATALYST_SAFE_MODE is set"
-
-  defp boot_status_reason({:safe_mode, :crash_detected}) do
-    "the previous boot crashed while extensions were active"
-  end
-
-  defp boot_status_reason({:load_failed, reason}) do
-    "the boot-time load failed: #{Catalyst.Extensions.format_error(reason)}"
-  end
-
-  defp boot_status_reason(_status), do: "safe mode"
+  defp boot_status_reason(status),
+    do: status |> Catalyst.Extensions.describe_boot_status() |> elem(1)
 
   defp codex_select_class do
     "cursor-pointer rounded-full border border-neutral-200 bg-transparent px-2 py-1 text-xs " <>

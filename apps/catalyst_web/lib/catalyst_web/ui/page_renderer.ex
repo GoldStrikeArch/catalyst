@@ -9,9 +9,7 @@ defmodule CatalystWeb.UI.PageRenderer do
 
   use Phoenix.Component
 
-  require Logger
-
-  alias CatalystWeb.UI.Registry
+  alias CatalystWeb.UI.{Registry, SafeRender}
 
   @trusted_pages [CatalystWeb.Pages.ChatPage, CatalystWeb.Pages.ExtensionsPage]
 
@@ -46,30 +44,14 @@ defmodule CatalystWeb.UI.PageRenderer do
   end
 
   defp safely_render_page(module, function, assigns) do
-    rendered = apply(module, function, [assigns])
-    {:safe, Phoenix.HTML.Safe.to_iodata(rendered)}
-  rescue
-    error ->
-      Logger.warning(
-        "[ui] page #{inspect(module)}.#{function} raised: #{Exception.message(error)} — falling back to chat"
-      )
-
-      CatalystWeb.Pages.ChatPage.render(assigns)
-  catch
-    kind, reason ->
-      Logger.warning("[ui] page #{inspect(module)}.#{function} #{kind}: #{inspect(reason)}")
-      CatalystWeb.Pages.ChatPage.render(assigns)
+    SafeRender.forced_iodata(
+      fn -> apply(module, function, [assigns]) end,
+      "page #{inspect(module)}.#{function}",
+      fn -> CatalystWeb.Pages.ChatPage.render(assigns) end
+    )
   end
 
   defp safely_render_component(function, assigns) do
-    {:safe, Phoenix.HTML.Safe.to_iodata(function.(assigns))}
-  rescue
-    error ->
-      Logger.warning("[ui] slot component raised: #{Exception.message(error)}")
-      nil
-  catch
-    kind, reason ->
-      Logger.warning("[ui] slot component #{kind}: #{inspect(reason)}")
-      nil
+    SafeRender.forced_iodata(fn -> function.(assigns) end, "slot component", fn -> nil end)
   end
 end

@@ -5,12 +5,7 @@ defmodule Catalyst.Tools.AstGrep do
   the rewrite in place across the target.
   """
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.{Binaries, Exec, Paths, Truncate}
-
-  # ast-grep has no match limit or output cap of its own; bound the child's
-  # stdout so a broad pattern over a big tree can't be accumulated unboundedly
-  # (same rationale and size as ripgrep's cap).
-  @max_output_bytes 8 * 1024 * 1024
+  alias Catalyst.Tools.{Binaries, Exec, Listing, Paths}
 
   @impl true
   # Can mutate (rewrite mode), so serialize relative to other file-touching tools.
@@ -66,10 +61,15 @@ defmodule Catalyst.Tools.AstGrep do
   defp search(ag, pattern, lang, target, ctx) do
     ag_args = ["run", "--pattern", pattern, "--lang", lang, "--json=stream", target]
 
+    # ast-grep has no match limit or output cap of its own; bound the child's
+    # stdout so a broad pattern over a big tree can't be accumulated unboundedly
+    # (same rationale and size as ripgrep's cap).
+    max_output_bytes = Listing.max_output_bytes()
+
     res =
       Exec.collect!("ast-grep", ag, ag_args,
         cwd: ctx.cwd,
-        max_output_bytes: @max_output_bytes,
+        max_output_bytes: max_output_bytes,
         ok_statuses: [0, 1]
       )
 
@@ -82,17 +82,15 @@ defmodule Catalyst.Tools.AstGrep do
         matches -> Enum.join(matches, "\n")
       end
 
-    {body, info} = Truncate.listing(text, limited?: false, limit: 0, total: 0, noun: "matches")
+    {body, details} =
+      Listing.render(text,
+        count: length(matches),
+        noun: "matches",
+        capped?: capped?,
+        max_output_bytes: max_output_bytes
+      )
 
-    body =
-      body
-      |> Exec.append_capped_notice(capped?, @max_output_bytes, "narrow the pattern or path")
-
-    result(body, %{
-      match_count: length(matches),
-      output_capped: capped?,
-      truncation: info
-    })
+    result(body, details)
   end
 
   defp rewrite(ag, pattern, lang, rewrite, target, ctx) do
@@ -115,24 +113,16 @@ defmodule Catalyst.Tools.AstGrep do
     end
   end
 
-  defp parse_matches(out) do
-    out
-    |> String.split("\n", trim: true)
-    |> Enum.flat_map(&decode_match/1)
+  defp parse_matches(out), do: Listing.decode_json_lines(out, &decode_match/1)
+
+  defp decode_match(%{"file" => file} = m) do
+    # ast-grep reports 0-indexed lines; display 1-indexed.
+    line_no = get_in(m, ["range", "start", "line"]) || 0
+    text = m |> Map.get("lines", "") |> to_string() |> String.split("\n") |> List.first()
+    ["#{file}:#{line_no + 1}: #{text}"]
   end
 
-  defp decode_match(line) do
-    case Jason.decode(line) do
-      {:ok, %{"file" => file} = m} ->
-        # ast-grep reports 0-indexed lines; display 1-indexed.
-        line_no = get_in(m, ["range", "start", "line"]) || 0
-        text = m |> Map.get("lines", "") |> to_string() |> String.split("\n") |> List.first()
-        ["#{file}:#{line_no + 1}: #{text}"]
-
-      _ ->
-        []
-    end
-  end
+  defp decode_match(_other), do: []
 
   defp default_if_blank("", default), do: default
   defp default_if_blank(str, _default), do: str

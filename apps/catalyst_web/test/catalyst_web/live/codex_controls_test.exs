@@ -13,15 +13,13 @@ defmodule CatalystWeb.CodexControlsTest do
   end
 
   defp session_pid(view) do
-    html = view |> element("#catalyst-shell") |> render()
-    [_, id] = Regex.run(~r/data-session-id="([^"]+)"/, html)
-    {:ok, pid} = Manager.whereis(id)
+    {:ok, pid} = Manager.whereis(session_id(view))
     pid
   end
 
   test "the run controls reconfigure the live session in place", %{conn: conn} do
-    {:ok, view, html} = live(conn, "/")
-    assert html =~ "codex-opts"
+    {:ok, view, _html} = live(conn, "/")
+    assert has_element?(view, "#codex-opts")
     pid = session_pid(view)
 
     # The codex session starts with the default settings already applied.
@@ -41,10 +39,10 @@ defmodule CatalystWeb.CodexControlsTest do
     assert snap.opts[:transport] == "websocket"
 
     # Fast → service_tier "priority"; toggling off DELETES the key.
-    view |> element("button", "⚡ Fast") |> render_click()
+    view |> element("#codex-fast-toggle") |> render_click()
     assert Server.state(pid).opts[:service_tier] == "priority"
 
-    view |> element("button", "⚡ Fast") |> render_click()
+    view |> element("#codex-fast-toggle") |> render_click()
     refute Keyword.has_key?(Server.state(pid).opts, :service_tier)
 
     # Reconfigured in place: same session process, transcript untouched.
@@ -55,12 +53,12 @@ defmodule CatalystWeb.CodexControlsTest do
     {:ok, view, _html} = live(conn, "/")
     pid = session_pid(view)
 
-    view |> element("button", "⚡ Fast") |> render_click()
+    view |> element("#codex-fast-toggle") |> render_click()
     assert Server.state(pid).opts[:service_tier] == "priority"
 
     view |> form("#codex-opts") |> render_change(%{"model" => "gpt-5.4-mini"})
 
     refute Keyword.has_key?(Server.state(pid).opts, :service_tier)
-    refute render(view) =~ "⚡ Fast"
+    refute has_element?(view, "#codex-fast-toggle")
   end
 end

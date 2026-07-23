@@ -12,21 +12,14 @@ defmodule Catalyst.Extensions.Loader do
   require Logger
 
   alias Catalyst.{Extension, ExtensionAPI, Tasks}
-  alias Catalyst.Extensions.CompilerTracer
+  alias Catalyst.Extensions.{CompilerTracer, Contribution}
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @compile_timeout 30_000
   @setup_timeout 30_000
 
   @typedoc "A compiled file's registry-neutral contribution."
-  @type contribution :: %{
-          modules: [module()],
-          beams: %{module() => binary()},
-          ext_mods: [module()],
-          tool_mods: [module()],
-          tool_names: [String.t()],
-          metadata: map()
-        }
+  @type contribution :: Contribution.t()
 
   @doc "Compile and classify one source file within a bounded task."
   @spec compile(Path.t()) :: {:ok, contribution()} | {:error, term(), [module()]}
@@ -111,7 +104,7 @@ defmodule Catalyst.Extensions.Loader do
   end
 
   defp contribution(compiled, extension_modules, tool_modules, definitions) do
-    %{
+    %Contribution{
       modules: Enum.map(compiled, &elem(&1, 0)),
       beams: Map.new(compiled),
       ext_mods: extension_modules,

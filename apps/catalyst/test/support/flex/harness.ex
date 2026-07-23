@@ -102,7 +102,7 @@ defmodule Catalyst.Flex.Harness do
   @doc "Override the stock Codex API in the live provider registry and schedule restoration."
   @spec with_codex_provider(module()) :: Catalyst.LLM.ProviderConfig.t()
   def with_codex_provider(module) do
-    previous = Catalyst.LLM.Registry.fetch_config(@codex_api)
+    {:ok, previous} = Catalyst.LLM.Registry.fetch_config(@codex_api)
     ExUnit.Callbacks.on_exit(fn -> restore_codex_provider(previous) end)
     :ok = Catalyst.LLM.Registry.register_provider(@codex_api, module)
     previous

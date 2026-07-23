@@ -33,6 +33,41 @@ defmodule Catalyst.Paths do
   @spec sessions() :: Path.t()
   def sessions, do: join("sessions")
 
+  @doc "Default persisted session-catalog file (see `Catalyst.Session.Catalog`)."
+  @spec session_catalog() :: Path.t()
+  def session_catalog, do: join("session_catalog.json")
+
+  @doc """
+  Default working directory for a new session, as a tagged result.
+
+  Fallback order: the process working directory, then the user's home
+  directory. Packaged releases (`RELEASE_NAME` is set) skip the process
+  working directory — a double-clicked .app or installed binary inherits an
+  unhelpful one such as `/`. Returns `{:error, :no_default_cwd}` when neither
+  source yields a directory.
+  """
+  @spec default_cwd() :: {:ok, Path.t()} | {:error, :no_default_cwd}
+  def default_cwd do
+    case System.get_env("RELEASE_NAME") do
+      nil -> process_cwd_or_home()
+      _release -> user_home()
+    end
+  end
+
+  defp process_cwd_or_home do
+    case File.cwd() do
+      {:ok, cwd} -> {:ok, cwd}
+      {:error, _reason} -> user_home()
+    end
+  end
+
+  defp user_home do
+    case System.user_home() do
+      nil -> {:error, :no_default_cwd}
+      home -> {:ok, home}
+    end
+  end
+
   @doc "Default debug-log directory."
   @spec debug() :: Path.t()
   def debug, do: join("debug")

@@ -19,9 +19,13 @@ defmodule Catalyst.LLM.Provider do
   Deliver incremental `Catalyst.LLM.Event` values to `sink`. Request, model,
   authentication, and transport failures must return an error/aborted assistant
   inside `{:ok, assistant}`; reserve `{:error, reason}` for programmer errors.
+
+  `model` may be `nil` (a session can run before any model is configured —
+  `RunConfig` declares `Model.t() | nil`); providers must tolerate it, as
+  `Faux` does with its `model && model.id` guard.
   """
   @callback stream(
-              model :: Catalyst.Model.t(),
+              model :: Catalyst.Model.t() | nil,
               context :: Catalyst.LLM.Context.t(),
               opts :: keyword(),
               sink :: sink()
@@ -37,7 +41,7 @@ defmodule Catalyst.LLM.Provider do
   Return `:unsupported` when the provider cannot supply an exact projection.
   """
   @callback context_fingerprint(
-              model :: Catalyst.Model.t(),
+              model :: Catalyst.Model.t() | nil,
               context :: Catalyst.LLM.Context.t(),
               opts :: keyword()
             ) :: {:ok, binary()} | :unsupported
@@ -48,7 +52,7 @@ defmodule Catalyst.LLM.Provider do
   Return `:unsupported` to use Catalyst's provider-neutral coarse estimate.
   """
   @callback estimate_tokens(
-              model :: Catalyst.Model.t(),
+              model :: Catalyst.Model.t() | nil,
               context :: Catalyst.LLM.Context.t(),
               opts :: keyword()
             ) :: {:ok, non_neg_integer()} | :unsupported

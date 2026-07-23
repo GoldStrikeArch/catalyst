@@ -80,17 +80,18 @@ catalyst/                      # umbrella
         message.ex content.ex model.ex usage.ex   # data model (mirror ai/src/types.ts)
         tasks.ex paths.ex ids.ex owned_index.ex    # shared task, path, id, and ownership helpers
         files/atomic_write.ex                      # shared atomic replacement + mode preservation
-        agent/{event.ex, loop.ex, tool_runner.ex, children.ex}
+        agent/{event.ex, loop.ex, tool_runner.ex, children.ex, children/table_owner.ex}
         hooks.ex hooks/{table_owner.ex, observer_dispatcher.ex}
                                                    # hook registry + ordered bounded event observers (§11)
         system_prompt.ex prompt.ex prompt/{request.ex,resolution.ex,config.ex,registry.ex}
                                                    # purpose/model-aware prompt resolution (§11)
         workflow.ex workflow/{registry.ex,support.ex}
-        context/{policy.ex,registry.ex,tokens.ex,window.ex,guard.ex,compaction.ex}
-                                                   # request guard + persistent compaction (§4/§9)
+        context/{policy.ex,registry.ex,tokens.ex,window.ex,guard.ex,compaction.ex,
+                 transcript.ex,summarizer.ex}      # request guard + persistent compaction (§4/§9)
         extension.ex extension_api.ex              # extension behaviour + unified API (§11)
         extensions.ex                              # multi-kind loader (§11)
         extensions/{versioning.ex, boot_guard.ex, processes.ex, state.ex,
+                    contribution.ex, owner.ex,
                     transaction.ex, module_versions.ex, sources.ex,
                     installer.ex, loader.ex, compiler_tracer.ex}
                                                    # git versioning + crash-safe boot + isolated loading
@@ -98,16 +99,19 @@ catalyst/                      # umbrella
         debug.ex                                   # per-session debug log (§12)
         session/{server.ex, manager.ex, store.ex, event_sink.ex,
                  reducer.ex, run_config.ex, run_context.ex, snapshot.ex,
-                 server/state.ex, store/codec.ex}  # thin server + extracted state/codec + hot-swap logic
-        tools/{tool.ex, registry.ex, exec.ex, binaries.ex, truncate.ex, paths.ex, diff.ex,
-               atomic_write.ex,                    # compatibility facade for files/atomic_write.ex
+                 catalog.ex, server/state.ex, store/codec.ex}
+                                                   # thin server + extracted state/codec + hot-swap logic
+                                                   # + persisted {id, cwd} session catalog
+        tools/{tool.ex, registry.ex, exec.ex, binaries.ex, truncate.ex, listing.ex, paths.ex,
+               diff.ex,
                context.ex, read.ex, write.ex, edit.ex, ls.ex, bash.ex,
                ripgrep.ex, fd.ex, sd.ex, ast_grep.ex,
                develop_tool.ex, install_extension.ex, reload_tool.ex,
-               rollback_tool.ex, read_log.ex, list_agents.ex, spawn_agent.ex}
+               rollback_tool.ex, read_log.ex, list_agents.ex, spawn_agent.ex,
+               self_mod_report.ex}
                                                    # …+ self-modification and child-session tools (§5/§11)
         llm/{provider.ex, provider_config.ex, registry.ex, event.ex, context.ex,
-             sse.ex, faux.ex, demo.ex, openai_codex.ex,
+             sse.ex, faux.ex, openai_codex.ex,
              openai_codex/{bounded_buffer.ex, catalog.ex, catalog_cache.ex, catalog_cache/state.ex,
                            conn_cache.ex, provider.ex,
                            request.ex, sse_transport.ex, stream_parser.ex, headers.ex,
@@ -120,17 +124,23 @@ catalyst/                      # umbrella
         {endpoint.ex, router.ex, application.ex, assets.ex}
         file_search.ex                             # "@" file references for the chat input (fd-backed)
         live/shell_live.ex                         # ONE LiveView; catch-all routes / and /:page
+        live/shell_live/{chat_input.ex, commands.ex, conversation.ex,
+                         extension_actions.ex, run_diagnostics.ex,
+                         session_lifecycle.ex, settings.ex}
+                                                   # extracted ShellLive concerns
         pages/chat_page.ex                         # the chat as a registry-registered page
         pages/extensions_page.ex                   # extensions/settings panel (also a seeded page, §11)
-        ui/{registry.ex, message_renderer.ex}      # pages/renderers/components/commands (§11)
-        tools/{rebuild_assets.ex, reconnect_ui.ex} # web-side self-mod tools (§11)
+        ui/{registry.ex, table_owner.ex, contributions.ex, message_renderer.ex,
+            page_renderer.ex, markdown.ex, safe_render.ex}
+                                                   # pages/renderers/components/commands + replay log (§11)
+        tools/{rebuild_assets.ex, reload_ui.ex}    # web-side self-mod tools (§11)
         components/* controllers/*
     catalyst_desktop/          # Desktop.Window child + release/packaging (depends on web)
       lib/catalyst_desktop.ex
     catalyst_cli/              # headless (no-wx) release — proves packaged hot-loading
       lib/catalyst_cli.ex
   rel/macos/launcher.c         # native arm64 .app launcher (§8)
-  config/{config.exs, dev.exs, prod.exs, runtime.exs}
+  config/{config.exs, dev.exs, prod.exs, runtime.exs, test.exs}
 ```
 
 The boundary is enforced by app dependencies: `catalyst` carries no Phoenix; `catalyst_web`
@@ -145,18 +155,20 @@ never references `catalyst_web` directly — UI extension _kinds_ are dispatched
 
 ```
 Catalyst.Application (top, in apps/catalyst)
-├── {DNSCluster, ...}
 ├── {Phoenix.PubSub, name: Catalyst.PubSub}
 ├── {Finch, name: Catalyst.Finch}                 # SSE streaming + token HTTP
 ├── {Task.Supervisor, name: Catalyst.TaskSupervisor}        # run, hook, metadata, refresh tasks
+├── Catalyst.Hooks.ObserverDispatcher             # ordered, bounded async event observers — deliberately
+│                                                 #   OUTSIDE the extension group: observer entries are passed
+│                                                 #   by value, so admitted queues survive registry recovery
 ├── Catalyst.Tools.Registry                     # validated, fingerprinted tool-definition cache
 ├── Catalyst.Auth.TokenStore                      # GenServer, single-flight token refresh
 ├── Catalyst.LLM.OpenAICodex.CatalogCache         # live model metadata, single-flight refresh
 ├── Catalyst.LLM.OpenAICodex.ConnCache            # idle Codex ws conns between runs (delta-upload state, §6)
-├── ExtensionRuntimeSupervisor (:rest_for_one)    # order load-bearing: a crash restarts everything after it
+├── ExtensionRuntimeSupervisor (:rest_for_one)    # order load-bearing: a crash restarts everything
+│   │                                             #   after it; max_restarts test-overridable
 │   ├── Catalyst.Hooks.TableOwner                 # owns the hooks ETS table (handlers survive a Hooks crash)
 │   ├── Catalyst.Hooks                            # ETS agent-loop hook registry (§11)
-│   ├── Catalyst.Hooks.ObserverDispatcher         # ordered, bounded async event observers
 │   ├── Catalyst.LLM.Registry                     # ETS provider registry: built-ins + runtime (§11)
 │   ├── Catalyst.Prompt.Registry                  # purpose/model prompt + policy runtime overlay (§11)
 │   ├── Catalyst.Workflow.Registry                # named/default workflow runtime overlay (§11)
@@ -171,17 +183,21 @@ Catalyst.Application (top, in apps/catalyst)
 └── {DynamicSupervisor, name: Catalyst.Session.DynamicSupervisor}   # one Session.Server per session
                                                   # (outside the group: sessions ride out a registry restart)
 
-CatalystWeb.Application (in catalyst_web)
-├── CatalystWeb.Telemetry
-├── CatalystWeb.UI.TableOwner / UI.Registry        # durable ETS UI registry: pages/renderers/components/commands (§11)
+CatalystWeb.Application (in catalyst_web — :rest_for_one, max_restarts test-overridable)
+├── CatalystWeb.UI.Contributions                   # replay log of exact accepted UI contributions; first so
+│                                                  #   rest-for-one table recovery keeps it
+├── CatalystWeb.UI.TableOwner                      # owns the UI ETS table independently of the registry process
+├── CatalystWeb.UI.Registry                        # UI registry: pages/renderers/components/commands (§11)
 └── CatalystWeb.Endpoint                           # + register_web_tools/0 after boot (rebuild_assets/reload_ui,
                                                    #   registered as an Extensions reseeder so restarts re-add them)
 
 Catalyst.Desktop (Desktop.Window child)           # started by catalyst_desktop, desktop mode only
 
 # per session: Session.Manager starts a Catalyst.Session.Server (GenServer, PI Agent analog)
-# directly under Catalyst.Session.DynamicSupervisor; loop/tool Tasks run under the shared
-# Catalyst.TaskSupervisor (abort = kill the run Task; linked tool Tasks + their Ports die).
+# directly under Catalyst.Session.DynamicSupervisor; the run (loop) Task runs under the shared
+# Catalyst.TaskSupervisor, and tool Tasks are Task.async_stream children linked to that run
+# Task (abort = kill the run Task; the linked tool Tasks + their Ports die — a deliberate
+# abort cascade, not a shared tool-task supervisor).
 ```
 
 The extension group, including the provider, prompt, workflow, and context registries, boots
@@ -227,7 +243,8 @@ and rebuild all contributions coherently (§11).
   through the shared `DynamicSupervisor`.
 - **`ToolRunner`**: sequential vs parallel batch (parity with PI — any tool with
   `execution_mode: :sequential`, or a config flag, forces sequential). Validates args against
-  the tool's JSON schema (`ex_json_schema`), runs each tool in a supervised Task; a crash
+  the tool's JSON schema (`ex_json_schema`), runs each tool in a `Task.async_stream` Task
+  linked to the run Task (so an abort cascades); a crash
   becomes an error tool-result (the "thrown becomes error result" rule). The `onUpdate`
   callback is a closure (`ctx.report`) that emits `ToolExecutionUpdate`; `bash` streams a
   bounded output tail through it, throttled in-tool to one report per 100ms.
@@ -321,7 +338,13 @@ the seeded built-in; unknown commands flash the known list rather than reaching 
 
 `ShellLive.mount` attaches to (or starts) the session, **subscribes first, then** replays the
 snapshot (`Session.Server.state/1`) with a small dedup window (and flushes already-queued
-`MessageUpdate`s ≤ the snapshot), so no event is lost or doubled around the reattach. The
+`MessageUpdate`s ≤ the snapshot), so no event is lost or doubled around the reattach.
+Attach resolution is two-tier: a warm VM reuses the `:persistent_term` session memo; after a
+full VM restart the GUI consults the core-owned persisted catalog (`Catalyst.Session.Catalog`,
+`~/.catalyst/session_catalog.json`, `{id, cwd}` entries pruned against the on-disk stores) and
+reopens the most recent session's JSONL through the normal `load_state` replay. Default cwd
+policy is shared: both core and web resolve through `Catalyst.Paths.default_cwd/0`
+(process cwd → user home; releases skip the process cwd). The
 message list uses LiveView `stream/3`. **Streaming renders live with block-commit markdown**
 (the Codex CLI's strategy adapted to LiveView): each text/thinking delta is `push_event`ed to
 a client-side `StreamingMessage` hook that appends into a `phx-update="ignore"` raw tail; on
@@ -362,7 +385,7 @@ defmodule Catalyst.Tools.Tool do
 end
 ```
 
-`Catalyst.Exec` wraps two shell-out modes:
+`Catalyst.Tools.Exec` wraps two shell-out modes:
 
 - **`collect/3`** — plain `Port` `{:spawn_executable, ...}`, accumulate stdout, parse after
   exit, receive-after timeout. Used by the single-shot structured tools.
@@ -382,8 +405,11 @@ caches the result under the module's BEAM fingerprint. Turn assembly reads that 
 change invalidates the fingerprint and forces one bounded revalidation, rather than spawning a
 task for every tool on every turn. Each entry keeps the module, validated definition and execution
 mode, resolved schema, and (for `use Catalyst.Tools.Tool`) a local executor capture pinned to the
-same BEAM generation. `ToolRunner` therefore never re-enters extension metadata callbacks and
-cannot execute replacement code under an older schema/mode snapshot. A stale legacy tool without
+same BEAM generation. `Workflow.Support.resolve_turn_tools/1` builds one tool index
+(`Registry.index/1`) from those entries at the start of each turn, and
+`ToolRunner.run_batch_with_index/4` executes the whole batch from that index — so `ToolRunner`
+never re-enters extension metadata callbacks and cannot execute replacement code under an older
+schema/mode snapshot, per entry **and** per turn. A stale legacy tool without
 a pinnable executor returns a tagged error result instead of calling the new generation. Invalid
 metadata is logged and the tool is omitted.
 
@@ -424,10 +450,11 @@ end
 ```
 
 `Catalyst.LLM.Faux` replays scripted events (including tool calls) so the entire loop is
-testable with no network — built before the real provider. `Catalyst.LLM.Demo` is an offline,
-input-aware provider (runs a real `ls`/`grep`/`find` then word-streams a reply) with **no UI
-surface**: the app's only real provider is Codex; the LiveView test helper overrides the Codex API
-through `Catalyst.LLM.Registry` to drive full turns offline.
+testable with no network — built before the real provider. `Catalyst.LLM.Demo` (test-only,
+`apps/catalyst/test/support/`) is an offline, input-aware provider (runs a real
+`ls`/`grep`/`find` then word-streams a reply) with **no UI surface**: the app's only real
+provider is Codex; the LiveView test helper overrides the Codex API through
+`Catalyst.LLM.Registry` to drive full turns offline.
 
 Providers are resolved through **`Catalyst.LLM.Registry`** (ETS-GenServer), keyed by `api` name
 and seeded with the built-ins (`faux`, `openai-codex-responses`). A session resolves its provider
@@ -564,7 +591,10 @@ webview's token.
 
 ### Packaging internals (root `mix.exs` release `steps:`)
 
-The desktop release runs custom steps after `:assemble` so the **packaged** app can self-modify:
+The desktop release runs custom steps after `:assemble` so the **packaged** app can self-modify.
+A deterministic `release_preflight!` step runs before the bundling steps and **fails loudly**,
+listing every missing packaging input at once (web app dir, the fast-tool binaries,
+esbuild/tailwind) instead of warn-and-skip. Then:
 
 1. **`bundle_assets/1`** ships a self-contained esbuild/tailwind workspace into the `.app`
    (`<webapp>/priv/asset_build/{assets,lib,bin}` + the JS `deps/` esbuild resolves), so
@@ -634,7 +664,7 @@ transcripts. Consumer-specific overrides such as `:auth_path`, `:sessions_root`,
 
 - **Core (`apps/catalyst`):** `phoenix_pubsub`, `finch`, `mint_web_socket` (Codex websocket
   transport), `req`, `jason`, `muontrap`, `ex_json_schema`, `bandit`/`plug` (OAuth callback
-  server; also the test websocket server via `websock_adapter`, test-only), `dns_cluster`.
+  server; also the test websocket server via `websock_adapter`, test-only).
 - **Web/desktop:** `phoenix`, `phoenix_live_view`, `bandit`, `desktop`, `esbuild`, `tailwind`;
   packaging via `desktop_deployment` (GUI `.app`) and `burrito` (headless `catalyst_cli`).
 - **Later:** `joken` (verified JWT), `ecto_sqlite3`.
@@ -697,16 +727,31 @@ compiled definition live.
 `rollback_extension` is a `git revert` + reload. Loads, installs, reload/disable/enable and
 `uninstall` all serialize on one per-process-requester `:global` load lock; the installer's
 whole write → load → commit runs as a single critical section (`Extensions.locked/1`).
-The stable facade delegates typed state, load transactions, accepted BEAM stacks, and source-path
-rules to `Extensions.State`, `Transaction`, `ModuleVersions`, and `Sources`. Web-capable hosts wire
+The stable facade delegates its state transitions and bookkeeping to focused modules: typed
+ownership state and its transitions (claim tracking, contribution commit, module-conflict checks,
+owner drop/snapshot, purge-result recording) live in `Extensions.State`; load transactions in
+`Transaction`; accepted BEAM stacks in `ModuleVersions`; source-path rules in `Sources`; a loader
+contribution is a typed `%Extensions.Contribution{}`; and owner-id conventions (`:host` for
+host registrations) are shared via `Extensions.Owner`. A failed purge does not forget the owner:
+its entry stays tracked as `:degraded` with per-subsystem `purge_failures`, so live residue is
+never orphaned. Web-capable hosts wire
 their UI kinds and publish live registry/application leases before invoking the idempotent
 `Extensions.bootstrap/0`; headless hosts bootstrap directly, so arbitrary `setup/1` side effects
 execute once rather than once in core and again in web. Bootstrap begins only after both web leases
-are alive and only after the web-owned tool reseeder is installed. The UI ETS table has an
-independent `UI.TableOwner`, preserving accepted contributions across a normal registry restart.
-`UI.Contributions` serializes the exact live page, renderer, component, and command entries and
+are alive and only after the web-owned tool reseeder is installed; reseeder registration is
+serialized through the Extensions server, and reseeding is an acknowledged bootstrap phase — hook
+readiness (which gates per-turn snapshots) is published only once every reseeder has reported back
+or a bounded deadline fires, so a turn cannot start against a half-reseeded tool table. The UI ETS
+table has an independent `UI.TableOwner`, which buys **read continuity**: renders keep resolving
+pages/renderers while the registry process is down or restarting. Durability of accepted
+contributions comes from `UI.Contributions`, which serializes the exact live page, renderer,
+component, and command entries and
 mirrors them in `:persistent_term`; after table-owner or contribution-log process loss, the
-registry replays those values directly. Recovery never reads edited source, recompiles modules,
+registry replays those values directly. `UI.Registry.init/1` deliberately **wipes** the ETS table
+before reseeding built-ins and replaying that log: `purge_extension_owner/1` drops the owner's
+contribution-log entries first and skips the ETS delete when the registry process is down, so a
+surviving table row could otherwise resurrect a purged owner — the log, not the table, is the
+authority. Recovery never reads edited source, recompiles modules,
 or re-runs arbitrary `setup/1` side effects. Each load transaction and `ExtensionAPI` handle is
 pinned to the `Catalyst.Extensions` server generation that created it, so work that outlives a
 restart is rejected instead of committing into the replacement runtime. Before a new generation
@@ -775,10 +820,14 @@ supervised callback process at a time per session, ordered within a session and 
 sessions. A crashing or hanging callback is logged, killed, and skipped. Per-session admission is
 bounded; streamed `MessageUpdate`/`ToolExecutionUpdate` events may be dropped at saturation, while
 ordinary structural events evict an older queued update or apply backpressure. Successfully
-persisted compactions wait for a ready hook-runtime generation, freeze the first complete handler
-snapshot, and are admitted losslessly to an ordered waiting lane before broadcast, without running
-observer callbacks in the Session GenServer. Direct dispatcher downtime retries only admission
-against that frozen snapshot. Queue overload never drops an admitted compaction, but a dispatcher
+persisted compactions freeze the first complete handler snapshot read from the durable handler
+table (committed admission deliberately does not wait on hook-runtime readiness, so a
+still-bootstrapping extension generation cannot strand a session) and are admitted to an ordered
+waiting lane before broadcast, without running
+observer callbacks in the Session GenServer. Direct dispatcher/registry downtime retries only
+admission against that frozen snapshot, bounded by a configurable deadline
+(`:event_sink_deadline_ms`, default 500 ms); at the deadline the observer handoff is dropped with
+a logged warning while persistence and PubSub delivery are unaffected. Queue overload never drops an admitted compaction, but a dispatcher
 crash after acknowledgement can lose queued callback work and an ambiguous failed admission can
 be retried, so observers must tolerate both process loss and duplicate delivery. Host-synthesized
 failure/abort lifecycle
@@ -802,9 +851,12 @@ observe a fresh but incomplete handler table:
 **Registries that resolve live.** `Catalyst.LLM.Registry` (§6) resolves providers;
 `Catalyst.Prompt.Registry`, `Catalyst.Workflow.Registry`, and `Catalyst.Context.Registry` hold
 owner-aware runtime overlays for prompt policy/text, named/default workflows, and context
-policy/thresholds. Their common collision/detach/purge bookkeeping uses the pure
-`Catalyst.OwnedIndex`; each registry retains its own validation, ETS shape, fallback layers, and
-domain error tuples. Each lookup reads the runtime entry first, then current application
+policy/thresholds. Owner bookkeeping is a column in each registry's own ETS rows (the pure
+`Catalyst.OwnedIndex` helper now backs only `LLM.Registry`, where multi-key ownership pays for
+it), owner-id normalization is shared via `Extensions.Owner`, and ownership conflicts are reported
+in one normalized shape — `{:owner_collision, kind, key, existing, attempted}` (`key` is `nil`
+for single-slot kinds such as the context policy); each registry retains its own validation, ETS
+shape, fallback layers, and domain error tuples. Each lookup reads the runtime entry first, then current application
 configuration, then its documented file/built-in layers; deleting an overlay never re-seeds a
 stale boot value. Their `runtime_entries/0` results expose `key`, `value`, and `owner` fields for rollback and
 diagnostics. `CatalystWeb.UI.Registry` resolves **pages / renderers / components / commands**.
@@ -830,7 +882,7 @@ reload broadcast over the `"ui"` PubSub topic.
 `install_extension` (write+load any module — tool, provider, hook, or UI), `reload_extensions`
 (purge+reload by owner), `rollback_extension` (git revert + reload; optional `name` scopes the
 LIFO walk to one extension's file via `Versioning.rollback_file/2`); web boot registers
-`rebuild_assets` and `reconnect_ui`. The agent is pointed at `./guide.md` (published to
+`rebuild_assets` and `reload_ui`. The agent is pointed at `./guide.md` (published to
 `Catalyst.Paths.join("guide.md")` on boot, `~/.catalyst/guide.md` by default) which documents all
 of this relative to the live bundled app.
 
@@ -838,7 +890,10 @@ of this relative to the live bundled app.
 built-in page (`Pages.ExtensionsPage`, registered exactly like `Pages.ChatPage`, so it also
 dogfoods the page registry). It renders a data snapshot (`panel_data/0`, rebuilt by `ShellLive`
 on navigation, after each action, and at `AgentEnd`) of: loaded extensions
-(`Extensions.list_loaded/0` — owner/file/tools/modules + process count), disabled extensions
+(via `Extensions.snapshot/0`, the bounded UI summary — boot status, generation, and each
+`list_loaded/0` owner entry (owner/file/tools/modules/status) augmented with a process count
+computed in one supervised deadline-bounded task, degrading to `:unknown` rather than blocking
+the render path), disabled extensions
 (`Extensions.list_disabled/0`), boot status with a "Load extensions now" recovery button, and
 every live registry. Prompt/workflow/context runtime owner rows are separate from the effective
 ordered values/provenance for the current model; panel snapshots never call an extension's

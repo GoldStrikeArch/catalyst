@@ -15,14 +15,13 @@ defmodule CatalystWeb.FormComponents do
 
   attr :type, :string,
     default: "text",
-    values: ~w(checkbox color date datetime-local email file month number password
-               search select tel text textarea time url week hidden)
+    values: ~w(color date datetime-local email file month number password
+               search select tel text time url week)
 
   attr :field, Phoenix.HTML.FormField,
     doc: "a form field struct retrieved from the form, for example: @form[:email]"
 
   attr :errors, :list, default: []
-  attr :checked, :boolean, doc: "the checked flag for checkbox inputs"
   attr :prompt, :string, default: nil, doc: "the prompt for select inputs"
   attr :options, :list, doc: "the options passed to Phoenix.HTML.Form.options_for_select/2"
   attr :multiple, :boolean, default: false, doc: "the multiple flag for select inputs"
@@ -50,47 +49,6 @@ defmodule CatalystWeb.FormComponents do
     |> input()
   end
 
-  def input(%{type: "hidden"} = assigns) do
-    ~H"""
-    <input type="hidden" id={@id} name={@name} value={@value} {@rest} />
-    """
-  end
-
-  def input(%{type: "checkbox"} = assigns) do
-    assigns =
-      assign_new(assigns, :checked, fn ->
-        Phoenix.HTML.Form.normalize_value("checkbox", assigns[:value])
-      end)
-
-    ~H"""
-    <div class={@container_class}>
-      <label
-        for={@id}
-        class="flex items-center gap-3 text-sm font-medium text-neutral-700 dark:text-neutral-200"
-      >
-        <input
-          type="hidden"
-          name={@name}
-          value="false"
-          disabled={@rest[:disabled]}
-          form={@rest[:form]}
-        />
-        <input
-          type="checkbox"
-          id={@id}
-          name={@name}
-          value="true"
-          checked={@checked}
-          class={@class || checkbox_class()}
-          {@rest}
-        />
-        <span>{@label}</span>
-      </label>
-      <.error :for={message <- @errors}>{message}</.error>
-    </div>
-    """
-  end
-
   def input(%{type: "select"} = assigns) do
     ~H"""
     <div class={@container_class}>
@@ -114,31 +72,6 @@ defmodule CatalystWeb.FormComponents do
           <option :if={@prompt} value="">{@prompt}</option>
           {Phoenix.HTML.Form.options_for_select(@options, @value)}
         </select>
-      </label>
-      <.error :for={message <- @errors}>{message}</.error>
-    </div>
-    """
-  end
-
-  def input(%{type: "textarea"} = assigns) do
-    ~H"""
-    <div class={@container_class}>
-      <label for={@id} class="block">
-        <span
-          :if={@label}
-          class="mb-1 block text-sm font-medium text-neutral-700 dark:text-neutral-200"
-        >
-          {@label}
-        </span>
-        <textarea
-          id={@id}
-          name={@name}
-          class={[
-            @class || text_input_class(),
-            @errors != [] && (@error_class || invalid_class())
-          ]}
-          {@rest}
-        >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
       </label>
       <.error :for={message <- @errors}>{message}</.error>
     </div>
@@ -180,12 +113,6 @@ defmodule CatalystWeb.FormComponents do
     end)
   end
 
-  @doc "Translates all validation errors for one field."
-  @spec translate_errors(keyword(), atom()) :: [String.t()]
-  def translate_errors(errors, field) when is_list(errors) do
-    for {^field, error} <- errors, do: translate_error(error)
-  end
-
   slot :inner_block, required: true
 
   defp error(assigns) do
@@ -199,11 +126,6 @@ defmodule CatalystWeb.FormComponents do
 
   defp field_name(field, true), do: field.name <> "[]"
   defp field_name(field, false), do: field.name
-
-  defp checkbox_class do
-    "size-4 rounded border-neutral-300 text-neutral-900 focus:ring-neutral-400 " <>
-      "dark:border-white/20 dark:bg-white/10"
-  end
 
   defp select_class do
     "w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-950 " <>

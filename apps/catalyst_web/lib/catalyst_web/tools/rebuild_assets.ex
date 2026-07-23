@@ -24,8 +24,14 @@ defmodule CatalystWeb.Tools.RebuildAssets do
   @impl true
   def execute(_args, _ctx) do
     case CatalystWeb.Assets.rebuild() do
-      :ok -> result("Rebuilt assets and requested a UI reload.")
-      {:error, reason} -> raise "Asset rebuild failed: #{inspect(reason)}"
+      :ok ->
+        result("Rebuilt assets and requested a UI reload.")
+
+      {:ok, %{warnings: warnings}} ->
+        result("Rebuilt assets and requested a UI reload, with warnings: #{inspect(warnings)}")
+
+      {:error, reason} ->
+        raise "Asset rebuild failed: #{inspect(reason)}"
     end
   end
 end

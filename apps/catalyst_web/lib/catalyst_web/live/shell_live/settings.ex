@@ -86,9 +86,14 @@ defmodule CatalystWeb.ShellLive.Settings do
     assign(socket, ui_prefs: prefs)
   end
 
-  @doc "Builds the registry-resolved provider selection and model used to start a session."
-  @spec provider_config(codex_prefs()) :: {nil, Catalyst.Model.t()}
-  def provider_config(prefs), do: {nil, OpenAICodex.model(prefs.model)}
+  @doc """
+  Builds the registry-resolved model used to start a session.
+
+  Provider selection is deliberately left to the model API's live registry
+  entry, so no provider is returned here.
+  """
+  @spec provider_config(codex_prefs()) :: Catalyst.Model.t()
+  def provider_config(prefs), do: OpenAICodex.model(prefs.model)
 
   @doc "Converts Codex controls into session run options."
   @spec run_opts(codex_prefs()) :: keyword()

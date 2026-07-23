@@ -253,10 +253,7 @@ defmodule Catalyst.Tools.Read do
     data = binary_part(segment, 0, take)
     state = state |> open_line() |> append_data(data)
 
-    case take == byte_size(segment) do
-      true -> {:cont, state}
-      false -> {:halt, state}
-    end
+    if take == byte_size(segment), do: {:cont, state}, else: {:halt, state}
   end
 
   defp open_line(%{line_open?: true} = state), do: state

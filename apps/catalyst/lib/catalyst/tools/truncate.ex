@@ -96,7 +96,8 @@ defmodule Catalyst.Tools.Truncate do
   `:unknown` because the child's output was capped), then head-truncate and
   attach the standard truncation notice.
 
-  Returns `{text, info}` so each tool keeps its own details keys.
+  Returns `{text, info}`; `Catalyst.Tools.Listing.render/2` wraps this and
+  produces the shared listing details keys.
 
   Options (all required): `:limited?` (boolean), `:limit` (pos_integer),
   `:total` (non_neg_integer or `:unknown`), `:noun` (e.g. `"matches"`).

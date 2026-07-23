@@ -54,10 +54,6 @@ defmodule Catalyst.Session.Server do
   @spec prompt(GenServer.server(), input()) :: :ok | {:error, term()}
   def prompt(server, input), do: GenServer.call(server, {:prompt, normalize(input)})
 
-  @doc "Continue running (no new prompt) — e.g. after steering/follow-up. Same returns as `prompt/2`."
-  @spec continue(GenServer.server()) :: :ok | {:error, term()}
-  def continue(server), do: GenServer.call(server, :continue)
-
   @doc "Inject a message mid-run, applied before the next LLM call."
   @spec steer(GenServer.server(), input()) :: :ok
   def steer(server, input), do: GenServer.cast(server, {:steer, normalize(input)})
@@ -171,17 +167,6 @@ defmodule Catalyst.Session.Server do
   end
 
   def handle_call({:prompt, _msg}, _from, state), do: {:reply, {:error, :busy}, state}
-
-  def handle_call(:continue, _from, %State{run: nil} = state) do
-    state = stop_prewarm(state)
-
-    case start_run(state, []) do
-      {:ok, state} -> {:reply, :ok, state}
-      {:error, _reason} = err -> {:reply, err, state}
-    end
-  end
-
-  def handle_call(:continue, _from, state), do: {:reply, {:error, :busy}, state}
 
   # Drains are scoped to the run that asked: a drain from a dead run (buffered
   # behind the abort that cleared run_ref) carries a stale ref and must reply []
@@ -407,54 +392,48 @@ defmodule Catalyst.Session.Server do
     # workflow, catalog, and extension policy code starts only inside the task.
     case RunConfig.resolve_provider(state) do
       {:ok, provider} ->
-        emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
-
-        task =
-          Tasks.async(fn ->
-            case RunContext.build(state, server, run_ref, provider) do
-              {:ok, run_context} ->
-                GenServer.cast(server, {:run_metadata, run_ref, run_context.metadata})
-
-                result =
-                  run_context.config.loop.run(
-                    prompts,
-                    run_context.context,
-                    run_context.config,
-                    emit
-                  )
-
-                case result do
-                  {:ok, messages, final_context} = success
-                  when is_list(messages) and is_map(final_context) ->
-                    {:workflow_result, success}
-
-                  {:error, reason} ->
-                    {:run_error, reason}
-
-                  invalid ->
-                    {:run_error, {:invalid_workflow_result, invalid}}
-                end
-
-              {:error, reason} ->
-                {:run_error, reason}
-            end
-          end)
-
-        {:ok,
-         %{
-           state
-           | run: task,
-             run_ref: run_ref,
-             agent_ended: false,
-             run_final_assistant: nil,
-             error_message: nil,
-             current_run_metadata: nil,
-             run_resources: []
-         }}
+        task = Tasks.async(fn -> run_task_body(state, server, run_ref, provider, prompts) end)
+        {:ok, reset_for_run(state, task, run_ref)}
 
       {:error, _reason} = error ->
         error
     end
+  end
+
+  defp run_task_body(state, server, run_ref, provider, prompts) do
+    emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
+
+    case RunContext.build(state, server, run_ref, provider) do
+      {:ok, run_context} ->
+        GenServer.cast(server, {:run_metadata, run_ref, run_context.metadata})
+
+        prompts
+        |> run_context.config.loop.run(run_context.context, run_context.config, emit)
+        |> classify_workflow_result()
+
+      {:error, reason} ->
+        {:run_error, reason}
+    end
+  end
+
+  defp classify_workflow_result({:ok, messages, final_context} = success)
+       when is_list(messages) and is_map(final_context),
+       do: {:workflow_result, success}
+
+  defp classify_workflow_result({:error, reason}), do: {:run_error, reason}
+  defp classify_workflow_result(invalid), do: {:run_error, {:invalid_workflow_result, invalid}}
+
+  defp reset_for_run(state, task, run_ref) do
+    %{
+      state
+      | run: task,
+        run_ref: run_ref,
+        agent_ended: false,
+        run_final_assistant: nil,
+        error_message: nil,
+        current_run_metadata: nil,
+        run_resources: []
+    }
   end
 
   defp merge_opts(opts, changes) do
@@ -488,7 +467,7 @@ defmodule Catalyst.Session.Server do
         {:error, {:invalid_cwd, cwd}}
 
       :error ->
-        case File.cwd() do
+        case Catalyst.Paths.default_cwd() do
           {:ok, cwd} -> {:ok, cwd}
           {:error, reason} -> {:error, {:cwd_failed, reason}}
         end
@@ -613,25 +592,7 @@ defmodule Catalyst.Session.Server do
       "run failed: " <> Catalyst.Debug.truncate(reason, 8_000)
     )
 
-    # Complete orphaned tool calls first: the assistant message carrying them
-    # was already persisted, and a transcript with a tool call but no result is
-    # rejected by the provider on every subsequent request.
-    state =
-      case Reducer.aborted_tool_results(state, reason) do
-        [] ->
-          state
-
-        results ->
-          Enum.each(results, fn result ->
-            append_best_effort(state, :aborted_tool_result, fn ->
-              Store.append_message(state.store, result)
-            end)
-
-            synthetic_and_broadcast(state, %Event.MessageEnd{message: result})
-          end)
-
-          %{state | messages: Enum.reverse(results, state.messages)}
-      end
+    state = complete_orphaned_tool_calls(state, reason)
 
     msg = Reducer.failure_message(state, reason)
 
@@ -639,7 +600,35 @@ defmodule Catalyst.Session.Server do
       Store.append_message(state.store, msg)
     end)
 
-    state = %{
+    state = clear_failed_run(state, msg)
+    synthetic_and_broadcast(state, %Event.MessageEnd{message: msg})
+    synthetic_and_broadcast(state, %Event.AgentEnd{messages: [msg]})
+    state
+  end
+
+  # Complete orphaned tool calls first: the assistant message carrying them
+  # was already persisted, and a transcript with a tool call but no result is
+  # rejected by the provider on every subsequent request.
+  defp complete_orphaned_tool_calls(state, reason) do
+    case Reducer.aborted_tool_results(state, reason) do
+      [] ->
+        state
+
+      results ->
+        Enum.each(results, fn result ->
+          append_best_effort(state, :aborted_tool_result, fn ->
+            Store.append_message(state.store, result)
+          end)
+
+          synthetic_and_broadcast(state, %Event.MessageEnd{message: result})
+        end)
+
+        %{state | messages: Enum.reverse(results, state.messages)}
+    end
+  end
+
+  defp clear_failed_run(state, msg) do
+    %{
       state
       | messages: [msg | state.messages],
         error_message: msg.error_message,
@@ -656,10 +645,6 @@ defmodule Catalyst.Session.Server do
         follow_up: requeue(state.in_flight, :follow_up, state.follow_up),
         in_flight: []
     }
-
-    synthetic_and_broadcast(state, %Event.MessageEnd{message: msg})
-    synthetic_and_broadcast(state, %Event.AgentEnd{messages: [msg]})
-    state
   end
 
   defp requeue(in_flight, kind, queue) do

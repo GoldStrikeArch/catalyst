@@ -68,18 +68,6 @@ defmodule Catalyst.Session.Snapshot do
     %{state.streaming_message | content: blocks}
   end
 
-  # Current reducers keep a proper newest-first chunk list. Live sessions can
-  # still carry the old nested/improper iodata accumulator across a hot code
-  # reload, so retain its already-chronological interpretation until the next
-  # MessageStart resets it.
-  defp streaming_binary(chunks) do
-    case proper_list?(chunks) do
-      true -> chunks |> Enum.reverse() |> IO.iodata_to_binary()
-      false -> IO.iodata_to_binary(chunks)
-    end
-  end
-
-  defp proper_list?([]), do: true
-  defp proper_list?([_head | tail]), do: proper_list?(tail)
-  defp proper_list?(_improper_tail), do: false
+  # Reducers keep a proper newest-first chunk list; reverse once here.
+  defp streaming_binary(chunks), do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
 end

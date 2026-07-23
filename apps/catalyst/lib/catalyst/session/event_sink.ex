@@ -44,9 +44,8 @@ defmodule Catalyst.Session.EventSink do
   A failed or stale persistence request is returned unchanged and is not shown
   to observers. Observer callbacks never run in `Session.Server`.
   """
-  @spec persist(GenServer.server(), reference(), term(), Event.t()) ::
-          :ok | {:error, term()}
-  def persist(server, run_ref, _session_key, event) when is_reference(run_ref) do
+  @spec persist(GenServer.server(), reference(), Event.t()) :: :ok | {:error, term()}
+  def persist(server, run_ref, event) when is_reference(run_ref) do
     case call_server(server, run_ref, event) do
       :ok ->
         :ok

@@ -115,8 +115,7 @@ defmodule Catalyst.LLM.OpenAICodex.Catalog do
 
   defp live_efforts(_entry), do: @efforts
 
-  defp positive(value) when is_integer(value) and value > 0, do: value
-  defp positive(_value), do: nil
+  defp positive(value), do: Catalyst.Model.positive_int(value)
 
   # Codex's documented default: a missing or invalid effective percentage
   # normalizes to 95 at the catalog boundary rather than in each consumer.

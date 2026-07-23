@@ -1,6 +1,8 @@
 defmodule Catalyst.Session.ServerRunBoundaryTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_runtime_policy: 2, runtime_policy: 1]
+
   alias Catalyst.Agent.Event
   alias Catalyst.{Hooks, Message, Model}
   alias Catalyst.Prompt.Registry, as: PromptRegistry
@@ -14,7 +16,7 @@ defmodule Catalyst.Session.ServerRunBoundaryTest do
       )
 
     File.mkdir_p!(tmp)
-    previous_policy = runtime_policy()
+    previous_policy = runtime_policy(PromptRegistry)
     :ok = PromptRegistry.unregister_policy()
 
     :ok =
@@ -24,7 +26,7 @@ defmodule Catalyst.Session.ServerRunBoundaryTest do
 
     on_exit(fn ->
       :ok = PromptRegistry.unregister_policy()
-      restore_runtime_policy(previous_policy)
+      restore_runtime_policy(PromptRegistry, previous_policy)
       File.rm_rf!(tmp)
     end)
 
@@ -47,10 +49,11 @@ defmodule Catalyst.Session.ServerRunBoundaryTest do
     refute policy_worker == pid
     assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 1_000
 
+    # Server.state/1 is a call: answering it already proves the server
+    # survived the worker error (no Process.alive? needed).
     snapshot = Server.state(pid)
     refute snapshot.running
     assert snapshot.run_metadata == nil
-    assert Process.alive?(pid)
 
     assert [%Message.Assistant{stop_reason: :error} = error] = snapshot.messages
     assert error.error_message =~ "{:prompt_resolution, :prompt_blocked}"
@@ -348,15 +351,5 @@ defmodule Catalyst.Session.ServerRunBoundaryTest do
       context_window: 10_000,
       context_window_source: :session
     }
-  end
-
-  defp runtime_policy do
-    Enum.find(PromptRegistry.runtime_entries(), &(&1.key == {:policy, :default}))
-  end
-
-  defp restore_runtime_policy(nil), do: :ok
-
-  defp restore_runtime_policy(entry) do
-    PromptRegistry.register_policy(entry.value, owner: entry.owner)
   end
 end

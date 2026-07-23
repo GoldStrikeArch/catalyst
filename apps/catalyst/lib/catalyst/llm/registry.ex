@@ -14,11 +14,11 @@ defmodule Catalyst.LLM.Registry do
   use GenServer
 
   alias Catalyst.ExtensionAPI
+  alias Catalyst.Extensions.Owner
   alias Catalyst.LLM.ProviderConfig
   alias Catalyst.OwnedIndex
 
   @table :catalyst_llm_providers
-  @host_owner :host
 
   @builtin %{
     "faux" => Catalyst.LLM.Faux,
@@ -40,28 +40,30 @@ defmodule Catalyst.LLM.Registry do
     end
   end
 
-  @doc "Like `fetch/1` but raises `ArgumentError` for an unknown api."
-  @spec fetch!(String.t()) :: module()
-  def fetch!(api) do
-    case fetch(api) do
-      {:ok, module} ->
-        module
-
-      {:error, reason} ->
-        raise ArgumentError, "no LLM provider for api #{inspect(api)}: #{inspect(reason)}"
+  @doc "The full `%ProviderConfig{}` for an api string. Returns `{:ok, config}` or `:error`."
+  @spec fetch_config(String.t()) :: {:ok, ProviderConfig.t()} | :error
+  def fetch_config(api) when is_binary(api) do
+    case lookup(api) do
+      %ProviderConfig{} = config -> {:ok, config}
+      nil -> :error
     end
   end
-
-  @doc "The full `%ProviderConfig{}` for an api string, or nil."
-  @spec fetch_config(String.t()) :: ProviderConfig.t() | nil
-  def fetch_config(api) when is_binary(api), do: lookup(api)
 
   @doc "All registered providers as `%{api => %ProviderConfig{}}`."
   @spec list() :: %{String.t() => ProviderConfig.t()}
   def list do
-    @table |> :ets.tab2list() |> Map.new()
+    case table_rows() do
+      {:ok, rows} -> Map.new(rows)
+      :error -> seed_map()
+    end
+  end
+
+  # The rescue wraps only the :ets call: a missing table (registry restarting)
+  # falls back to the seed layer; a malformed row is a real bug and must crash.
+  defp table_rows do
+    {:ok, :ets.tab2list(@table)}
   rescue
-    ArgumentError -> seed_map()
+    ArgumentError -> :error
   end
 
   @doc """
@@ -99,17 +101,17 @@ defmodule Catalyst.LLM.Registry do
 
   @impl true
   def handle_call({:register, api, config, opts}, _from, state) do
-    owner = normalize_owner(opts[:owner])
+    owner = Owner.normalize(opts[:owner])
 
     case validate_provider_module(config.module) do
       :ok ->
-        case OwnedIndex.claim(state, api, owner, track_owner: owner != @host_owner) do
+        case OwnedIndex.claim(state, api, owner, track_owner: owner != Owner.host()) do
           {:ok, state} ->
             :ets.insert(@table, {api, config})
             {:reply, :ok, state}
 
           {:error, existing_owner} ->
-            error = {:provider_owner_collision, api, existing_owner, owner}
+            error = {:owner_collision, :provider, api, existing_owner, owner}
             {:reply, {:error, error}, state}
         end
 
@@ -152,12 +154,16 @@ defmodule Catalyst.LLM.Registry do
   # ---- internals ------------------------------------------------------------
 
   defp lookup(api) do
-    case :ets.lookup(@table, api) do
+    case lookup_row(api) do
       [{^api, cfg}] -> cfg
       _ -> Map.get(seed_map(), api)
     end
+  end
+
+  defp lookup_row(api) do
+    :ets.lookup(@table, api)
   rescue
-    ArgumentError -> Map.get(seed_map(), api)
+    ArgumentError -> []
   end
 
   # Drop an entry; if `api` is a built-in/config default, restore that default.
@@ -169,9 +175,6 @@ defmodule Catalyst.LLM.Registry do
       cfg -> :ets.insert(@table, {api, cfg})
     end
   end
-
-  defp normalize_owner(nil), do: @host_owner
-  defp normalize_owner(owner), do: owner
 
   defp seed_map do
     builtins =

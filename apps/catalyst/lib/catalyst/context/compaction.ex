@@ -3,19 +3,17 @@ defmodule Catalyst.Context.Compaction do
   A context policy's proposed chronological transcript replacement.
 
   The replacement is advisory until `Catalyst.Context.Guard` validates the
-  message shape and recomputes the exact staged request estimate.  Policies
-  therefore cannot make persistence diverge from the request that was checked.
+  message shape and recomputes the authoritative accounting (replaced count,
+  token totals, and policy provenance) for the staged request.  The candidate
+  therefore carries only what the guard cannot derive itself: the replacement
+  list and the optional summary message it must contain.
   """
 
-  @enforce_keys [:replacement, :replaced_count, :tokens_before, :tokens_after, :policy]
-  defstruct [:replacement, :summary, :replaced_count, :tokens_before, :tokens_after, :policy]
+  @enforce_keys [:replacement]
+  defstruct [:replacement, :summary]
 
   @type t :: %__MODULE__{
           replacement: [Catalyst.Message.t()],
-          summary: Catalyst.Message.User.t() | nil,
-          replaced_count: non_neg_integer(),
-          tokens_before: non_neg_integer(),
-          tokens_after: non_neg_integer(),
-          policy: term()
+          summary: Catalyst.Message.User.t() | nil
         }
 end

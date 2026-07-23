@@ -21,16 +21,7 @@ defmodule CatalystWeb.ShellLive.Conversation do
   @spec init(socket()) :: socket()
   def init(socket) do
     socket
-    |> assign(
-      streaming: nil,
-      running: false,
-      tools: %{},
-      replayed_tail: [],
-      message_seq: 0,
-      message_count: 0,
-      run_metadata: nil,
-      context_status: nil
-    )
+    |> clear_projection()
     |> stream(:messages, [])
     |> stream(:stream_blocks, [])
   end
@@ -39,18 +30,22 @@ defmodule CatalystWeb.ShellLive.Conversation do
   @spec reset(socket()) :: socket()
   def reset(socket) do
     socket
+    |> clear_projection()
+    |> stream(:messages, [], reset: true)
+    |> stream(:stream_blocks, [], reset: true)
+  end
+
+  defp clear_projection(socket) do
+    socket
     |> assign(
       streaming: nil,
       running: false,
       tools: %{},
       replayed_tail: [],
-      message_seq: 0,
-      message_count: 0,
       run_metadata: nil,
       context_status: nil
     )
-    |> stream(:messages, [], reset: true)
-    |> stream(:stream_blocks, [], reset: true)
+    |> set_message_count(0)
   end
 
   @doc "Rebuilds the conversation projection from a live session snapshot."
@@ -63,13 +58,12 @@ defmodule CatalystWeb.ShellLive.Conversation do
     run_metadata = Map.get(snapshot, :run_metadata)
 
     socket
+    |> set_message_count(message_count)
     |> assign(
       cwd: snapshot.cwd,
       running: snapshot.running,
       streaming: nil,
       tools: %{},
-      message_seq: message_count,
-      message_count: message_count,
       session_model: snapshot.model,
       session_opts: Map.get(snapshot, :opts, []),
       replayed_tail: replayed_tail(snapshot.messages),
@@ -150,11 +144,9 @@ defmodule CatalystWeb.ShellLive.Conversation do
       when is_list(replacement) do
     {socket, message_count} = replace_messages(socket, replacement)
 
-    assign(socket,
-      message_seq: message_count,
-      message_count: message_count,
-      replayed_tail: replayed_tail(replacement)
-    )
+    socket
+    |> set_message_count(message_count)
+    |> assign(replayed_tail: replayed_tail(replacement))
   end
 
   def apply_event(%Event.AgentStart{}, socket), do: assign(socket, running: true)
@@ -168,12 +160,12 @@ defmodule CatalystWeb.ShellLive.Conversation do
   def apply_event(_event, socket), do: socket
 
   defp replace_messages(socket, messages) do
-    Enum.reduce(messages, {stream(socket, :messages, [], reset: true), 0}, fn message,
-                                                                              {socket, sequence} ->
-      next_sequence = sequence + 1
-      item = %{id: next_sequence, msg: message}
-      {stream_insert(socket, :messages, item), next_sequence}
-    end)
+    items =
+      messages
+      |> Enum.with_index(1)
+      |> Enum.map(fn {message, sequence} -> %{id: sequence, msg: message} end)
+
+    {stream(socket, :messages, items, reset: true), length(items)}
   end
 
   defp replayed_tail(messages) do
@@ -189,16 +181,23 @@ defmodule CatalystWeb.ShellLive.Conversation do
   defp put_context_status(_metadata, status), do: %{context_status: status}
 
   defp append_message(socket, message) do
-    sequence = socket.assigns.message_seq + 1
+    socket =
+      socket
+      |> maybe_clear_streaming(message)
+      |> bump_message_count()
+      |> assign(replayed_tail: [])
 
-    socket
-    |> maybe_clear_streaming(message)
-    |> assign(
-      message_seq: sequence,
-      message_count: socket.assigns.message_count + 1,
-      replayed_tail: []
+    stream_insert(socket, :messages, %{id: socket.assigns.message_seq, msg: message})
+  end
+
+  defp set_message_count(socket, count),
+    do: assign(socket, message_seq: count, message_count: count)
+
+  defp bump_message_count(socket) do
+    assign(socket,
+      message_seq: socket.assigns.message_seq + 1,
+      message_count: socket.assigns.message_count + 1
     )
-    |> stream_insert(:messages, %{id: sequence, msg: message})
   end
 
   defp maybe_clear_streaming(socket, %Message.Assistant{}), do: clear_stream_bubble(socket)
@@ -223,15 +222,20 @@ defmodule CatalystWeb.ShellLive.Conversation do
     |> stream(:stream_blocks, [], reset: true)
   end
 
+  # `:acc` holds the streamed text as a reversed chunk list: appending a delta
+  # is O(1), and the full string is materialized only at the newline-bearing
+  # parse boundaries that need it (see `stream_text/1`).
   defp empty_stream_seed do
-    %{thinking: "", tail: "", acc: "", committed: 0, epoch: unique_epoch()}
+    %{thinking: "", tail: "", acc: [], committed: 0, epoch: unique_epoch()}
   end
 
   defp unique_epoch, do: System.unique_integer([:positive])
 
+  defp stream_text(%{acc: chunks}), do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
+
   defp accumulate_stream_text(socket, delta) do
     streaming = socket.assigns.streaming
-    socket = assign(socket, streaming: %{streaming | acc: streaming.acc <> delta})
+    socket = assign(socket, streaming: %{streaming | acc: [delta | streaming.acc]})
 
     case String.contains?(delta, "\n") do
       true -> commit_stable_blocks(socket)
@@ -241,7 +245,7 @@ defmodule CatalystWeb.ShellLive.Conversation do
 
   defp commit_stable_blocks(socket) do
     streaming = socket.assigns.streaming
-    {blocks, tail} = Markdown.stable_split(streaming.acc)
+    {blocks, tail} = Markdown.stable_split(stream_text(streaming))
     block_count = length(blocks)
 
     case block_count > streaming.committed do
@@ -282,7 +286,7 @@ defmodule CatalystWeb.ShellLive.Conversation do
     seed = %{
       thinking: thinking,
       tail: tail,
-      acc: text,
+      acc: [text],
       committed: length(blocks),
       epoch: epoch
     }

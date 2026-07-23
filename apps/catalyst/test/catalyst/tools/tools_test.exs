@@ -143,9 +143,28 @@ defmodule Catalyst.ToolsTest do
 
     res = Fd.execute(%{"pattern" => "cap*.txt", "limit" => 3}, ctx)
 
-    assert res.details.result_limit_reached
-    assert res.details.result_count == 3
+    assert res.details.limit_reached
+    assert res.details.count == 3
     assert text(res) =~ "showing first 3 results; more exist"
+  end
+
+  test "find (fd) reports visibly-incomplete output when the byte cap kills fd", %{
+    tmp: tmp,
+    ctx: ctx
+  } do
+    # Lower the cap through the test seam so a small tree exercises the
+    # Exec kill-at-cap path; fd's real cap is 8MB.
+    Application.put_env(:catalyst, :fd_max_output_bytes, 512)
+    on_exit(fn -> Application.delete_env(:catalyst, :fd_max_output_bytes) end)
+
+    for i <- 1..200 do
+      File.write!(Path.join(tmp, "byte_cap_#{i}_#{String.duplicate("x", 40)}.txt"), "x")
+    end
+
+    res = Fd.execute(%{"pattern" => "byte_cap_*"}, ctx)
+
+    assert res.details.output_capped
+    assert text(res) =~ "output capped"
   end
 
   test "grep caps runaway search output and says so", %{tmp: tmp, ctx: ctx} do

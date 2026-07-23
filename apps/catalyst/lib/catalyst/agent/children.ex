@@ -77,7 +77,9 @@ defmodule Catalyst.Agent.Children do
     :exit, reason -> {:error, {:children_unavailable, reason}}
   end
 
-  @doc "Release a reservation. Repeated and late releases are successful no-ops."
+  # test seam. Releases a reservation; repeated and late releases are
+  # successful no-ops.
+  @doc false
   @spec release(lease(), keyword()) :: :ok
   def release(lease, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
@@ -89,7 +91,9 @@ defmodule Catalyst.Agent.Children do
     end
   end
 
-  @doc "List the current rows for a root tree, in stable parent/child order."
+  # test seam (count/2 also reads it). Lists the current rows for a root tree,
+  # in stable parent/child order.
+  @doc false
   @spec list(String.t(), keyword()) :: [entry()]
   def list(root_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
@@ -108,7 +112,13 @@ defmodule Catalyst.Agent.Children do
 
   @impl true
   def init(opts) do
-    table = opts |> Keyword.get(:table, @table) |> ensure_table()
+    table =
+      case Keyword.fetch(opts, :table) do
+        # Test path: tests own their table lifecycle, so create on demand.
+        {:ok, table} -> ensure_table(table)
+        :error -> owned_table!(@table)
+      end
+
     {:ok, recover_state(table)}
   end
 
@@ -177,6 +187,17 @@ defmodule Catalyst.Agent.Children do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  # `Catalyst.Agent.Children.TableOwner` owns the production table under a
+  # `:rest_for_one` supervisor, so it must already exist here; a missing table
+  # is an invariant violation and the init crash lets the supervisor restore
+  # the correct start order instead of silently adopting a fresh empty table.
+  defp owned_table!(table) do
+    case :ets.whereis(table) do
+      :undefined -> raise "ETS table #{inspect(table)} missing; TableOwner must start first"
+      _existing -> table
+    end
+  end
 
   defp ensure_table(table) do
     case :ets.whereis(table) do
@@ -474,8 +495,21 @@ defmodule Catalyst.Agent.Children do
     }
   end
 
+  # Prefer the shared task supervisor, but this stop must also fire while
+  # supervisors are unwinding (see reap_orphan/2): when the supervisor is
+  # already gone or refuses children, fall back to an unsupervised process
+  # rather than dropping the only remaining stop request for the child.
   defp request_child_stop(child_id) when is_binary(child_id) do
-    _pid = spawn(fn -> Catalyst.Session.Manager.stop(child_id) end)
+    stop = fn -> Catalyst.Session.Manager.stop(child_id) end
+
+    case Catalyst.Tasks.start_background(stop) do
+      {:ok, _pid} -> :ok
+      {:error, _reason} -> stop_unsupervised(stop)
+    end
+  end
+
+  defp stop_unsupervised(stop) do
+    _pid = spawn(stop)
     :ok
   end
 
@@ -514,6 +548,10 @@ defmodule Catalyst.Agent.Children do
   defp demonitor(nil), do: :ok
   defp demonitor(monitor), do: Process.demonitor(monitor, [:flush])
 
-  defp nonblank?(value),
+  # Shared with Catalyst.Tools.SpawnAgent, which validates the same id/cwd
+  # inputs before reserving a lease here.
+  @doc false
+  @spec nonblank?(term()) :: boolean()
+  def nonblank?(value),
     do: is_binary(value) and String.valid?(value) and String.trim(value) != ""
 end

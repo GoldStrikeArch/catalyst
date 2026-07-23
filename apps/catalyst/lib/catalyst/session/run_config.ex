@@ -64,7 +64,7 @@ defmodule Catalyst.Session.RunConfig do
        get_steering: fn -> drain(server, {:drain_steering, run_ref}) end,
        get_follow_up: fn -> drain(server, {:drain_follow_up, run_ref}) end,
        register_resource: fn resource -> register_resource(server, run_ref, resource) end,
-       persist_event: fn event -> EventSink.persist(server, run_ref, state.id, event) end,
+       persist_event: fn event -> EventSink.persist(server, run_ref, event) end,
        report_metadata: fn metadata ->
          GenServer.cast(server, {:run_metadata, run_ref, metadata})
        end
@@ -154,7 +154,7 @@ defmodule Catalyst.Session.RunConfig do
   defp call_provider_cleanup(provider, session_id) do
     {:ok, provider.cleanup_session(session_id)}
   rescue
-    error -> {:error, {:error, error}}
+    error -> {:error, error}
   catch
     kind, reason -> {:error, {kind, reason}}
   end

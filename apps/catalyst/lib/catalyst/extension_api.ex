@@ -1,7 +1,7 @@
 defmodule Catalyst.ExtensionAPI do
   @moduledoc """
   The facade passed to `Catalyst.Extension.setup/1`. It carries the extension's
-  provenance (`owner`, `source_path`) and exposes `register_*` functions for every
+  provenance (`owner`) and exposes `register_*` functions for every
   extension kind. Handles also capture the originating extension server and
   runtime generation. Registration through a stale handle is rejected, including
   a generation change that races a subsystem handler call.
@@ -18,22 +18,20 @@ defmodule Catalyst.ExtensionAPI do
 
   require Logger
 
-  defstruct [:owner, :source_path, :load_ref, :generation, :server]
+  defstruct [:owner, :load_ref, :generation, :server]
 
   @type t :: %__MODULE__{
           owner: String.t() | nil,
-          source_path: String.t() | nil,
           load_ref: reference() | nil,
           generation: reference() | nil,
           server: GenServer.server()
         }
 
-  @doc "Build an API handle for `owner` (the extension id) and its source file."
-  @spec new(String.t() | nil, String.t() | nil, reference() | nil) :: t()
-  def new(owner, source_path \\ nil, load_ref \\ nil) do
+  @doc "Build an API handle for `owner` (the extension id)."
+  @spec new(String.t() | nil, reference() | nil) :: t()
+  def new(owner, load_ref \\ nil) do
     %__MODULE__{
       owner: owner,
-      source_path: source_path,
       load_ref: load_ref,
       generation: Catalyst.Extensions.Transaction.generation(),
       server: Catalyst.Extensions.Transaction.server()
@@ -66,28 +64,47 @@ defmodule Catalyst.ExtensionAPI do
     :persistent_term.put({__MODULE__, :purgers}, Map.put(purger_map(), purger_key(fun), fun))
   end
 
-  @doc "Run every registered purger for `owner`."
-  @spec purge_owner(term()) :: :ok
+  @typedoc "Stable purger identity: `{module, function, arity}` for external captures, else the fun itself."
+  @type purger_key :: {module(), atom(), arity()} | (term() -> any())
+
+  @typedoc "One purger's failure: its key plus the caught `{kind, reason}`."
+  @type purger_failure :: {purger_key(), {atom(), term()}}
+
+  @doc """
+  Run every registered purger for `owner`.
+
+  Returns `{:ok, purged_keys}` when every purger succeeded, or
+  `{:error, failures}` listing each failed subsystem — callers keep the owner
+  tracked as degraded on failure so cleanup stays retryable, never silently
+  forgotten with live residue.
+  """
+  @spec purge_owner(term()) :: {:ok, [purger_key()]} | {:error, [purger_failure()]}
   def purge_owner(owner) do
-    Enum.each(purgers(), fn fun ->
-      # `catch _, _`, not just `rescue` (mirrors Hooks.safe/2): purgers call
-      # into other registries' GenServers, and a dead or busy one EXITs
-      # (:noproc/:timeout) rather than raising. The purge paths run inside the
-      # Catalyst.Extensions server, so an uncaught exit would take down the
-      # live tools table along with it.
-      try do
-        fun.(owner)
-      catch
-        kind, reason ->
-          Logger.warning(
-            "[extension_api] purger #{inspect(fun)} for #{inspect(owner)} " <>
-              "#{kind}: #{inspect(reason)}"
-          )
-      end
-    end)
+    results = Enum.map(purger_map(), fn {key, fun} -> {key, run_purger(fun, owner)} end)
+
+    case for {key, {:error, reason}} <- results, do: {key, reason} do
+      [] -> {:ok, Enum.map(results, &elem(&1, 0))}
+      failures -> {:error, failures}
+    end
   end
 
-  defp purgers, do: Map.values(purger_map())
+  # `catch _, _`, not just `rescue` (mirrors Hooks.safe/2): purgers call
+  # into other registries' GenServers, and a dead or busy one EXITs
+  # (:noproc/:timeout) rather than raising. The purge paths run inside the
+  # Catalyst.Extensions server, so an uncaught exit would take down the
+  # live tools table along with it.
+  defp run_purger(fun, owner) do
+    fun.(owner)
+    :ok
+  catch
+    kind, reason ->
+      Logger.warning(
+        "[extension_api] purger #{inspect(fun)} for #{inspect(owner)} " <>
+          "#{kind}: #{inspect(reason)}"
+      )
+
+      {:error, {kind, reason}}
+  end
 
   defp purger_map, do: :persistent_term.get({__MODULE__, :purgers}, %{})
 
@@ -214,64 +231,32 @@ defmodule Catalyst.ExtensionAPI do
   end
 
   defp purge_stale_registration(owner) do
-    purge_owner(owner)
+    case purge_owner(owner) do
+      {:ok, _purged} ->
+        :ok
+
+      {:error, failures} ->
+        Logger.warning(
+          "[extension_api] stale-generation purge for #{inspect(owner)} left residue: " <>
+            inspect(failures)
+        )
+    end
+
     {:error, :stale_extension_generation}
   end
 
+  # Every registry emits the one unified collision shape
+  # `{:owner_collision, kind, key, existing, attempted}` (key `nil` for the
+  # context policy), so one clause records them all for the in-flight load.
   defp remember_owner_collision(
          api,
-         {:error, {:tool_owner_collision, _name, _existing, _attempted} = reason} = error
+         {:error, {:owner_collision, _kind, _key, _existing, _attempted} = reason} = error
        ) do
-    record_owner_collision(api, reason)
-    error
-  end
-
-  defp remember_owner_collision(
-         api,
-         {:error, {:prompt_owner_collision, _key, _existing, _attempted} = reason} = error
-       ) do
-    record_owner_collision(api, reason)
-    error
-  end
-
-  defp remember_owner_collision(
-         api,
-         {:error, {:workflow_owner_collision, _name, _existing, _attempted} = reason} = error
-       ) do
-    record_owner_collision(api, reason)
-    error
-  end
-
-  defp remember_owner_collision(
-         api,
-         {:error, {:context_policy_owner_collision, _existing, _attempted} = reason} = error
-       ) do
-    record_owner_collision(api, reason)
-    error
-  end
-
-  defp remember_owner_collision(
-         api,
-         {:error, {:context_threshold_owner_collision, _key, _existing, _attempted} = reason} =
-           error
-       ) do
-    record_owner_collision(api, reason)
-    error
-  end
-
-  defp remember_owner_collision(
-         api,
-         {:error, {:provider_owner_collision, _api, _existing, _attempted} = reason} = error
-       ) do
-    record_owner_collision(api, reason)
+    record_load_collision(api, reason)
     error
   end
 
   defp remember_owner_collision(_api, result), do: result
-
-  defp record_owner_collision(api, reason) do
-    record_load_collision(api, reason)
-  end
 
   defp record_load_collision(%__MODULE__{load_ref: nil}, _reason), do: :ok
 

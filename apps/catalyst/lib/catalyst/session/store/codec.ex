@@ -43,7 +43,7 @@ defmodule Catalyst.Session.Store.Codec do
       "toolName" => message.tool_name,
       "content" => encode_content(message.content),
       "isError" => message.is_error,
-      "details" => encodable(message.details),
+      "details" => message.details,
       "timestamp" => message.timestamp
     }
   end
@@ -184,16 +184,6 @@ defmodule Catalyst.Session.Store.Codec do
 
   # Unknown block shapes degrade to inspected text so the line stays decodable.
   defp encode_block(other), do: %{"type" => "text", "text" => inspect(other)}
-
-  # Details are best-effort JSON; drop anything not encodable rather than crash.
-  defp encodable(nil), do: nil
-
-  defp encodable(details) do
-    case Jason.encode(details) do
-      {:ok, _encoded} -> details
-      {:error, _reason} -> nil
-    end
-  end
 
   defp decode_usage(%{} = usage) do
     %Usage{

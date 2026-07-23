@@ -5,7 +5,9 @@ GUI. See `architecture.md` for the design. Reference implementation lives in `./
 
 **Locked decisions:** project name **Catalyst** (`Catalyst.*` / `CatalystWeb.*`, app
 `:catalyst`); **umbrella** project; **desktop spike first** (de-risk wx); fast-tool binaries
-**auto-downloaded on demand** (mirrors PI's `ensureTool`). The desktop risk is already
+**bundled into the release and resolved locally** (`~/.catalyst/bin` → bundled `priv/bin` →
+`$PATH` → Homebrew paths); per-OS/arch **auto-download** à la PI's `ensureTool` is **explicitly
+deferred** — a missing binary raises with an install hint. The desktop risk is already
 largely retired — `:wx` is present in the installed Erlang/OTP 29 and `rg`/`fd`/`sd`/`ast-grep`
 are installed.
 
@@ -18,8 +20,9 @@ are installed.
   native wx window opens, loads ChatLive, and the **LiveView WebSocket connects + mounts
   inside the wxWebView**. `mix test` green (7 tests).
   - Gotchas captured in code: `Desktop.Endpoint`'s dynamic-port path assumes cowboy/ranch and
-    breaks under Bandit on Phoenix 1.8 → use a **fixed port** (`url/0` then takes the simple
-    path; the `:ranch.get_port` compile warning is harmless/unused). `Desktop.Auth` is
+    breaks under Bandit on Phoenix 1.8 → initially worked around with a fixed port; since
+    superseded — `config/runtime.exs` now defaults `PORT=0` (the OS assigns a free loopback
+    port resolved after bind; set `PORT` to pin a fixed one). `Desktop.Auth` is
     **prod-only** (else it 401s browser/tests). Endpoint needs **`server: true`** because the
     shell boots via `mix run`, not `mix phx.server`.
 - **P1 — DONE ✅** (headless core in `apps/catalyst`). Data model (`Content`/`Message`/
@@ -53,7 +56,8 @@ StreamParser, Provider}` against `chatgpt.com/backend-api/codex/responses`; reas
   assistant tokens, thinking blocks (collapsible), tool-call chips, and tool-result cards —
   with a prompt box, Stop (abort), New session, and a Demo/Codex provider switch. Added
   `Catalyst.LLM.Demo` (offline, input-aware: runs a real `ls`/`grep`/`find` then replies,
-  word-streamed) so the GUI is interactive without login, and a `ScrollBottom` JS hook.
+  word-streamed; since relocated to `apps/catalyst/test/support/` as a test-only provider)
+  so the GUI is interactive without login, and a `ScrollBottom` JS hook.
   Verified: browser renders the shell; a LiveView test drives a full Demo turn (tool result +
   streamed reply); and the **native desktop window mounts ChatLive over a live socket**.
   `mix test`: 38 (catalyst) + 6 (web) green. Open with `mix phx.server` (browser) or
@@ -84,8 +88,9 @@ StreamParser, Provider}` against `chatgpt.com/backend-api/codex/responses`; reas
   `apps/catalyst_desktop/priv/icon.png`, `app_name: :catalyst_desktop` — required for an
   umbrella) + a `catalyst_desktop` release with `steps: [:assemble,
 &Desktop.Deployment.generate_installer/1]`. Prod config fixed for a local app: `prod.exs`
-  (localhost url, no force_ssl, `start_window: true`), `runtime.exs` (loopback + fixed port +
-  url port + generated secret). Build = `MIX_ENV=prod mix do --app catalyst_web
+  (localhost url, no force_ssl, `start_window: true`), `runtime.exs` (loopback + port + url
+  port + generated secret; the fixed port used here has since become a `PORT=0` dynamic
+  default). Build = `MIX_ENV=prod mix do --app catalyst_web
 assets.deploy` then `MIX_ENV=prod mix release catalyst_desktop --overwrite` (≡ `mix
 desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M),
   **`Catalyst-0.1.0.pkg`** in `_build/prod/`, with **20 wxWidgets dylibs bundled +
@@ -104,7 +109,7 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   bundle vs `Application.app_dir`/`:code.priv_dir` resolutions inside), the "compiled code is
   already loaded → change behavior by loading new code" rule, a how-to-change decision guide,
   and a worked `install_extension` recipe. Bundled at `apps/catalyst/priv/guide.md` and
-  **published to `~/.catalyst/guide.md` on boot** (`Extensions.ensure_guide/0`). System prompt
+  **published to `~/.catalyst/guide.md` on boot** (a private `Extensions` boot step). System prompt
   tells the agent it can self-extend and points to the guide + `read_log`. (Keep `./guide.md`,
   `apps/catalyst/priv/guide.md`, and the in-bundle copy in sync.)
 - **P4d — DONE ✅ (runtime extensibility: "modify everything at runtime", E1–E6).** Design =
@@ -123,8 +128,8 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   (pages/renderers/components/commands) + `UI.MessageRenderer` dispatch + `ShellLive` (catch-all
   routes `/` and `/:page`) + `Pages.ChatPage`; `CatalystWeb.Assets.rebuild/0` (runtime
   tailwind+esbuild) broadcasts a reload over PubSub. (E6) self-mod tools `install_extension` /
-  `reload_extensions` / `rollback_extension` (core) + `rebuild_assets` / `reconnect_ui` (web,
-  registered at boot). Locked user decisions: approval = **auto-allow** (safety = git rollback +
+  `reload_extensions` / `rollback_extension` (core) + `rebuild_assets` / `reload_ui` (web,
+  `CatalystWeb.Tools.ReloadUi`, registered at boot). Locked user decisions: approval = **auto-allow** (safety = git rollback +
   safe-mode + dry-run); UI routing = catch-all; styling = ship esbuild+tailwind.
 - **Debug log — DONE ✅.** `Catalyst.Debug` writes a per-session log at `~/.catalyst/debug/<id>.log`
   (+ `latest.log`) capturing every agent-loop event, each tool call+result, and the truncated
@@ -235,8 +240,8 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   Codex provider + the saved run settings; sign-in/sign-out no longer restart the session (the
   loop pulls a fresh token per turn, so login mid-conversation keeps the transcript); the
   not-authenticated error now points at the header button. `Catalyst.LLM.Demo` survives with no
-  UI surface as the LiveView test/offline-dev provider, registered for the Codex API through
-  `Catalyst.LLM.Registry` by the web test helper. (2) **Header decluttered** — removed
+  UI surface as the test-only provider (now in `apps/catalyst/test/support/`), registered for
+  the Codex API through `Catalyst.LLM.Registry` by the web test helper. (2) **Header decluttered** — removed
   the "Catalyst" brand text and the model-label chip (the model select already shows it); the
   provider pill buttons are gone; `<title>` keeps the app name. (3) **"@" file search** —
   `CatalystWeb.FileSearch` (fd via `Binaries`/`Exec`, `--full-path`, ≤8 results, 3s deadline,
@@ -294,8 +299,8 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   fingerprint-classified and executable/static checked. The opt-in `mix test.release` tier builds
   a plain headless `catalyst_cli` release in a temporary path and checks the
   `PACKAGED HOT-LOAD WORKS`, `RELEASE TURN OK`, and `RELEASE SAFE MODE OK` sentinels in isolated
-  fresh VMs. Observed locally: `mix test.flex` ran **26 tests in 7.19s**; the earlier cold release
-  build took **25.2s**, and a warm integrated `mix test.release` run took **3.0s**. The automated
+  fresh VMs. The flex tier has since grown to **36 tests (7 core + 29 web)**; the earlier cold
+  release build took **25.2s**, and a warm integrated `mix test.release` run took **3.0s**. The automated
   release proof deliberately excludes Phoenix/HEEx/runtime assets; packaged GUI behavior remains
   a manual `.app` smoke.
 - **P5c — DONE ✅ (purpose-aware prompts, guarded context, workflows, and child sessions).**
@@ -323,8 +328,9 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   boot clean, while self-test uses an exclusive temporary source and never touches user extension
   state. Shared ownership bookkeeping moved into pure `OwnedIndex`; Codex token accounting and
   request construction share one projection; `Extensions` keeps its façade while delegating state,
-  transaction, BEAM-version, and source concerns; obsolete `RunConfig` and `ModuleScan` paths were
-  removed. Extension setup now has one host-controlled bootstrap, and exact live UI contributions
+  transaction, BEAM-version, and source concerns; the obsolete `RunConfig.build/3`/`resolve_loop/1`
+  entry points and the `ModuleScan` module were removed (`Session.RunConfig` itself remains the
+  heavily used host-side run preflight). Extension setup now has one host-controlled bootstrap, and exact live UI contributions
   replay after table loss without recompiling or running setup twice. Extension transactions and
   API handles are generation-pinned, prior runtime footprints are revoked before restart/safe-mode
   readiness, and stale asynchronous boot work cannot run after or replace newer explicit outcomes.
@@ -332,9 +338,12 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   generation went stale; a restart-stable provisional compiler journal covers boot workers killed
   before they can return those candidates. Extension-owner teardown is bounded even when a child
   start callback or shutdown never returns, while preserving the shared process registry. Core
-  state/config types, behaviour callback docs, reverse chunk accumulation, async debug writes, and
+  state/config types, behaviour callback docs, reverse chunk accumulation, and
   concurrent provider cleanup tighten the idiomatic Elixir/OTP boundaries; the former core compile
-  cycle is gone.
+  cycle is gone. Debug logging of committed events runs asynchronously outside the session, while
+  the observed-path debug append deliberately remains a synchronous `File.write!` in the run task
+  before the event is accepted by the session — moving observation behind an accepted-event
+  pipeline is a known design option, explicitly deferred.
 - **Next options:** notarize for distribution (the launcher step must then re-sign inside-out +
   re-sign the dmg); replace the placeholder icon; optional approval gate as an extension via the
   `before_tool_call` hook (a panel toggle could install it); optional `self_test/0` extension
@@ -369,8 +378,8 @@ The agent engine, with no real LLM yet (driven by a `Faux` provider).
 - `Session.Server` (PI `Agent` analog) + `Session.Manager` (DynamicSupervisor + Registry; the
   per-session wrapper supervisor was dropped — `Server` runs directly under the DynamicSupervisor);
   event-fold + PubSub broadcast; JSONL `Session.Store`.
-- `Catalyst.Exec` (`collect` via Port, `stream` via MuonTrap) and `Tools.Binaries`
-  auto-downloader.
+- `Catalyst.Tools.Exec` (`collect` via Port, `stream` via MuonTrap) and the `Tools.Binaries`
+  resolver (bundled/`~/.catalyst/bin`/PATH/Homebrew; auto-download deferred).
 - Tools: `read`, `write`, `edit`, `ls`, `bash` + `grep` (ripgrep), `find` (fd), `replace`
   (sd), `ast_grep` (search + rewrite). `Truncate` (2000 lines / 50KB).
 - `Catalyst.LLM.Faux` for deterministic loop tests.
@@ -410,8 +419,8 @@ window; abort mid-run works; a persisted session resumes.
 
 ## P4 — Desktop packaging
 
-- `MIX_ENV=prod mix release` + elixir-desktop macOS `.app` packaging; bundle (or on-first-run
-  download) the fast-tool binaries; code-sign / notarize.
+- `MIX_ENV=prod mix release` + elixir-desktop macOS `.app` packaging; bundle the fast-tool
+  binaries (auto-download deferred); code-sign / notarize.
 
 **Exit:** double-clicking the `.app` opens the native window running the chat.
 **Risks:** packaging tooling/version; signing/notarization.

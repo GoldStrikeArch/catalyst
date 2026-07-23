@@ -15,9 +15,7 @@ defmodule Catalyst.Session.RunContext do
   @type t :: %{
           context: map(),
           config: RunConfig.t(),
-          metadata: map(),
-          prompt_cache: map(),
-          catalog: map() | nil
+          metadata: map()
         }
 
   @doc "Resolve one run from an immutable session-state snapshot."
@@ -54,9 +52,7 @@ defmodule Catalyst.Session.RunContext do
        %{
          context: %{system_prompt: prompt.text, messages: Enum.reverse(state.messages)},
          config: config,
-         metadata: metadata,
-         prompt_cache: %{model_key(model) => prompt},
-         catalog: catalog
+         metadata: metadata
        }}
     end
   end
@@ -101,6 +97,24 @@ defmodule Catalyst.Session.RunContext do
       {:ok, context, config}
     end
   end
+
+  @doc """
+  Resolve the effective model a run started now would use.
+
+  For catalog-backed APIs (OpenAI Codex) this refreshes context-window
+  metadata from the current catalog snapshot — the same pre-request refresh
+  `build/4` performs. The single resolver behind preview/panel call sites;
+  non-catalog models (and `nil`) pass through unchanged.
+  """
+  @spec effective_model(Model.t() | nil) :: Model.t() | nil
+  def effective_model(%Model{} = model) do
+    # resolve_model/1 cannot error on a %Model{} input; the type checker
+    # rejects an unreachable {:error, _} fallback clause here.
+    {:ok, resolved, _catalog} = resolve_model(model)
+    resolved
+  end
+
+  def effective_model(model), do: model
 
   @doc "Resolve model context metadata from the immutable run-start catalog snapshot."
   @spec resolve_epoch_model(Model.t() | nil, map() | nil) ::
@@ -224,7 +238,10 @@ defmodule Catalyst.Session.RunContext do
   defp install_hook_prompt(context, config, prompt) when is_binary(prompt) do
     resolution = Resolution.new(prompt, [{:hook, :prepare_next_turn}])
 
-    case normalize_resolution(resolution) do
+    # Prompt owns resolution validation; this keeps hook prompts on the same
+    # (stricter) contract as policy resolutions: UTF-8 scrub + first invalid
+    # source in the provenance error.
+    case Prompt.normalize_resolution(resolution) do
       {:ok, resolution} ->
         config =
           config
@@ -334,17 +351,6 @@ defmodule Catalyst.Session.RunContext do
 
   defp context_window_source(_model, nil, nil), do: :fallback
 
-  defp normalize_resolution(%Resolution{text: text, sources: sources})
-       when is_binary(text) and is_list(sources) do
-    cond do
-      String.trim(text) == "" -> {:error, :blank_prompt_resolution}
-      not Resolution.valid_sources?(sources) -> {:error, {:invalid_prompt_provenance, sources}}
-      true -> {:ok, Resolution.new(text, sources)}
-    end
-  end
-
-  defp normalize_resolution(resolution), do: {:error, {:invalid_prompt_resolution, resolution}}
-
   defp prompt_metadata(prompt) do
     %{text: prompt.text, digest: prompt.digest, sources: prompt.sources}
   end
@@ -363,6 +369,5 @@ defmodule Catalyst.Session.RunContext do
   defp model_identity(nil), do: :default
   defp model_identity(model), do: {model.id, model.api, model.provider}
 
-  defp positive(value) when is_integer(value) and value > 0, do: value
-  defp positive(_value), do: nil
+  defp positive(value), do: Model.positive_int(value)
 end

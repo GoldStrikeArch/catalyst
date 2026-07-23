@@ -8,6 +8,8 @@ defmodule Catalyst.Tools.ReloadTool do
 
   alias Catalyst.Extensions
 
+  import Catalyst.Tools.SelfModReport, only: [failures_section: 1, format_failures: 1]
+
   @impl true
   def execution_mode, do: :sequential
 
@@ -49,11 +51,6 @@ defmodule Catalyst.Tools.ReloadTool do
     end
   end
 
-  defp failures_section([]), do: ""
-
-  defp failures_section(failed),
-    do: "\n#{length(failed)} file(s) FAILED to load:\n" <> format_failures(failed)
-
   defp warnings_section(loaded) do
     warnings =
       for summary <- loaded,
@@ -68,11 +65,5 @@ defmodule Catalyst.Tools.ReloadTool do
       warnings ->
         "\n#{length(warnings)} file(s) loaded with WARNINGS:\n" <> Enum.join(warnings, "\n")
     end
-  end
-
-  defp format_failures(failed) do
-    Enum.map_join(failed, "\n", fn {path, reason} ->
-      "  - #{path}: #{Extensions.format_error(reason)}"
-    end)
   end
 end

@@ -48,4 +48,38 @@ defmodule CatalystWeb.AssetsTest do
 
     assert File.read!(css) == before
   end
+
+  test "rebuild surfaces a localization failure instead of discarding it" do
+    # A marked css that needs rewriting, but is not writable: localization
+    # fails while the build itself may still proceed.
+    css =
+      with_tailwind_profile("""
+      #{@marker}
+      @source "/Users/someone-else/.catalyst/extensions";
+      """)
+
+    File.chmod!(css, 0o444)
+    on_exit(fn -> File.chmod!(css, 0o644) end)
+
+    # Point the esbuild profile into the same sandbox so a machine with the
+    # real toolchain installed cannot rebuild the repo's actual assets from a
+    # test (the entry file does not exist, so a real esbuild fails fast).
+    tmp_dir = css |> Path.dirname() |> Path.dirname() |> Path.dirname()
+    original_esbuild = Application.get_env(:esbuild, :catalyst_web)
+    Application.put_env(:esbuild, :catalyst_web, args: ["js/app.js", "--bundle"], cd: tmp_dir)
+    on_exit(fn -> Application.put_env(:esbuild, :catalyst_web, original_esbuild) end)
+
+    {result, log} = ExUnit.CaptureLog.with_log(fn -> Assets.rebuild() end)
+
+    assert log =~ "could not localize extensions @source"
+
+    # Never a bare :ok — the failure is either carried as a warning on the
+    # success shape or superseded by the build's own error (when the
+    # esbuild/tailwind toolchain is unavailable in this environment).
+    case result do
+      {:ok, %{warnings: [{:localize_extension_source, _reason}]}} -> :ok
+      {:error, _build_unavailable_or_failed} -> :ok
+      other -> flunk("expected surfaced localization failure, got: #{inspect(other)}")
+    end
+  end
 end

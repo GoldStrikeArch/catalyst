@@ -1,6 +1,8 @@
 defmodule Catalyst.Tools.ListAgentsTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2]
+
   alias Catalyst.Content
   alias Catalyst.Tools.ListAgents
 
@@ -16,7 +18,7 @@ defmodule Catalyst.Tools.ListAgentsTest do
     File.mkdir_p!(dir)
 
     on_exit(fn ->
-      restore_env(previous)
+      restore_env(:agents_dir, previous)
       File.rm_rf!(dir)
     end)
 
@@ -61,7 +63,4 @@ defmodule Catalyst.Tools.ListAgentsTest do
     File.write!(Path.join(dir, "blank.md"), " \n\t\n")
     assert {:error, {:blank_agent_prompt, "blank"}} = ListAgents.fetch("blank")
   end
-
-  defp restore_env({:ok, value}), do: Application.put_env(:catalyst, :agents_dir, value)
-  defp restore_env(:error), do: Application.delete_env(:catalyst, :agents_dir)
 end

@@ -11,10 +11,9 @@ defmodule Catalyst.Context.Registry do
   use GenServer
 
   alias Catalyst.ExtensionAPI
-  alias Catalyst.OwnedIndex
+  alias Catalyst.Extensions.Owner
 
   @table :catalyst_context_registry
-  @host_owner :host
   @policy_key {:policy, :default}
 
   @type model_key :: String.t() | :default
@@ -51,12 +50,15 @@ defmodule Catalyst.Context.Registry do
   @doc "Owner-aware snapshot of runtime overlays (application values are not included)."
   @spec runtime_entries() :: [runtime_entry()]
   def runtime_entries do
-    @table
-    |> :ets.tab2list()
-    |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
-    |> Enum.sort_by(&inspect(&1.key))
-  rescue
-    ArgumentError -> []
+    case table_rows() do
+      {:ok, rows} ->
+        rows
+        |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
+        |> Enum.sort_by(&inspect(&1.key))
+
+      :error ->
+        []
+    end
   end
 
   @doc "Resolve the effective context policy (runtime, live app config, built-in)."
@@ -65,15 +67,6 @@ defmodule Catalyst.Context.Registry do
     case runtime_lookup(@policy_key) do
       {:ok, module, owner} -> {:ok, module, {:extension, owner, @policy_key}}
       :error -> configured_policy()
-    end
-  end
-
-  @doc "Compatibility projection returning only the effective policy module."
-  @spec fetch_policy() :: {:ok, module()} | {:error, term()}
-  def fetch_policy do
-    case policy() do
-      {:ok, module, _source} -> {:ok, module}
-      {:error, _reason} = error -> error
     end
   end
 
@@ -109,15 +102,15 @@ defmodule Catalyst.Context.Registry do
   def init(:ok) do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
     wire()
-    {:ok, OwnedIndex.new()}
+    {:ok, :ok}
   end
 
   @impl true
   def handle_call({:register, key, value, opts}, _from, state) do
-    owner = opts |> Keyword.get(:owner) |> normalize_owner()
+    owner = opts |> Keyword.get(:owner) |> Owner.normalize()
 
     with :ok <- validate_registration(key, value),
-         {:ok, state} <- claim(key, owner, state) do
+         :ok <- claim(key, owner) do
       :ets.insert(@table, {key, value, owner})
       {:reply, :ok, state}
     else
@@ -127,12 +120,11 @@ defmodule Catalyst.Context.Registry do
 
   def handle_call({:unregister, key}, _from, state) do
     :ets.delete(@table, key)
-    {:reply, :ok, OwnedIndex.release(state, key)}
+    {:reply, :ok, state}
   end
 
   def handle_call({:unregister_owner, owner}, _from, state) do
-    {keys, state} = OwnedIndex.release_owner(state, owner)
-    Enum.each(keys, &:ets.delete(@table, &1))
+    :ets.match_delete(@table, {:_, :_, owner})
     {:reply, :ok, state}
   end
 
@@ -153,24 +145,40 @@ defmodule Catalyst.Context.Registry do
   defp validate_registration(key, value),
     do: {:error, {:invalid_registration, key, value}}
 
-  defp claim(key, owner, state) do
-    case OwnedIndex.claim(state, key, owner) do
-      {:ok, state} -> {:ok, state}
-      {:error, existing_owner} -> {:error, collision(key, existing_owner, owner)}
+  # Ownership lives in ETS column 3 (single writer: this process), so a claim
+  # is a plain lookup — no second bookkeeping structure to desync.
+  defp claim(key, owner) do
+    case runtime_lookup(key) do
+      :error -> :ok
+      {:ok, _value, ^owner} -> :ok
+      {:ok, _value, existing} -> {:error, collision(key, existing, owner)}
     end
   end
 
   defp collision(@policy_key, existing, attempted),
-    do: {:context_policy_owner_collision, existing, attempted}
+    do: {:owner_collision, :context_policy, nil, existing, attempted}
 
   defp collision({:threshold, model_key}, existing, attempted),
-    do: {:context_threshold_owner_collision, model_key, existing, attempted}
+    do: {:owner_collision, :context_threshold, model_key, existing, attempted}
 
   defp runtime_lookup(key) do
-    case :ets.lookup(@table, key) do
+    case lookup_row(key) do
       [{^key, value, owner}] -> {:ok, value, owner}
       _missing -> :error
     end
+  end
+
+  # The rescues wrap only the :ets call: readers keep their documented
+  # fallbacks while the table is absent; malformed rows must not read as
+  # "no overlays".
+  defp lookup_row(key) do
+    :ets.lookup(@table, key)
+  rescue
+    ArgumentError -> []
+  end
+
+  defp table_rows do
+    {:ok, :ets.tab2list(@table)}
   rescue
     ArgumentError -> :error
   end
@@ -230,13 +238,10 @@ defmodule Catalyst.Context.Registry do
     end)
   end
 
-  defp model_keys(nil), do: [:default]
-
-  defp model_keys(model) do
-    [Map.get(model, :id), Map.get(model, :api), :default]
-    |> Enum.filter(&valid_model_key?/1)
-    |> Enum.uniq()
-  end
+  # Shared derivation (id → api → :default) so prompt and threshold overlays
+  # can't drift; this registry keeps its own `valid_model_key?/1` for
+  # registration-time validation of caller-supplied keys.
+  defp model_keys(model), do: Catalyst.Prompt.Config.model_keys(model)
 
   defp policy_module?(module) when is_atom(module) do
     Code.ensure_loaded?(module) and function_exported?(module, :threshold, 2) and
@@ -244,9 +249,6 @@ defmodule Catalyst.Context.Registry do
   end
 
   defp policy_module?(_module), do: false
-
-  defp normalize_owner(nil), do: @host_owner
-  defp normalize_owner(owner), do: owner
 
   @doc false
   @spec register_extension_policy(ExtensionAPI.t(), module(), keyword()) ::

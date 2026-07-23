@@ -6,26 +6,44 @@ defmodule Catalyst.Auth.JWT do
 
   @claim_path "https://api.openai.com/auth"
 
-  @doc "Decode the JWT payload (middle segment) into a claims map, or `nil`."
-  @spec payload(term()) :: map() | nil
+  @doc "Decode the JWT payload (middle segment) into a claims map."
+  @spec payload(term()) :: {:ok, map()} | {:error, term()}
   def payload(token) when is_binary(token) do
-    with [_header, payload, _sig] <- String.split(token, "."),
-         {:ok, json} <- Base.url_decode64(payload, padding: false),
-         {:ok, claims} <- Jason.decode(json) do
-      claims
-    else
-      _ -> nil
+    case String.split(token, ".") do
+      [_header, payload, _signature] -> decode_payload(payload)
+      _segments -> {:error, :malformed_jwt}
     end
   end
 
-  def payload(_), do: nil
+  def payload(token), do: {:error, {:invalid_token, token}}
 
-  @doc "Extract `chatgpt_account_id` from a Codex access token, or `nil`."
+  @doc "Extract `chatgpt_account_id` from a Codex access token, or `nil` when absent."
   @spec account_id(term()) :: String.t() | nil
   def account_id(token) do
     case payload(token) do
-      %{} = claims -> get_in(claims, [@claim_path, "chatgpt_account_id"])
-      _ -> nil
+      {:ok, claims} -> get_in(claims, [@claim_path, "chatgpt_account_id"])
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp decode_payload(payload) do
+    with {:ok, json} <- decode_base64(payload) do
+      decode_claims(json)
+    end
+  end
+
+  defp decode_base64(payload) do
+    case Base.url_decode64(payload, padding: false) do
+      {:ok, json} -> {:ok, json}
+      :error -> {:error, :invalid_payload_encoding}
+    end
+  end
+
+  defp decode_claims(json) do
+    case Jason.decode(json) do
+      {:ok, claims} when is_map(claims) -> {:ok, claims}
+      {:ok, other} -> {:error, {:invalid_claims, other}}
+      {:error, reason} -> {:error, {:invalid_claims_json, reason}}
     end
   end
 end

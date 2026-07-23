@@ -4,188 +4,27 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
   `CatalystWeb.UI.Registry` (a built-in page, exactly like `Pages.ChatPage`).
 
   Shows everything the runtime-extensibility layer knows: loaded extensions
-  (owner, source file, tools/modules/processes), disabled extensions, boot
-  status with safe-mode recovery, and the live contents of every registry
-  (tools, LLM providers, loop hooks, pages, renderers, components, commands).
-  Per-extension reload / rollback / disable buttons make the rollback system
-  usable without a terminal — recovery no longer requires asking the agent.
+  (owner, source file, tools/modules/processes, degraded status), disabled
+  extensions, boot status with safe-mode recovery, and the live contents of
+  every registry (tools, LLM providers, loop hooks, pages, renderers,
+  components, commands). Per-extension reload / rollback / disable buttons
+  make the rollback system usable without a terminal — recovery no longer
+  requires asking the agent.
 
-  Render-only: data is assembled by `panel_data/0` (assigned by `ShellLive` as
-  `@ext_panel` on navigation and after each action), and all button events
-  (`ext_*`) are handled in `ShellLive`. Reloading this module hot-swaps the
-  panel with no restart.
+  Render-only: data is assembled by `CatalystWeb.ShellLive.ExtensionsPanel`
+  (assigned by `ShellLive` as `@ext_panel` on navigation and after each
+  action), and all button events (`ext_*`) are handled in `ShellLive`.
+  Reloading this module hot-swaps the panel with no restart.
   """
   use CatalystWeb, :html
 
-  alias Catalyst.{Extensions, Hooks, Model}
-  alias Catalyst.Context.{Registry, Window}
-  alias Catalyst.Extensions.{Processes, Versioning}
-  alias Catalyst.LLM
-  alias Catalyst.LLM.OpenAICodex
-  alias Catalyst.Prompt.Registry, as: PromptRegistry
-  alias Catalyst.Session.RunContext
-  alias Catalyst.Workflow.Registry, as: WorkflowRegistry
-  alias CatalystWeb.UI
+  alias Catalyst.Extensions
+  alias CatalystWeb.ShellLive.ExtensionsPanel
 
-  @doc """
-  Snapshot of the extension system for rendering: loaded/disabled extensions
-  and the live contents of every registry. Reads ETS tables and the
-  `Extensions` server; cheap enough to rebuild on each navigation/action.
-  """
-  @spec panel_data(Catalyst.Model.t() | nil, keyword() | map(), map()) :: map()
-  def panel_data(model \\ nil, opts \\ [], diagnostics \\ %{}) do
-    loaded =
-      Extensions.list_loaded()
-      |> Enum.map(&Map.put(&1, :processes, length(Processes.list(&1.owner))))
-
-    owner_by_tool =
-      for %{owner: owner, tools: tools} <- loaded, name <- tools, into: %{}, do: {name, owner}
-
-    %{
-      boot_status: Extensions.boot_status(),
-      dir: Extensions.dir(),
-      git?: Versioning.available?(),
-      loaded: loaded,
-      disabled: Extensions.list_disabled(),
-      tools: tool_rows(owner_by_tool),
-      providers: provider_rows(),
-      hooks: hook_rows(),
-      prompt_runtime: PromptRegistry.runtime_entries(),
-      workflow_runtime: WorkflowRegistry.runtime_entries(),
-      context_runtime: Registry.runtime_entries(),
-      effective: effective_rows(model, opts, diagnostics),
-      pages: UI.Registry.list_pages(),
-      commands: UI.Registry.list_commands(),
-      renderers: UI.Registry.list_renderers(),
-      components: UI.Registry.list_components()
-    }
-  end
-
-  defp tool_rows(owner_by_tool) do
-    Extensions.tools()
-    |> Enum.map(fn mod ->
-      name = tool_name(mod)
-      %{name: name, module: mod, owner: Map.get(owner_by_tool, name)}
-    end)
-    |> Enum.sort_by(& &1.name)
-  end
-
-  # Extension-authored name/0 reached from a render path — degrade, never crash.
-  defp tool_name(mod) do
-    mod.name()
-  rescue
-    _ -> inspect(mod)
-  catch
-    _, _ -> inspect(mod)
-  end
-
-  defp provider_rows do
-    LLM.Registry.list()
-    |> Enum.map(fn {api, cfg} -> %{api: api, module: cfg.module, name: cfg.name} end)
-    |> Enum.sort_by(& &1.api)
-  end
-
-  defp hook_rows do
-    for point <- Hooks.points(), entry <- Hooks.handlers(point) do
-      %{point: point, id: entry.id, owner: entry.owner, priority: entry.priority}
-    end
-  end
-
-  defp effective_rows(model, opts, diagnostics) do
-    [effective_prompt_policy(), effective_workflow(opts)] ++
-      effective_context_rows(model, opts) ++ request_context_rows(diagnostics)
-  end
-
-  defp effective_prompt_policy do
-    case PromptRegistry.policy() do
-      {:ok, module, source} -> effective_row("Prompt policy", module, source)
-      {:error, reason} -> error_row("Prompt policy", reason)
-    end
-  end
-
-  defp effective_workflow(opts) do
-    case WorkflowRegistry.resolve(opts) do
-      {:ok, workflow} ->
-        effective_row("Workflow", {workflow.name, workflow.module}, workflow.source)
-
-      {:error, reason} ->
-        error_row("Workflow", reason)
-    end
-  end
-
-  defp effective_context_rows(model, opts) do
-    model = effective_panel_model(model)
-
-    case Registry.policy() do
-      {:ok, Window, source} ->
-        [
-          effective_row("Context policy", Window, source),
-          effective_window_threshold(model, opts)
-        ]
-
-      {:ok, module, source} ->
-        [
-          effective_row("Context policy", module, source),
-          effective_row(
-            "Context threshold",
-            "resolved per request by custom policy",
-            source
-          )
-        ]
-
-      {:error, reason} ->
-        [
-          error_row("Context policy", reason),
-          error_row("Context threshold", {:context_policy_unavailable, reason})
-        ]
-    end
-  end
-
-  # Match RunContext's pre-request catalog refresh so the panel threshold uses
-  # the same effective model snapshot the next run will enforce.
-  defp effective_panel_model(%Model{} = model) do
-    snapshot =
-      case model.api do
-        "openai-codex-responses" -> OpenAICodex.catalog_snapshot(model.id)
-        _other -> nil
-      end
-
-    # resolve_epoch_model/2 cannot error on a %Model{} input; the type checker
-    # rejects an unreachable {:error, _} fallback clause here.
-    {:ok, resolved} = RunContext.resolve_epoch_model(model, snapshot)
-    resolved
-  end
-
-  defp effective_panel_model(model), do: model
-
-  defp effective_window_threshold(model, opts) do
-    note = "unanchored baseline; each request's ContextStatus is authoritative"
-
-    case Window.threshold_with_source(model, %{opts: opts}) do
-      {:ok, threshold, source} -> effective_row("Context threshold", threshold, source, note)
-      :none -> effective_row("Context threshold", :none, :builtin, note)
-      {:error, reason} -> error_row("Context threshold", reason)
-    end
-  end
-
-  defp request_context_rows(%{context_status: %{} = status} = diagnostics) do
-    threshold = Map.get(status, :threshold) || :none
-    source = Map.get(status, :threshold_source)
-    anchored = Map.get(status, :anchored, false)
-    model_id = get_in(diagnostics, [:run_metadata, :context, :model_id])
-    basis = if(anchored, do: "anchored", else: "estimated")
-    model_note = if(is_binary(model_id), do: " for #{model_id}", else: "")
-
-    [effective_row("Last request threshold", threshold, source, basis <> model_note)]
-  end
-
-  defp request_context_rows(_diagnostics), do: []
-
-  defp effective_row(label, value, source, note \\ nil),
-    do: %{label: label, value: value, source: source, error?: false, note: note}
-
-  defp error_row(label, reason),
-    do: %{label: label, value: reason, source: :error, error?: true, note: nil}
+  @doc "Panel-data snapshot; see `CatalystWeb.ShellLive.ExtensionsPanel.build/3`."
+  defdelegate panel_data(model \\ nil, opts \\ [], diagnostics \\ %{}),
+    to: ExtensionsPanel,
+    as: :build
 
   # ---- render -----------------------------------------------------------------
 
@@ -268,11 +107,17 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
   end
 
   defp boot_problem_card(assigns) do
+    {title, reason} = Extensions.describe_boot_status(assigns.panel.boot_status)
+    assigns = assign(assigns, boot_title: title, boot_reason: reason)
+
     ~H"""
-    <div class="rounded-2xl border border-amber-300/60 bg-amber-50/90 px-4 py-3 text-sm text-amber-900 shadow-sm dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200">
-      <p class="font-semibold">⚠ {boot_problem_title(@panel.boot_status)}</p>
+    <div
+      id="extension-boot-problem"
+      class="rounded-2xl border border-amber-300/60 bg-amber-50/90 px-4 py-3 text-sm text-amber-900 shadow-sm dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200"
+    >
+      <p class="font-semibold">⚠ {@boot_title}</p>
       <p class="mt-1 text-xs leading-5">
-        {boot_problem_reason(@panel.boot_status)} Fix or disable the offending file below
+        {@boot_reason} Fix or disable the offending file below
         (disabled extensions are skipped at boot), then load extensions again.
       </p>
       <button
@@ -287,25 +132,11 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     """
   end
 
-  defp boot_problem_title({:load_failed, _reason}), do: "Extension boot load failed"
-  defp boot_problem_title(_status), do: "Safe mode — extensions were not loaded"
-
-  defp boot_problem_reason({:safe_mode, :env}),
-    do: "CATALYST_SAFE_MODE is set, so loading was skipped on purpose."
-
-  defp boot_problem_reason({:safe_mode, :crash_detected}),
-    do: "The previous boot died while extensions were active, so this boot skipped them."
-
-  defp boot_problem_reason({:load_failed, reason}),
-    do: "The boot-time load returned an error: #{Extensions.format_error(reason)}."
-
-  defp boot_problem_reason(_other), do: "Extension loading was skipped."
-
   # ---- loaded / disabled ----------------------------------------------------------
 
   defp loaded_extensions(assigns) do
     ~H"""
-    <section>
+    <section id="loaded-extensions">
       <.section_title>Loaded extensions ({length(@panel.loaded)})</.section_title>
 
       <div
@@ -345,10 +176,18 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
               external source
             </span>
             <span
-              :if={ext.processes > 0}
+              :if={ext.status == :degraded}
+              class="rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700 dark:bg-rose-500/15 dark:text-rose-200"
+              title={degraded_note(ext.purge_failures)}
+              data-degraded-owner={ext.owner}
+            >
+              degraded
+            </span>
+            <span
+              :if={is_integer(ext.process_count) and ext.process_count > 0}
               class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200"
             >
-              {ext.processes} process(es)
+              {ext.process_count} process(es)
             </span>
 
             <span class="flex-1"></span>
@@ -393,6 +232,12 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
             >
               {ext.metadata[:description]}
             </p>
+            <p
+              :if={ext.status == :degraded}
+              class="text-rose-600 dark:text-rose-300"
+            >
+              {degraded_note(ext.purge_failures)}
+            </p>
             <div :if={ext.tools != []} class="flex flex-wrap items-center gap-1.5">
               <span class="text-neutral-400 dark:text-neutral-500">tools</span>
               <code
@@ -414,6 +259,15 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     </section>
     """
   end
+
+  # A prior purge left residue in these subsystems; reload/disable retries it.
+  defp degraded_note(purge_failures) do
+    "a previous purge left residue (retried on reload/disable) — failed: " <>
+      Enum.map_join(purge_failures, ", ", &degraded_failure/1)
+  end
+
+  defp degraded_failure({{mod, fun, arity}, _reason}), do: "#{inspect(mod)}.#{fun}/#{arity}"
+  defp degraded_failure({key, _reason}), do: display_value(key)
 
   defp disabled_extensions(assigns) do
     ~H"""
@@ -568,7 +422,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
 
   defp registries(assigns) do
     ~H"""
-    <section>
+    <section id="live-registries">
       <.section_title>Live registries</.section_title>
       <div class="flex flex-col gap-2">
         <.registry_table label="Tools" rows={@panel.tools}>
@@ -629,6 +483,11 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     </section>
     """
   end
+
+  attr :label, :string, required: true
+  attr :rows, :list, required: true
+
+  slot :row, required: true
 
   defp registry_table(assigns) do
     ~H"""

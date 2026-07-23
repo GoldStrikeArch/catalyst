@@ -7,11 +7,9 @@ defmodule Catalyst.Tools.SpawnAgent do
   sessions share the parent's working directory and permission hooks, but own a
   fresh transcript and provider continuation.
 
-  Child creation requires `Catalyst.Session.Manager.start_unique_session/1`.
-  The function is feature-detected so this module can load independently while
-  the session integration is being upgraded; the idempotent `start_session/1`
-  API is never used as a fallback because doing so could adopt an unrelated
-  live or persisted session after an identifier collision.
+  Child creation goes through `Catalyst.Session.Manager.start_unique_session/1`;
+  the idempotent `start_session/1` API is never used because it could adopt an
+  unrelated live or persisted session after an identifier collision.
   """
 
   use Catalyst.Tools.Tool
@@ -74,7 +72,6 @@ defmodule Catalyst.Tools.SpawnAgent do
   @spec run(map(), map()) :: {:ok, String.t(), map()} | {:error, term()}
   def run(args, context) when is_map(args) and is_map(context) do
     with {:ok, request} <- validate_request(args, context),
-         :ok <- ensure_unique_start_api(),
          {:ok, definition} <- ListAgents.fetch(request.agent) do
       run_with_watchdog(request, definition)
     end
@@ -181,13 +178,6 @@ defmodule Catalyst.Tools.SpawnAgent do
     end
   end
 
-  defp ensure_unique_start_api do
-    case Code.ensure_loaded?(Manager) and function_exported?(Manager, :start_unique_session, 1) do
-      true -> :ok
-      false -> {:error, {:subagent_integration_unavailable, :start_unique_session}}
-    end
-  end
-
   defp run_with_watchdog(request, definition) do
     owner = self()
     token = make_ref()
@@ -283,7 +273,7 @@ defmodule Catalyst.Tools.SpawnAgent do
     with {:ok, child_id} <- generate_child_id(request.parent_id) do
       opts = child_session_opts(request, prompt, child_id)
 
-      case apply(Manager, :start_unique_session, [opts]) do
+      case Manager.start_unique_session(opts) do
         {:ok, %{id: ^child_id, pid: child}} when is_pid(child) ->
           {:ok, %{id: child_id, pid: child}}
 
@@ -362,18 +352,9 @@ defmodule Catalyst.Tools.SpawnAgent do
   defp inherit_workflow(opts, name) when is_binary(name), do: Keyword.put(opts, :workflow, name)
   defp inherit_workflow(opts, _other), do: opts
 
-  defp collision?(reason) do
-    case reason do
-      :collision -> true
-      :already_exists -> true
-      {:collision, _id} -> true
-      {:session_id_collision, _id} -> true
-      {:session_exists, _id} -> true
-      {:already_started, _pid} -> true
-      {:already_exists, _id} -> true
-      _other -> false
-    end
-  end
+  defp collision?({:session_id_collision, _id}), do: true
+  defp collision?({:session_exists, _id}), do: true
+  defp collision?(_other), do: false
 
   defp await_child_start(watchdog, token, request, lease, deadline) do
     watchdog_monitor = Process.monitor(watchdog)
@@ -443,10 +424,6 @@ defmodule Catalyst.Tools.SpawnAgent do
   end
 
   defp await_agent_end(child_id, child, child_monitor, watchdog_monitor, deadline) do
-    do_await_agent_end(child_id, child, child_monitor, watchdog_monitor, deadline)
-  end
-
-  defp do_await_agent_end(child_id, child, child_monitor, watchdog_monitor, deadline) do
     remaining = remaining(deadline)
 
     receive do
@@ -454,7 +431,7 @@ defmodule Catalyst.Tools.SpawnAgent do
         final_assistant(messages)
 
       {:agent_event, ^child_id, _event} ->
-        do_await_agent_end(child_id, child, child_monitor, watchdog_monitor, deadline)
+        await_agent_end(child_id, child, child_monitor, watchdog_monitor, deadline)
 
       {:DOWN, ^child_monitor, :process, ^child, reason} ->
         {:error, {:child_down_before_agent_end, reason}}
@@ -526,6 +503,5 @@ defmodule Catalyst.Tools.SpawnAgent do
 
   defp context_value(context, key, default \\ nil), do: Map.get(context, key, default)
 
-  defp nonblank?(value),
-    do: is_binary(value) and String.valid?(value) and String.trim(value) != ""
+  defp nonblank?(value), do: Children.nonblank?(value)
 end

@@ -1,6 +1,8 @@
 defmodule Catalyst.Workflow.RegistryTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2]
+
   alias Catalyst.Workflow.Registry
 
   defmodule WorkflowA do
@@ -62,10 +64,11 @@ defmodule Catalyst.Workflow.RegistryTest do
 
     assert {:ok, WorkflowB} = Registry.fetch("a-review")
 
+    # Stable inspect-order, matching the prompt/context registries' convention.
     assert Registry.runtime_entries() == [
-             %{key: {:workflow, :default}, value: WorkflowA, owner: owner},
              %{key: {:workflow, "a-review"}, value: WorkflowB, owner: owner},
-             %{key: {:workflow, "z-review"}, value: WorkflowA, owner: owner}
+             %{key: {:workflow, "z-review"}, value: WorkflowA, owner: owner},
+             %{key: {:workflow, :default}, value: WorkflowA, owner: owner}
            ]
 
     assert :ok = Registry.unregister_owner(owner)
@@ -80,10 +83,10 @@ defmodule Catalyst.Workflow.RegistryTest do
     assert :ok = Registry.register_workflow("review", WorkflowB, owner: owner)
     assert {:ok, WorkflowB} = Registry.fetch("review")
 
-    assert {:error, {:workflow_owner_collision, "review", ^owner, "other"}} =
+    assert {:error, {:owner_collision, :workflow, "review", ^owner, "other"}} =
              Registry.register_workflow("review", WorkflowA, owner: "other")
 
-    assert {:error, {:workflow_owner_collision, "review", ^owner, :host}} =
+    assert {:error, {:owner_collision, :workflow, "review", ^owner, :host}} =
              Registry.register_workflow("review", WorkflowA)
 
     assert :ok = Registry.unregister_owner("other")
@@ -223,10 +226,33 @@ defmodule Catalyst.Workflow.RegistryTest do
     assert {:ok, WorkflowA} = Registry.fetch("review")
     assert {:ok, %{module: WorkflowB}} = Registry.resolve([])
 
-    # Any subsequent write-side call recreates the owner table. This keeps the
-    # shared test VM healthy without changing the missing-table read contract.
-    assert :ok = Registry.unregister_owner(owner)
+    # Writes do not self-heal a sabotaged table (the registry owns its table
+    # in init, like its sibling registries): the write crashes the process and
+    # supervision restarts it with a fresh table, keeping the shared test VM
+    # healthy without changing the missing-table read contract.
+    pid = Process.whereis(Registry)
+    ref = Process.monitor(pid)
+    assert catch_exit(Registry.unregister_owner(owner))
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+
+    new_pid = wait_for_restart(pid)
+    _ = :sys.get_state(new_pid)
     assert is_reference(:ets.whereis(Registry.table()))
+  end
+
+  # Sanctioned poll: a supervisor restart re-registers the name with no
+  # observable message to the test process.
+  defp wait_for_restart(old_pid) do
+    Catalyst.EnvCase.wait_until(
+      fn ->
+        case Process.whereis(Registry) do
+          pid when is_pid(pid) and pid != old_pid -> {:ok, pid}
+          _missing_or_old -> false
+        end
+      end,
+      2_000,
+      "workflow registry did not restart after the sabotaged write"
+    )
   end
 
   defp ensure_registry_started do
@@ -235,7 +261,4 @@ defmodule Catalyst.Workflow.RegistryTest do
       _pid -> :ok
     end
   end
-
-  defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
-  defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
 end

@@ -39,23 +39,18 @@ defmodule CatalystWeb.UI.Registry do
   @doc "The `{module, function}` registered for a page path. Returns `{:ok, {mod, fun}}` or `:error`."
   @spec fetch_page(String.t()) :: {:ok, {module(), atom()}} | :error
   def fetch_page(path) do
-    case :ets.lookup(@table, {:page, path}) do
-      [{_, entry} | _] -> {:ok, {entry.mod, entry.fun}}
+    case lookup_entries({:page, path}) do
+      [entry | _] -> {:ok, {entry.mod, entry.fun}}
       [] -> :error
     end
-  rescue
-    ArgumentError -> :error
   end
 
   @doc "All registered pages (`%{path, label, ...}`), sorted by label."
   @spec list_pages() :: [map()]
   def list_pages do
-    @table
-    |> :ets.match_object({{:page, :_}, :_})
-    |> Enum.map(&elem(&1, 1))
+    {:page, :_}
+    |> match_entries()
     |> Enum.sort_by(& &1.label)
-  rescue
-    ArgumentError -> []
   end
 
   ## renderers
@@ -65,27 +60,30 @@ defmodule CatalystWeb.UI.Registry do
   def register_renderer(kind, match_fun, render_fun, opts \\ []),
     do: GenServer.call(__MODULE__, {:register_renderer, kind, match_fun, render_fun, opts})
 
-  @doc "The newest matching render function for `value` at `kind`, or nil."
-  @spec renderer(kind(), term()) :: render_fun() | nil
+  @doc """
+  The newest matching render function for `value` at `kind`.
+
+  Returns `{:ok, render_fun}` or `:error` — no renderer matched, or the
+  registry table is temporarily absent (recovery); callers fall back to the
+  built-in rendering in both cases.
+  """
+  @spec renderer(kind(), term()) :: {:ok, render_fun()} | :error
   def renderer(kind, value) do
-    @table
-    |> :ets.lookup({:renderer, kind})
-    |> Enum.map(&elem(&1, 1))
+    {:renderer, kind}
+    |> lookup_entries()
     |> Enum.sort_by(& &1.seq, :desc)
-    |> Enum.find_value(fn e -> if safe_match(e.match, value), do: e.render end)
-  rescue
-    ArgumentError -> nil
+    |> Enum.find_value(:error, fn e ->
+      if safe_match(e.match, value), do: {:ok, e.render}
+    end)
   end
 
   @doc "All registered renderers (`%{kind, owner, seq}`), newest first. Introspection only."
   @spec list_renderers() :: [map()]
   def list_renderers do
-    @table
-    |> :ets.match_object({{:renderer, :_}, :_})
+    {:renderer, :_}
+    |> match_objects()
     |> Enum.map(fn {{:renderer, kind}, e} -> %{kind: kind, owner: e.owner, seq: e.seq} end)
     |> Enum.sort_by(& &1.seq, :desc)
-  rescue
-    ArgumentError -> []
   end
 
   ## components
@@ -98,24 +96,19 @@ defmodule CatalystWeb.UI.Registry do
   @doc "Component render functions for a slot, newest first."
   @spec components(atom()) :: [render_fun()]
   def components(slot) do
-    @table
-    |> :ets.lookup({:component, slot})
-    |> Enum.map(&elem(&1, 1))
+    {:component, slot}
+    |> lookup_entries()
     |> Enum.sort_by(& &1.seq, :desc)
     |> Enum.map(& &1.fun)
-  rescue
-    ArgumentError -> []
   end
 
   @doc "All registered slot components (`%{slot, owner, seq}`), newest first. Introspection only."
   @spec list_components() :: [map()]
   def list_components do
-    @table
-    |> :ets.match_object({{:component, :_}, :_})
+    {:component, :_}
+    |> match_objects()
     |> Enum.map(fn {{:component, slot}, e} -> %{slot: slot, owner: e.owner, seq: e.seq} end)
     |> Enum.sort_by(& &1.seq, :desc)
-  rescue
-    ArgumentError -> []
   end
 
   ## commands
@@ -128,20 +121,39 @@ defmodule CatalystWeb.UI.Registry do
   @doc "All registered command-palette entries."
   @spec list_commands() :: [map()]
   def list_commands do
-    @table |> :ets.match_object({{:command, :_}, :_}) |> Enum.map(&elem(&1, 1))
-  rescue
-    ArgumentError -> []
+    match_entries({:command, :_})
   end
 
   @doc "The command entry registered under `name`. Returns `{:ok, entry}` or `:error`."
   @spec fetch_command(String.t()) :: {:ok, map()} | :error
   def fetch_command(name) do
-    case :ets.lookup(@table, {:command, name}) do
+    case lookup_entries({:command, name}) do
       [] -> :error
-      entries -> {:ok, entries |> Enum.map(&elem(&1, 1)) |> Enum.max_by(& &1.seq)}
+      entries -> {:ok, Enum.max_by(entries, & &1.seq)}
     end
+  end
+
+  # The rescues wrap only the :ets call: while the named table is absent
+  # (table-owner recovery) reads degrade to "nothing registered"; a malformed
+  # entry is a real bug and must not be silently read as absence.
+  defp lookup_entries(key) do
+    key |> ets_lookup() |> Enum.map(&elem(&1, 1))
+  end
+
+  defp ets_lookup(key) do
+    :ets.lookup(@table, key)
   rescue
-    ArgumentError -> :error
+    ArgumentError -> []
+  end
+
+  defp match_objects(key_pattern) do
+    :ets.match_object(@table, {key_pattern, :_})
+  rescue
+    ArgumentError -> []
+  end
+
+  defp match_entries(key_pattern) do
+    key_pattern |> match_objects() |> Enum.map(&elem(&1, 1))
   end
 
   ## purge

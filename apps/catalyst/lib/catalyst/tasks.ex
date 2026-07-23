@@ -47,6 +47,10 @@ defmodule Catalyst.Tasks do
     end
   end
 
+  @doc "Current monotonic time in milliseconds, for deadlines and idle clocks."
+  @spec monotonic_ms() :: integer()
+  def monotonic_ms, do: System.monotonic_time(:millisecond)
+
   @doc """
   Start fire-and-forget work without crashing when the shared supervisor is
   absent or disappears during a shutdown race.

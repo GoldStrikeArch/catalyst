@@ -21,7 +21,7 @@ defmodule CatalystWeb.ShellLive.SettingsTest do
   end
 
   test "provider selection is deferred to the model API's live registry entry" do
-    assert {nil, %{api: "openai-codex-responses", id: "gpt-5.4"}} =
+    assert %{api: "openai-codex-responses", id: "gpt-5.4"} =
              Settings.provider_config(@base_prefs)
   end
 

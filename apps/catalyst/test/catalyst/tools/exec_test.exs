@@ -1,6 +1,8 @@
 defmodule Catalyst.Tools.ExecTest do
   use ExUnit.Case, async: true
 
+  import Catalyst.EnvCase, only: [wait_until: 3]
+
   alias Catalyst.Tools.Exec
 
   defp sh, do: System.find_executable("sh")
@@ -82,8 +84,9 @@ defmodule Catalyst.Tools.ExecTest do
 
     # Closing the wrapper's port makes muontrap SIGTERM (then SIGKILL after
     # ~500ms) its child — poll until the recorded pid is gone.
+    # Sanctioned poll: OS-pid death has no observable BEAM message.
     pid = pidfile |> File.read!() |> String.trim()
-    assert wait_until_dead(pid)
+    wait_until(fn -> os_pid_dead?(pid) end, 6_000, "spawned command #{pid} was not killed")
   end
 
   test "invalid public options return tagged errors before spawning" do
@@ -96,17 +99,10 @@ defmodule Catalyst.Tools.ExecTest do
              Exec.bash("sleep 300", on_output: :invalid)
   end
 
-  defp wait_until_dead(pid, tries \\ 50) do
+  defp os_pid_dead?(pid) do
     case System.cmd("kill", ["-0", pid], stderr_to_stdout: true) do
-      {_, 0} when tries > 0 ->
-        Process.sleep(100)
-        wait_until_dead(pid, tries - 1)
-
-      {_, 0} ->
-        false
-
-      _ ->
-        true
+      {_, 0} -> false
+      _ -> true
     end
   end
 end

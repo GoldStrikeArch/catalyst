@@ -120,7 +120,8 @@ defmodule Catalyst.LLM.OpenAICodex.CatalogCache do
     GenServer.call(server, {:store, entries, Keyword.get(opts, :etag)})
   end
 
-  @doc "Clear all cached catalog state."
+  # test seam: clears all cached catalog state between tests.
+  @doc false
   @spec reset(server()) :: :ok
   def reset(server \\ __MODULE__), do: GenServer.call(server, :reset)
 
@@ -129,7 +130,7 @@ defmodule Catalyst.LLM.OpenAICodex.CatalogCache do
     {:ok,
      %State{
        fetcher: Keyword.get(opts, :fetcher, &fetch_authenticated/0),
-       clock: Keyword.get(opts, :clock, &monotonic_ms/0),
+       clock: Keyword.get(opts, :clock, &Tasks.monotonic_ms/0),
        enabled?: Keyword.get(opts, :enabled?, &live_enabled?/0),
        ttl_ms: Keyword.get(opts, :ttl_ms, @ttl_ms),
        retry_ms: Keyword.get(opts, :retry_ms, @retry_ms),
@@ -321,6 +322,5 @@ defmodule Catalyst.LLM.OpenAICodex.CatalogCache do
   end
 
   defp now(state), do: state.clock.()
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
   defp live_enabled?, do: Application.get_env(:catalyst, :codex_live_models, true)
 end

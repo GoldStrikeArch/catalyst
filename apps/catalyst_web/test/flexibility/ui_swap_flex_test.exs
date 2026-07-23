@@ -34,7 +34,7 @@ defmodule CatalystWeb.Flex.UISwapFlexTest do
     |> form("#chat-form", %{"message" => "/flexping hello"})
     |> render_submit()
 
-    assert render(view) =~ "FLEX-PONG hello"
+    assert has_element?(view, "#flash-info", "FLEX-PONG hello")
 
     remove_installed_fixture!("ui_renderer_pack")
     remove_installed_fixture!("ui_chat_page")

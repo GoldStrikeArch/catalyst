@@ -282,7 +282,9 @@ defmodule Catalyst.Agent.ChildrenTest do
 
     dead_keeper = spawn(fn -> :ok end)
     keeper_ref = Process.monitor(dead_keeper)
-    assert_receive {:DOWN, ^keeper_ref, :process, ^dead_keeper, :normal}
+    # `:noproc` when the spawn already exited before the monitor attached.
+    assert_receive {:DOWN, ^keeper_ref, :process, ^dead_keeper, reason}
+                   when reason in [:normal, :noproc]
 
     entry = %{
       lease: make_ref(),

@@ -153,6 +153,5 @@ defmodule Catalyst.LLM.OpenAICodex do
     end
   end
 
-  defp positive(value) when is_integer(value) and value > 0, do: value
-  defp positive(_value), do: nil
+  defp positive(value), do: Model.positive_int(value)
 end

@@ -43,11 +43,10 @@ defmodule Catalyst.LLM.OpenAICodex.Headers do
   @doc "Return the first case-insensitive response-header value, or `nil`."
   @spec get([{String.t(), String.t()}], String.t()) :: String.t() | nil
   def get(headers, name) do
+    wanted = String.downcase(name)
+
     Enum.find_value(headers, fn {key, value} ->
-      case String.downcase(key) == String.downcase(name) do
-        true -> value
-        false -> nil
-      end
+      if String.downcase(key) == wanted, do: value
     end)
   end
 

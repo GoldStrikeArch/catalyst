@@ -15,7 +15,6 @@ defmodule CatalystWeb.Application do
     end
 
     children = [
-      CatalystWeb.Telemetry,
       # Serializes and retains the exact live UI contribution replay log. It
       # starts before the table owner so rest-for-one table recovery keeps it.
       CatalystWeb.UI.Contributions,
@@ -68,7 +67,7 @@ defmodule CatalystWeb.Application do
   # (`:catalyst` boots before `:catalyst_web`, so `Catalyst.Extensions` is up.)
   # Public: re-run as an Extensions reseeder after a registry restart.
   def register_web_tools do
-    Enum.each([CatalystWeb.Tools.RebuildAssets, CatalystWeb.Tools.ReconnectUi], fn tool ->
+    Enum.each([CatalystWeb.Tools.RebuildAssets, CatalystWeb.Tools.ReloadUi], fn tool ->
       case Catalyst.Extensions.register_tool(tool) do
         {:ok, _} -> :ok
         other -> Logger.warning("failed to register #{inspect(tool)}: #{inspect(other)}")

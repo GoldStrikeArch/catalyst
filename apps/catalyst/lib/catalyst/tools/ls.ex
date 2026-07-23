@@ -1,7 +1,7 @@
 defmodule Catalyst.Tools.Ls do
   @moduledoc "List a directory's entries (non-recursive), directories suffixed with `/`."
   use Catalyst.Tools.Tool
-  alias Catalyst.Tools.{Paths, Truncate}
+  alias Catalyst.Tools.{Listing, Paths}
 
   @default_limit 500
 
@@ -52,20 +52,17 @@ defmodule Catalyst.Tools.Ls do
         if File.dir?(Path.join(abs, name)), do: name <> "/", else: name
       end)
 
-    {text, info} =
+    {text, details} =
       shown
       |> Enum.join("\n")
-      |> Truncate.listing(
+      |> Listing.render(
+        count: length(shown),
+        noun: "entries",
         limited?: limited?,
         limit: limit,
-        total: length(names),
-        noun: "entries"
+        total: length(names)
       )
 
-    result(text, %{
-      path: abs,
-      truncation: info,
-      entry_limit_reached: limited?
-    })
+    result(text, Map.put(details, :path, abs))
   end
 end

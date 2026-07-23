@@ -23,6 +23,21 @@ defmodule Catalyst.AuthTest do
     assert JWT.account_id("not-a-jwt") == nil
   end
 
+  test "JWT.payload tags each decode failure distinctly" do
+    claims_segment = %{"ok" => true} |> Jason.encode!() |> Base.url_encode64(padding: false)
+
+    assert {:ok, %{"ok" => true}} = JWT.payload("header.#{claims_segment}.sig")
+    assert {:error, :malformed_jwt} = JWT.payload("not-a-jwt")
+    assert {:error, :invalid_payload_encoding} = JWT.payload("header.%%%.sig")
+    assert {:error, {:invalid_token, nil}} = JWT.payload(nil)
+
+    bad_json = Base.url_encode64("{oops", padding: false)
+    assert {:error, {:invalid_claims_json, _reason}} = JWT.payload("header.#{bad_json}.sig")
+
+    non_map = Base.url_encode64("[1,2]", padding: false)
+    assert {:error, {:invalid_claims, [1, 2]}} = JWT.payload("header.#{non_map}.sig")
+  end
+
   test "authorize_url carries the PKCE and Codex flow params" do
     url = OpenAIOAuth.authorize_url("CHAL", "STATE")
     assert url =~ "code_challenge=CHAL"
@@ -105,9 +120,14 @@ defmodule Catalyst.AuthTest do
   test "stale tokens refresh single-flight without blocking other calls" do
     test_pid = self()
 
+    # Receive-gated (not a timed sleep): the worker parks until the test has
+    # observed the in-flight state, then the test releases it explicitly.
     Application.put_env(:catalyst, :oauth_refresh_fun, fn refresh_token ->
-      send(test_pid, {:refresh_called, refresh_token})
-      Process.sleep(300)
+      send(test_pid, {:refresh_called, refresh_token, self()})
+
+      receive do
+        :finish_refresh -> :ok
+      end
 
       {:ok,
        %{
@@ -131,15 +151,17 @@ defmodule Catalyst.AuthTest do
     t1 = Task.async(fn -> TokenStore.get_access_token("stale-provider") end)
     t2 = Task.async(fn -> TokenStore.get_access_token("stale-provider") end)
 
-    # While the refresh is in flight the server must keep answering other calls.
+    # The parked worker proves the refresh is in flight; the server must keep
+    # answering other calls meanwhile.
+    assert_receive {:refresh_called, "ref_1", worker}
     assert TokenStore.logged_in?("stale-provider")
+    send(worker, :finish_refresh)
 
     assert {:ok, %{access: "new_access", account_id: "acct_keep"}} = Task.await(t1)
     assert {:ok, %{access: "new_access", account_id: "acct_keep"}} = Task.await(t2)
 
     # Single-flight: both callers were served by ONE refresh.
-    assert_received {:refresh_called, "ref_1"}
-    refute_received {:refresh_called, _}
+    refute_received {:refresh_called, _, _}
   end
 
   test "a fresh login during an in-flight refresh supersedes the refresh result" do

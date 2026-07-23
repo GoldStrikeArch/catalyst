@@ -2,6 +2,8 @@ defmodule Catalyst.Extensions.ProcessesTest do
   # async: false — shared process registry + Extensions server.
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [wait_until: 3]
+
   alias Catalyst.{ExtensionAPI, Extensions}
   alias Catalyst.Extensions.Processes
   alias Catalyst.Test.{BlockingExtensionChild, StubbornExtensionChild}
@@ -17,12 +19,12 @@ defmodule Catalyst.Extensions.ProcessesTest do
         restart: :temporary
       })
 
-    assert Process.alive?(pid)
     assert [^pid] = Processes.list(owner)
+    ref = Process.monitor(pid)
 
     ExtensionAPI.purge_owner(owner)
 
-    refute Process.alive?(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
     assert Processes.list(owner) == []
   end
 
@@ -38,19 +40,24 @@ defmodule Catalyst.Extensions.ProcessesTest do
       })
 
     Process.exit(pid, :kill)
-    # The per-owner supervisor restarts it with a NEW pid.
+
+    # Sanctioned poll: the per-owner supervisor restarts the child with a NEW
+    # pid and there is no message the test could await for that.
     new_pid =
-      Enum.find_value(1..50, fn _ ->
-        case Processes.list(owner) do
-          [p] when p != pid -> p
-          _ -> Process.sleep(10) && nil
-        end
-      end)
+      wait_until(
+        fn ->
+          case Processes.list(owner) do
+            [p] when p != pid -> {:ok, p}
+            _other -> false
+          end
+        end,
+        2_000,
+        "expected the supervisor to restart the killed child"
+      )
 
-    assert new_pid, "expected the supervisor to restart the killed child"
-
+    ref = Process.monitor(new_pid)
     ExtensionAPI.purge_owner(owner)
-    refute Process.alive?(new_pid)
+    assert_receive {:DOWN, ^ref, :process, ^new_pid, _reason}
   end
 
   test "start_child immediately after stop_owner succeeds (stale Registry window)" do
@@ -70,7 +77,6 @@ defmodule Catalyst.Extensions.ProcessesTest do
       assert :ok = Processes.stop_owner(owner)
 
       assert {:ok, pid} = Processes.start_child(owner, spec.({:probe_b, i}))
-      assert Process.alive?(pid)
       assert [^pid] = Processes.list(owner)
     end
   end
@@ -113,8 +119,9 @@ defmodule Catalyst.Extensions.ProcessesTest do
                restart: :temporary
              })
 
-    assert Process.alive?(pid2)
+    ref2 = Process.monitor(pid2)
     Processes.stop_owner(owner)
+    assert_receive {:DOWN, ^ref2, :process, ^pid2, _reason}
   end
 
   test "stop_owner stays bounded while an extension child start callback is wedged" do
@@ -141,15 +148,13 @@ defmodule Catalyst.Extensions.ProcessesTest do
 
     on_exit(fn ->
       try do
-        if Process.alive?(caller) do
-          case Registry.lookup(Catalyst.Extensions.ProcessRegistry, owner) do
-            [{pid, _value}] -> send(pid, {:release_blocking_extension_child, token})
-            [] -> :ok
-          end
-
-          Process.exit(caller, :kill)
+        # Safe on an already-dead caller: lookup/send/exit are all no-ops then.
+        case Registry.lookup(Catalyst.Extensions.ProcessRegistry, owner) do
+          [{pid, _value}] -> send(pid, {:release_blocking_extension_child, token})
+          [] -> :ok
         end
 
+        Process.exit(caller, :kill)
         Processes.stop_owner(owner)
       after
         case previous_timeout do
@@ -176,7 +181,7 @@ defmodule Catalyst.Extensions.ProcessesTest do
                restart: :temporary
              })
 
-    assert Process.alive?(replacement)
+    assert [^replacement] = Processes.list(owner)
   end
 
   @proc_ext_source ~S'''
@@ -205,9 +210,11 @@ defmodule Catalyst.Extensions.ProcessesTest do
     assert {:ok, _summary} = Extensions.load_file(path)
 
     pid = Process.whereis(Catalyst.Ext.ProcOwnerAgent)
-    assert pid && Process.alive?(pid)
+    assert is_pid(pid)
+    ref = Process.monitor(pid)
 
     Extensions.uninstall("procowner")
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
     refute Process.whereis(Catalyst.Ext.ProcOwnerAgent)
   end
 end

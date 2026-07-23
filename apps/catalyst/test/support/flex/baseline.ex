@@ -24,6 +24,12 @@ defmodule Catalyst.Flex.Baseline do
     {:catalyst, :prompts_dir},
     {:catalyst, :agents_dir},
     {:catalyst, :boot_marker_path},
+    # Keys config/test.exs sets — a flex scenario that flips one of these and
+    # forgets to restore it must be caught, like any other seam.
+    {:catalyst, :extension_runtime_max_restarts},
+    {:catalyst, :codex_live_models},
+    {:catalyst, :boot_stable_ms},
+    {:catalyst_web, :ui_runtime_max_restarts},
     {:catalyst, :agent_loop},
     {:catalyst, :workflows},
     {:catalyst, :prompt_policy},
@@ -54,6 +60,7 @@ defmodule Catalyst.Flex.Baseline do
 
     %{
       tools: tool_snapshot(),
+      modules: module_snapshot(),
       loaded: Extensions.list_loaded() |> stable_term(),
       disabled: Extensions.list_disabled() |> stable_term(),
       sources: source_manifest(Extensions.dir()),
@@ -156,6 +163,34 @@ defmodule Catalyst.Flex.Baseline do
     |> Enum.sort()
     |> Map.new(fn name -> {name, Extensions.fetch(name)} end)
   end
+
+  # The module dimension: extension-contributed code enters the VM without a
+  # disk beam — in-memory (loaded file `[]`) from `Code.compile_*` or re-loaded
+  # from its `*.ex` source path by ModuleVersions. A purge that unregisters an
+  # owner but leaves its module loaded now shows up as a leak. Disk-beam
+  # modules load lazily throughout a run and are deliberately excluded.
+  defp module_snapshot do
+    :code.all_loaded()
+    |> Enum.filter(fn {module, file} ->
+      source_loaded?(file) and not compiler_artifact?(module)
+    end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.sort()
+  end
+
+  # Each Code.compile_* invocation leaves a transient `:elixir_compiler_N`
+  # module behind; those are compiler plumbing, not extension contributions.
+  defp compiler_artifact?(module) do
+    module |> Atom.to_string() |> String.starts_with?("elixir_compiler_")
+  end
+
+  defp source_loaded?([]), do: true
+
+  defp source_loaded?(file) when is_list(file),
+    do: file |> List.to_string() |> String.ends_with?(".ex")
+
+  defp source_loaded?(file) when is_binary(file), do: String.ends_with?(file, ".ex")
+  defp source_loaded?(_preloaded_or_cover), do: false
 
   defp hook_snapshot do
     (Catalyst.Hooks.points() ++ [:event])

@@ -27,8 +27,12 @@ defmodule Catalyst.Hooks do
   `owner` so a reloaded extension can revoke its prior handlers (`unregister/1`).
   The table is owned by `Catalyst.Hooks.TableOwner`, not by this server, so a
   crash here cannot destroy the registered handlers (which nothing would
-  re-register — `before_tool_call` gates would silently fail open). The hot path
-  (`run_filter/3`, `run_decision/2`, `notify/2`) reads ETS directly. **Every
+  re-register). Synchronous decision/filter hooks are generation-gated and fail
+  closed: the agent loop pins one `capture_snapshot/1` per turn, snapshot
+  capture refuses to observe a rebuilding extension runtime (returning
+  `{:error, :extension_runtime_recovering}`), and `before_tool_call` blocks
+  rather than proceeding without its gates. Only the fire-and-forget observer
+  channel (`notify/2`) reads live ETS and stays fail-open. **Every
   handler runs in an isolated supervised process under a deadline
   (`:hook_handler_timeout`, default 10s): a crashing, throwing, or hanging hook
   is logged and skipped — it can never take down or wedge a run.** Synchronous
@@ -111,11 +115,12 @@ defmodule Catalyst.Hooks do
   @spec unregister(term()) :: :ok
   def unregister(owner), do: GenServer.call(__MODULE__, {:unregister, owner})
 
-  @doc "Drop all handlers (test helper)."
-  @spec clear() :: :ok
-  def clear, do: GenServer.call(__MODULE__, :clear)
+  @doc """
+  Handlers registered at `point`, ordered by priority then registration order.
 
-  @doc "Handlers registered at `point`, ordered by priority then registration order."
+  Fail-open live read used by the observer paths (`notify/2`, `notify_async/2`);
+  synchronous gates and filters go through `capture_snapshot/1` instead.
+  """
   @spec handlers(point()) :: [handler_entry()]
   def handlers(point) do
     case fetch_handlers(point) do
@@ -142,19 +147,6 @@ defmodule Catalyst.Hooks do
     end
   rescue
     ArgumentError -> {:error, :registry_unavailable}
-  end
-
-  @doc false
-  @spec fetch_ready_handlers(point()) ::
-          {:ok, [handler_entry()]} | {:error, :registry_unavailable}
-  def fetch_ready_handlers(point) do
-    with {:ok, generation} <- ready_generation(),
-         {:ok, entries} <- fetch_handlers(point),
-         true <- same_ready_generation?(generation) do
-      {:ok, entries}
-    else
-      _not_stable -> {:error, :registry_unavailable}
-    end
   end
 
   @doc "Capture ready synchronous hook entries for one complete turn."
@@ -244,19 +236,26 @@ defmodule Catalyst.Hooks do
     end
   end
 
-  # ---- hot path (ETS reads only) --------------------------------------------
+  # ---- hot path --------------------------------------------------------------
 
-  @doc """
-  Fold `value` through every handler at `point` (handler: `(value, ctx) -> {:ok, new} | _`).
-
-  `valid?` guards the documented isolation promise: a handler returning
-  `{:ok, value}` of the wrong SHAPE (e.g. `{:ok, :done}` where a 4-tuple is
-  expected) is logged and skipped instead of poisoning the fold and crashing
-  the run when the caller destructures the result.
-  """
+  # Generic runners over a freshly captured single-point snapshot. Contract
+  # seams for the handler-isolation tests (crash/timeout/shape coverage on
+  # synthetic points); production sync-hook call sites use the turn-pinned
+  # snapshot wrappers below.
+  #
+  # `valid?` guards the documented isolation promise: a handler returning
+  # `{:ok, value}` of the wrong SHAPE (e.g. `{:ok, :done}` where a 4-tuple is
+  # expected) is logged and skipped instead of poisoning the fold and crashing
+  # the run when the caller destructures the result.
+  @doc false
   @spec run_filter(point(), term(), term(), (term() -> boolean())) :: term()
   def run_filter(point, value, ctx, valid? \\ fn _ -> true end) do
-    run_filter_entries(handlers(point), value, ctx, valid?)
+    with {:ok, snapshot} <- capture_snapshot([point]),
+         {:ok, entries} <- snapshot_entries(snapshot, point) do
+      run_filter_entries(entries, value, ctx, valid?)
+    else
+      _recovering -> value
+    end
   end
 
   defp run_filter_entries(entries, value, ctx, valid?) do
@@ -281,9 +280,19 @@ defmodule Catalyst.Hooks do
     end)
   end
 
-  @doc "First non-abstaining decision from a handler at `point`, else `:none` (handler: `(ctx) -> decision | :cont`)."
+  # First non-abstaining decision from a handler at `point`, else `:none`
+  # (handler: `(ctx) -> decision | :cont`). Same test-seam status as
+  # `run_filter/4`; the production gate is `before_tool_call/1,2`.
+  @doc false
   @spec run_decision(point(), term()) :: term() | :none
-  def run_decision(point, ctx), do: run_decision_entries(handlers(point), ctx)
+  def run_decision(point, ctx) do
+    with {:ok, snapshot} <- capture_snapshot([point]),
+         {:ok, entries} <- snapshot_entries(snapshot, point) do
+      run_decision_entries(entries, ctx)
+    else
+      _recovering -> :none
+    end
+  end
 
   defp run_decision_entries(entries, ctx) do
     Enum.reduce_while(entries, :none, fn entry, _ ->
@@ -295,11 +304,6 @@ defmodule Catalyst.Hooks do
   end
 
   # Convenience wrappers used by Catalyst.Agent.Loop / ToolRunner.
-
-  @doc "Synchronously fold the request message list through context-transform hooks."
-  @spec transform_context([term()], term()) :: [term()]
-  def transform_context(messages, ctx),
-    do: run_filter(:transform_context, messages, ctx, &is_list/1)
 
   @doc "Fold request messages through a turn-pinned hook snapshot."
   @spec transform_context([term()], term(), snapshot()) ::
@@ -329,13 +333,21 @@ defmodule Catalyst.Hooks do
     end
   end
 
-  @doc "Synchronously fold a tool result through result-transform hooks."
+  @doc """
+  Fold a tool result through result-transform hooks under a freshly captured
+  snapshot; while the extension runtime is recovering, the result passes
+  through unchanged.
+  """
   @spec after_tool_call({term(), term(), boolean(), boolean()}, term()) ::
           {term(), term(), boolean(), boolean()}
-  def after_tool_call(result_tuple, ctx),
-    do: run_filter(:after_tool_call, result_tuple, ctx, &valid_tool_result?/1)
+  def after_tool_call(result_tuple, ctx) do
+    case capture_snapshot([:after_tool_call]) do
+      {:ok, snapshot} -> after_tool_call(result_tuple, ctx, snapshot)
+      {:error, :extension_runtime_recovering} -> result_tuple
+    end
+  end
 
-  @doc false
+  @doc "Fold a tool result through the result-transform hooks pinned in `snapshot`."
   @spec after_tool_call({term(), term(), boolean(), boolean()}, term(), snapshot()) ::
           {term(), term(), boolean(), boolean()}
   def after_tool_call(result_tuple, ctx, snapshot) do
@@ -345,12 +357,7 @@ defmodule Catalyst.Hooks do
     end
   end
 
-  @doc "Synchronously fold context/config through next-turn preparation hooks."
-  @spec prepare_next_turn(map(), map(), term()) :: {map(), map()}
-  def prepare_next_turn(context, config, ctx),
-    do: run_filter(:prepare_next_turn, {context, config}, ctx, &match?({%{}, %{}}, &1))
-
-  @doc false
+  @doc "Fold context/config through the next-turn preparation hooks pinned in `snapshot`."
   @spec prepare_next_turn(map(), map(), term(), snapshot()) :: {map(), map()}
   def prepare_next_turn(context, config, ctx, snapshot) do
     case snapshot_entries(snapshot, :prepare_next_turn) do
@@ -362,11 +369,7 @@ defmodule Catalyst.Hooks do
     end
   end
 
-  @doc "Whether a synchronous stop hook requests termination after this turn."
-  @spec should_stop?(term()) :: boolean()
-  def should_stop?(ctx), do: run_decision(:should_stop_after_turn, ctx) == true
-
-  @doc false
+  @doc "Whether a stop hook pinned in `snapshot` requests termination after this turn."
   @spec should_stop?(term(), snapshot()) :: boolean()
   def should_stop?(ctx, snapshot) do
     case snapshot_entries(snapshot, :should_stop_after_turn) do
@@ -408,22 +411,6 @@ defmodule Catalyst.Hooks do
   @spec notify(term(), term()) :: ObserverDispatcher.enqueue_result()
   def notify(event, session_key) do
     ObserverDispatcher.enqueue(session_key || self(), event, handlers(:event))
-  end
-
-  @doc """
-  Hand a committed event to ordered observer delivery.
-
-  Admission is acknowledged before returning, but observer callbacks remain
-  asynchronous and cannot backpressure the caller.
-  """
-  @spec notify_committed(term(), term()) ::
-          :ok | {:error, :dispatcher_unavailable | :registry_unavailable}
-  def notify_committed(event, session_key) do
-    with {:ok, entries} <- fetch_ready_handlers(:event) do
-      ObserverDispatcher.enqueue_committed(session_key || self(), event, entries)
-    else
-      {:error, :registry_unavailable} = error -> error
-    end
   end
 
   @doc """
@@ -495,11 +482,6 @@ defmodule Catalyst.Hooks do
       end
     end)
 
-    {:reply, :ok, state}
-  end
-
-  def handle_call(:clear, _from, state) do
-    :ets.delete_all_objects(@table)
     {:reply, :ok, state}
   end
 

@@ -122,9 +122,10 @@ defmodule Catalyst.HooksTest do
     assert log =~ "malformed"
 
     Hooks.register(:prepare_next_turn, fn _v, _ctx -> {:ok, "nope"} end, owner: owner)
+    assert {:ok, snapshot} = Hooks.capture_snapshot([:prepare_next_turn])
 
     capture_log(fn ->
-      assert Hooks.prepare_next_turn(%{messages: []}, %{model: nil}, %{}) ==
+      assert Hooks.prepare_next_turn(%{messages: []}, %{model: nil}, %{}, snapshot) ==
                {%{messages: []}, %{model: nil}}
     end)
   end
@@ -187,7 +188,8 @@ defmodule Catalyst.HooksTest do
 
     assert_receive {:observer_after_crash, :event}
     assert log =~ "observer boom"
-    assert Process.alive?(Process.whereis(ObserverDispatcher))
+    # A registered name implies a live process; whereis avoids Process.alive?.
+    assert is_pid(Process.whereis(ObserverDispatcher))
   end
 
   test "event observers are asynchronous and ordered per session", %{owner: owner} do
@@ -528,17 +530,17 @@ defmodule Catalyst.HooksTest do
     Hooks.on(fn _event -> :ok end, owner: owner)
 
     stale = Hooks.begin_runtime_generation()
-    assert {:error, :registry_unavailable} = Hooks.fetch_ready_handlers(:event)
+    assert {:error, :extension_runtime_recovering} = Hooks.capture_snapshot([:event])
 
     Hooks.mark_runtime_ready(stale)
-    assert {:ok, [_entry | _rest]} = Hooks.fetch_ready_handlers(:event)
+    assert {:ok, %{handlers: %{event: [_entry | _rest]}}} = Hooks.capture_snapshot([:event])
 
     current = Hooks.begin_runtime_generation()
     Hooks.mark_runtime_ready(stale)
-    assert {:error, :registry_unavailable} = Hooks.fetch_ready_handlers(:event)
+    assert {:error, :extension_runtime_recovering} = Hooks.capture_snapshot([:event])
 
     Hooks.mark_runtime_ready(current)
-    assert {:ok, [_entry | _rest]} = Hooks.fetch_ready_handlers(:event)
+    assert {:ok, %{handlers: %{event: [_entry | _rest]}}} = Hooks.capture_snapshot([:event])
   end
 
   test "registered handlers survive a Hooks crash (table owned by TableOwner)", %{owner: owner} do
@@ -556,6 +558,9 @@ defmodule Catalyst.HooksTest do
     new_pid = wait_for_restart!(Hooks, pid, supervisor)
     assert Process.whereis(Catalyst.Hooks.TableOwner) == table_owner
     _ = :sys.get_state(new_pid)
+    # rest_for_one also restarted Catalyst.Extensions, which re-publishes hook
+    # readiness only after its reseed bootstrap phase acknowledges completion.
+    wait_for_runtime_ready!()
 
     # The table outlived the crash: the handler registered before still fires...
     assert Hooks.run_filter(:test_filter, "", %{}) == "survived"
@@ -637,7 +642,15 @@ defmodule Catalyst.HooksTest do
         pid
 
       _not_restarted ->
-        _ = :sys.get_state(supervisor)
+        # Under suite-wide restart pressure the :rest_for_one group supervisor
+        # can itself be restarting; syncing on a dying supervisor exits, so
+        # tolerate that and fall back to a short wait before retrying.
+        try do
+          _ = :sys.get_state(supervisor)
+        catch
+          :exit, _ -> receive after: (10 -> :ok)
+        end
+
         wait_for_restart!(name, old_pid, supervisor, attempts - 1)
     end
   end

@@ -116,12 +116,9 @@ defmodule Catalyst.Tools.Diff do
   end
 
   defp cap(diff, max) do
-    lines = String.split(diff, "\n")
-
-    if length(lines) > max do
-      (lines |> Enum.take(max) |> Enum.join("\n")) <> "\n… (diff truncated)"
-    else
-      diff
+    case diff |> String.split("\n") |> Enum.split(max) do
+      {_all, []} -> diff
+      {shown, _hidden} -> Enum.join(shown, "\n") <> "\n… (diff truncated)"
     end
   end
 end

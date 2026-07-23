@@ -13,6 +13,8 @@ defmodule Catalyst.Tools.InstallExtension do
 
   alias Catalyst.Extensions.Installer
 
+  import Catalyst.Tools.SelfModReport, only: [append_warning: 2]
+
   @impl true
   def execution_mode, do: :sequential
 
@@ -71,7 +73,4 @@ defmodule Catalyst.Tools.InstallExtension do
     "Installed #{owner} (#{summary}). Active now."
     |> append_warning(result[:warning])
   end
-
-  defp append_warning(text, nil), do: text
-  defp append_warning(text, warning), do: text <> " Warning: #{warning}"
 end

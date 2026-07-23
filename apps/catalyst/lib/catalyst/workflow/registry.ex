@@ -23,10 +23,9 @@ defmodule Catalyst.Workflow.Registry do
   use GenServer
 
   alias Catalyst.ExtensionAPI
-  alias Catalyst.OwnedIndex
+  alias Catalyst.Extensions.Owner
 
   @table :catalyst_workflows
-  @host_owner :host
   @builtin Catalyst.Agent.Loop
 
   @type name :: String.t() | :default
@@ -52,7 +51,9 @@ defmodule Catalyst.Workflow.Registry do
     end
   end
 
-  @doc "Resolve one named workflow; `:default` includes agent-loop and built-in fallbacks."
+  # test seam. Resolves one named workflow; :default includes agent-loop and
+  # built-in fallbacks.
+  @doc false
   @spec fetch(name()) :: {:ok, module()} | {:error, term()}
   def fetch(name) do
     case fetch_with_source(name) do
@@ -61,7 +62,8 @@ defmodule Catalyst.Workflow.Registry do
     end
   end
 
-  @doc "Resolve one named workflow together with its winning source."
+  # test seam. Resolves one named workflow together with its winning source.
+  @doc false
   @spec fetch_with_source(name()) :: {:ok, module(), source()} | {:error, term()}
   def fetch_with_source(:default), do: resolve_default()
 
@@ -89,12 +91,15 @@ defmodule Catalyst.Workflow.Registry do
   @doc "Return the owner-aware runtime overlay in stable key order."
   @spec runtime_entries() :: [runtime_entry()]
   def runtime_entries do
-    @table
-    |> :ets.tab2list()
-    |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
-    |> Enum.sort_by(& &1.key)
-  rescue
-    ArgumentError -> []
+    case table_rows() do
+      {:ok, rows} ->
+        rows
+        |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
+        |> Enum.sort_by(&inspect(&1.key))
+
+      :error ->
+        []
+    end
   end
 
   @doc false
@@ -103,33 +108,28 @@ defmodule Catalyst.Workflow.Registry do
 
   @impl true
   def init(:ok) do
-    new_table()
+    :ets.new(@table, [:named_table, :public, read_concurrency: true])
     wire_extension_api()
-    {:ok, OwnedIndex.new()}
+    {:ok, :ok}
   end
 
   @impl true
   def handle_call({:register, name, module, opts}, _from, state) do
-    state = ensure_table(state)
     key = {:workflow, name}
 
     case validate_registration(key, module) do
-      :ok -> register(key, module, normalize_owner(opts[:owner]), state)
+      :ok -> register(key, module, Owner.normalize(opts[:owner]), state)
       {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   def handle_call({:unregister, name}, _from, state) do
-    state = ensure_table(state)
-    key = {:workflow, name}
-    :ets.delete(@table, key)
-    {:reply, :ok, OwnedIndex.release(state, key)}
+    :ets.delete(@table, {:workflow, name})
+    {:reply, :ok, state}
   end
 
   def handle_call({:unregister_owner, owner}, _from, state) do
-    state = ensure_table(state)
-    {keys, state} = OwnedIndex.release_owner(state, owner)
-    Enum.each(keys, &:ets.delete(@table, &1))
+    :ets.match_delete(@table, {:_, :_, owner})
     {:reply, :ok, state}
   end
 
@@ -236,10 +236,23 @@ defmodule Catalyst.Workflow.Registry do
   defp option(opts, _key), do: {:error, {:invalid_configuration, :workflow_options, opts}}
 
   defp runtime_lookup(key) do
-    case :ets.lookup(@table, key) do
+    case lookup_row(key) do
       [{^key, module, owner}] -> {:ok, module, owner}
       _missing -> :error
     end
+  end
+
+  # The rescues wrap only the :ets call: reads keep exposing the application
+  # and built-in layers while the owner table is absent; malformed rows must
+  # not read as "no overlays".
+  defp lookup_row(key) do
+    :ets.lookup(@table, key)
+  rescue
+    ArgumentError -> []
+  end
+
+  defp table_rows do
+    {:ok, :ets.tab2list(@table)}
   rescue
     ArgumentError -> :error
   end
@@ -260,10 +273,13 @@ defmodule Catalyst.Workflow.Registry do
     is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :run, 4)
   end
 
+  # Ownership lives in ETS column 3 (single writer: this process), so a claim
+  # is a plain lookup — no second bookkeeping structure to desync.
   defp register(key, module, owner, state) do
-    case OwnedIndex.claim(state, key, owner) do
-      {:ok, state} -> put_registration(key, module, owner, state)
-      {:error, existing_owner} -> collision(key, existing_owner, owner, state)
+    case runtime_lookup(key) do
+      :error -> put_registration(key, module, owner, state)
+      {:ok, _module, ^owner} -> put_registration(key, module, owner, state)
+      {:ok, _module, existing} -> collision(key, existing, owner, state)
     end
   end
 
@@ -273,29 +289,8 @@ defmodule Catalyst.Workflow.Registry do
   end
 
   defp collision({:workflow, name}, existing_owner, attempted_owner, state) do
-    error = {:workflow_owner_collision, name, existing_owner, attempted_owner}
+    error = {:owner_collision, :workflow, name, existing_owner, attempted_owner}
     {:reply, {:error, error}, state}
-  end
-
-  defp normalize_owner(nil), do: @host_owner
-  defp normalize_owner(owner), do: owner
-
-  defp ensure_table(state) do
-    case :ets.whereis(@table) do
-      :undefined ->
-        new_table()
-        OwnedIndex.new()
-
-      _table ->
-        state
-    end
-  end
-
-  defp new_table do
-    case :ets.whereis(@table) do
-      :undefined -> :ets.new(@table, [:named_table, :public, read_concurrency: true])
-      _existing -> :ets.delete_all_objects(@table)
-    end
   end
 
   @doc false

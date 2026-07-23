@@ -10,7 +10,6 @@ defmodule CatalystWeb.ShellLive.ExtensionActions do
   import Phoenix.Component, only: [assign: 3]
 
   alias Catalyst.Extensions
-  alias Catalyst.Extensions.Versioning
 
   @type action ::
           :reload_all
@@ -86,31 +85,13 @@ defmodule CatalystWeb.ShellLive.ExtensionActions do
     end
   end
 
+  # Presentation only — the lock → revert → reload orchestration is the
+  # tagged `Extensions.rollback/1` domain operation.
   @spec rollback(String.t() | nil) :: result()
-  defp rollback(nil) do
-    Extensions.locked(fn ->
-      Extensions.dir()
-      |> Versioning.rollback()
-      |> rollback_result("the most recent extension change")
-    end)
-  end
-
   defp rollback(owner) do
-    Extensions.locked(fn ->
-      case Extensions.source_file(owner) do
-        {:ok, path} ->
-          Extensions.dir()
-          |> Versioning.rollback_file(path)
-          |> rollback_result("#{owner}'s most recent change")
+    what = rollback_scope(owner)
 
-        :error ->
-          {:error, "Rollback failed: no source file found for #{owner}."}
-      end
-    end)
-  end
-
-  defp rollback_result(:ok, what) do
-    case Extensions.load_all() do
+    case Extensions.rollback(owner) do
       {:ok, %{loaded: loaded, failed: []}} ->
         {:ok,
          "Rolled back #{what} and reloaded #{length(loaded)} file(s)." <>
@@ -121,18 +102,22 @@ defmodule CatalystWeb.ShellLive.ExtensionActions do
          "Rolled back #{what}, but #{length(failed)} file(s) failed to load — " <>
            failure_lines(failed) <> warnings_section(loaded)}
 
-      {:error, reason} ->
+      {:error, :no_file} ->
+        {:error, "Rollback failed: no source file found for #{owner}."}
+
+      {:error, :nothing_to_rollback} ->
+        {:error, "Nothing to roll back for #{what} — recent changes were all reverted already."}
+
+      {:error, {:reload_failed, reason}} ->
         {:error, "Rolled back #{what}, but reload failed: " <> Extensions.format_error(reason)}
+
+      {:error, reason} ->
+        {:error, "Rollback of #{what} failed: #{inspect(reason)}"}
     end
   end
 
-  defp rollback_result({:error, :nothing_to_rollback}, what) do
-    {:error, "Nothing to roll back for #{what} — recent changes were all reverted already."}
-  end
-
-  defp rollback_result({:error, reason}, what) do
-    {:error, "Rollback of #{what} failed: #{inspect(reason)}"}
-  end
+  defp rollback_scope(nil), do: "the most recent extension change"
+  defp rollback_scope(owner), do: "#{owner}'s most recent change"
 
   defp summary_suffix(summary) do
     tools =

@@ -132,15 +132,17 @@ defmodule CatalystWeb.UI.RegistryTest do
         owner: @owner
       )
 
-      assert Registry.renderer(:message, {:probe, 1}).(%{}) == :newer
+      assert {:ok, newest} = Registry.renderer(:message, {:probe, 1})
+      assert newest.(%{}) == :newer
 
       # A newest renderer whose match raises must fall through, not crash.
       Registry.register_renderer(:message, fn _ -> raise "boom" end, fn _ -> :crashy end,
         owner: @owner
       )
 
-      assert Registry.renderer(:message, {:probe, 1}).(%{}) == :newer
-      assert Registry.renderer(:message, {:unmatched, 1}) == nil
+      assert {:ok, fallthrough} = Registry.renderer(:message, {:probe, 1})
+      assert fallthrough.(%{}) == :newer
+      assert Registry.renderer(:message, {:unmatched, 1}) == :error
     end
   end
 
@@ -158,7 +160,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       Registry.unregister_owner(@owner)
 
       assert :error = Registry.fetch_page("sweep")
-      assert Registry.renderer(:message, :sweep_probe) == nil
+      assert Registry.renderer(:message, :sweep_probe) == :error
       refute Enum.any?(Registry.list_components(), &(&1.owner == @owner))
       assert :error = Registry.fetch_command("sweepcmd")
     end
@@ -321,13 +323,17 @@ defmodule CatalystWeb.UI.RegistryTest do
 
       assert_receive {:dispatch_waiting, blocked, ^gate}
 
+      stale_generation = Catalyst.Extensions.generation_token()
       extensions = Process.whereis(Catalyst.Extensions)
       ref = Process.monitor(extensions)
       Process.exit(extensions, :kill)
       assert_receive {:DOWN, ^ref, :process, ^extensions, :killed}
 
       new_extensions = wait_for_restart!(Catalyst.Extensions, extensions)
-      assert Catalyst.Extensions.generation_token() == nil
+      # Sync with the replacement's init: it publishes a fresh generation
+      # token, making the in-flight registration's captured generation stale.
+      _ = :sys.get_state(new_extensions)
+      refute Catalyst.Extensions.generation_token() == stale_generation
 
       send(blocked, {:continue, gate})
       assert {:error, :stale_extension_generation} = Task.await(task, 5_000)
@@ -397,8 +403,13 @@ defmodule CatalystWeb.UI.RegistryTest do
     result = Registry.register_extension_page(api, path, target, opts)
     send(test, {:dispatch_waiting, self(), gate})
 
+    # Bounded: this block runs inside the global generation gate — if the test
+    # fails before releasing it, an unbounded receive would wedge every later
+    # ExtensionAPI dispatch in the suite.
     receive do
       {:continue, ^gate} -> result
+    after
+      10_000 -> result
     end
   end
 end

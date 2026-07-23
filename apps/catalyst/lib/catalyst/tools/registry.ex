@@ -116,8 +116,6 @@ defmodule Catalyst.Tools.Registry do
   def fetch(index, name) when is_map(index) do
     case Map.fetch(index, name) do
       {:ok, %{module: module}} -> {:ok, module}
-      # Accept old/prebuilt name => module maps for public API compatibility.
-      {:ok, module} when is_atom(module) -> {:ok, module}
       :error -> :error
     end
   end
@@ -137,12 +135,6 @@ defmodule Catalyst.Tools.Registry do
          executor: _executor
        } = entry} ->
         {:ok, entry}
-
-      {:ok, %{module: module}} when is_atom(module) ->
-        fetch_legacy_entry(module)
-
-      {:ok, module} when is_atom(module) ->
-        fetch_legacy_entry(module)
 
       :error ->
         :error
@@ -180,13 +172,6 @@ defmodule Catalyst.Tools.Registry do
     |> Enum.reduce_while(:ok, fn name, :ok -> validate_index_entry(index, name) end)
   end
 
-  defp fetch_legacy_entry(module) do
-    case cached_entry(module) do
-      {:ok, entry} -> {:ok, entry}
-      {:error, _reason} -> :error
-    end
-  end
-
   @doc """
   Resolve and validate all registration metadata in bounded, isolated work.
 
@@ -206,6 +191,9 @@ defmodule Catalyst.Tools.Registry do
   @spec entry(module(), keyword()) :: {:ok, entry()} | {:error, term()}
   def entry(module, opts \\ []) when is_atom(module), do: resolve_and_cache(module, opts)
 
+  # Concurrent cache misses race here unsynchronized, so a module's metadata
+  # callbacks may be invoked more than once; each racer caches an identical
+  # fingerprint-keyed result, so last write wins harmlessly.
   defp resolve_and_cache(module, opts) do
     with {:ok, before_fingerprint} <- fingerprint(module),
          result <- await_entry(module, opts),
@@ -219,22 +207,12 @@ defmodule Catalyst.Tools.Registry do
   end
 
   @doc """
-  Read metadata previously validated by `definition/2`.
+  Read the complete validated entry, refreshing it once when missing or stale.
 
-  A missing or stale entry is validated once as a safe fallback for direct
-  session tools and focused scripts. Both successful definitions and validation
-  failures are cached by BEAM fingerprint, so later turns never repeat the
-  extension callbacks unless the module code changes or `invalidate/1` is used.
+  Both successful definitions and validation failures are cached by BEAM
+  fingerprint, so later turns never repeat the extension callbacks unless the
+  module code changes or `invalidate/1` is used.
   """
-  @spec cached_definition(module()) :: {:ok, definition()} | {:error, term()}
-  def cached_definition(module) when is_atom(module) do
-    case cached_entry(module) do
-      {:ok, entry} -> {:ok, entry.definition}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  @doc "Read the complete validated entry, refreshing it once when missing or stale."
   @spec cached_entry(module()) :: {:ok, entry()} | {:error, term()}
   def cached_entry(module) when is_atom(module) do
     case fetch_cached(module) do

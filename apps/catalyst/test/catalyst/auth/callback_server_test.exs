@@ -3,6 +3,7 @@ defmodule Catalyst.Auth.CallbackServerTest do
   # and binds a real TCP port.
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [wait_until: 1]
   import Plug.Test
 
   alias Catalyst.Auth.CallbackServer.Handler
@@ -79,19 +80,5 @@ defmodule Catalyst.Auth.CallbackServerTest do
     end)
 
     assert {:ok, "abc"} = Task.await(second, 5_000)
-  end
-
-  defp wait_until(fun, tries \\ 100) do
-    cond do
-      fun.() ->
-        :ok
-
-      tries == 0 ->
-        flunk("condition never became true")
-
-      true ->
-        Process.sleep(20)
-        wait_until(fun, tries - 1)
-    end
   end
 end

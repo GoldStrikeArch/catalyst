@@ -12,6 +12,18 @@ defmodule Catalyst.MixProject do
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       test_ignore_filters: [&String.starts_with?(&1, "test/fixtures/")],
+      # Coverage measures shipped code only: test/support harnesses (stub
+      # providers, fixtures, case templates) are test-env-only and covering
+      # them with tests would be circular.
+      test_coverage: [
+        ignore_modules: [
+          ~r/^Catalyst\.Test\./,
+          ~r/^Catalyst\.Flex\./,
+          ~r/^Catalyst\.ExtensionsFixtures/,
+          Catalyst.LLM.Demo,
+          Catalyst.EnvCase
+        ]
+      ],
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps()

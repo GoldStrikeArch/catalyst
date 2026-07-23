@@ -33,6 +33,21 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
   @type queued_event :: %{event: term(), entries: [map()]}
   @type waiting_event :: %{from: GenServer.from() | nil, event: queued_event()}
 
+  @typedoc """
+  Per-lane admission policy.
+
+  `drop_updates?` — at capacity, drop the newest stream-update event instead of
+  displacing queued work (the committed lane never drops, because committed
+  admission may carry any event kind). `on_full` — what to do with a structural
+  event when no queued update can be evicted: `:park` in ordered waiting state
+  (backpressuring `from` when present), or `:drop` the newest synthetic event.
+  """
+  @type admission_policy :: %{
+          drop_updates?: boolean(),
+          on_full: :park | :drop,
+          from: GenServer.from() | nil
+        }
+
   @doc "Start the singleton observer dispatcher."
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -109,16 +124,19 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
   @impl true
   def handle_call({:enqueue, session_key, event, entries}, from, state) do
     queued = %{event: event, entries: entries}
+    policy = %{drop_updates?: true, on_full: :park, from: from}
 
-    case admit(state, session_key, queued, from) do
-      {:reply, result, state} -> {:reply, result, state}
-      {:wait, state} -> {:noreply, state}
+    case admit(state, session_key, queued, policy) do
+      {:parked, state} -> {:noreply, state}
+      {result, state} -> {:reply, result, state}
     end
   end
 
   def handle_call({:enqueue_committed, session_key, event, entries}, _from, state) do
     queued = %{event: event, entries: entries}
-    {:reply, :ok, admit_committed(state, session_key, queued)}
+    policy = %{drop_updates?: false, on_full: :park, from: nil}
+    {_result, state} = admit(state, session_key, queued, policy)
+    {:reply, :ok, state}
   end
 
   def handle_call({:await_idle, session_key}, from, state) do
@@ -135,7 +153,9 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
   @impl true
   def handle_cast({:enqueue_async, session_key, event, entries}, state) do
     queued = %{event: event, entries: entries}
-    {:noreply, admit_async(state, session_key, queued)}
+    policy = %{drop_updates?: true, on_full: :drop, from: nil}
+    {_result, state} = admit(state, session_key, queued, policy)
+    {:noreply, state}
   end
 
   @impl true
@@ -185,127 +205,68 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp admit(state, session_key, queued, from) do
+  # One admission skeleton for all three lanes (sync, async, committed).
+  # Returns `{:ok | {:dropped, :queue_full} | :parked, state}`; `:parked` means
+  # the event waits in ordered waiting state (with `policy.from` replied to on
+  # admission when present).
+  @spec admit(map(), session_key(), queued_event(), admission_policy()) ::
+          {:ok | {:dropped, :queue_full} | :parked, map()}
+  defp admit(state, session_key, queued, policy) do
     case Map.fetch(state.sessions, session_key) do
       :error ->
         session = new_session(queued)
-        {:reply, :ok, state |> put_session(session_key, session) |> start_handler(session_key)}
+        {:ok, state |> put_session(session_key, session) |> start_handler(session_key)}
 
       {:ok, session} ->
         case session.pending < queue_limit() do
-          true ->
-            session = enqueue_event(session, queued)
-            {:reply, :ok, put_session(state, session_key, session)}
-
-          false ->
-            admit_at_capacity(state, session_key, session, queued, from)
+          true -> {:ok, put_session(state, session_key, enqueue_event(session, queued))}
+          false -> admit_at_capacity(state, session_key, session, queued, policy)
         end
     end
   end
 
-  defp admit_at_capacity(state, session_key, session, queued, from) do
-    case update_event?(queued.event) do
+  defp admit_at_capacity(state, session_key, session, queued, policy) do
+    case policy.drop_updates? and update_event?(queued.event) do
       true ->
         log_dropped(session_key, session.dropped + 1)
         session = %{session | dropped: session.dropped + 1}
-        {:reply, {:dropped, :queue_full}, put_session(state, session_key, session)}
+        {{:dropped, :queue_full}, put_session(state, session_key, session)}
 
       false ->
-        admit_structural(state, session_key, session, queued, from)
+        admit_structural(state, session_key, session, queued, policy)
     end
   end
 
-  defp admit_async(state, session_key, queued) do
-    case Map.fetch(state.sessions, session_key) do
-      :error ->
-        state |> put_session(session_key, new_session(queued)) |> start_handler(session_key)
-
-      {:ok, session} ->
-        case session.pending < queue_limit() do
-          true -> put_session(state, session_key, enqueue_event(session, queued))
-          false -> admit_async_at_capacity(state, session_key, session, queued)
-        end
-    end
-  end
-
-  defp admit_committed(state, session_key, queued) do
-    case Map.fetch(state.sessions, session_key) do
-      :error ->
-        state |> put_session(session_key, new_session(queued)) |> start_handler(session_key)
-
-      {:ok, session} ->
-        case session.pending < queue_limit() do
-          true ->
-            put_session(state, session_key, enqueue_event(session, queued))
-
-          false ->
-            admit_committed_at_capacity(state, session_key, session, queued)
-        end
-    end
-  end
-
-  defp admit_committed_at_capacity(state, session_key, session, queued) do
+  defp admit_structural(state, session_key, session, queued, policy) do
     case evict_queued_update(session.queue) do
       {:ok, queue} ->
         Logger.warning(
           "[hooks] observer queue full for #{inspect(session_key)}; " <>
-            "evicted a queued update to preserve a committed event"
+            "evicted a queued update to preserve a #{preserved_label(policy)} event"
         )
 
         session = %{session | queue: :queue.in(queued, queue), dropped: session.dropped + 1}
-        put_session(state, session_key, session)
+        {:ok, put_session(state, session_key, session)}
 
       :error ->
-        waiting = :queue.in(%{from: nil, event: queued}, session.waiting)
-        put_session(state, session_key, %{session | waiting: waiting})
+        admit_on_full(state, session_key, session, queued, policy)
     end
   end
 
-  defp admit_async_at_capacity(state, session_key, session, queued) do
-    case update_event?(queued.event) do
-      true ->
-        log_dropped(session_key, session.dropped + 1)
-        put_session(state, session_key, %{session | dropped: session.dropped + 1})
-
-      false ->
-        queue_async_structural(state, session_key, session, queued)
-    end
+  defp admit_on_full(state, session_key, session, queued, %{on_full: :park} = policy) do
+    waiting = :queue.in(%{from: policy.from, event: queued}, session.waiting)
+    {:parked, put_session(state, session_key, %{session | waiting: waiting})}
   end
 
-  defp queue_async_structural(state, session_key, session, queued) do
-    case evict_queued_update(session.queue) do
-      {:ok, queue} ->
-        Logger.warning(
-          "[hooks] observer queue full for #{inspect(session_key)}; " <>
-            "evicted a queued update to preserve a lifecycle event"
-        )
-
-        session = %{session | queue: :queue.in(queued, queue), dropped: session.dropped + 1}
-        put_session(state, session_key, session)
-
-      :error ->
-        dropped = session.dropped + 1
-        log_dropped_synthetic(session_key, dropped)
-        put_session(state, session_key, %{session | dropped: dropped})
-    end
+  defp admit_on_full(state, session_key, session, _queued, %{on_full: :drop}) do
+    dropped = session.dropped + 1
+    log_dropped_synthetic(session_key, dropped)
+    {{:dropped, :queue_full}, put_session(state, session_key, %{session | dropped: dropped})}
   end
 
-  defp admit_structural(state, session_key, session, queued, from) do
-    case evict_queued_update(session.queue) do
-      {:ok, queue} ->
-        Logger.warning(
-          "[hooks] observer queue full for #{inspect(session_key)}; " <>
-            "evicted a queued update to preserve a lifecycle event"
-        )
-
-        session = %{session | queue: :queue.in(queued, queue), dropped: session.dropped + 1}
-        {:reply, :ok, put_session(state, session_key, session)}
-
-      :error ->
-        waiting = :queue.in(%{from: from, event: queued}, session.waiting)
-        {:wait, put_session(state, session_key, %{session | waiting: waiting})}
-    end
-  end
+  # Only the committed lane admits with `drop_updates?: false`.
+  defp preserved_label(%{drop_updates?: false}), do: "committed"
+  defp preserved_label(%{drop_updates?: true}), do: "lifecycle"
 
   defp new_session(queued) do
     %{
@@ -396,15 +357,13 @@ defmodule Catalyst.Hooks.ObserverDispatcher do
   defp maybe_add_reply(replies, nil), do: replies
   defp maybe_add_reply(replies, from), do: [from | replies]
 
+  # `finish_event/2` runs `admit_waiting/1` before `:queue.out/1`, so an empty
+  # active queue implies the waiting queue drained into the freed slot; assert
+  # that invariant instead of keeping an unreachable retention branch.
   defp finish_session(state, session_key, %{pending: 0, waiting: waiting} = session) do
-    case :queue.is_empty(waiting) do
-      true ->
-        Enum.each(session.idle_waiters, &GenServer.reply(&1, :ok))
-        %{state | sessions: Map.delete(state.sessions, session_key)}
-
-      false ->
-        put_session(state, session_key, session)
-    end
+    true = :queue.is_empty(waiting)
+    Enum.each(session.idle_waiters, &GenServer.reply(&1, :ok))
+    %{state | sessions: Map.delete(state.sessions, session_key)}
   end
 
   defp put_session(state, session_key, session) do

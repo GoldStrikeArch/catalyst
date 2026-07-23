@@ -1,7 +1,8 @@
 defmodule Catalyst.LLM.Demo do
   @moduledoc """
-  An offline, input-aware provider used by the LiveView test suite (registered
-  for the Codex API through `Catalyst.LLM.Registry`) and handy for headless dev.
+  An offline, input-aware provider used by the test suites (the LiveView test
+  helper registers it for the Codex API through `Catalyst.LLM.Registry`).
+  Compiled from `test/support`, so it exists only in the `:test` environment.
   It has no UI surface — the app's only real provider is OpenAI Codex.
 
   It runs one real tool against the working directory based on the user's
@@ -42,7 +43,7 @@ defmodule Catalyst.LLM.Demo do
       content: [%Content.Text{text: note}, tool_call(name, args)],
       api: "demo",
       provider: "demo",
-      model: model.id,
+      model: model && model.id,
       usage: %Usage{},
       stop_reason: :tool_use,
       timestamp: Message.now()
@@ -101,7 +102,7 @@ defmodule Catalyst.LLM.Demo do
       content: [%Content.Text{text: text}],
       api: "demo",
       provider: "demo",
-      model: model.id,
+      model: model && model.id,
       usage: %Usage{},
       stop_reason: :stop,
       timestamp: Message.now()

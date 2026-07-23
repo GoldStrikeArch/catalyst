@@ -128,22 +128,24 @@ defmodule Catalyst.Agent.Loop do
     end
   end
 
+  # A failed/aborted stream ends the run immediately (PI parity): no tool
+  # execution, no per-turn hooks, and outer_loop won't drain follow-ups.
   defp continue_after_assistant(assistant, context, acc, config, turn_config, emit) do
-    # A failed/aborted stream ends the run immediately (PI parity): no tool
-    # execution, no per-turn hooks, and outer_loop won't drain follow-ups.
-    if assistant.stop_reason in [:error, :aborted] do
-      {context, acc} = finish_turn(context, acc, assistant, [], emit)
-      {:halt, context, acc}
-    else
-      run_turn_tail(
-        Message.tool_calls(assistant),
-        assistant,
-        context,
-        acc,
-        config,
-        turn_config,
-        emit
-      )
+    case assistant.stop_reason do
+      stop when stop in [:error, :aborted] ->
+        {context, acc} = finish_turn(context, acc, assistant, [], emit)
+        {:halt, context, acc}
+
+      _continue ->
+        run_turn_tail(
+          Message.tool_calls(assistant),
+          assistant,
+          context,
+          acc,
+          config,
+          turn_config,
+          emit
+        )
     end
   end
 
@@ -226,10 +228,9 @@ defmodule Catalyst.Agent.Loop do
   # retained `:tool_source` must follow it, or `Support.resolve_turn_tools/1`
   # keeps resolving the stale source and the hook's change never applies.
   defp retarget_tool_source(hooked, config) do
-    case Map.get(hooked, :tools) == Map.get(config, :tools) do
-      true -> hooked
-      false -> Map.put(hooked, :tool_source, Map.get(hooked, :tools, :extensions))
-    end
+    if Map.get(hooked, :tools) == Map.get(config, :tools),
+      do: hooked,
+      else: Map.put(hooked, :tool_source, Map.get(hooked, :tools, :extensions))
   end
 
   defp stream_assistant(context, config, emit) do

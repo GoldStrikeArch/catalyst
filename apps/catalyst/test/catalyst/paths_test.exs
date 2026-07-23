@@ -1,11 +1,13 @@
 defmodule Catalyst.PathsTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2]
+
   alias Catalyst.Paths
 
   test "an extensions override does not relocate other user data" do
-    previous_home = Application.get_env(:catalyst, :home)
-    previous_extensions = Application.get_env(:catalyst, :extensions_dir)
+    previous_home = Application.fetch_env(:catalyst, :home)
+    previous_extensions = Application.fetch_env(:catalyst, :extensions_dir)
     home = Path.join(System.tmp_dir!(), "paths_home_#{System.unique_integer([:positive])}")
     extensions = Path.join(System.tmp_dir!(), "paths_extensions/extensions")
 
@@ -29,7 +31,7 @@ defmodule Catalyst.PathsTest do
   end
 
   test "an explicit home relocates all default paths together" do
-    previous = Application.get_env(:catalyst, :home)
+    previous = Application.fetch_env(:catalyst, :home)
     root = Path.join(System.tmp_dir!(), "explicit_home")
     on_exit(fn -> restore_env(:home, previous) end)
 
@@ -42,7 +44,7 @@ defmodule Catalyst.PathsTest do
   end
 
   test "CATALYST_HOME relocates home in a release, but app env wins" do
-    previous = Application.get_env(:catalyst, :home)
+    previous = Application.fetch_env(:catalyst, :home)
     env_root = Path.join(System.tmp_dir!(), "env_home")
     app_root = Path.join(System.tmp_dir!(), "app_home")
 
@@ -60,7 +62,4 @@ defmodule Catalyst.PathsTest do
     Application.put_env(:catalyst, :home, app_root)
     assert Paths.home() == app_root
   end
-
-  defp restore_env(key, nil), do: Application.delete_env(:catalyst, key)
-  defp restore_env(key, value), do: Application.put_env(:catalyst, key, value)
 end

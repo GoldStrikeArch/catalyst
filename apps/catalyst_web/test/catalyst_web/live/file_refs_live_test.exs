@@ -7,12 +7,6 @@ defmodule CatalystWeb.FileRefsLiveTest do
   alias Catalyst.Agent.Event
   alias Catalyst.Session.Server
 
-  defp session_id(view) do
-    html = view |> element("#catalyst-shell") |> render()
-    [_, id] = Regex.run(~r/data-session-id="([^"]+)"/, html)
-    id
-  end
-
   # Mount the shell and point its session at a temp tree with two same-named
   # files (the disambiguation scenario from the design).
   defp mount_in_tmp_tree!(conn) do
@@ -28,7 +22,7 @@ defmodule CatalystWeb.FileRefsLiveTest do
 
     {:ok, view, _html} = live(conn, "/")
     view |> form("#chat-form", %{"message" => "/cd #{root}"}) |> render_submit()
-    assert render(view) =~ root
+    assert has_element?(view, "#chat-empty-state", root)
     view
   end
 
@@ -36,30 +30,32 @@ defmodule CatalystWeb.FileRefsLiveTest do
        %{conn: conn} do
     view = mount_in_tmp_tree!(conn)
 
-    html =
-      view
-      |> form("#chat-form", %{"message" => "look at @server"})
-      |> render_change()
+    view
+    |> form("#chat-form", %{"message" => "look at @server"})
+    |> render_change()
 
-    assert html =~ "file-search-results"
-    assert html =~ "@session/server.ex"
-    assert html =~ "@qwe/server.ex"
+    # The fd search runs via start_async; wait for its result to render.
+    render_async(view)
 
-    html =
-      view
-      |> element("#file-search-results button", "@session/server.ex")
-      |> render_click()
+    assert has_element?(view, "#file-search-results")
+    assert has_element?(view, "#file-search-results code", "@session/server.ex")
+    assert has_element?(view, "#file-search-results code", "@qwe/server.ex")
+
+    view
+    |> element("#file-search-results button", "@session/server.ex")
+    |> render_click()
 
     # The trailing @query is replaced by the short label in the input, and the
     # dropdown closes.
-    assert html =~ ~s(value="look at @session/server.ex ")
-    refute html =~ "file-search-results"
+    assert has_element?(view, ~s(#chat-form input[value="look at @session/server.ex "]))
+    refute has_element?(view, "#file-search-results")
   end
 
   test "sending expands picked labels into real cwd-relative paths", %{conn: conn} do
     view = mount_in_tmp_tree!(conn)
 
     view |> form("#chat-form", %{"message" => "read @server"}) |> render_change()
+    render_async(view)
     view |> element("#file-search-results button", "@qwe/server.ex") |> render_click()
 
     id = session_id(view)
@@ -72,7 +68,7 @@ defmodule CatalystWeb.FileRefsLiveTest do
     assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
 
     # The transcript's user message carries the expanded path the model needs.
-    assert render(view) =~ "read qwe/server.ex please"
+    assert has_element?(view, "#message-stream", "read qwe/server.ex please")
   end
 
   test "Enter with the dropdown open picks the first match instead of sending",
@@ -80,15 +76,15 @@ defmodule CatalystWeb.FileRefsLiveTest do
     view = mount_in_tmp_tree!(conn)
 
     view |> form("#chat-form", %{"message" => "see @qwe"}) |> render_change()
-    assert render(view) =~ "file-search-results"
+    render_async(view)
+    assert has_element?(view, "#file-search-results")
 
-    html =
-      view
-      |> form("#chat-form", %{"message" => "see @qwe"})
-      |> render_submit()
+    view
+    |> form("#chat-form", %{"message" => "see @qwe"})
+    |> render_submit()
 
     # Picked, not sent: the label landed in the input and no run started.
-    assert html =~ ~s(value="see @qwe/server.ex ")
+    assert has_element?(view, ~s(#chat-form input[value="see @qwe/server.ex "]))
     assert has_element?(view, "#chat-empty-state")
   end
 end

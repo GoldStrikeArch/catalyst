@@ -28,25 +28,6 @@ defmodule CatalystWeb.ShellLiveTest do
     def card(assigns), do: ~H|<div>CUSTOM-LS-CARD:{@msg.tool_name}</div>|
   end
 
-  defp session_id(view) do
-    html = view |> element("#catalyst-shell") |> render()
-    [_, id] = Regex.run(~r/data-session-id="([^"]+)"/, html)
-    id
-  end
-
-  defp submit_prompt(view, prompt) do
-    id = session_id(view)
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-
-    view
-    |> form("#chat-form", %{"message" => prompt})
-    |> render_submit()
-
-    # Broadcasts are tagged with the broadcasting session's id.
-    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
-    render(view)
-  end
-
   test "a runtime-registered page renders via the catch-all route", %{conn: conn} do
     on_exit(fn -> Registry.unregister_owner("e5_page") end)
 
@@ -55,9 +36,9 @@ defmodule CatalystWeb.ShellLiveTest do
       label: "Settings"
     )
 
-    {:ok, _view, html} = live(conn, "/settings")
-    assert html =~ "SETTINGS-PAGE-CONTENT"
-    assert html =~ "Settings"
+    {:ok, view, _html} = live(conn, "/settings")
+    assert has_element?(view, "#catalyst-shell", "SETTINGS-PAGE-CONTENT")
+    assert has_element?(view, "#shell-page-nav", "Settings")
   end
 
   test "an extension page that raises at diff time falls back to chat", %{conn: conn} do
@@ -71,9 +52,9 @@ defmodule CatalystWeb.ShellLiveTest do
     # The template raises only when its dynamics run (missing assign), so a
     # guard around the lazy build alone would let the diff engine crash-loop
     # the LiveView. Forced evaluation renders the chat fallback instead.
-    {:ok, view, html} = live(conn, "/broken")
-    refute html =~ "BROKEN-PAGE"
-    assert html =~ "Ask Catalyst to inspect this project."
+    {:ok, view, _html} = live(conn, "/broken")
+    refute has_element?(view, "#catalyst-shell", "BROKEN-PAGE")
+    assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
     assert has_element?(view, "#chat-form")
   end
 
@@ -89,21 +70,21 @@ defmodule CatalystWeb.ShellLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    html = submit_prompt(view, "list the files")
+    submit_prompt(view, "list the files")
 
-    assert html =~ "CUSTOM-LS-CARD:ls"
-    refute html =~ "Ask Catalyst to inspect this project."
+    assert has_element?(view, "#message-stream", "CUSTOM-LS-CARD:ls")
+    refute has_element?(view, "#chat-empty-state")
   end
 
   test "the chat page is the default at /", %{conn: conn} do
-    {:ok, view, html} = live(conn, ~p"/")
-    assert html =~ "Catalyst"
-    assert has_element?(view, "#chat-empty-state")
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert has_element?(view, "#shell-header")
+    assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
   end
 
   test "the chat starts empty and renders messages through a LiveView stream", %{conn: conn} do
-    {:ok, view, html} = live(conn, ~p"/")
-    assert html =~ "Ask Catalyst to inspect this project."
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
     assert has_element?(view, "#message-stream")
   end
 
@@ -119,7 +100,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
     assert has_element?(view, "#streaming-message")
     assert has_element?(view, "#streaming-message [data-stream=text]")
-    assert render(view) =~ "Assistant is working"
+    assert has_element?(view, "#stream-dots", "Assistant is working")
 
     send(
       view.pid,
@@ -136,15 +117,15 @@ defmodule CatalystWeb.ShellLiveTest do
     # itself stays at the seed — LiveView never repaints the ignored bubble).
     assert_push_event(view, "stream_delta", %{kind: "thinking", delta: "hmm…"})
     assert_push_event(view, "stream_delta", %{kind: "text", delta: "- partial `item`"})
-    refute render(view) =~ "partial"
+    refute has_element?(view, "#catalyst-shell", "partial")
 
     final = %Message.Assistant{content: Content.text("- final `item`")}
     send(view.pid, {:agent_event, id, %Event.MessageEnd{message: final}})
 
     refute has_element?(view, "#streaming-message")
-    assert has_element?(view, "ul li")
-    assert has_element?(view, "code", "item")
-    assert render(view) =~ "final"
+    assert has_element?(view, "#message-stream ul li")
+    assert has_element?(view, "#message-stream code", "item")
+    assert has_element?(view, "#message-stream", "final")
   end
 
   test "streaming commits stable markdown blocks progressively through the real renderer",
@@ -173,14 +154,12 @@ defmodule CatalystWeb.ShellLiveTest do
       )
     end
 
-    html = render(view)
-
     # The heading, paragraph, and (fence-closed) code block stabilized and
     # rendered through MessageRenderer while the message is still streaming.
     assert has_element?(view, "#stream-blocks", "Title")
     assert has_element?(view, "#stream-blocks p", "intro para")
     assert has_element?(view, "#stream-blocks pre code[data-lang=elixir]")
-    assert html =~ "def f, do: :ok"
+    assert has_element?(view, "#stream-blocks", "def f, do: :ok")
 
     # Each commit trimmed the client tail to the open block's source.
     assert_push_event(view, "stream_tail", %{text: _})
@@ -195,7 +174,7 @@ defmodule CatalystWeb.ShellLiveTest do
     # The bubble is gone; the final message shows the same blocks.
     refute has_element?(view, "#streaming-message")
     assert has_element?(view, "#message-stream pre code[data-lang=elixir]")
-    assert render(view) =~ "closing thoughts"
+    assert has_element?(view, "#message-stream", "closing thoughts")
   end
 
   defmodule SlowStreamProvider do
@@ -228,7 +207,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
   test "a mid-stream replay seeds the bubble with the accumulated partial text",
        %{conn: conn} do
-    previous_provider = Catalyst.LLM.Registry.fetch_config("openai-codex-responses")
+    {:ok, previous_provider} = Catalyst.LLM.Registry.fetch_config("openai-codex-responses")
     :ok = Catalyst.LLM.Registry.register_provider("openai-codex-responses", SlowStreamProvider)
     Application.put_env(:catalyst_web, :slow_provider_test, self())
 
@@ -259,9 +238,8 @@ defmodule CatalystWeb.ShellLiveTest do
     view |> element("a", "Extensions") |> render_click()
     view |> element("a", "Chat") |> render_click()
 
-    html = render(view)
     assert has_element?(view, "#streaming-message")
-    assert html =~ "already streamed"
+    assert has_element?(view, "#streaming-message", "already streamed")
 
     send(provider_pid, :finish)
 
@@ -284,19 +262,20 @@ defmodule CatalystWeb.ShellLiveTest do
     # A needle that survives markdown rendering (no backticks/formatting).
     needle = "offline Demo provider"
     assert Catalyst.Content.text_of(last.content) =~ needle
+    stream_html = fn -> view |> element("#message-stream") |> render() end
     count = fn html -> length(String.split(html, needle)) - 1 end
 
-    before_count = count.(render(view))
+    before_count = count.(stream_html.())
     assert before_count >= 1
 
     # A duplicate broadcast (the reattach race) must NOT double-render...
     send(view.pid, {:agent_event, id, %Event.MessageEnd{message: last}})
-    assert count.(render(view)) == before_count
+    assert count.(stream_html.()) == before_count
 
     # ...while a genuinely new message still renders (the window closed).
     fresh = %Message.User{content: Content.text("brand new message")}
     send(view.pid, {:agent_event, id, %Event.MessageEnd{message: fresh}})
-    assert render(view) =~ "brand new message"
+    assert has_element?(view, "#message-stream", "brand new message")
   end
 
   # 1x1 red-pixel PNG.
@@ -321,9 +300,8 @@ defmodule CatalystWeb.ShellLiveTest do
     assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
 
     # The user bubble shows the attached thumbnail alongside the text.
-    html = render(view)
-    assert html =~ "data:image/png;base64,"
-    assert html =~ "what is in this screenshot?"
+    assert has_element?(view, ~s(#message-stream img[src^="data:image/png;base64,"]))
+    assert has_element?(view, "#message-stream", "what is in this screenshot?")
 
     # And the session's transcript carries a real image content block.
     [{session_pid, _}] = Elixir.Registry.lookup(Catalyst.Session.Registry, id)
@@ -332,20 +310,6 @@ defmodule CatalystWeb.ShellLiveTest do
     assert [%Catalyst.Content.Text{}, %Catalyst.Content.Image{} = img] = user.content
     assert img.mime_type == "image/png"
     assert Base.decode64!(img.data) == @png_bytes
-  end
-
-  defp wait_until(fun, tries \\ 50) do
-    cond do
-      fun.() ->
-        :ok
-
-      tries == 0 ->
-        flunk("condition never became true")
-
-      true ->
-        Process.sleep(20)
-        wait_until(fun, tries - 1)
-    end
   end
 
   test "tool execution indicators and results render immediately", %{conn: conn} do
@@ -357,8 +321,8 @@ defmodule CatalystWeb.ShellLiveTest do
       {:agent_event, id, %Event.ToolExecutionStart{call_id: "call-1", name: "grep", args: %{}}}
     )
 
-    assert render(view) =~ "running"
-    assert has_element?(view, "code", "grep")
+    assert has_element?(view, "#tool-indicator-call-1", "running")
+    assert has_element?(view, "#tool-indicator-call-1 code", "grep")
 
     # A streamed partial-output tail renders under the spinner.
     send(
@@ -372,8 +336,7 @@ defmodule CatalystWeb.ShellLiveTest do
        }}
     )
 
-    assert render(view) =~ "partial tail line"
-    assert has_element?(view, "[data-tool-partial]")
+    assert has_element?(view, "#tool-indicator-call-1 [data-tool-partial]", "partial tail line")
 
     result = %Message.ToolResult{
       tool_call_id: "call-1",
@@ -383,12 +346,11 @@ defmodule CatalystWeb.ShellLiveTest do
 
     send(view.pid, {:agent_event, id, %Event.MessageEnd{message: result}})
 
-    assert has_element?(view, ~s([data-message-role="tool-result"]))
-    assert render(view) =~ "found it"
+    assert has_element?(view, ~s(#message-stream [data-message-role="tool-result"]), "found it")
 
     send(view.pid, {:agent_event, id, %Event.ToolExecutionEnd{call_id: "call-1"}})
 
-    refute render(view) =~ "running"
+    refute has_element?(view, "#tool-indicator-call-1")
   end
 
   test "context status updates the header meter without adding a chat block", %{conn: conn} do
@@ -427,8 +389,8 @@ defmodule CatalystWeb.ShellLiveTest do
     send(view.pid, {:agent_event, id, %Event.MessageEnd{message: old_user}})
     send(view.pid, {:agent_event, id, %Event.MessageEnd{message: old_assistant}})
 
-    assert render(view) =~ "OLD-CONTEXT-USER"
-    assert render(view) =~ "OLD-CONTEXT-ASSISTANT"
+    assert has_element?(view, "#message-stream", "OLD-CONTEXT-USER")
+    assert has_element?(view, "#message-stream", "OLD-CONTEXT-ASSISTANT")
 
     replacement = [
       %Message.User{content: Content.text("COMPACTED-SUMMARY")},
@@ -448,11 +410,10 @@ defmodule CatalystWeb.ShellLiveTest do
        }}
     )
 
-    html = render(view)
-    refute html =~ "OLD-CONTEXT-USER"
-    refute html =~ "OLD-CONTEXT-ASSISTANT"
-    assert html =~ "COMPACTED-SUMMARY"
-    assert html =~ "KEPT-AFTER-COMPACTION"
+    refute has_element?(view, "#message-stream", "OLD-CONTEXT-USER")
+    refute has_element?(view, "#message-stream", "OLD-CONTEXT-ASSISTANT")
+    assert has_element?(view, "#message-stream", "COMPACTED-SUMMARY")
+    assert has_element?(view, "#message-stream", "KEPT-AFTER-COMPACTION")
     refute has_element?(view, "#chat-empty-state")
   end
 
@@ -495,14 +456,14 @@ defmodule CatalystWeb.ShellLiveTest do
       {:agent_event, "not-" <> session_id(view), %Event.MessageEnd{message: leaked}}
     )
 
-    refute render(view) =~ "LEAKED-FROM-OTHER-SESSION"
+    refute has_element?(view, "#catalyst-shell", "LEAKED-FROM-OTHER-SESSION")
     # The transcript is untouched — the empty state is still up.
     assert has_element?(view, "#chat-empty-state")
   end
 
   test "the web self-modification tools are registered into the core tool set" do
     assert Catalyst.Extensions.fetch("rebuild_assets") == {:ok, CatalystWeb.Tools.RebuildAssets}
-    assert Catalyst.Extensions.fetch("reload_ui") == {:ok, CatalystWeb.Tools.ReconnectUi}
+    assert Catalyst.Extensions.fetch("reload_ui") == {:ok, CatalystWeb.Tools.ReloadUi}
   end
 
   test "an asset reload broadcast triggers a full page reload in connected views", %{conn: conn} do
@@ -529,7 +490,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
     view |> form("#chat-form", %{"message" => "/cd "}) |> render_submit()
 
-    assert render(view) =~ "usage: /cd"
+    assert has_element?(view, "#flash-error", "usage: /cd")
     # Nothing was sent to the agent.
     assert has_element?(view, "#chat-empty-state")
   end
@@ -539,9 +500,8 @@ defmodule CatalystWeb.ShellLiveTest do
 
     view |> form("#chat-form", %{"message" => "/nope now"}) |> render_submit()
 
-    html = render(view)
-    assert html =~ "unknown command /nope"
-    assert html =~ "/cd"
+    assert has_element?(view, "#flash-error", "unknown command /nope")
+    assert has_element?(view, "#flash-error", "/cd")
     assert has_element?(view, "#chat-empty-state")
   end
 
@@ -563,7 +523,7 @@ defmodule CatalystWeb.ShellLiveTest do
     view |> form("#chat-form", %{"message" => "/ping_test hello"}) |> render_submit()
 
     assert_receive {:command_ran, "hello"}
-    assert render(view) =~ "pong hello"
+    assert has_element?(view, "#flash-info", "pong hello")
     assert has_element?(view, "#chat-empty-state")
   end
 
@@ -578,12 +538,11 @@ defmodule CatalystWeb.ShellLiveTest do
     {:ok, view, _html} = live(conn, ~p"/")
 
     view |> form("#chat-form", %{"message" => "/cd #{parent}"}) |> render_submit()
-    assert render(view) =~ parent
+    assert has_element?(view, "#chat-empty-state", parent)
 
     view |> form("#chat-form", %{"message" => "/cd child"}) |> render_submit()
 
-    html = render(view)
-    assert html =~ child
-    refute html =~ "Not a directory"
+    assert has_element?(view, "#chat-empty-state", child)
+    refute has_element?(view, "#flash-error", "Not a directory")
   end
 end

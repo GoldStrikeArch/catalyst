@@ -1,6 +1,8 @@
 defmodule Catalyst.Prompt.RegistryTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2]
+
   alias Catalyst.Prompt
   alias Catalyst.Prompt.{Registry, Request, Resolution}
 
@@ -82,7 +84,7 @@ defmodule Catalyst.Prompt.RegistryTest do
                owner: "owner-a"
              )
 
-    assert {:error, {:prompt_owner_collision, ^key, "owner-a", "owner-b"}} =
+    assert {:error, {:owner_collision, :prompt, ^key, "owner-a", "owner-b"}} =
              Registry.register_prompt("gpt-test", "rejected",
                purpose: :compaction,
                owner: "owner-b"
@@ -243,7 +245,4 @@ defmodule Catalyst.Prompt.RegistryTest do
         end
     end
   end
-
-  defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
-  defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
 end

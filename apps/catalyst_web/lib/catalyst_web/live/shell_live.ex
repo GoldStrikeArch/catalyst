@@ -48,9 +48,6 @@ defmodule CatalystWeb.ShellLive do
         session_opts: [],
         file_search: nil,
         file_search_token: nil,
-        file_search_ref: nil,
-        image_preps: %{},
-        image_prep_refs: %{},
         file_refs: %{},
         session_id: nil,
         session_pid: nil,
@@ -90,7 +87,22 @@ defmodule CatalystWeb.ShellLive do
     {:noreply,
      socket
      |> change_page(page)
+     |> refresh_shell_chrome()
      |> maybe_refresh_panel()}
+  end
+
+  # The Codex catalog and the registered page list only change at discrete
+  # points (mount/navigation, Codex control changes, extension actions,
+  # session swaps), so they are resolved into assigns there instead of on
+  # every render — render/1 runs many times per second while streaming.
+  defp refresh_shell_chrome(socket) do
+    catalog = Catalyst.LLM.OpenAICodex.catalog_snapshot(socket.assigns.codex_prefs.model)
+
+    assign(socket,
+      codex_catalog: catalog.models,
+      selected_codex_entry: catalog.selected,
+      shell_pages: CatalystWeb.UI.Registry.list_pages()
+    )
   end
 
   # Returning to chat recreates a DOM-backed stream that disappeared while a
@@ -137,20 +149,6 @@ defmodule CatalystWeb.ShellLive do
      |> ChatInput.search_files(text)}
   end
 
-  def handle_event("validate", _params, socket) do
-    # Triggered by auto_upload or manual selection.
-    # We use this to start async preparation of images.
-    socket =
-      Enum.reduce(socket.assigns.uploads.image.entries, socket, fn entry, socket ->
-        case entry.done? or Map.has_key?(socket.assigns.image_preps, entry.ref) do
-          true -> socket
-          false -> ChatInput.prepare_image(socket, entry)
-        end
-      end)
-
-    {:noreply, socket}
-  end
-
   # Enter selects the first active `@` result rather than submitting an
   # unresolved search token to the model.
   def handle_event(
@@ -175,10 +173,13 @@ defmodule CatalystWeb.ShellLive do
         {:noreply, put_flash(socket, :error, message)}
 
       {:command, name, argument} ->
+        # Command handlers are an extension boundary: they can swap the
+        # session (/cd) or mutate the UI registry, so refresh the chrome.
         {:noreply,
          name
          |> Commands.dispatch(argument, socket)
-         |> RunDiagnostics.preview()}
+         |> RunDiagnostics.preview()
+         |> refresh_shell_chrome()}
 
       :prompt ->
         submit_prompt(socket, text)
@@ -208,6 +209,7 @@ defmodule CatalystWeb.ShellLive do
      socket
      |> SessionLifecycle.start()
      |> RunDiagnostics.preview()
+     |> refresh_shell_chrome()
      |> maybe_refresh_panel()}
   end
 
@@ -236,6 +238,7 @@ defmodule CatalystWeb.ShellLive do
      socket
      |> Settings.apply_codex(prefs)
      |> RunDiagnostics.preview()
+     |> refresh_shell_chrome()
      |> maybe_refresh_panel()}
   end
 
@@ -246,6 +249,7 @@ defmodule CatalystWeb.ShellLive do
      socket
      |> Settings.apply_codex(prefs)
      |> RunDiagnostics.preview()
+     |> refresh_shell_chrome()
      |> maybe_refresh_panel()}
   end
 
@@ -288,52 +292,15 @@ defmodule CatalystWeb.ShellLive do
   end
 
   @impl true
-  def handle_info({ref, result}, %{assigns: %{file_search_ref: ref}} = socket) do
-    Process.demonitor(ref, [:flush])
+  def handle_async({:file_search, _token}, {:ok, result}, socket) do
     {:noreply, ChatInput.apply_search(socket, result)}
   end
 
-  def handle_info(
-        {:DOWN, ref, :process, _pid, _reason},
-        %{assigns: %{file_search_ref: ref}} = socket
-      ) do
-    {:noreply, assign(socket, file_search: nil, file_search_ref: nil)}
-  end
-
-  def handle_info({ref, result}, socket) when is_map_key(socket.assigns.image_prep_refs, ref) do
-    Process.demonitor(ref, [:flush])
-    {entry_ref, image_prep_refs} = Map.pop(socket.assigns.image_prep_refs, ref)
-
-    socket =
-      case result do
-        {:ok, prepared} ->
-          Phoenix.LiveView.Component.update_upload(socket, :image, entry_ref, fn entry ->
-            put_in(entry.meta[:prepared], prepared)
-          end)
-          |> assign(image_preps: Map.put(socket.assigns.image_preps, entry_ref, :ok))
-
-        {:error, reason} ->
-          assign(socket,
-            image_preps: Map.put(socket.assigns.image_preps, entry_ref, {:error, reason})
-          )
-      end
-
-    {:noreply, assign(socket, image_prep_refs: image_prep_refs)}
-  end
-
-  def handle_info(
-        {:DOWN, ref, :process, _pid, reason},
-        socket
-      )
-      when is_map_key(socket.assigns.image_prep_refs, ref) do
-    {entry_ref, image_prep_refs} = Map.pop(socket.assigns.image_prep_refs, ref)
-
-    {:noreply,
-     socket
-     |> assign(
-       image_preps: Map.put(socket.assigns.image_preps, entry_ref, {:error, reason}),
-       image_prep_refs: image_prep_refs
-     )}
+  def handle_async({:file_search, token}, {:exit, _reason}, socket) do
+    case socket.assigns.file_search_token do
+      ^token -> {:noreply, assign(socket, file_search: nil, file_search_token: nil)}
+      _superseded -> {:noreply, socket}
+    end
   end
 
   @impl true
@@ -398,11 +365,13 @@ defmodule CatalystWeb.ShellLive do
   def handle_info({ref, result}, %{assigns: %{ext_action: %{ref: ref}}} = socket) do
     Process.demonitor(ref, [:flush])
 
-    # Reload/rollback/disable can change prompt registrations, so the resolved
-    # preview must be recomputed along with the panel snapshot.
+    # Reload/rollback/disable can change prompt registrations, registered
+    # pages, and the model catalog, so the resolved preview and the shell
+    # chrome must be recomputed along with the panel snapshot.
     socket =
       socket
       |> assign(ext_action: nil)
+      |> refresh_shell_chrome()
       |> maybe_refresh_panel()
       |> RunDiagnostics.preview()
 
@@ -419,8 +388,26 @@ defmodule CatalystWeb.ShellLive do
     {:noreply,
      socket
      |> assign(ext_action: nil)
+     |> refresh_shell_chrome()
      |> maybe_refresh_panel()
      |> put_flash(:error, "Extension action crashed: #{inspect(reason)}")}
+  end
+
+  # Scheduled by SessionLifecycle when a remembered session id was not yet
+  # registered at mount; retries are bounded and stop once a session attached.
+  def handle_info({:retry_session_attach, id, retries_left}, socket) do
+    case socket.assigns.session_pid do
+      nil ->
+        socket = SessionLifecycle.retry_attach(socket, id, retries_left)
+
+        case socket.assigns.session_pid do
+          nil -> {:noreply, socket}
+          _attached -> {:noreply, RunDiagnostics.preview(socket)}
+        end
+
+      _attached ->
+        {:noreply, socket}
+    end
   end
 
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{assigns: %{session_ref: ref}} = socket) do
@@ -431,16 +418,13 @@ defmodule CatalystWeb.ShellLive do
       |> assign(session_ref: nil, session_id: nil, session_pid: nil, running: false)
       |> SessionLifecycle.attach_or_start()
       |> RunDiagnostics.preview()
+      |> refresh_shell_chrome()
       |> maybe_refresh_panel()
 
     {:noreply, put_flash(socket, :info, "Session was replaced — reattached.")}
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
-
-  @doc false
-  @deprecated "Use CatalystWeb.ShellLive.Commands.change_directory/2"
-  def command_cd(path, socket), do: Commands.change_directory(path, socket)
 
   @impl true
   def render(assigns), do: CatalystWeb.ShellComponents.render(assigns)
@@ -515,8 +499,8 @@ defmodule CatalystWeb.ShellLive do
     Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
   end
 
-  defp page_path("chat"), do: "/"
-  defp page_path(page), do: "/#{page}"
+  defp page_path("chat"), do: ~p"/"
+  defp page_path(page), do: ~p"/#{page}"
 
   defp login_fun do
     Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)

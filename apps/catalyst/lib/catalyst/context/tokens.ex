@@ -116,18 +116,6 @@ defmodule Catalyst.Context.Tokens do
     div(bytes + @bytes_per_token - 1, @bytes_per_token) + image_floor
   end
 
-  @doc "Digest a semantic prefix using the same projection as request accounting."
-  @spec prefix_digest(Model.t() | nil, LLMContext.t(), non_neg_integer(), keyword() | map()) ::
-          String.t()
-  def prefix_digest(model, %LLMContext{} = context, count, opts \\ []) do
-    prefix = %{context | messages: Enum.take(context.messages, count)}
-
-    case context_fingerprint(model, prefix, opts) do
-      {:ok, digest} -> digest
-      {:error, _reason} -> semantic_digest(model, prefix, opts)
-    end
-  end
-
   @doc """
   Attach a provider-accurate resumable digest to a successful assistant usage
   record. Adapter-less, failed, aborted, and zero-total responses remain
@@ -221,7 +209,9 @@ defmodule Catalyst.Context.Tokens do
 
     case context_fingerprint_with_source(model, prefix, opts) do
       {:ok, current, :provider} ->
-        case secure_equal?(normalize_digest(digest), current) do
+        # Content fingerprints are change detectors, not secrets, so a plain
+        # comparison is enough — no constant-time requirement.
+        case normalize_digest(digest) == current do
           true ->
             %{
               total: total,
@@ -458,9 +448,4 @@ defmodule Catalyst.Context.Tokens do
 
   defp hash_digest(value),
     do: value |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
-
-  defp secure_equal?(left, right) when byte_size(left) == byte_size(right),
-    do: Plug.Crypto.secure_compare(left, right)
-
-  defp secure_equal?(_left, _right), do: false
 end

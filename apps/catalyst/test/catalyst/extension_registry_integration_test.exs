@@ -1,6 +1,8 @@
 defmodule Catalyst.ExtensionRegistryIntegrationTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2]
+
   import ExUnit.CaptureLog
 
   alias Catalyst.Context.Registry, as: ContextRegistry
@@ -98,7 +100,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
     assert runtime_entry(ContextRegistry, {:threshold, "registry-direct-model"}) ==
              %{value: 0.75, owner: @direct_owner}
 
-    assert :ok = Catalyst.ExtensionAPI.purge_owner(@direct_owner)
+    assert {:ok, _purged} = Catalyst.ExtensionAPI.purge_owner(@direct_owner)
     refute owner_registered?(@direct_owner)
   end
 
@@ -112,7 +114,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
         collide:
           ~S<Catalyst.ExtensionAPI.register_prompt(api, "registry-shared-prompt", "owner b")>,
         error:
-          {:prompt_owner_collision, {:text, :system, "registry-shared-prompt"},
+          {:owner_collision, :prompt, {:text, :system, "registry-shared-prompt"},
            "registry_collision_owner_a", "registry_collision_prompt_text"}
       },
       %{
@@ -122,7 +124,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
         end,
         collide: ~S<Catalyst.ExtensionAPI.register_prompt_policy(api, Catalyst.SystemPrompt)>,
         error:
-          {:prompt_owner_collision, {:policy, :default}, "registry_collision_owner_a",
+          {:owner_collision, :prompt, {:policy, :default}, "registry_collision_owner_a",
            "registry_collision_prompt_policy"}
       },
       %{
@@ -137,7 +139,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
         collide:
           ~S<Catalyst.ExtensionAPI.register_workflow(api, "registry-shared-workflow", Catalyst.Agent.Loop)>,
         error:
-          {:workflow_owner_collision, "registry-shared-workflow", "registry_collision_owner_a",
+          {:owner_collision, :workflow, "registry-shared-workflow", "registry_collision_owner_a",
            "registry_collision_workflow"}
       },
       %{
@@ -147,7 +149,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
         end,
         collide: ~S<Catalyst.ExtensionAPI.register_context_policy(api, Catalyst.Context.Window)>,
         error:
-          {:context_policy_owner_collision, "registry_collision_owner_a",
+          {:owner_collision, :context_policy, nil, "registry_collision_owner_a",
            "registry_collision_context_policy"}
       },
       %{
@@ -158,7 +160,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
         collide:
           ~S<Catalyst.ExtensionAPI.register_context_threshold(api, "registry-shared-threshold", 901)>,
         error:
-          {:context_threshold_owner_collision, "registry-shared-threshold",
+          {:owner_collision, :context_threshold, "registry-shared-threshold",
            "registry_collision_owner_a", "registry_collision_context_threshold"}
       }
     ]
@@ -211,7 +213,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
 
     capture_log(fn ->
       assert {:error,
-              {:prompt_owner_collision, {:text, :system, "registry-restore-shared"},
+              {:owner_collision, :prompt, {:text, :system, "registry-restore-shared"},
                @direct_owner, @lifecycle_owner}} = Extensions.reload(@lifecycle_owner)
     end)
 
@@ -367,7 +369,4 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
     assert is_pid(pid)
     pid
   end
-
-  defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
-  defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
 end

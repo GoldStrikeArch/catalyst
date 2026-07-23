@@ -2,7 +2,7 @@ defmodule Catalyst.Context.WindowTest do
   use ExUnit.Case, async: false
 
   alias Catalyst.{Content, Message, Model}
-  alias Catalyst.Context.{Registry, Window}
+  alias Catalyst.Context.{Registry, Transcript, Window}
 
   defmodule ToolUseSummarizer do
     @behaviour Catalyst.LLM.Provider
@@ -77,7 +77,7 @@ defmodule Catalyst.Context.WindowTest do
     assert {:ok, 12_000, :builtin} = Window.builtin_threshold(no_window, false)
 
     tiny = %Model{id: "model", api: "api", context_window: 1, auto_compact_token_limit: 10}
-    assert :none = Window.builtin_threshold(tiny, false)
+    assert :missing = Window.builtin_threshold(tiny, false)
 
     assert {:error, {:context_ratio_without_window, 0.8, {:session, :context_threshold}}} =
              Window.threshold_with_source(no_window, %{context_threshold: 0.8})
@@ -91,17 +91,17 @@ defmodule Catalyst.Context.WindowTest do
       tool_result("two")
     ]
 
-    assert :ok = Window.validate_transcript(valid)
+    assert :ok = Transcript.validate_transcript(valid)
 
     duplicate_calls = [tool_assistant(["same", "same"]), tool_result("same")]
 
     assert {:error, {:invalid_tool_result_group, _, _}} =
-             Window.validate_transcript(duplicate_calls)
+             Transcript.validate_transcript(duplicate_calls)
 
-    assert {:error, :orphan_tool_result} = Window.validate_transcript([tool_result("orphan")])
+    assert {:error, :orphan_tool_result} = Transcript.validate_transcript([tool_result("orphan")])
 
     assert {:error, {:invalid_transcript_message, :foreign}} =
-             Window.validate_transcript([Message.user("ok"), :foreign])
+             Transcript.validate_transcript([Message.user("ok"), :foreign])
   end
 
   test "compaction preserves the active tool group and current input" do
@@ -134,11 +134,7 @@ defmodule Catalyst.Context.WindowTest do
              current
            ]
 
-    assert compaction.replaced_count == 2
-    assert compaction.tokens_before == 200
-    assert compaction.tokens_after == 40
-    assert compaction.tokens_after <= 75
-    assert :ok = Window.validate_transcript(compaction.replacement)
+    assert :ok = Transcript.validate_transcript(compaction.replacement)
   end
 
   test "a summary that misses the target is discarded before tightening old units" do
@@ -168,8 +164,6 @@ defmodule Catalyst.Context.WindowTest do
     assert Content.text_of(summarized.content) == "a"
     assert compaction.summary == nil
     assert compaction.replacement == Enum.drop(messages, 2)
-    assert compaction.replaced_count == 2
-    assert compaction.tokens_after == 60
   end
 
   test "the protected suffix may miss the hysteresis target while remaining below the trigger" do
@@ -184,7 +178,6 @@ defmodule Catalyst.Context.WindowTest do
     assert {:ok, compaction} = Window.compact(messages, context)
     assert compaction.summary == nil
     assert compaction.replacement == Enum.drop(messages, 1)
-    assert compaction.tokens_after == 80
 
     summary_context =
       context
@@ -196,7 +189,6 @@ defmodule Catalyst.Context.WindowTest do
     assert {:ok, summary_free} = Window.compact(messages, summary_context)
     assert summary_free.summary == nil
     assert summary_free.replacement == Enum.drop(messages, 1)
-    assert summary_free.tokens_after == 80
 
     assert {:error, :irreducible_context} =
              Window.compact(messages, %{
@@ -221,8 +213,8 @@ defmodule Catalyst.Context.WindowTest do
   end
 
   test "tool-result summary bounds count Unicode characters rather than bytes" do
-    assert tool_result_compaction_tokens(2_000) > tool_result_compaction_tokens(1_000)
-    assert tool_result_compaction_tokens(2_001) == tool_result_compaction_tokens(2_000)
+    assert tool_result_render_bytes(2_000) > tool_result_render_bytes(1_000)
+    assert tool_result_render_bytes(2_001) == tool_result_render_bytes(2_000)
   end
 
   test "an invalid summarizer stop reason falls back to the summary-free cut" do
@@ -289,12 +281,11 @@ defmodule Catalyst.Context.WindowTest do
 
       assert retained == Enum.take(messages, -length(retained))
       assert List.last(retained) == List.last(messages)
-      assert compaction.replaced_count == length(messages) - length(retained)
-      assert compaction.replaced_count > 0
-      assert compaction.tokens_after == length(compaction.replacement) * token_weight
-      assert compaction.tokens_after < compaction.tokens_before
-      assert compaction.tokens_after <= 75
-      assert :ok = Window.validate_transcript(compaction.replacement)
+      # History must shrink, and the accepted candidate must satisfy the
+      # 75-token hysteresis target under the test estimator.
+      assert length(retained) < length(messages)
+      assert length(compaction.replacement) * token_weight <= 75
+      assert :ok = Transcript.validate_transcript(compaction.replacement)
     end
   end
 
@@ -335,17 +326,10 @@ defmodule Catalyst.Context.WindowTest do
     %Message.ToolResult{tool_call_id: id, tool_name: "read", content: Content.text(text)}
   end
 
-  defp tool_result_compaction_tokens(character_count) do
-    messages = [
-      Message.user("old"),
-      tool_assistant(["call"]),
-      tool_result("call", String.duplicate("🙂", character_count)),
-      Message.user("current")
-    ]
-
-    assert {:ok, compaction} =
-             Window.compact(messages, %{threshold: 10_000, tokens_before: 20_000})
-
-    compaction.tokens_after
+  defp tool_result_render_bytes(character_count) do
+    "call"
+    |> tool_result(String.duplicate("🙂", character_count))
+    |> Catalyst.Context.Summarizer.render_message()
+    |> byte_size()
   end
 end

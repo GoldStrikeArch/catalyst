@@ -102,7 +102,11 @@ defmodule CatalystWeb.Pages.ChatPage do
             </div>
           </div>
 
-          <div :for={{_id, t} <- @tools} class="flex flex-col items-start gap-1">
+          <div
+            :for={{call_id, t} <- @tools}
+            id={"tool-indicator-#{call_id}"}
+            class="flex flex-col items-start gap-1"
+          >
             <div class="inline-flex items-center gap-2 rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs font-medium text-neutral-600 dark:border-white/10 dark:bg-white/5 dark:text-neutral-300">
               <span class="size-3 animate-spin rounded-full border-2 border-neutral-200 border-t-neutral-600 dark:border-white/15 dark:border-t-white">
               </span>

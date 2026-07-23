@@ -24,6 +24,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   """
 
   alias Catalyst.LLM.OpenAICodex.BoundedBuffer
+  alias Catalyst.Tasks
 
   @upgrade_timeout 15_000
   @idle_timeout 600_000
@@ -46,7 +47,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   @type reducer :: (map(), acc :: term() -> acc :: term())
 
   @doc "Guard matching TCP/SSL messages that may belong to a Mint connection."
-  defguard socket_message?(message)
+  defguard is_socket_message(message)
            when is_tuple(message) and tuple_size(message) > 0 and
                   elem(message, 0) in [
                     :tcp,
@@ -79,7 +80,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
              transport_opts: [timeout: timeout]
            ),
          {:ok, conn, ref} <- Mint.WebSocket.upgrade(ws_scheme, conn, path, headers) do
-      deadline = monotonic_ms() + timeout
+      deadline = Tasks.monotonic_ms() + timeout
 
       await_upgrade(
         %{conn: conn, ref: ref, status: nil, headers: [], body: BoundedBuffer.new()},
@@ -115,7 +116,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   # Collect the upgrade response (101 → websocket; anything else → error with
   # the response body, so a 401 can drive the token-refresh retry).
   defp await_upgrade(%{conn: conn} = acc, deadline) do
-    remaining = deadline - monotonic_ms()
+    remaining = deadline - Tasks.monotonic_ms()
 
     case remaining > 0 do
       true -> receive_upgrade(acc, deadline, remaining)
@@ -125,7 +126,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
 
   defp receive_upgrade(%{conn: conn} = acc, deadline, remaining) do
     receive do
-      msg when socket_message?(msg) ->
+      msg when is_socket_message(msg) ->
         case Mint.WebSocket.stream(conn, msg) do
           {:ok, conn, entries} ->
             acc = %{acc | conn: conn}
@@ -257,7 +258,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
 
   defp recv_loop(state, idle_timeout) do
     receive do
-      msg when socket_message?(msg) ->
+      msg when is_socket_message(msg) ->
         case handle_socket_message(state, msg) do
           {:cont, state} -> recv_loop(state, idle_timeout)
           {:halt, result} -> result
@@ -392,7 +393,7 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   # connection.
   defp drain_idle(%__MODULE__{} = ws) do
     receive do
-      msg when socket_message?(msg) ->
+      msg when is_socket_message(msg) ->
         state = idle_state(ws)
 
         case handle_socket_message(state, msg) do
@@ -413,8 +414,6 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
 
   defp encode_request(frame) when is_binary(frame), do: frame
   defp encode_request(body), do: body |> Map.put("type", "response.create") |> Jason.encode!()
-
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   # `mint_web_socket` 1.0.5's inferred success type for new/4 collapses to its
   # error branch under Dialyzer even though its public contract and runtime both

@@ -83,31 +83,6 @@ defmodule Catalyst.Session.ReducerTest do
     assert done.streaming_thinking == []
   end
 
-  test "snapshot accepts the pre-upgrade nested iodata accumulator", %{state: state} do
-    assistant = %Message.Assistant{content: [], timestamp: Message.now()}
-
-    legacy = %{
-      state
-      | streaming_message: assistant,
-        streaming_text: [[[] | "hel"] | "lo"],
-        streaming_thinking: []
-    }
-
-    assert [%Content.Text{text: "hello"}] =
-             Catalyst.Session.Snapshot.of(legacy).streaming_message.content
-
-    migrated =
-      Reducer.reduce(
-        %Event.MessageUpdate{llm_event: %Catalyst.LLM.Event.TextDelta{delta: "!"}},
-        legacy
-      )
-
-    assert migrated.streaming_text == ["!", "hello"]
-
-    assert [%Content.Text{text: "hello!"}] =
-             Catalyst.Session.Snapshot.of(migrated).streaming_message.content
-  end
-
   test "a provider-error assistant surfaces in error_message", %{state: state} do
     err = %Message.Assistant{
       content: Content.text("provider error"),

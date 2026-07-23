@@ -241,6 +241,17 @@ defmodule Catalyst.Tools.Exec do
             finish_owner(task, token)
             {:error, reason}
 
+          {^task_ref, {:status_lost, reason}} ->
+            finish_owner(task, token)
+
+            # The ack write raced the wrapper's exit (see port_loop): output is
+            # complete but the exit status is unrecoverable. Mirror the owner
+            # DOWN fallback below — with output in hand, treat it as a success.
+            case acc do
+              [] -> {:error, {:port_exit, reason}}
+              _ -> {:ok, %{out: scrub(acc_to_binary(acc)), status: 0}}
+            end
+
           {:DOWN, ^task_ref, :process, ^owner, reason} ->
             drain_owner_messages(token, owner)
 
@@ -308,6 +319,14 @@ defmodule Catalyst.Tools.Exec do
 
       {^port, {:exit_status, status}} ->
         {:status, status}
+
+      {:EXIT, ^port, :epipe} when mode == :muontrap ->
+        # In :muontrap mode the only port writes are the ack bytes for
+        # already-received chunks (see ack/3). :epipe on that write means the
+        # wrapper exited after forwarding everything but before the port
+        # delivered its exit_status — the ack raced the exit, the command did
+        # not fail. Report it distinctly so collect_loop can salvage the run.
+        {:status_lost, :epipe}
 
       {:EXIT, ^port, reason} ->
         {:error, {:port_exit, reason}}

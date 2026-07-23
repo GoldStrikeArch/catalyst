@@ -1,6 +1,8 @@
 defmodule Catalyst.Session.RunContextBoundaryTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2, restore_runtime_policy: 2, runtime_policy: 1]
+
   alias Catalyst.Model
   alias Catalyst.LLM.OpenAICodex.Catalog
   alias Catalyst.Prompt.Registry, as: PromptRegistry
@@ -8,7 +10,7 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
 
   setup do
     previous_timeout = Application.fetch_env(:catalyst, :prompt_policy_timeout)
-    previous_policy = runtime_policy()
+    previous_policy = runtime_policy(PromptRegistry)
 
     :ok = PromptRegistry.unregister_policy()
 
@@ -21,7 +23,7 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
 
     on_exit(fn ->
       :ok = PromptRegistry.unregister_policy()
-      restore_runtime_policy(previous_policy)
+      restore_runtime_policy(PromptRegistry, previous_policy)
       restore_env(:prompt_policy_timeout, previous_timeout)
     end)
 
@@ -337,17 +339,4 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
 
   defp model(id, provider),
     do: %Model{id: id, api: "test-api", provider: provider, context_window: 10_000}
-
-  defp runtime_policy do
-    Enum.find(PromptRegistry.runtime_entries(), &(&1.key == {:policy, :default}))
-  end
-
-  defp restore_runtime_policy(nil), do: :ok
-
-  defp restore_runtime_policy(entry) do
-    PromptRegistry.register_policy(entry.value, owner: entry.owner)
-  end
-
-  defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
-  defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
 end

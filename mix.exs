@@ -44,6 +44,7 @@ defmodule Catalyst.Umbrella.MixProject do
         ],
         steps: [
           :assemble,
+          &release_preflight!/1,
           &bundle_assets/1,
           &Desktop.Deployment.generate_installer/1,
           &native_macos_launcher/1
@@ -84,53 +85,100 @@ defmodule Catalyst.Umbrella.MixProject do
     ]
   end
 
+  @fast_tools ~w(rg fd sd ast-grep)
+
+  # Deterministic packaging preflight (desktop release). Every input the
+  # bundling steps below copy into the release must exist on the build host,
+  # otherwise the app would assemble fine but ship without runtime asset
+  # rebuild or the fast search/replace tools. Collect ALL missing inputs and
+  # fail once with the full list; dev/test flows never run this (it is a
+  # release step).
+  defp release_preflight!(release) do
+    checks =
+      [
+        {webapp_dir(release), "catalyst_web app dir under #{release.path}/lib"},
+        {core_dir(release), "catalyst core app dir under #{release.path}/lib"},
+        {esbuild_bin(),
+         "esbuild standalone binary under #{build_root()} (run `mix assets.setup`)"},
+        {tailwind_bin(),
+         "tailwind standalone binary under #{build_root()} (run `mix assets.setup`)"}
+      ] ++
+        for exe <- @fast_tools do
+          {System.find_executable(exe), "fast tool `#{exe}` on PATH"}
+        end
+
+    case for {nil, label} <- checks, do: label do
+      [] ->
+        release
+
+      missing ->
+        raise """
+        catalyst_desktop release preflight failed — missing required packaging inputs:
+
+        #{Enum.map_join(missing, "\n", &("  - " <> &1))}
+        """
+    end
+  end
+
+  defp webapp_dir(release),
+    do: release.path |> Path.join("lib/catalyst_web-*") |> Path.wildcard() |> List.first()
+
+  defp core_dir(release),
+    do: release.path |> Path.join("lib/catalyst-*") |> Path.wildcard() |> List.first()
+
+  # Parent of the per-env build dir; esbuild/tailwind install their standalone
+  # binaries there. Derived from Mix.Project so MIX_BUILD_ROOT/:build_path
+  # overrides keep working (a literal "_build" would not).
+  defp build_root, do: Path.dirname(Mix.Project.build_path())
+
+  defp esbuild_bin, do: build_root() |> Path.join("esbuild-*") |> Path.wildcard() |> List.first()
+
+  defp tailwind_bin,
+    do: build_root() |> Path.join("tailwind-*") |> Path.wildcard() |> List.first()
+
   # Release step (desktop): bundle a self-contained asset workspace so the packaged
   # app can rebuild CSS/JS at runtime (CatalystWeb.Assets / the rebuild_assets tool).
   # See the prod block in config/runtime.exs for the paths these are wired to.
+  # Runs after release_preflight!/1, so all inputs are known to exist.
   defp bundle_assets(release) do
-    webapp = release.path |> Path.join("lib/catalyst_web-*") |> Path.wildcard() |> List.first()
+    webapp = webapp_dir(release)
+    ws = Path.join(webapp, "priv/asset_build")
+    deps = Path.join(webapp, "deps")
+    File.mkdir_p!(Path.join(ws, "bin"))
+    File.mkdir_p!(Path.join(ws, "lib"))
+    File.mkdir_p!(deps)
 
-    if webapp do
-      ws = Path.join(webapp, "priv/asset_build")
-      deps = Path.join(webapp, "deps")
-      File.mkdir_p!(Path.join(ws, "bin"))
-      File.mkdir_p!(Path.join(ws, "lib"))
-      File.mkdir_p!(deps)
+    # Asset source (css/js/vendor) + lib source (for tailwind's @source scanning).
+    File.cp_r!("apps/catalyst_web/assets", Path.join(ws, "assets"))
+    File.cp_r!("apps/catalyst_web/lib/catalyst_web", Path.join(ws, "lib/catalyst_web"))
 
-      # Asset source (css/js/vendor) + lib source (for tailwind's @source scanning).
-      File.cp_r!("apps/catalyst_web/assets", Path.join(ws, "assets"))
-      File.cp_r!("apps/catalyst_web/lib/catalyst_web", Path.join(ws, "lib/catalyst_web"))
-
-      # JS deps esbuild resolves via NODE_PATH, heroicons (its tailwind plugin reads
-      # SVGs via a path relative to vendor/), and the generated colocated hooks.
-      for d <- ~w(phoenix phoenix_html phoenix_live_view heroicons) do
-        File.cp_r!("deps/#{d}", Path.join(deps, d))
-      end
-
-      colocated = "_build/#{Mix.env()}/phoenix-colocated"
-      if File.dir?(colocated), do: File.cp_r!(colocated, Path.join(deps, "phoenix-colocated"))
-
-      # esbuild + tailwind standalone binaries.
-      cp_bin!(Path.wildcard("_build/esbuild-*") |> List.first(), Path.join(ws, "bin/esbuild"))
-      cp_bin!(Path.wildcard("_build/tailwind-*") |> List.first(), Path.join(ws, "bin/tailwind"))
-
-      # Also scan the user's runtime extensions dir so Tailwind classes used by
-      # runtime-created UI components get compiled. The build machine's path is
-      # only a placeholder: the marker comment lets the runtime rebuild
-      # (CatalystWeb.Assets) rewrite this line for the machine the app actually
-      # runs on before invoking tailwind.
-      ext_dir = Path.expand("~/.catalyst/extensions")
-
-      File.write!(
-        Path.join(ws, "assets/css/app.css"),
-        ~s[\n/* catalyst:extensions-source */\n@source "#{ext_dir}";\n],
-        [:append]
-      )
-
-      IO.puts("bundle_assets: workspace at #{ws}")
-    else
-      IO.warn("bundle_assets: catalyst_web app dir not found under #{release.path}")
+    # JS deps esbuild resolves via NODE_PATH, heroicons (its tailwind plugin reads
+    # SVGs via a path relative to vendor/), and the generated colocated hooks.
+    for d <- ~w(phoenix phoenix_html phoenix_live_view heroicons) do
+      File.cp_r!("deps/#{d}", Path.join(deps, d))
     end
+
+    colocated = Path.join(Mix.Project.build_path(), "phoenix-colocated")
+    if File.dir?(colocated), do: File.cp_r!(colocated, Path.join(deps, "phoenix-colocated"))
+
+    # esbuild + tailwind standalone binaries.
+    cp_bin!(esbuild_bin(), Path.join(ws, "bin/esbuild"))
+    cp_bin!(tailwind_bin(), Path.join(ws, "bin/tailwind"))
+
+    # Also scan the user's runtime extensions dir so Tailwind classes used by
+    # runtime-created UI components get compiled. The build machine's path is
+    # only a placeholder: the marker comment lets the runtime rebuild
+    # (CatalystWeb.Assets) rewrite this line for the machine the app actually
+    # runs on before invoking tailwind.
+    ext_dir = Path.expand("~/.catalyst/extensions")
+
+    File.write!(
+      Path.join(ws, "assets/css/app.css"),
+      ~s[\n/* catalyst:extensions-source */\n@source "#{ext_dir}";\n],
+      [:append]
+    )
+
+    IO.puts("bundle_assets: workspace at #{ws}")
 
     bundle_fast_tools(release)
     release
@@ -231,26 +279,21 @@ defmodule Catalyst.Umbrella.MixProject do
 
   # Bundle the fast-tool binaries (rg/fd/sd/ast-grep) into the core app's priv/bin
   # so grep/find/replace/ast_grep work in the packaged app (a GUI .app has a minimal
-  # PATH). Resolved from the build host; skipped if not installed.
+  # PATH). release_preflight!/1 already verified they exist on the build host.
   defp bundle_fast_tools(release) do
-    coreapp = release.path |> Path.join("lib/catalyst-*") |> Path.wildcard() |> List.first()
+    bindir = release |> core_dir() |> Path.join("priv/bin")
+    File.mkdir_p!(bindir)
 
-    if coreapp do
-      bindir = Path.join(coreapp, "priv/bin")
-      File.mkdir_p!(bindir)
+    for exe <- @fast_tools do
+      src =
+        System.find_executable(exe) ||
+          raise "bundle_fast_tools: `#{exe}` disappeared from PATH after preflight"
 
-      for exe <- ~w(rg fd sd ast-grep) do
-        case System.find_executable(exe) do
-          nil -> IO.puts("bundle_fast_tools: #{exe} not on PATH, skipping")
-          src -> cp_bin!(src, Path.join(bindir, exe))
-        end
-      end
+      cp_bin!(src, Path.join(bindir, exe))
     end
 
     :ok
   end
-
-  defp cp_bin!(nil, _dest), do: :ok
 
   defp cp_bin!(src, dest) do
     File.cp!(src, dest)

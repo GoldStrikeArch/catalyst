@@ -67,10 +67,9 @@ defmodule CatalystWeb.Flex.UIProviderLoopFlexTest do
     _new_id = fresh_session!(view)
     submit_prompt!(view, "list files")
 
-    baseline_html = render(view)
-    assert baseline_html =~ "offline Demo provider"
-    refute baseline_html =~ "[flex-loop]"
-    refute baseline_html =~ "[flex-echo]"
+    assert has_element?(view, "#message-stream", "offline Demo provider")
+    refute has_element?(view, "#catalyst-shell", "[flex-loop]")
+    refute has_element?(view, "#catalyst-shell", "[flex-echo]")
 
     restore_persistent_map(previous_persistent)
   end

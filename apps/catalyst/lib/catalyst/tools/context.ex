@@ -13,11 +13,12 @@ defmodule Catalyst.Tools.Context do
   field kept in sync with `parent_session_id`, so `Map.get/2`, map access, and
   `ctx[:session_id]` all see the parent id.
 
-  Invariant: `session_id == parent_session_id` at all times. Only `new/1` and
-  the `Access` callbacks maintain that sync — build contexts with `new/1` and
-  update either key through `Access` (`put_in`/`update_in`), never with a
-  direct struct update like `%{ctx | session_id: ...}`, which would desync the
-  aliased fields.
+  Invariant: `session_id == parent_session_id` at all times. Only `new/1`
+  maintains that sync — contexts are read-only after construction. The `Access`
+  read (`ctx[:session_id]`) is a published compatibility promise; the write
+  callbacks (`put_in`/`update_in`/`pop_in`) raise, because a written context is
+  never observed by the run that produced it and a direct struct update like
+  `%{ctx | session_id: ...}` would desync the aliased fields.
   """
 
   @behaviour Access
@@ -79,68 +80,15 @@ defmodule Catalyst.Tools.Context do
   def fetch(context, key), do: Map.fetch(context, key)
 
   @impl Access
-  def get_and_update(context, :session_id, fun) do
-    update_parent_id(context, fun)
-  end
-
-  def get_and_update(context, :parent_session_id, fun) do
-    update_parent_id(context, fun)
-  end
-
-  def get_and_update(context, key, fun) do
-    case Map.has_key?(context, key) do
-      true -> update_field(context, key, fun)
-      false -> raise KeyError, key: key, term: context
-    end
+  def get_and_update(_context, key, _fun) do
+    raise ArgumentError,
+          "Catalyst.Tools.Context is read-only after new/1; " <>
+            "cannot put_in/update_in key #{inspect(key)}"
   end
 
   @impl Access
-  def pop(context, :session_id), do: pop_parent_id(context)
-
-  def pop(context, :parent_session_id), do: pop_parent_id(context)
-
-  def pop(context, key) do
-    case Map.has_key?(context, key) do
-      true -> {Map.fetch!(context, key), Map.put(context, key, nil)}
-      false -> {nil, context}
-    end
-  end
-
-  defp update_parent_id(context, fun) do
-    current = context.parent_session_id
-
-    case fun.(current) do
-      :pop ->
-        {current, sync_parent_id(context, nil)}
-
-      {get, update} ->
-        {get, sync_parent_id(context, update)}
-
-      other ->
-        raise "the Access callback must return {get, update} or :pop, got: #{inspect(other)}"
-    end
-  end
-
-  defp pop_parent_id(context) do
-    {context.parent_session_id, sync_parent_id(context, nil)}
-  end
-
-  defp sync_parent_id(context, parent_id) do
-    %{context | session_id: parent_id, parent_session_id: parent_id}
-  end
-
-  defp update_field(context, key, fun) do
-    current = Map.fetch!(context, key)
-
-    case fun.(current) do
-      :pop ->
-        {current, Map.put(context, key, nil)}
-
-      {get, update} ->
-        {get, Map.put(context, key, update)}
-
-      other ->
-        raise "the Access callback must return {get, update} or :pop, got: #{inspect(other)}"
-    end
+  def pop(_context, key) do
+    raise ArgumentError,
+          "Catalyst.Tools.Context is read-only after new/1; cannot pop key #{inspect(key)}"
   end
 end

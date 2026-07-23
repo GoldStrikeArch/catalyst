@@ -1,4 +1,4 @@
-defmodule CatalystWeb.Tools.ReconnectUi do
+defmodule CatalystWeb.Tools.ReloadUi do
   @moduledoc """
   Self-modification tool: reload the UI so structural page/layout/render changes
   (hot-swapped LiveView/component modules) take effect in already-connected windows.

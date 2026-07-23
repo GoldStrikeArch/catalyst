@@ -3,9 +3,8 @@ defmodule Catalyst.LLM.RegistryTest do
   # overrides a built-in.
   use ExUnit.Case, async: false
 
-  alias Catalyst.{Content, Model}
+  alias Catalyst.Content
   alias Catalyst.LLM.{ProviderConfig, Registry}
-  alias Catalyst.Session.{Manager, Server}
 
   defmodule EchoProvider do
     @behaviour Catalyst.LLM.Provider
@@ -33,7 +32,7 @@ defmodule Catalyst.LLM.RegistryTest do
 
     assert :ok = Registry.register_provider("echo", EchoProvider)
     assert {:ok, EchoProvider} = Registry.fetch("echo")
-    assert %ProviderConfig{module: EchoProvider} = Registry.fetch_config("echo")
+    assert {:ok, %ProviderConfig{module: EchoProvider}} = Registry.fetch_config("echo")
     assert Map.has_key?(Registry.list(), "echo")
 
     Registry.unregister_provider("echo")
@@ -72,7 +71,7 @@ defmodule Catalyst.LLM.RegistryTest do
 
     assert :ok = Registry.register_provider("faux", EchoProvider, owner: "provider_owner_a")
 
-    assert {:error, {:provider_owner_collision, "faux", "provider_owner_a", "provider_owner_b"}} =
+    assert {:error, {:owner_collision, :provider, "faux", "provider_owner_a", "provider_owner_b"}} =
              Registry.register_provider("faux", Catalyst.LLM.Demo, owner: "provider_owner_b")
 
     assert {:ok, EchoProvider} = Registry.fetch("faux")
@@ -90,7 +89,7 @@ defmodule Catalyst.LLM.RegistryTest do
     assert :ok =
              Registry.register_provider("owned-api", EchoProvider, owner: "provider_extension")
 
-    assert {:error, {:provider_owner_collision, "owned-api", "provider_extension", :host}} =
+    assert {:error, {:owner_collision, :provider, "owned-api", "provider_extension", :host}} =
              Registry.register_provider("owned-api", Catalyst.LLM.Demo)
 
     assert {:ok, EchoProvider} = Registry.fetch("owned-api")

@@ -1,6 +1,8 @@
 defmodule Catalyst.Context.ResourceCleanupTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [restore_env: 2, restore_runtime_policy: 2, runtime_policy: 1]
+
   alias Catalyst.Agent.Event
   alias Catalyst.Context.{Registry, Window}
   alias Catalyst.LLM.Registry, as: ProviderRegistry
@@ -18,7 +20,7 @@ defmodule Catalyst.Context.ResourceCleanupTest do
     File.mkdir_p!(tmp)
     owner = "summary-cleanup-#{System.unique_integer([:positive])}"
     api = "summary-cleanup-#{System.unique_integer([:positive])}"
-    previous_policy = runtime_policy()
+    previous_policy = runtime_policy(Registry)
 
     Registry.unregister_policy()
     Application.put_env(:catalyst, :summary_cleanup_test_pid, self())
@@ -26,7 +28,7 @@ defmodule Catalyst.Context.ResourceCleanupTest do
 
     on_exit(fn ->
       Registry.unregister_policy()
-      restore_runtime_policy(previous_policy)
+      restore_runtime_policy(Registry, previous_policy)
       ProviderRegistry.unregister_owner(owner)
       Application.delete_env(:catalyst, :summary_cleanup_test_pid)
       File.rm_rf!(tmp)
@@ -220,17 +222,4 @@ defmodule Catalyst.Context.ResourceCleanupTest do
              resource.provider == provider and resource.session_id == session_id
            end)
   end
-
-  defp runtime_policy do
-    Enum.find(Registry.runtime_entries(), &(&1.key == {:policy, :default}))
-  end
-
-  defp restore_runtime_policy(nil), do: :ok
-
-  defp restore_runtime_policy(entry) do
-    Registry.register_policy(entry.value, owner: entry.owner)
-  end
-
-  defp restore_env(key, :error), do: Application.delete_env(:catalyst, key)
-  defp restore_env(key, {:ok, value}), do: Application.put_env(:catalyst, key, value)
 end

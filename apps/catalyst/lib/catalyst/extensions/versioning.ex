@@ -65,13 +65,11 @@ defmodule Catalyst.Extensions.Versioning do
     end
   end
 
-  @doc """
-  Stage everything and commit with `message`.
-
-  A clean tree (e.g. re-installing byte-identical source) is a no-op `:ok`, not
-  an empty commit: `git revert` of an empty commit fails, so an empty commit
-  would break the next `rollback/1`.
-  """
+  # test seam. Stages everything and commits with `message`. A clean tree
+  # (e.g. re-installing byte-identical source) is a no-op :ok, not an empty
+  # commit: `git revert` of an empty commit fails, so an empty commit would
+  # break the next rollback/1.
+  @doc false
   @spec commit(Path.t(), String.t()) :: :ok | {:error, term()}
   def commit(dir, message) do
     case repo?(dir) do

@@ -7,7 +7,7 @@ defmodule CatalystWeb.ShellLive.ChatInput do
   """
 
   import Phoenix.Component, only: [assign: 2, to_form: 1]
-  import Phoenix.LiveView, only: [consume_uploaded_entries: 3]
+  import Phoenix.LiveView, only: [consume_uploaded_entries: 3, start_async: 3]
 
   alias Catalyst.Content
   alias CatalystWeb.FileSearch
@@ -23,26 +23,28 @@ defmodule CatalystWeb.ShellLive.ChatInput do
   @spec put_text(socket(), String.t()) :: socket()
   def put_text(socket, text), do: assign(socket, chat_form: form(text))
 
-  @doc "Updates the trailing `@query` file search for the current input asynchronously."
+  @doc """
+  Updates the trailing `@query` file search for the current input asynchronously.
+
+  The `fd` run happens off the LiveView process via `start_async/3`; ShellLive's
+  `handle_async/3` applies the result through `apply_search/2`. Each keystroke
+  mints a fresh token, so results from superseded searches are discarded.
+  """
   @spec search_files(socket(), String.t()) :: socket()
   def search_files(socket, text) do
     case active_file_query(text) do
       nil ->
-        assign(socket, file_search: nil)
+        assign(socket, file_search: nil, file_search_token: nil)
 
       query ->
         token = make_ref()
         cwd = socket.assigns.cwd
 
-        # Phoenix 1.1 doesn't have run_async, but we use a supervised task.
-        # ShellLive handles the task completion.
-        task =
-          Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-            results = FileSearch.search(cwd, query)
-            %{token: token, query: query, results: results}
-          end)
-
-        assign(socket, file_search_token: token, file_search_ref: task.ref)
+        socket
+        |> assign(file_search_token: token)
+        |> start_async({:file_search, token}, fn ->
+          %{token: token, query: query, results: FileSearch.search(cwd, query)}
+        end)
     end
   end
 
@@ -93,45 +95,21 @@ defmodule CatalystWeb.ShellLive.ChatInput do
   @doc "Consumes completed uploads and builds the content accepted by `Session.Server.prompt/2`."
   @spec consume_prompt(socket(), String.t()) :: String.t() | [struct()]
   def consume_prompt(socket, text) do
+    # The upload channel hands the consume callback `%{path: path}`; the file
+    # is read here, at the submit boundary, and encoded for the model.
     images =
-      consume_uploaded_entries(socket, :image, fn meta, _entry ->
-        {:ok, meta.prepared}
+      consume_uploaded_entries(socket, :image, fn %{path: path}, entry ->
+        {:ok,
+         %Content.Image{
+           data: path |> File.read!() |> Base.encode64(),
+           mime_type: entry.client_type || "image/png"
+         }}
       end)
 
     case images do
       [] -> text
       _images -> text_block(text) ++ images
     end
-  end
-
-  @doc "Prepares an image upload entry asynchronously."
-  @spec prepare_image(socket(), Phoenix.LiveView.UploadEntry.t()) :: socket()
-  def prepare_image(socket, entry) do
-    # Phoenix 1.1 doesn't have run_async, but we use a supervised task.
-    # ShellLive handles the task completion.
-    task =
-      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-        case Phoenix.LiveView.consume_uploaded_entry(socket, entry, fn %{path: path} ->
-               case File.read(path) do
-                 {:ok, data} ->
-                   {:ok,
-                    %Content.Image{
-                      data: Base.encode64(data),
-                      mime_type: entry.client_type || "image/png"
-                    }}
-
-                 {:error, reason} ->
-                   {:error, reason}
-               end
-             end) do
-          {:ok, prepared} -> {:ok, prepared}
-          {:error, reason} -> {:error, reason}
-        end
-      end)
-
-    assign(socket,
-      image_prep_refs: Map.put(socket.assigns.image_prep_refs || %{}, task.ref, entry.ref)
-    )
   end
 
   defp active_file_query(text) do

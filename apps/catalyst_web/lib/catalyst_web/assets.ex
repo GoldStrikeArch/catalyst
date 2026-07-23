@@ -11,6 +11,8 @@ defmodule CatalystWeb.Assets do
   instead of crashing.
   """
 
+  require Logger
+
   @topic "ui"
   @profile :catalyst_web
 
@@ -23,17 +25,38 @@ defmodule CatalystWeb.Assets do
   @spec topic() :: String.t()
   def topic, do: @topic
 
-  @doc "Rebuild CSS+JS, then (by default) ask clients to reload."
-  @spec rebuild(keyword()) :: :ok | {:error, term()}
-  def rebuild(opts \\ []) do
-    localize_extension_source()
+  @doc """
+  Rebuild CSS+JS, then ask clients to reload.
+
+  Returns `{:ok, %{warnings: [...]}}` when the rebuild itself succeeded but
+  localizing the bundled extensions `@source` line failed — tailwind then ran
+  against a stale (build-machine) extensions path, so extension-added classes
+  may be missing until the failure is fixed.
+  """
+  @spec rebuild() :: :ok | {:ok, %{warnings: [term()]}} | {:error, term()}
+  def rebuild do
+    warnings = localization_warnings()
 
     with :ok <- run(Tailwind, @profile),
          :ok <- run(Esbuild, @profile) do
-      if Keyword.get(opts, :reload, true), do: reload()
-      :ok
+      reload()
+      rebuilt(warnings)
     end
   end
+
+  defp localization_warnings do
+    case localize_extension_source() do
+      :ok ->
+        []
+
+      {:error, reason} ->
+        Logger.warning("[assets] could not localize extensions @source: #{inspect(reason)}")
+        [{:localize_extension_source, reason}]
+    end
+  end
+
+  defp rebuilt([]), do: :ok
+  defp rebuilt(warnings), do: {:ok, %{warnings: warnings}}
 
   @doc "Broadcast a reload request to every connected LiveView."
   @spec reload() :: :ok | {:error, term()}
