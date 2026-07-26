@@ -2,7 +2,7 @@ defmodule Catalyst.Extensions.Sources do
   @moduledoc """
   Pure source-path conventions for runtime extensions.
 
-  Filesystem mutation and load orchestration stay in `Catalyst.Extensions`;
+  Filesystem mutation and load orchestration stay in `Catalyst.Extensions.Load`;
   this module owns only discovery, owner normalization, and managed-path checks.
   """
 

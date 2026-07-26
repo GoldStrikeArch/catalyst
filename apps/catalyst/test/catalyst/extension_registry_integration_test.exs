@@ -16,6 +16,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
   @lifecycle_owner "registry_lifecycle"
 
   setup do
+    Catalyst.ExtensionsFixtures.await_bootstrap!()
     File.rm_rf!(Extensions.dir())
     File.mkdir_p!(Extensions.dir())
 

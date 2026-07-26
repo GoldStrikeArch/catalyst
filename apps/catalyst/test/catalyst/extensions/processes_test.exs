@@ -202,6 +202,7 @@ defmodule Catalyst.Extensions.ProcessesTest do
   '''
 
   test "an extension's setup/1 starts a supervised process; uninstall tears it down" do
+    Catalyst.ExtensionsFixtures.await_bootstrap!()
     File.mkdir_p!(Extensions.dir())
     path = Path.join(Extensions.dir(), "procowner.ex")
     File.write!(path, @proc_ext_source)

@@ -11,6 +11,7 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
 
   alias Catalyst.{Content, Message, Usage}
   alias Catalyst.LLM.Event
+  alias Catalyst.LLM.OpenAICodex.ResponseEvent
 
   defstruct blocks: [],
             current: nil,
@@ -42,7 +43,11 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParser do
 
   @doc "Apply one decoded SSE event, emitting normalized events to `sink`."
   @spec handle(t(), map(), Catalyst.LLM.Provider.sink()) :: t()
-  def handle(%__MODULE__{} = s, %{"type" => type} = ev, sink), do: do_handle(type, ev, s, sink)
+  def handle(%__MODULE__{} = s, %{"type" => _type} = event, sink) do
+    event = ResponseEvent.normalize(event)
+    do_handle(event["type"], event, s, sink)
+  end
+
   def handle(s, _ev, _sink), do: s
 
   # ---- item lifecycle -------------------------------------------------------

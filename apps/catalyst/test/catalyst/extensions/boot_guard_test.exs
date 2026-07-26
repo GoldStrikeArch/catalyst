@@ -121,14 +121,32 @@ defmodule Catalyst.Extensions.BootGuardTest do
     assert {:ok, %{failed: []}} = Task.await(explicit, 5_000)
     drain_stray_setups()
 
-    # bootstrap/0 is a host acknowledgement (liveness probe), not a load
-    # trigger: it must not start queued boot work that would rerun extension
-    # setup after the newer explicit load. Explicit reruns go through
-    # load_all/0 or reload_after_wiring/0 only.
+    # The explicit success completes a pending bootstrap generation. A later
+    # host acknowledgement is therefore idempotent and cannot queue setup a
+    # second time; explicit reruns continue to go through load_all/0.
     assert :ok = Extensions.bootstrap()
     _ = :sys.get_state(Extensions)
     refute_receive {:boot_revision_setup, _second_setup}, 200
     assert Extensions.boot_status() == :ok
+  end
+
+  test "a core-only runtime starts bootstrap immediately" do
+    case Application.spec(:catalyst_web, :vsn) do
+      nil ->
+        BootGuard.mark_ok()
+        restart_extensions()
+
+        state = :sys.get_state(Extensions)
+        assert state.bootstrap in [:running, :complete]
+        wait_until(fn -> match?(%{bootstrap: :complete}, :sys.get_state(Extensions)) end)
+        assert Catalyst.Hooks.runtime_ready?()
+
+      _web_capable_umbrella_context ->
+        # The umbrella test runner intentionally loads the web application
+        # specification; the core-only branch is exercised by this app's own
+        # test task and by the CLI release.
+        assert Extensions.host_ready?(:web)
+    end
   end
 
   # Release any setup notifications from loads that were already in flight
@@ -144,6 +162,11 @@ defmodule Catalyst.Extensions.BootGuardTest do
   end
 
   test "a compiler from a dead generation cannot leave code live in safe mode" do
+    # A prior test may have restarted the server and left its supervised boot
+    # workflow queued on the load lock. Settle that generation before adding a
+    # source whose top-level compiler intentionally blocks.
+    wait_until(fn -> match?(%{bootstrap: :complete}, :sys.get_state(Extensions)) end)
+
     File.mkdir_p!(Extensions.dir())
     path = Path.join(Extensions.dir(), "stale_compile_probe.ex")
     token = make_ref()
@@ -398,6 +421,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
     end)
 
     restart_extensions()
+    wait_until(fn -> File.regular?(Path.join(home, "guide.md")) end)
     assert File.regular?(Path.join(home, "guide.md"))
     refute File.exists?(Path.join(Path.dirname(extensions), "guide.md"))
   end

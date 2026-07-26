@@ -39,6 +39,9 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
 
         "invalid" ->
           {:push, [{:text, <<255>>}], state}
+
+        "terminal" ->
+          {:push, [text(terminal_event(state.terminal))], state}
       end
     end
 
@@ -66,6 +69,33 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
     @impl true
     def terminate(_reason, _state), do: :ok
 
+    defp terminal_event(type) when type in ["response.completed", "response.done"] do
+      %{"type" => type, "response" => %{"id" => "terminal", "status" => "completed"}}
+    end
+
+    defp terminal_event("response.incomplete") do
+      %{
+        "type" => "response.incomplete",
+        "response" => %{
+          "id" => "terminal",
+          "incomplete_details" => %{"reason" => "max_output_tokens"}
+        }
+      }
+    end
+
+    defp terminal_event("response.failed") do
+      %{
+        "type" => "response.failed",
+        "response" => %{"id" => "terminal", "error" => %{"message" => "failed"}}
+      }
+    end
+
+    defp terminal_event("response.cancelled"),
+      do: %{"type" => "response.cancelled", "response" => %{"id" => "terminal"}}
+
+    defp terminal_event("error"),
+      do: %{"type" => "error", "error" => %{"message" => "failed"}}
+
     defp text(map), do: {:text, Jason.encode!(map)}
   end
 
@@ -78,7 +108,8 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
     get "/codex/responses" do
       conn = Plug.Conn.fetch_query_params(conn)
       mode = conn.query_params["mode"] || "happy"
-      WebSockAdapter.upgrade(conn, Handler, %{mode: mode}, timeout: 10_000)
+      terminal = conn.query_params["terminal"]
+      WebSockAdapter.upgrade(conn, Handler, %{mode: mode, terminal: terminal}, timeout: 10_000)
     end
 
     get "/denied" do
@@ -137,6 +168,24 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocketTest do
     assert {:ok, conn, events} = WebSocket.request(conn, frame, [], &collect/2)
     assert Enum.any?(events, &(&1["type"] == "response.completed"))
     WebSocket.close(conn)
+  end
+
+  test "every terminal event ends the receive loop while the socket remains open", %{port: port} do
+    for terminal <- ~w(response.completed response.done response.incomplete
+                       response.failed response.cancelled error) do
+      query = URI.encode_query(%{"mode" => "terminal", "terminal" => terminal})
+      url = "ws://127.0.0.1:#{port}/codex/responses?#{query}"
+
+      assert {:ok, conn} = WebSocket.connect(url, [])
+
+      assert {:ok, conn, [event]} =
+               WebSocket.request(conn, %{"model" => "m"}, [], &collect/2, idle_timeout: 100)
+
+      expected = if terminal == "response.done", do: "response.completed", else: terminal
+      assert event["type"] == expected
+      assert WebSocket.open?(conn)
+      WebSocket.close(conn)
+    end
   end
 
   test "an initial send failure closes the checked-out socket", %{port: port} do

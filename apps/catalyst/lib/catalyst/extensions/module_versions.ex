@@ -83,10 +83,9 @@ defmodule Catalyst.Extensions.ModuleVersions do
         end
       end)
 
-    if results == %{} do
-      :ok
-    else
-      {:error, results}
+    case results do
+      empty when map_size(empty) == 0 -> :ok
+      failures -> {:error, failures}
     end
   end
 
@@ -97,6 +96,26 @@ defmodule Catalyst.Extensions.ModuleVersions do
       [version | _rest] -> load_version(module, version)
       [] -> restore_original(module)
     end
+  end
+
+  @doc "Restore a module from the release code path, or remove it when no original exists."
+  @spec restore_original(module()) :: :ok
+  def restore_original(module) do
+    purge(module)
+
+    case :code.load_file(module) do
+      {:module, ^module} ->
+        Logger.info("[extensions] restored original #{inspect(module)}")
+
+      {:error, :nofile} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[extensions] could not restore #{inspect(module)}: #{inspect(reason)}")
+    end
+  catch
+    kind, reason ->
+      Logger.warning("[extensions] purging #{inspect(module)} #{kind}: #{inspect(reason)}")
   end
 
   defp load_version(module, %{path: path, beam: beam}) do
@@ -121,24 +140,6 @@ defmodule Catalyst.Extensions.ModuleVersions do
       )
 
       restore_original(module)
-  end
-
-  defp restore_original(module) do
-    purge(module)
-
-    case :code.load_file(module) do
-      {:module, ^module} ->
-        Logger.info("[extensions] restored original #{inspect(module)}")
-
-      {:error, :nofile} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("[extensions] could not restore #{inspect(module)}: #{inspect(reason)}")
-    end
-  catch
-    kind, reason ->
-      Logger.warning("[extensions] purging #{inspect(module)} #{kind}: #{inspect(reason)}")
   end
 
   defp purge(module) do

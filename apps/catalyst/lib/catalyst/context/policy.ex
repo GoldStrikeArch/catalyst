@@ -10,7 +10,9 @@ defmodule Catalyst.Context.Policy do
   @doc """
   Resolve the request-time token threshold for a model and policy context.
 
-  Return `:none` to let the next lower-precedence threshold source decide.
+  Return `:none` to disable Catalyst-managed compaction for this request. Lower
+  precedence threshold resolution happens before the selected policy callback
+  is invoked.
   """
   @callback threshold(Catalyst.Model.t() | nil, map()) ::
               {:ok, pos_integer()} | :none | {:error, term()}

@@ -12,7 +12,7 @@ defmodule Catalyst.Extensions.State do
 
   require Logger
 
-  alias Catalyst.Extensions.Contribution
+  alias Catalyst.Extensions.{Contribution, ModuleVersions}
 
   @host_owner :host
 
@@ -22,17 +22,14 @@ defmodule Catalyst.Extensions.State do
   @typedoc "A monitored extension setup and the ownership collisions it reported."
   @type setup_entry :: %{monitor: reference(), collisions: [term()]}
 
-  @typedoc "One retained module version: the owner that loaded it, its source path, and the exact BEAM."
-  @type module_version :: %{owner: term(), path: Path.t(), beam: binary()}
-
-  @typedoc "Bootstrap lifecycle: reseeding pending or acknowledged (hook readiness published)."
-  @type bootstrap :: :pending | :complete
+  @typedoc "Bootstrap lifecycle: waiting for a host, running its workflow, or complete."
+  @type bootstrap :: :waiting | :running | :complete
 
   @type t :: %__MODULE__{
           contrib: %{optional(term()) => MapSet.t(tool_pair())},
           owners: %{optional(String.t()) => term()},
           modules: %{optional(term()) => [module()]},
-          module_versions: %{optional(module()) => [module_version()]},
+          module_versions: ModuleVersions.t(),
           metadata: %{optional(term()) => map()},
           paths: %{optional(term()) => Path.t()},
           degraded: %{optional(term()) => [Catalyst.ExtensionAPI.purger_failure()]},
@@ -52,7 +49,7 @@ defmodule Catalyst.Extensions.State do
             setup_collisions: %{},
             hook_generation: nil,
             boot_token: nil,
-            bootstrap: :pending
+            bootstrap: :waiting
 
   @doc "Create an empty extension runtime state."
   @spec new() :: t()
@@ -108,7 +105,7 @@ defmodule Catalyst.Extensions.State do
         owners: replace_owner_claims(state.owners, owner, pairs),
         modules: Map.put(state.modules, owner, contribution.modules),
         module_versions:
-          put_module_versions(state.module_versions, owner, path, contribution.beams),
+          ModuleVersions.put(state.module_versions, owner, path, contribution.beams),
         metadata: Map.put(state.metadata, owner, contribution.metadata),
         paths: Map.put(state.paths, owner, path)
     }
@@ -144,7 +141,7 @@ defmodule Catalyst.Extensions.State do
   # ---- purging ---------------------------------------------------------------
 
   @doc "Drop every piece of `owner`'s tracking, installing the given post-purge module versions."
-  @spec drop_owner(t(), term(), %{optional(module()) => [module_version()]}) :: t()
+  @spec drop_owner(t(), term(), ModuleVersions.t()) :: t()
   def drop_owner(%__MODULE__{} = state, owner, module_versions) do
     %{
       state
@@ -178,38 +175,6 @@ defmodule Catalyst.Extensions.State do
     %{state | degraded: Map.put(state.degraded, owner, failures)}
   end
 
-  # ---- module versions -------------------------------------------------------
-
-  @doc "Replace `owner`'s retained BEAM versions with the given `module => beam` map."
-  @spec put_module_versions(
-          %{optional(module()) => [module_version()]},
-          term(),
-          Path.t(),
-          %{module() => binary()}
-        ) :: %{optional(module()) => [module_version()]}
-  def put_module_versions(module_versions, owner, path, beams) do
-    module_versions
-    |> drop_owner_versions(owner)
-    |> then(fn versions ->
-      Enum.reduce(beams, versions, fn {module, beam}, acc ->
-        version = %{owner: owner, path: path, beam: beam}
-        Map.update(acc, module, [version], &[version | &1])
-      end)
-    end)
-  end
-
-  @doc "Remove every retained BEAM version owned by `owner`, dropping empty module entries."
-  @spec drop_owner_versions(%{optional(module()) => [module_version()]}, term()) ::
-          %{optional(module()) => [module_version()]}
-  def drop_owner_versions(module_versions, owner) do
-    Enum.reduce(module_versions, %{}, fn {module, versions}, acc ->
-      case Enum.reject(versions, &(&1.owner == owner)) do
-        [] -> acc
-        remaining -> Map.put(acc, module, remaining)
-      end
-    end)
-  end
-
   # ---- snapshots -------------------------------------------------------------
 
   @doc """
@@ -221,7 +186,7 @@ defmodule Catalyst.Extensions.State do
   def owner_snapshot(%__MODULE__{} = state, owner) do
     with {:ok, path} <- Map.fetch(state.paths, owner),
          {:ok, modules} <- Map.fetch(state.modules, owner),
-         {:ok, beams} <- owner_beams(modules, owner, state.module_versions) do
+         {:ok, beams} <- ModuleVersions.owner_beams(modules, owner, state.module_versions) do
       pairs = state.contrib |> Map.get(owner, MapSet.new()) |> Enum.sort()
 
       {:ok,
@@ -255,14 +220,5 @@ defmodule Catalyst.Extensions.State do
     |> Map.keys()
     |> Map.new(&{&1, []})
     |> Map.merge(state.modules)
-  end
-
-  defp owner_beams(modules, owner, module_versions) do
-    Enum.reduce_while(modules, {:ok, %{}}, fn module, {:ok, acc} ->
-      case module_versions |> Map.get(module, []) |> Enum.find(&(&1.owner == owner)) do
-        %{beam: beam} -> {:cont, {:ok, Map.put(acc, module, beam)}}
-        nil -> {:halt, :error}
-      end
-    end)
   end
 end

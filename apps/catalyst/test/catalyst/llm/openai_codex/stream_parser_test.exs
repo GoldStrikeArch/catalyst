@@ -191,6 +191,34 @@ defmodule Catalyst.LLM.OpenAICodex.StreamParserTest do
     assert %Message.Assistant{} = assistant
   end
 
+  test "every terminal event, including legacy done, completes parser normalization" do
+    events = [
+      %{
+        "type" => "response.completed",
+        "response" => %{"id" => "completed", "status" => "completed"}
+      },
+      %{"type" => "response.done", "response" => %{"id" => "done", "status" => "completed"}},
+      %{
+        "type" => "response.incomplete",
+        "response" => %{
+          "id" => "incomplete",
+          "incomplete_details" => %{"reason" => "max_output_tokens"}
+        }
+      },
+      %{
+        "type" => "response.failed",
+        "response" => %{"id" => "failed", "error" => %{"message" => "failed"}}
+      },
+      %{"type" => "response.cancelled", "response" => %{"id" => "cancelled"}},
+      %{"type" => "error", "message" => "failed"}
+    ]
+
+    for event <- events do
+      parser = StreamParser.handle(StreamParser.new(), event, fn _event -> :ok end)
+      assert parser.done, "expected #{event["type"]} to complete the parser"
+    end
+  end
+
   test "a stream that drops mid-text keeps the partial text and reports an error" do
     events = [
       %{"type" => "response.output_item.added", "item" => %{"type" => "message", "id" => "m"}},

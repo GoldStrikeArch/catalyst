@@ -313,7 +313,8 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   application/file/built-in fallbacks and extension purge/collision semantics. System and
   compaction prompts resolve independently by exact model id/API/default with digest and ordered
   provenance. Model catalog context metadata feeds request-time token fingerprinting, anchored or
-  coarse estimates, absolute/ratio/disabled thresholds, and staged persistent compaction; durable
+  coarse estimates, absolute/ratio/disabled thresholds (`:none` explicitly disables Catalyst
+  compaction), and staged persistent compaction; durable
   `ContextCompacted` JSONL replacements and transient `ContextStatus` drive resume and the chat
   meter. `Catalyst.Workflow`/`Workflow.Support` make the built-in loop and extensions share
   observed events, final tool capability filtering, and the context-guard provider seam.
@@ -325,20 +326,26 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
 - **Core simplification and durability audit — DONE ✅.** Session-store writes and persisted-line
   decoding now return tagged failures; compaction appends before reduction/broadcast and uses a
   shared `Session.EventSink` for durable, ordinary, and synthetic observer semantics. GUI sessions
-  resolve providers through `LLM.Registry`, and tool execution consumes one validated, generation-
+  persist model and thinking-level changes together as one authoritative `settings_snapshot`
+  before installing them in memory, while retaining read compatibility with the two legacy entry
+  types. GUI sessions resolve providers through `LLM.Registry`, and tool execution consumes one validated, generation-
   pinned registry entry instead of calling extension metadata twice. CLI controlled exits mark the
   boot clean, while self-test uses an exclusive temporary source and never touches user extension
   state. Shared ownership bookkeeping moved into pure `OwnedIndex`; Codex token accounting and
-  request construction share one projection; `Extensions` keeps its façade while delegating state,
-  transaction, BEAM-version, and source concerns; the obsolete `RunConfig.build/3`/`resolve_loop/1`
+  request construction share one projection. The stable `Extensions` facade delegates its
+  GenServer state owner, serialized lifecycle saga, pure presentation, source rules, and exact BEAM
+  restoration to `Server`, `Load`, `Presenter`, `Sources`, and `ModuleVersions`; the obsolete
+  `RunConfig.build/3`/`resolve_loop/1`
   entry points and the `ModuleScan` module were removed (`Session.RunConfig` itself remains the
-  heavily used host-side run preflight). Extension setup now has one host-controlled bootstrap, and exact live UI contributions
-  replay after table loss without recompiling or running setup twice. Extension transactions and
+  heavily used host-side run preflight). Extension setup now has one host-controlled
+  `:waiting | :running | :complete` bootstrap, and exact live UI contributions replay after table
+  loss without recompiling or running setup twice. Extension transactions and
   API handles are generation-pinned, prior runtime footprints are revoked before restart/safe-mode
   readiness, and stale asynchronous boot work cannot run after or replace newer explicit outcomes.
-  Replacement also waits for prior compilation, whose traced candidates are restored if its
-  generation went stale; a restart-stable provisional compiler journal covers boot workers killed
-  before they can return those candidates. Extension-owner teardown is bounded even when a child
+  Returned stale compilations restore their traced candidates. The provisional compiler journal
+  remains in persistent term, but replacement does not currently drain it; an orphan-compiler
+  reproduction and benchmark are required before wiring `drain_provisional/0` or replacing its
+  storage. Extension-owner teardown is bounded even when a child
   start callback or shutdown never returns, while preserving the shared process registry. Core
   state/config types, behaviour callback docs, reverse chunk accumulation, and
   concurrent provider cleanup tighten the idiomatic Elixir/OTP boundaries; the former core compile

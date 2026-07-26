@@ -89,8 +89,9 @@ catalyst/                      # umbrella
         context/{policy.ex,registry.ex,tokens.ex,window.ex,guard.ex,compaction.ex,
                  transcript.ex,summarizer.ex}      # request guard + persistent compaction (§4/§9)
         extension.ex extension_api.ex              # extension behaviour + unified API (§11)
-        extensions.ex                              # multi-kind loader (§11)
-        extensions/{versioning.ex, boot_guard.ex, processes.ex, state.ex,
+        extensions.ex                              # stable public facade + registered process name (§11)
+        extensions/{server.ex, load.ex, presenter.ex,
+                    versioning.ex, boot_guard.ex, processes.ex, state.ex,
                     contribution.ex, owner.ex,
                     transaction.ex, module_versions.ex, sources.ex,
                     installer.ex, loader.ex, compiler_tracer.ex}
@@ -505,8 +506,11 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   `:websocket` — the CLI's preferred transport (`Catalyst.LLM.OpenAICodex.WebSocket`,
   Mint + mint_web_socket): upgrade on the same path with
   `OpenAI-Beta: responses_websockets=2026-02-06`, ONE `{"type":"response.create", ...body}` text
-  frame per turn, Responses events back as JSON text frames (`response.done` normalized to
-  `completed`), pings answered with pongs, idle/connect timeouts. Between requests the
+  frame per turn, Responses events back as JSON text frames, pings answered with pongs, and
+  idle/connect timeouts. `OpenAICodex.ResponseEvent` is the shared normalization/termination
+  policy: legacy `response.done` becomes `response.completed`, and completed, incomplete, failed,
+  cancelled, and error events all end the receive loop without waiting for the ten-minute idle
+  deadline. Between requests the
   connection lives in **`ConnCache`** (per-session; ownership transferred via
   `Mint.HTTP.controlling_process/2`, idle pings answered there) so it survives run
   boundaries; while a request streams, the run task owns the socket — an abort kills both.
@@ -540,7 +544,8 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   `event:`/`data:` → JSON decode → `on_frame`. 600s `receive_timeout` on the request;
   the provider also handles `Finch.stream/5`'s 3-tuple `{:error, e, partial}` transport
   close (finalizing the partial — see §12).
-- `StreamParser` maps Responses events → `Catalyst.LLM.Event` (port
+- `StreamParser` normalizes through `ResponseEvent`, then maps Responses events →
+  `Catalyst.LLM.Event` (port
   `openai-responses-shared.ts`): `response.output_text.delta` → TextDelta; reasoning deltas →
   ThinkingDelta; `function_call` item add / `arguments.delta` / done → ToolCall
   start/delta/end; `response.completed` → Done (fill usage, set `:tool_use` if tool calls);
@@ -638,11 +643,14 @@ root-owned `/Applications`).
 
 `Catalyst.Session.Store`: append-only JSONL per session at
 `~/.catalyst/sessions/<cwd-hash>/<uuid>.jsonl` — a header line, `message` entries, `reset`
-markers, durable `compaction` replacements, and PI's **`model_change` /
-`thinking_level_change`** entries (appended by
-`configure/2` when the model/effort actually changes; `load_state/1` folds transcript and settings
-in one pass so a crash-restarted session resumes with the settings it was switched to, independent
-of transcript resets). `active_tools_change` is still skipped — tools resolve live per turn.
+markers, durable `compaction` replacements, and authoritative **`settings_snapshot`** entries.
+`configure/2` appends one snapshot containing both the current model and thinking level before
+installing either live change; a failed append leaves both settings unchanged. `load_state/1`
+folds transcript and settings in one pass, accepts legacy `model_change` /
+`thinking_level_change` entries, and lets the latest valid snapshot atomically supersede both.
+Explicit `nil` values are persisted tombstones, distinct from settings never written, and
+transcript resets do not reset settings. `active_tools_change` is still skipped — tools resolve
+live per turn.
 Append on each `message_end`. A `ContextCompacted` entry stores the complete chronological
 replacement; folding it replaces the logical transcript, while later message lines continue from
 that state. Append/encoding failures are tagged; ordinary message persistence remains explicitly
@@ -742,21 +750,38 @@ compiled definition live.
 `rollback_extension` is a `git revert` + reload. Loads, installs, reload/disable/enable and
 `uninstall` all serialize on one per-process-requester `:global` load lock; the installer's
 whole write → load → commit runs as a single critical section (`Extensions.locked/1`).
-The stable facade delegates its state transitions and bookkeeping to focused modules: typed
-ownership state and its transitions (claim tracking, contribution commit, module-conflict checks,
-owner drop/snapshot, purge-result recording) live in `Extensions.State`; load transactions in
-`Transaction`; accepted BEAM stacks in `ModuleVersions`; source-path rules in `Sources`; a loader
-contribution is a typed `%Extensions.Contribution{}`; and owner-id conventions (`:host` for
-host registrations) are shared via `Extensions.Owner`. A failed purge does not forget the owner:
-its entry stays tracked as `:degraded` with per-subsystem `purge_failures`, so live residue is
-never orphaned. Web-capable hosts wire
-their UI kinds and publish live registry/application leases before invoking the idempotent
-`Extensions.bootstrap/0`; headless hosts bootstrap directly, so arbitrary `setup/1` side effects
-execute once rather than once in core and again in web. Bootstrap begins only after both web leases
-are alive and only after the web-owned tool reseeder is installed; reseeder registration is
-serialized through the Extensions server, and reseeding is an acknowledged bootstrap phase — hook
-readiness (which gates per-turn snapshots) is published only once every reseeder has reported back
-or a bounded deadline fires, so a turn cannot start against a half-reseeded tool table. The UI ETS
+Lifecycle calls into the state server share
+`config :catalyst, :extension_lifecycle_call_timeout` (default 30s), including direct uninstall
+and disable's purge. This is independent of the extension-process tree's shorter graceful
+shutdown deadline, after which that tree is killed.
+`Catalyst.Extensions` remains the stable public facade, registered process name, and supervisor
+child id. Its GenServer implementation lives in `Extensions.Server`; serialized compile/setup,
+lifecycle, rollback, and prior-version restoration live in `Extensions.Load`; and user-facing
+status/error rendering lives in the pure `Extensions.Presenter`. Typed ownership transitions
+(claim tracking, contribution commit, module-conflict checks, owner drop/snapshot, purge-result
+recording) live in `Extensions.State`; caller-independent locking and generation capture live in
+`Transaction`; accepted BEAM stacks and every restoration operation live in `ModuleVersions`;
+and all source discovery, owner derivation, and managed-path checks live in `Sources`. A loader
+contribution is a typed `%Extensions.Contribution{}`, and owner-id conventions (`:host` for host
+registrations) are shared via `Extensions.Owner`. A failed purge does not forget the owner: its
+entry stays tracked as `:degraded` with per-subsystem `purge_failures`, so live residue is never
+orphaned.
+
+At init, `Application.spec(:catalyst_web, :vsn)` distinguishes a web-capable runtime from the
+core-only CLI/headless runtime. Headless startup begins bootstrap immediately. Web-capable startup
+publishes `{:waiting_for_host, :web}` until both the application and registry leases name live
+processes and the host calls the idempotent `Extensions.bootstrap/0`. Bootstrap state is tracked
+separately as `:waiting`, `:running`, or `:complete`; a successful explicit `load_all/0` can win
+while waiting and completes the remaining publication workflow without running extension setup
+again. A replacement server also starts automatically when the persisted leases are still live.
+One supervised workflow publishes the guide, runs the registered reseeders under a deadline, then
+performs the boot load. Guide/reseeder failures are logged and nonfatal. Hook readiness (which
+gates per-turn snapshots) is published after the workflow for successful, failed, and safe-mode
+outcomes, leaving built-in recovery tools usable. A failed boot load retains its armed BootGuard
+marker. Thus arbitrary `setup/1` side effects execute exactly once rather than once in core and
+again in web.
+
+The UI ETS
 table has an independent `UI.TableOwner`, which buys **read continuity**: renders keep resolving
 pages/renderers while the registry process is down or restarting. Durability of accepted
 contributions comes from `UI.Contributions`, which serializes the exact live page, renderer,
@@ -768,19 +793,18 @@ contribution-log entries first and skips the ETS delete when the registry proces
 surviving table row could otherwise resurrect a purged owner — the log, not the table, is the
 authority. Recovery never reads edited source, recompiles modules,
 or re-runs arbitrary `setup/1` side effects. Each load transaction and `ExtensionAPI` handle is
-pinned to the `Catalyst.Extensions` server generation that created it, so work that outlives a
-restart is rejected instead of committing into the replacement runtime. Before a new generation
-publishes readiness—including a safe-mode boot—it revokes the prior generation's recorded owners
-and restores or removes their accepted modules. A dedicated generation gate serializes that
-transition with extension API registration. Replacement first waits for the prior load lock and
-then takes the generation gate, matching the load/setup → dispatch lock order; a load that finds
-its captured generation stale restores every compiler-traced candidate before releasing the lock.
-Compiler workers are reserved before their start gate and provisional emissions are journaled in
-restart-stable state. Replacement kills and waits for any abandoned compiler, drains that journal,
-and uses managed-source metadata as a final pre-commit fallback before publishing readiness. No old
-compiler can therefore introduce untracked BEAM code after safe-mode purge. Boot-result revisions
-prevent an older asynchronous bootstrap result from running after, or overwriting, a newer explicit
-load result.
+pinned to the `Catalyst.Extensions` server generation that created it, so returned work that
+outlives a restart is rejected instead of committing into the replacement runtime. Before a
+safe-mode generation publishes readiness, it revokes the prior generation's recorded owners and
+restores or removes their accepted modules. Extension API dispatch takes a generation gate around
+its current-generation check and handler call; a load that discovers its captured generation is
+stale restores every compiler-traced candidate before releasing the load lock. Compiler workers
+reserve a provisional entry before their start gate and journal emitted modules in
+`:persistent_term`, but replacement does **not** currently invoke
+`CompilerTracer.drain_provisional/0`. Reproducing an orphan compiler and benchmarking the
+persistent-term write/global-GC cost are explicit follow-ups before that store or recovery path is
+changed. Boot generation checks prevent an older asynchronous result from overwriting a newer
+explicit outcome.
 
 **Crash-safe boot (`Catalyst.Extensions.BootGuard`).** `CATALYST_SAFE_MODE=1` skips loading
 manually; the boot marker makes it **automatic**: a marker file is set to `booting` before

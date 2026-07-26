@@ -12,6 +12,7 @@ defmodule Catalyst.Tools.SelfModTest do
   alias Catalyst.Tools.{InstallExtension, ReloadTool, RollbackTool}
 
   setup do
+    Catalyst.ExtensionsFixtures.await_bootstrap!()
     File.mkdir_p!(Extensions.dir())
     on_exit(fn -> File.rm_rf!(Extensions.dir()) end)
     {:ok, ctx: %{cwd: System.tmp_dir!(), call_id: "t", report: fn _ -> :ok end}}

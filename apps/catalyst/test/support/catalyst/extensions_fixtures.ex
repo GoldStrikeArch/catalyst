@@ -18,9 +18,50 @@ defmodule Catalyst.ExtensionsFixtures do
   @doc "Create the live extensions dir and remove it on exit (per-test setup)."
   @spec setup_extensions_dir() :: :ok
   def setup_extensions_dir do
+    await_bootstrap!()
     File.mkdir_p!(Extensions.dir())
     on_exit(fn -> File.rm_rf!(Extensions.dir()) end)
     :ok
+  end
+
+  @doc """
+  Wait for bootstrap and older serialized loads before mutating the shared directory.
+
+  A test that restarts `Catalyst.Extensions` can leave its caller-independent
+  bootstrap workflow running after the test process exits. Ordinary lifecycle
+  tests must not place their fixtures where that older workflow can discover
+  them.
+  """
+  @spec await_bootstrap!() :: :ok
+  def await_bootstrap! do
+    await_bootstrap!(500)
+    Extensions.locked(fn -> :ok end)
+  end
+
+  defp await_bootstrap!(0) do
+    raise "extension bootstrap did not quiesce before fixture setup"
+  end
+
+  defp await_bootstrap!(attempts) do
+    case bootstrap_complete?() do
+      true ->
+        :ok
+
+      false ->
+        receive do
+        after
+          10 -> await_bootstrap!(attempts - 1)
+        end
+    end
+  end
+
+  defp bootstrap_complete? do
+    case Process.whereis(Extensions) do
+      nil -> false
+      pid -> match?(%{bootstrap: :complete}, :sys.get_state(pid))
+    end
+  catch
+    :exit, _reason -> false
   end
 
   @doc "Write an extension source into the live extensions dir; returns its path."

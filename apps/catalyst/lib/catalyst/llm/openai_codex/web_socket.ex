@@ -23,16 +23,11 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
   what reached its own sink, since bookkeeping events never do).
   """
 
-  alias Catalyst.LLM.OpenAICodex.BoundedBuffer
+  alias Catalyst.LLM.OpenAICodex.{BoundedBuffer, ResponseEvent}
   alias Catalyst.Tasks
 
   @upgrade_timeout 15_000
   @idle_timeout 600_000
-  # Terminal event types: the response stream is over after one of these.
-  # "response.done" is an older alias the parser doesn't know — normalized to
-  # "response.completed" before delivery (as the Codex CLI and PI both do).
-  @terminal ~w(response.completed response.done response.incomplete
-               response.failed response.cancelled error)
 
   defstruct [:conn, :websocket, :ref, resp_headers: []]
 
@@ -326,11 +321,11 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
 
   defp handle_frame(state, {:text, payload}) do
     case Jason.decode(payload) do
-      {:ok, %{"type" => type} = event} ->
-        event = normalize_event(type, event)
+      {:ok, %{"type" => _type} = event} ->
+        event = ResponseEvent.normalize(event)
         state = %{state | acc: state.reducer.(event, state.acc), emitted: state.emitted + 1}
 
-        case type in @terminal do
+        case ResponseEvent.terminal?(event) do
           true -> {:cont, %{state | done: true}}
           false -> {:cont, state}
         end
@@ -361,9 +356,6 @@ defmodule Catalyst.LLM.OpenAICodex.WebSocket do
     do: {:halt, fail(state, {:frame_decode_error, reason})}
 
   defp handle_frame(state, _other), do: {:cont, state}
-
-  defp normalize_event("response.done", event), do: Map.put(event, "type", "response.completed")
-  defp normalize_event(_type, event), do: event
 
   defp fail(state, reason) do
     close_silently(state.ws.conn)

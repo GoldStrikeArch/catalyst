@@ -1,3 +1,21 @@
+await_extension_bootstrap = fn await_extension_bootstrap, attempts ->
+  case :sys.get_state(Catalyst.Extensions) do
+    %{bootstrap: :complete} ->
+      :ok
+
+    _not_ready when attempts > 0 ->
+      receive do
+      after
+        10 -> await_extension_bootstrap.(await_extension_bootstrap, attempts - 1)
+      end
+
+    state ->
+      raise "extension bootstrap did not complete before web tests: #{inspect(state)}"
+  end
+end
+
+:ok = await_extension_bootstrap.(await_extension_bootstrap, 500)
+
 ExUnit.start()
 
 # Keep Codex-shaped UI models but send their turns through the offline Demo

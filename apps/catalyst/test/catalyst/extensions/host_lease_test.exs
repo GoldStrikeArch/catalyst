@@ -31,6 +31,18 @@ defmodule Catalyst.Extensions.HostLeaseTest do
     refute Extensions.host_ready?(@host)
   end
 
+  test "bootstrap reports an unavailable extension runtime" do
+    server = Process.whereis(Extensions)
+    assert is_pid(server)
+    assert Process.unregister(Extensions)
+
+    try do
+      assert Extensions.bootstrap() == {:skipped, :extension_runtime_unavailable}
+    after
+      Process.register(server, Extensions)
+    end
+  end
+
   defp start_lease_process(id) do
     child_spec = %{
       id: id,

@@ -8,9 +8,11 @@ defmodule Catalyst.Extensions.CompilerTracer do
   earlier module, or the compile task is killed by its deadline.
 
   Provisional compiler ownership and emitted modules are also journaled in
-  `:persistent_term`. The journal outlives the `Catalyst.Extensions` process,
-  allowing a replacement generation to kill an orphan compiler and restore its
-  pre-commit modules before publishing safe-mode readiness.
+  `:persistent_term`. The journal outlives the `Catalyst.Extensions` process
+  and can be consumed through `drain_provisional/0`. Replacement does not
+  currently drain it automatically; wiring that recovery path, and replacing
+  the write-heavy persistent-term store, are deferred until an orphan-compiler
+  reproduction and benchmark justify the global-GC tradeoff.
   """
 
   @collector_key {__MODULE__, :collector}
