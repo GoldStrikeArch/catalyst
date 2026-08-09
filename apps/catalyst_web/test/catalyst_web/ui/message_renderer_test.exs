@@ -5,7 +5,7 @@ defmodule CatalystWeb.UI.MessageRendererTest do
   import Phoenix.LiveViewTest
 
   alias Catalyst.{Content, Message}
-  alias CatalystWeb.UI.{MessageRenderer, Registry}
+  alias CatalystWeb.UI.{ImageStore, MessageRenderer, Registry}
 
   defmodule BrokenRenderer do
     use CatalystWeb, :html
@@ -17,6 +17,8 @@ defmodule CatalystWeb.UI.MessageRendererTest do
 
   defp render_html(msg), do: rendered_to_string(MessageRenderer.render_message(%{msg: msg}))
   defp render_doc(msg), do: msg |> render_html() |> LazyHTML.from_fragment()
+
+  defp sha256_hex(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
 
   defp count(doc, selector) do
     doc
@@ -142,6 +144,75 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     assert html =~ "a.txt"
   end
 
+  test "a tool result renders image blocks with the stable block kind" do
+    msg = %Message.ToolResult{
+      tool_call_id: "c8",
+      tool_name: "computer",
+      content: [
+        %Content.Text{text: "Screenshot of display 1"},
+        %Content.Image{data: Base.encode64(<<1, 2, 3>>), mime_type: "image/png"}
+      ]
+    }
+
+    html = render_html(msg)
+    doc = LazyHTML.from_fragment(html)
+
+    # data-block-kind is the quiet-mode CSS contract (app.css), like the
+    # assistant block kinds asserted above.
+    assert html =~ ~s(data-block-kind="tool-image")
+
+    # Images are served out of line by digest (CatalystWeb.ImageController),
+    # never inlined as data URIs — reconnects re-stream the whole transcript.
+    [src] = doc |> LazyHTML.query("[data-block-kind=tool-image] img") |> LazyHTML.attribute("src")
+    assert src == "/image/" <> sha256_hex(<<1, 2, 3>>)
+
+    # The referenced bytes are actually servable.
+    assert ImageStore.fetch(sha256_hex(<<1, 2, 3>>)) == {:ok, {"image/png", <<1, 2, 3>>}}
+
+    # The text preview still renders alongside the image.
+    assert html =~ "Screenshot of display 1"
+  end
+
+  test "a user message image is also referenced out of line" do
+    msg =
+      Message.user([
+        %Content.Image{data: Base.encode64(<<9, 9, 9>>), mime_type: "image/png"},
+        %Content.Text{text: "see attached"}
+      ])
+
+    doc = render_doc(msg)
+
+    [src] = doc |> LazyHTML.query("img") |> LazyHTML.attribute("src")
+    assert src == "/image/" <> sha256_hex(<<9, 9, 9>>)
+    assert LazyHTML.text(doc) =~ "see attached"
+  end
+
+  test "an unservable image degrades to a src-less placeholder, not a crash" do
+    msg = %Message.ToolResult{
+      tool_call_id: "c3",
+      tool_name: "computer",
+      content: [%Content.Image{data: "%%%not-base64%%%", mime_type: "image/png"}]
+    }
+
+    html = render_html(msg)
+    doc = LazyHTML.from_fragment(html)
+
+    assert html =~ ~s(data-block-kind="tool-image")
+
+    assert doc |> LazyHTML.query("[data-block-kind=tool-image] img") |> LazyHTML.attribute("src") ==
+             []
+  end
+
+  test "a tool result without images renders no image container" do
+    msg = %Message.ToolResult{
+      tool_call_id: "c7",
+      tool_name: "ls",
+      content: Content.text("a.txt")
+    }
+
+    refute render_html(msg) =~ "tool-image"
+  end
+
   test "an error tool result is flagged" do
     msg = %Message.ToolResult{
       tool_call_id: "c2",
@@ -180,5 +251,36 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     refute html =~ "BROKEN-CARD"
     assert html =~ ~s(data-message-role="tool-result")
     assert html =~ "still visible"
+  end
+
+  # AUDIT: every persisted screenshot is re-embedded as a full base64 data URI on
+  # every render, and reattach streams the whole transcript. A routine
+  # 100-screenshot session therefore needs 100+ MB of HTML just to reconnect.
+  # A rendered screenshot needs a thumbnail or an out-of-line reference, not the
+  # capture payload inlined once per reconnect.
+  @tag :audit
+  test "a rendered screenshot does not inline the whole capture payload" do
+    # A downscaled 1366px PNG is ~0.5-1.5MB of base64; use a modest 512KB.
+    payload = Base.encode64(:crypto.strong_rand_bytes(384 * 1024))
+
+    msg = %Message.ToolResult{
+      tool_call_id: "c1",
+      tool_name: "computer",
+      content: [
+        Content.text("Screenshot of window 42."),
+        %Content.Image{data: payload, mime_type: "image/png"}
+      ],
+      details: %{},
+      is_error: false,
+      timestamp: Message.now()
+    }
+
+    html = render_html(msg)
+
+    assert html =~ ~s(data-block-kind="tool-image")
+
+    assert byte_size(html) < div(byte_size(payload), 4),
+           "the renderer inlined #{byte_size(html)} bytes for a #{byte_size(payload)}-byte " <>
+             "capture; a 100-screenshot session cannot be reconnected"
   end
 end

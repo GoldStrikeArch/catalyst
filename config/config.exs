@@ -12,6 +12,30 @@ import Config
 config :catalyst_web,
   generators: [context_app: :catalyst]
 
+# Computer use is off by default: with it on, the agent drives the machine the
+# way a person does, with no sandbox. A session opts in per run
+# (`Session.Server.configure(pid, opts: [computer_use: true])`, or the header
+# toggle); this is only the fallback when the session says nothing. The grant
+# additionally requires a usable backend — see
+# `Catalyst.Tools.Computer.Availability`, which resolves the native input
+# helper from `:computer_helper_path` (default: `<priv>/bin/catalyst-input`).
+config :catalyst, computer_use: false
+
+# Optional screenshot pruning for computer-use sessions: `:all` keeps every
+# screenshot in the request context; an integer N replaces all but the last N
+# screenshot images with text placeholders before each LLM call (a
+# transform_context hook — see `Catalyst.Tools.Computer.Screenshots` for the
+# delta-upload and durable-transcript costs of turning this on).
+config :catalyst, computer_screenshot_retain: :all
+
+# shell_session (PTY shells held open across turns; gated behind the same
+# :computer_use capability): idle shells are closed after this many ms of no
+# tool interaction, and at most this many shells run concurrently (global —
+# one machine, one pool of PTYs).
+config :catalyst,
+  shell_session_idle_ms: 15 * 60 * 1000,
+  shell_session_max: 4
+
 # Configures the endpoint
 config :catalyst_web, CatalystWeb.Endpoint,
   # Always serve: the desktop shell boots via `mix run`/`mix release` (not

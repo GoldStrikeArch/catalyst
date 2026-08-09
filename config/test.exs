@@ -25,7 +25,18 @@ config :catalyst,
   system_prompt_path: Path.join(test_tmp, "system_prompt.md"),
   prompts_dir: Path.join(test_tmp, "prompts"),
   agents_dir: Path.join(test_tmp, "agents"),
-  boot_stable_ms: 50
+  boot_stable_ms: 50,
+  # Computer use: pin the whole grant so the advertised tool set is identical
+  # on every host. The helper path stays inside test_tmp (nothing builds it),
+  # and the backend is explicitly reported unavailable — tests that need the
+  # granted state flip :computer_backend_available themselves.
+  computer_use: false,
+  computer_helper_path: Path.join(test_tmp, "bin/catalyst-input"),
+  computer_backend_available: false,
+  # shell_session: pin the lifecycle knobs so the suite is deterministic;
+  # idle-timeout and cap tests flip these per-test with restore.
+  shell_session_idle_ms: 15 * 60 * 1000,
+  shell_session_max: 4
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.

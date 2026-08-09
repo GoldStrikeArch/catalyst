@@ -9,10 +9,13 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
   reasoning blocks are replayed from their stored signature; tool-call ids carry
   `"<call_id>|<item_id>"` and are split apart. The semantic projection reuses the
   same encoder while omitting generated assistant replay ids, so request
-  fingerprints never depend on random values.
+  fingerprints never depend on random values, and replacing `input_image` data
+  URLs with a digest plus payload size so image-bearing turns are not estimated
+  as megabytes of text. The wire body is unaffected: real base64 still ships.
   """
 
   alias Catalyst.{Content, Message}
+  alias Catalyst.Context.Tokens
 
   @provider_module "Elixir.Catalyst.LLM.OpenAICodex.Provider"
   @default_instructions "You are a helpful assistant."
@@ -40,7 +43,10 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
   Runtime-only transport options and generated assistant replay ids are absent.
   Reasoning and function-call item ids remain because they are sent verbatim to
   the provider. JSON-equivalent tool schemas and function arguments normalize
-  to the same value.
+  to the same value. `input_image` parts carry `"image_digest"` and `"bytes"`
+  instead of their data URL — see the module doc — and are marked with
+  `Catalyst.Context.Tokens.tag_image_block/1` so only these harness-built
+  blocks (never model-written tool arguments) are priced as images.
   """
   @spec semantic_projection(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) :: map()
   def semantic_projection(model, context, opts \\ []) do
@@ -289,7 +295,62 @@ defmodule Catalyst.LLM.OpenAICodex.Request do
     end
   end
 
+  defp semantic_item(%{"type" => "function_call_output", "output" => parts} = item)
+       when is_list(parts),
+       do: semantic_parts_item(item, "output", parts)
+
+  defp semantic_item(%{"role" => "user", "content" => parts} = item) when is_list(parts),
+    do: semantic_parts_item(item, "content", parts)
+
   defp semantic_item(item), do: json_semantic_value(item)
+
+  # Image parts are tagged with `Tokens.tag_image_block/1` — an ATOM key — and
+  # only AFTER `json_semantic_value/1`, which would stringify it. The parts
+  # lists here are built by the harness from `Content` structs, never from
+  # model-written data; a model's function-call arguments are decoded JSON
+  # (string keys only) and so can never forge the tag, which is what keeps
+  # `Tokens.estimate_projection/1` from pricing argument maps merely shaped
+  # like image blocks.
+  defp semantic_parts_item(item, key, parts) do
+    item
+    |> Map.put(key, Enum.map(parts, &semantic_part/1))
+    |> json_semantic_value()
+    |> tag_image_parts(key)
+  end
+
+  defp tag_image_parts(%{} = item, key),
+    do: Map.update(item, key, [], fn parts -> Enum.map(parts, &tag_image_part/1) end)
+
+  defp tag_image_parts(item, _key), do: item
+
+  defp tag_image_part(%{"type" => "input_image"} = part), do: Tokens.tag_image_block(part)
+  defp tag_image_part(part), do: part
+
+  # The wire request keeps the real `data:<mime>;base64,<payload>` URL; only the
+  # projection swaps it for a digest plus the payload size. Embedding the base64
+  # would make `Tokens.estimate_projection/1` price a screenshot as a megabyte of
+  # text; the digest (over the whole URL, so the mime type stays covered) keeps
+  # two different images distinguishable for fingerprints and the delta-upload
+  # prefix check, and `"bytes"` carries the size the estimator prices.
+  defp semantic_part(%{"type" => "input_image", "image_url" => url} = part)
+       when is_binary(url) do
+    part
+    |> Map.delete("image_url")
+    |> Map.put("image_digest", image_digest(url))
+    |> Map.put("bytes", image_payload_size(url))
+  end
+
+  defp semantic_part(part), do: part
+
+  defp image_digest(url),
+    do: url |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+
+  defp image_payload_size(url) do
+    case String.split(url, ";base64,", parts: 2) do
+      [_prefix, payload] -> byte_size(payload)
+      [_not_a_data_url] -> byte_size(url)
+    end
+  end
 
   defp json_semantic_value(value) do
     with {:ok, encoded} <- Jason.encode(value),

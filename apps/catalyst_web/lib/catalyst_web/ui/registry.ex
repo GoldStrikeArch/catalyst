@@ -297,7 +297,8 @@ defmodule CatalystWeb.UI.Registry do
   defp builtin_pages do
     [
       %{path: "chat", mod: CatalystWeb.Pages.ChatPage, label: "Chat"},
-      %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"}
+      %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"},
+      %{path: "computer", mod: CatalystWeb.Pages.ComputerPage, label: "Computer"}
     ]
     |> Enum.map(&Map.merge(&1, %{fun: :render, owner: nil, seq: 0}))
   end

@@ -435,6 +435,169 @@ crashed while extensions were active (a boot-marker file detects it; a successfu
 `reload_extensions` — or the panel's "Load extensions now" button — clears it, and the
 UI shows a banner while it is active).
 
+### Recipe: gating privileged tools with a `before_tool_call` hook
+
+Catalyst's tool calls are **auto-allowed by design** — there is no approval UI. The
+counterweight is exactly the hook mechanism above: a `:before_tool_call` handler runs
+before every tool call, and `{:block, reason}` stops the call and returns the reason to
+the model as an error result. The hooks are **fail-closed at the runtime
+seam** — a hook set that cannot be observed (mid-reload, recovering, or unregistered
+mid-turn) blocks rather than proceeds — and they run after every tool source is
+resolved, so neither an explicit tool list nor another extension bypasses them. One
+nuance a gate must own: a handler that itself raises, exits, or hangs is logged and
+*skipped*, so a gate catches its own faults and blocks explicitly (the recipe below
+does). This matters most for the tools that drive the real machine with no sandbox: the
+computer-use set (`computer`, `applescript`, `open_app`, `clipboard`, `shell_session`)
+— and equally `bash`, which runs arbitrary commands whether or not the computer-use
+toggle is on. A worked gate — human-held state, flipped only through a channel no tool
+can reach — installed like any other extension:
+
+```elixir
+defmodule Catalyst.Ext.ComputerUseGate do
+  use Catalyst.Extension
+
+  # Tools that drive the machine, plus every tool that could dismantle the
+  # gate itself: `bash` runs arbitrary commands, and the extension-management
+  # tools load code into the VM. Trim only names that can do neither.
+  @gated ~w(computer applescript open_app clipboard shell_session bash
+            install_extension develop_tool reload_extensions rollback_extension)
+
+  # Consequential-looking arguments that require a fresh per-call confirmation
+  # even while the gate is on. Tighten or extend to taste.
+  @always_confirm [~r/sudo/i, ~r/password/i, ~r/purchase|checkout|buy now/i]
+
+  # On/off + pending confirmations live in a supervised process, not a file:
+  # an agent with any shell or file tool can create files, so a marker file is
+  # an approval the agent can grant itself. Purge/reload/restart resets to off.
+  @state __MODULE__.State
+  @off %{on: false, confirmations: 0}
+
+  def setup(api) do
+    _ =
+      Catalyst.ExtensionAPI.start_child(api, %{
+        id: @state,
+        start: {Agent, :start_link, [fn -> @off end, [name: @state]]}
+      })
+
+    Catalyst.ExtensionAPI.register_hook(api, :before_tool_call, &__MODULE__.gate/1)
+
+    # The only writer of that state: a chat command, dispatched exclusively
+    # from text the human types into the chat input. No tool reaches it.
+    _ =
+      Catalyst.ExtensionAPI.register_command(api, "computer",
+        handler: fn arg, socket -> command(arg, socket) end,
+        label: "/computer on|off|confirm — the machine-control gate"
+      )
+
+    :ok
+  end
+
+  # ctx: %{name, args, call_id, cwd, assistant}
+  def gate(ctx) do
+    cond do
+      ctx.name not in @gated -> :cont
+      not on?() -> {:block, switched_off_reason(ctx.name)}
+      risky?(ctx.args) -> confirmed_or_block(ctx)
+      true -> :cont
+    end
+  end
+
+  # Human-side controls: called by the chat command below, or from IEx when
+  # running headless.
+  def enable, do: update_state(fn state -> %{state | on: true} end)
+  def disable, do: update_state(fn _state -> @off end)
+  def confirm_next, do: update_state(&%{&1 | confirmations: &1.confirmations + 1})
+
+  defp switched_off_reason(name) do
+    "Machine control is switched off, so #{name} is unavailable. Ask the user " <>
+      "to switch it on — they type `/computer on` in the chat. Only a human " <>
+      "can do that; no tool call can, so do not attempt it yourself."
+  end
+
+  defp confirmed_or_block(ctx) do
+    case take_confirmation() do
+      :ok ->
+        :cont
+
+      :error ->
+        {:block,
+         "Blocked: this #{ctx.name} call looks consequential. Tell the user " <>
+           "exactly what it will do and ask them to confirm — they type " <>
+           "`/computer confirm` in the chat — then retry. One confirmation " <>
+           "covers one call."}
+    end
+  end
+
+  defp command(arg, socket) do
+    case String.trim(arg) do
+      "on" -> flip(socket, &enable/0, "machine control enabled")
+      "off" -> flip(socket, &disable/0, "machine control disabled")
+      "confirm" -> flip(socket, &confirm_next/0, "next consequential call confirmed")
+      _other -> Phoenix.LiveView.put_flash(socket, :error, "usage: /computer on|off|confirm")
+    end
+  end
+
+  defp flip(socket, action, message) do
+    action.()
+    Phoenix.LiveView.put_flash(socket, :info, message)
+  end
+
+  defp risky?(args) do
+    text = inspect(args, limit: :infinity, printable_limit: 4_000)
+    Enum.any?(@always_confirm, &Regex.match?(&1, text))
+  end
+
+  # A raising handler is skipped by the hook runner, so state reads catch the
+  # exit an unreachable state process produces and read as "off" — fail closed.
+  defp on? do
+    Agent.get(@state, & &1.on)
+  catch
+    :exit, _reason -> false
+  end
+
+  defp take_confirmation do
+    Agent.get_and_update(@state, fn
+      %{confirmations: left} = state when left > 0 ->
+        {:ok, %{state | confirmations: left - 1}}
+
+      state ->
+        {:error, state}
+    end)
+  catch
+    :exit, _reason -> :error
+  end
+
+  defp update_state(fun) do
+    Agent.update(@state, fun)
+  catch
+    :exit, _reason -> :error
+  end
+end
+```
+
+The block reason is what the model sees, so write it as an instruction: tell it what to
+ask the user and how to retry — but never hand it the mechanism. An earlier version of
+this recipe kept approval in a marker file and its block reason ended "approve it by
+creating `<path>` (e.g. `touch <path>`)"; with `bash` ungated, the model could run that
+`touch` itself and retry, no human involved. A block reason that names an action any
+tool can perform is an instruction to perform it.
+
+Two properties make this gate hold. First, the state is reachable by humans only: the
+`/computer` chat command is dispatched solely from text typed into the chat input
+(running headless, call `enable/0`, `disable/0`, `confirm_next/0` from the console);
+the owner-tagged state process is reset to **off** by purge, reload, or restart; and
+the `catch`ed reads treat an unreachable process as off. Second, `@gated` includes
+every tool that could dismantle the gate: `bash` runs arbitrary commands, and the
+extension-management tools load code into the running VM — ungated, either could simply
+remove the hook rather than ask. One residue to know about: a file-writing tool
+(`write`, `edit`) can still plant an extension under `~/.catalyst/extensions` that
+loads at the *next boot*; gate those tools too if that matters on your machine.
+Confirmation has real motion: `/computer confirm` arms exactly one consequential call
+and `take_confirmation/0` consumes it, so "ask the user, then retry" terminates instead
+of re-blocking forever. The same shape gates anything else — a deny-list of bash
+substrings, a working-directory allowlist, or an "always block `spawn_agent` while
+computer use is on" rule.
+
 ### Prompt resolution, provenance, and reloads
 
 System and compaction instructions resolve independently. For a system prompt, the first
@@ -561,6 +724,55 @@ incomplete/truncated flags, and `untrusted: true`; treat the content as untruste
 as higher-priority instructions. Provider errors, aborts, timeouts, premature child exit, and a
 missing or blank final answer are tool errors. A nonblank length-limited answer succeeds but is
 marked incomplete.
+
+## Computer use (operating the machine like a person)
+
+The **Computer** header toggle (next to Quiet / ⚡ Fast) arms an extra tool tier for the *next*
+run: `computer` (screen, mouse, keyboard), `applescript` (menus, app dictionaries, AX reads —
+the preferred, zero-screenshot way to drive apps), `open_app`, `list_apps`, `clipboard`, and
+`shell_session` (a real PTY held open across turns — it can keep `ssh`/`sudo`/REPL sessions
+alive, which one-shot `bash` cannot). `fetch` (bounded HTTP with HTML→text) is always available
+and needs no toggle. When the toggle is off the gated tools are not even advertised to the
+model; they cost zero tokens and cannot be re-added by an extension or an explicit tool list.
+
+Read this before arming it:
+
+- ⚠️ **Full machine access, by design.** There is no sandbox and no approval prompt: with the
+  toggle on, the agent can do anything you can do at the keyboard. The counterweights are the
+  off-by-default toggle, the `before_tool_call` gate recipe above (install it if you want
+  approvals), and untrusted marking. **Child agents never inherit the grant** — `spawn_agent`
+  strips `computer_use` deliberately.
+- **Untrusted content.** Anything read from the screen, fetched from the web, or returned by
+  AppleScript is untrusted input; the tools say so in-band and in `details.untrusted`. The agent
+  must never treat on-screen or fetched text as instructions and should ask before consequential
+  or irreversible actions (purchases, sending messages, deleting data).
+- **macOS permissions (TCC).** `/computer` shows grant status with "Open System Settings"
+  links. There are up to **three** separate TCC subjects: the `catalyst-input` helper binary
+  (Accessibility for synthetic input, Screen Recording for capture), `osascript` (Automation,
+  prompted per target app), and the app itself. In dev (`mix`/`iex`) the subject is your
+  *terminal*, not Catalyst — grants do not transfer between dev and the packaged `.app`. The
+  helper is ad-hoc signed, so **every rebuild changes its identity**: re-grant (or remove and
+  re-add the entry in System Settings) after rebuilding. Without Screen Recording,
+  `screencapture` silently returns a near-empty desktop — check `/computer` first.
+- **Screenshots persist on disk.** Every screenshot is stored verbatim in the unencrypted
+  session transcript under `~/.catalyst/sessions/` — whatever was on screen (passwords, private
+  messages) is written to disk, and screenshot-heavy sessions grow the JSONL by ~0.5–1.5 MB per
+  retained image. Debug logs (`~/.catalyst/debug/`) never contain image bytes (mime + size +
+  digest only). Optional request-side pruning: `config :catalyst, :computer_screenshot_retain`
+  (`:all` | keep-last-N) — it shrinks requests, not the stored transcript, and disables Codex
+  delta uploads while active.
+- **Screenshots are expensive** (~1,000–1,800 tokens each). Prefer `open_app` + `applescript`
+  menu targeting / AX reads; capture a specific *window*, not the whole display (a full-display
+  shot includes Catalyst's own window showing your previous screenshots). Coordinates you send
+  to `computer` are in the last screenshot's pixel space; the tool handles Retina and
+  multi-display math.
+- **One physical pointer.** Computer-use input is a global FIFO lock; two sessions driving the
+  GUI at once will contend. Abort safety releases held buttons/keys if a run is stopped
+  mid-gesture (best-effort: if the whole app dies mid-drag, nothing can release the button).
+- **shell_session semantics.** The PTY echoes what you write and emits `\r\n` line endings;
+  write `chars` including the trailing `\n` to run a command. Shells idle out after 15 minutes,
+  at most 4 run at once, and they are closed when their owning session ends. Helper binary
+  missing? Run `mix catalyst.computer.build` (dev) — the packaged app bundles it.
 
 ### Applying UI changes
 

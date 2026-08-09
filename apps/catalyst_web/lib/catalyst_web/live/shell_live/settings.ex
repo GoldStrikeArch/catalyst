@@ -15,6 +15,11 @@ defmodule CatalystWeb.ShellLive.Settings do
 
   @codex_prefs_ptr {CatalystWeb.ShellLive, :codex_prefs}
   @ui_prefs_ptr {CatalystWeb.ShellLive, :ui_prefs}
+  # Machine-capability grants get their own key on purpose: `sync_from_session`
+  # rebuilds `codex_prefs` wholesale from the session's Codex options and would
+  # drop anything else stored there, and `ui_prefs` is display-only state that
+  # never configures the session.
+  @machine_prefs_ptr {CatalystWeb.ShellLive, :machine_prefs}
 
   @type codex_prefs :: %{
           model: String.t(),
@@ -23,6 +28,7 @@ defmodule CatalystWeb.ShellLive.Settings do
           transport: String.t()
         }
   @type ui_prefs :: %{quiet: boolean()}
+  @type machine_prefs :: %{computer_use: boolean()}
   @type socket :: Phoenix.LiveView.Socket.t()
 
   @doc "Loads persisted Codex controls over the current application defaults."
@@ -50,6 +56,47 @@ defmodule CatalystWeb.ShellLive.Settings do
       %{} = saved -> Map.merge(defaults, saved)
       _not_saved -> defaults
     end
+  end
+
+  @doc "Loads persisted machine-capability grants over their defaults (all off)."
+  @spec load_machine() :: machine_prefs()
+  def load_machine do
+    defaults = %{computer_use: false}
+
+    case :persistent_term.get(@machine_prefs_ptr, nil) do
+      %{} = saved -> Map.merge(defaults, saved)
+      _not_saved -> defaults
+    end
+  end
+
+  @doc """
+  Toggles computer use, persists it, and applies it to the attached session.
+
+  Like the Codex controls this takes effect on the session's NEXT run; the
+  transcript and the running session are untouched. The grant is still subject
+  to backend availability — `Catalyst.Tools.Computer.Availability` decides
+  whether the tools can be advertised at all.
+  """
+  @spec toggle_computer_use(socket()) :: socket()
+  def toggle_computer_use(socket) do
+    prefs = Map.update!(socket.assigns.machine_prefs, :computer_use, &(!&1))
+    persist(@machine_prefs_ptr, prefs)
+    socket = assign(socket, machine_prefs: prefs)
+
+    case socket.assigns.session_pid do
+      pid when is_pid(pid) -> configure_machine(socket, pid, prefs)
+      _no_session -> socket
+    end
+  end
+
+  @doc "Converts machine-capability grants into session run options."
+  @spec machine_opts(machine_prefs()) :: keyword()
+  def machine_opts(prefs), do: [computer_use: prefs.computer_use]
+
+  @doc "Session run options for a new session: Codex controls plus machine grants."
+  @spec start_opts(socket()) :: keyword()
+  def start_opts(socket) do
+    run_opts(socket.assigns.codex_prefs) ++ machine_opts(socket.assigns.machine_prefs)
   end
 
   @doc "Merges a Codex controls form submission and enforces model capabilities."
@@ -111,7 +158,19 @@ defmodule CatalystWeb.ShellLive.Settings do
     ]
   end
 
-  @doc "Synchronizes controls from an attached session, which is the source of truth."
+  @doc """
+  Synchronizes controls from an attached session, which is the source of truth.
+
+  Reconciles both the Codex controls (`codex_prefs`) and the machine-capability
+  grants (`machine_prefs`, i.e. the computer-use toggle) from the session's
+  authoritative options — a session configured directly, or a reattach to a
+  different session, must never leave the SAFETY toggle showing a state the
+  session does not have. `machine_prefs` stays its own persistent term (see the
+  module attribute comment); only its `:computer_use` key is reconciled here,
+  and only when the session actually carries the option, so a browser-level
+  preference for a genuinely new session is never clobbered by a session that
+  predates the capability.
+  """
   @spec sync_from_session(socket()) :: socket()
   def sync_from_session(socket) do
     model = socket.assigns.session_model || OpenAICodex.model(socket.assigns.codex_prefs.model)
@@ -126,7 +185,39 @@ defmodule CatalystWeb.ShellLive.Settings do
       })
 
     persist(@codex_prefs_ptr, prefs)
-    assign(socket, codex_prefs: prefs)
+
+    socket
+    |> assign(codex_prefs: prefs)
+    |> sync_machine_from_opts(opts)
+  end
+
+  # The session's :computer_use option wins over the browser preference exactly
+  # as the Codex options do above — but only when the option is present; a
+  # session without the key (older session, external configurer) must not turn
+  # a persisted grant preference off behind the user's back.
+  defp sync_machine_from_opts(socket, opts) do
+    case Keyword.fetch(opts, :computer_use) do
+      {:ok, granted} when is_boolean(granted) ->
+        prefs = Map.put(socket.assigns.machine_prefs, :computer_use, granted)
+        persist(@machine_prefs_ptr, prefs)
+        assign(socket, machine_prefs: prefs)
+
+      _absent_or_invalid ->
+        socket
+    end
+  end
+
+  # Only the capability key is sent: `Server.configure/2` merges opts, so the
+  # session's Codex tuning stays exactly as it was.
+  defp configure_machine(socket, pid, prefs) do
+    opts = machine_opts(prefs)
+
+    try do
+      :ok = Server.configure(pid, opts: opts)
+      assign(socket, session_opts: Keyword.merge(socket.assigns.session_opts || [], opts))
+    catch
+      :exit, _reason -> socket
+    end
   end
 
   defp configure_session(socket, pid, prefs) do
@@ -135,7 +226,12 @@ defmodule CatalystWeb.ShellLive.Settings do
 
     try do
       :ok = Server.configure(pid, model: model, opts: opts)
-      assign(socket, session_model: model, session_opts: opts)
+      # Merge rather than replace: the server merges too, so a capability grant
+      # set by another control must not disappear from the UI's own view.
+      assign(socket,
+        session_model: model,
+        session_opts: Keyword.merge(socket.assigns.session_opts || [], opts)
+      )
     catch
       # The session can die during a control change. The monitor callback will
       # reattach, while the persisted preferences apply to the next session.

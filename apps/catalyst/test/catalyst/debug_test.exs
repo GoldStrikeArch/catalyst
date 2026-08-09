@@ -37,6 +37,51 @@ defmodule Catalyst.DebugTest do
     assert content =~ "tool_start read"
   end
 
+  test "tool results log image mime+size+digest, never image bytes", %{sid: sid} do
+    data = Base.encode64(String.duplicate("pixels!", 50))
+
+    Debug.log_event(sid, %Event.ToolExecutionEnd{
+      call_id: "c",
+      name: "computer",
+      is_error: false,
+      result: %{
+        content: [
+          %Content.Text{text: "Screenshot of display 1"},
+          %Content.Image{data: data, mime_type: "image/png"}
+        ],
+        details: %{}
+      }
+    })
+
+    content = File.read!(Debug.path(sid))
+    assert content =~ "tool_end computer"
+    assert content =~ "[image image/png #{byte_size(data)}B sha256:"
+    refute content =~ data
+  end
+
+  test "describe_content and scrub_image_payloads keep image bytes out of logs" do
+    data = Base.encode64(String.duplicate("x", 200))
+
+    described =
+      Debug.describe_content([
+        %Content.Text{text: "note"},
+        %Content.Image{data: data, mime_type: "image/png"}
+      ])
+
+    assert described =~ "note"
+    assert described =~ "[image image/png"
+    refute described =~ data
+
+    body = ~s({"image_url":"data:image/png;base64,#{data}","other":"kept"})
+    scrubbed = Debug.scrub_image_payloads(body)
+    refute scrubbed =~ data
+    assert scrubbed =~ "data:image/png;base64,<#{byte_size(data)}B elided>"
+    assert scrubbed =~ ~s("other":"kept")
+
+    # No data URL → byte-identical no-op.
+    assert Debug.scrub_image_payloads(~s({"a":1})) == ~s({"a":1})
+  end
+
   test "background debug writes complete outside the caller", %{sid: sid} do
     assert {:ok, log_pid} = Debug.log_async(sid, "async", "background line")
     assert {:ok, event_pid} = Debug.log_event_async(sid, %Event.AgentStart{})
@@ -123,6 +168,26 @@ defmodule Catalyst.DebugTest do
       ReadLog.execute(%{}, %{cwd: ".", call_id: "c", session_id: nil, report: fn _ -> :ok end})
 
     assert Content.text_of(res.content) =~ "no session id"
+  end
+
+  # AUDIT: the scrubbing regex requires a payload of at least 64 base64
+  # characters (48 bytes), so a small-but-valid inline image passes through
+  # untouched. guide.md and architecture.md both state that debug logs "never
+  # contain image bytes" — the threshold makes that claim false for any image
+  # under 48 bytes (a 1x1 GIF is 43).
+  @tag :audit
+  test "a short inline image payload is elided like any other" do
+    # A real 1x1 transparent GIF: 43 bytes, 58 base64 characters.
+    gif =
+      Base.decode64!("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+
+    payload = Base.encode64(gif)
+    body = ~s({"image_url":"data:image/gif;base64,#{payload}"})
+
+    scrubbed = Debug.scrub_image_payloads(body)
+
+    refute scrubbed =~ payload, "short image payload survived scrubbing: #{scrubbed}"
+    assert scrubbed =~ "elided"
   end
 
   defp await_background(pid) do

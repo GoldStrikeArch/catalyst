@@ -24,13 +24,20 @@ defmodule Catalyst.Tools.Registry do
     Fd,
     Sd,
     AstGrep,
+    Computer,
     DevelopTool,
     InstallExtension,
     ReloadTool,
     RollbackTool,
     ReadLog,
     ListAgents,
-    SpawnAgent
+    SpawnAgent,
+    AppleScript,
+    OpenApp,
+    ListApps,
+    Clipboard,
+    Fetch,
+    ShellSession
   }
 
   @default [
@@ -43,13 +50,20 @@ defmodule Catalyst.Tools.Registry do
     Edit,
     Sd,
     AstGrep,
+    Computer,
     DevelopTool,
     InstallExtension,
     ReloadTool,
     RollbackTool,
     ReadLog,
     ListAgents,
-    SpawnAgent
+    SpawnAgent,
+    Fetch,
+    AppleScript,
+    OpenApp,
+    ListApps,
+    Clipboard,
+    ShellSession
   ]
 
   @metadata_timeout 1_000
@@ -60,7 +74,8 @@ defmodule Catalyst.Tools.Registry do
           name: String.t(),
           description: String.t(),
           parameters: map(),
-          execution_mode: :parallel | :sequential
+          execution_mode: :parallel | :sequential,
+          capabilities: [atom()]
         }
 
   @typedoc "A fingerprinted tool definition, execution target, and pre-resolved schema."
@@ -221,7 +236,11 @@ defmodule Catalyst.Tools.Registry do
         %{
           module: _module,
           fingerprint: _fingerprint,
-          definition: _definition,
+          # `capabilities` is matched explicitly: a definition cached before
+          # capabilities existed survives a self-reload untouched (the tool's
+          # own fingerprint did not change), and reading it as "no capability"
+          # would un-gate a gated tool. It is re-validated below instead.
+          definition: %{capabilities: _capabilities},
           resolved_schema: _schema,
           executor: _executor
         }} = result} ->
@@ -237,6 +256,23 @@ defmodule Catalyst.Tools.Registry do
 
       {:uncached, _reason} ->
         entry(module)
+    end
+  end
+
+  @doc """
+  Capabilities a run must grant before `module` may be advertised.
+
+  Reads the fingerprint-keyed metadata cache, refreshing it once when the entry
+  is missing or a hot reload made it stale, so the capability gate never calls
+  extension code on the turn-assembly path. A module whose metadata cannot be
+  validated declares no capability here: it is already dropped by `index/1` and
+  `to_provider_tools/1`, so it can neither be advertised nor called.
+  """
+  @spec capabilities_of(module()) :: [atom()]
+  def capabilities_of(module) when is_atom(module) do
+    case cached_entry(module) do
+      {:ok, %{definition: %{capabilities: capabilities}}} -> capabilities
+      {:error, _unavailable} -> []
     end
   end
 
@@ -291,12 +327,14 @@ defmodule Catalyst.Tools.Registry do
            callback(module, :description, &is_binary/1, :bad_tool_description),
          {:ok, parameters} <- callback(module, :parameters, &is_map/1, :bad_tool_parameters),
          {:ok, execution_mode} <- execution_mode(module),
+         {:ok, capabilities} <- capabilities(module),
          {:ok, executor} <- executor(module) do
       definition = %{
         name: name,
         description: description,
         parameters: parameters,
-        execution_mode: execution_mode
+        execution_mode: execution_mode,
+        capabilities: capabilities
       }
 
       {:ok,
@@ -392,6 +430,15 @@ defmodule Catalyst.Tools.Registry do
       false -> {:ok, :parallel}
     end
   end
+
+  defp capabilities(module) do
+    case function_exported?(module, :capabilities, 0) do
+      true -> callback(module, :capabilities, &capability_list?/1, :bad_tool_capabilities)
+      false -> {:ok, []}
+    end
+  end
+
+  defp capability_list?(value), do: is_list(value) and Enum.all?(value, &is_atom/1)
 
   defp executor(module) do
     case function_exported?(module, :__catalyst_executor__, 0) do

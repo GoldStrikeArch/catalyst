@@ -41,9 +41,11 @@ defmodule CatalystWeb.ShellLive do
         login_ref: nil,
         boot_status: Catalyst.Extensions.boot_status(),
         ext_panel: nil,
+        computer_panel: nil,
         ext_action: nil,
         codex_prefs: Settings.load_codex(),
         ui_prefs: Settings.load_ui(),
+        machine_prefs: Settings.load_machine(),
         session_model: nil,
         session_opts: [],
         file_search: nil,
@@ -136,7 +138,39 @@ defmodule CatalystWeb.ShellLive do
     )
   end
 
+  # The /computer backend snapshot (grants, capture readiness, screens,
+  # windows, helper liveness) costs up to five synchronous backend round-trips,
+  # each with a multi-second helper call budget — so it is NEVER computed
+  # inside a LiveView callback (a wedged-but-alive helper would freeze the
+  # whole shell, chat included). The cheap availability part is assigned
+  # immediately and the queries run in a start_async task; the page renders
+  # the cached snapshot until the result lands. Triggered on navigation and
+  # discrete setting changes; the explicit Refresh button re-queries via
+  # "refresh_computer_state". Still lazy: nothing runs at boot, and nothing is
+  # queried when the backend is unavailable.
+  defp maybe_refresh_panel(%{assigns: %{page: "computer"}} = socket) do
+    start_computer_refresh(socket)
+  end
+
   defp maybe_refresh_panel(socket), do: socket
+
+  # The disconnected (static-render) pass assigns only the cheap pending state:
+  # its process exits right after rendering, so a query result could never be
+  # delivered — the connected mount's handle_params queries again anyway.
+  defp start_computer_refresh(socket) do
+    pending = CatalystWeb.Pages.ComputerPage.pending_state()
+    socket = assign(socket, computer_panel: pending)
+
+    case pending.available? and connected?(socket) do
+      true ->
+        start_async(socket, :computer_panel, fn ->
+          CatalystWeb.Pages.ComputerPage.backend_state()
+        end)
+
+      false ->
+        socket
+    end
+  end
 
   # Sessions intentionally are not stopped from terminate/2. Reconnects, page
   # refreshes, and self-triggered UI reloads must be able to reattach.
@@ -257,6 +291,39 @@ defmodule CatalystWeb.ShellLive do
     {:noreply, Settings.toggle_quiet(socket)}
   end
 
+  # The grant changes which tools the next run advertises, so the resolved
+  # prompt/tool preview and the panel snapshots are recomputed with it.
+  def handle_event("toggle_computer_use", _params, socket) do
+    {:noreply,
+     socket
+     |> Settings.toggle_computer_use()
+     |> RunDiagnostics.preview()
+     |> maybe_refresh_panel()}
+  end
+
+  # Explicit /computer "Refresh": re-query the backend snapshot on demand
+  # (grants, capture readiness, previews, helper liveness) — asynchronously,
+  # like every other snapshot; render itself never queries.
+  def handle_event("refresh_computer_state", _params, socket) do
+    {:noreply, start_computer_refresh(socket)}
+  end
+
+  # The desktop wxWebView cannot navigate x-apple.systempreferences: links
+  # ("unsupported URL"), so the page sends a pane key and the locally-running
+  # server hands the resolved deep link to open(1). Unknown keys are ignored —
+  # the client can never route an arbitrary string into the command.
+  def handle_event("open_system_settings", %{"pane" => pane}, socket) do
+    case CatalystWeb.Pages.ComputerPage.settings_url(pane) do
+      {:ok, url} ->
+        open_url = open_url_fun()
+        Task.Supervisor.start_child(Catalyst.TaskSupervisor, fn -> open_url.(url) end)
+        {:noreply, socket}
+
+      :error ->
+        {:noreply, put_flash(socket, :error, "Unknown settings pane: #{inspect(pane)}")}
+    end
+  end
+
   def handle_event("toggle_diagnostics", _params, socket) do
     {:noreply, assign(socket, diagnostics_open: !socket.assigns.diagnostics_open)}
   end
@@ -292,6 +359,15 @@ defmodule CatalystWeb.ShellLive do
   end
 
   @impl true
+  def handle_async(:computer_panel, {:ok, snapshot}, socket) do
+    {:noreply, assign(socket, computer_panel: snapshot)}
+  end
+
+  def handle_async(:computer_panel, {:exit, reason}, socket) do
+    {:noreply,
+     assign(socket, computer_panel: CatalystWeb.Pages.ComputerPage.failed_state(reason))}
+  end
+
   def handle_async({:file_search, _token}, {:ok, result}, socket) do
     {:noreply, ChatInput.apply_search(socket, result)}
   end
@@ -504,6 +580,13 @@ defmodule CatalystWeb.ShellLive do
 
   defp login_fun do
     Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)
+  end
+
+  # Config-injectable like :login_fun, so tests never open System Settings.
+  defp open_url_fun do
+    Application.get_env(:catalyst_web, :open_url_fun, fn url ->
+      System.cmd("/usr/bin/open", [url], stderr_to_stdout: true)
+    end)
   end
 
   defp format_error(reason) when is_binary(reason), do: reason

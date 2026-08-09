@@ -109,6 +109,17 @@ defmodule CatalystWeb.ShellComponents do
               <.icon name="hero-eye-slash" class="size-3.5" /> Quiet
             </button>
 
+            <button
+              id="computer-toggle"
+              type="button"
+              phx-click="toggle_computer_use"
+              aria-pressed={to_string(@machine_prefs.computer_use)}
+              title="Computer use: let the agent see the screen and drive this machine. Full access, no sandbox — applies to the next run and is never inherited by subagents."
+              class={computer_button_class(@machine_prefs.computer_use)}
+            >
+              <.icon name="hero-computer-desktop" class="size-3.5" /> Computer
+            </button>
+
             <div
               id="codex-control-group"
               class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
@@ -470,6 +481,18 @@ defmodule CatalystWeb.ShellComponents do
       "flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold transition",
       active? &&
         "border-neutral-400 bg-neutral-200/70 text-neutral-900 dark:border-white/25 dark:bg-white/10 dark:text-white",
+      !active? &&
+        "border-neutral-200 text-neutral-500 hover:border-neutral-300 hover:text-neutral-900 dark:border-white/10 dark:text-neutral-400 dark:hover:border-white/20 dark:hover:text-white"
+    ]
+  end
+
+  # Armed computer use means full, unsandboxed machine control, so the active
+  # state is deliberately louder than Quiet's neutral pill.
+  defp computer_button_class(active?) do
+    [
+      "flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold transition",
+      active? &&
+        "border-rose-500/50 bg-rose-500/10 text-rose-700 dark:border-rose-400/40 dark:bg-rose-400/10 dark:text-rose-300",
       !active? &&
         "border-neutral-200 text-neutral-500 hover:border-neutral-300 hover:text-neutral-900 dark:border-white/10 dark:text-neutral-400 dark:hover:border-white/20 dark:hover:text-white"
     ]

@@ -69,7 +69,10 @@ defmodule CatalystWeb.ExtensionsBootstrapTest do
     Extensions.register_host(:web, :registry, registry)
     assert :ok = Extensions.bootstrap()
 
-    assert_receive {:bootstrap_probe_setup, setup_pid}
+    # Generous window: the probe compiles + runs setup in a background
+    # bootstrap task, which can exceed assert_receive's 100ms default when
+    # the suite runs after the core apps in one VM.
+    assert_receive {:bootstrap_probe_setup, setup_pid}, 2_000
     assert is_pid(setup_pid)
     await_bootstrap_complete!()
     assert {:ok, {Catalyst.Ext.BootstrapProbePage, :render}} = Registry.fetch_page(@page)
@@ -86,7 +89,8 @@ defmodule CatalystWeb.ExtensionsBootstrapTest do
     assert %{bootstrap: phase} = :sys.get_state(replacement)
     assert phase in [:running, :complete]
 
-    assert_receive {:bootstrap_probe_setup, _setup_pid}
+    # Same generous window as above: setup runs in the background boot load.
+    assert_receive {:bootstrap_probe_setup, _setup_pid}, 2_000
     await_bootstrap_complete!()
     assert {:ok, {Catalyst.Ext.BootstrapProbePage, :render}} = Registry.fetch_page(@page)
     refute_receive {:bootstrap_probe_setup, _second_setup}, 50
@@ -94,7 +98,7 @@ defmodule CatalystWeb.ExtensionsBootstrapTest do
 
   test "an explicit successful load completes a pending bootstrap without rerunning setup" do
     assert {:ok, %{failed: []}} = Extensions.load_all()
-    assert_receive {:bootstrap_probe_setup, _setup_pid}
+    assert_receive {:bootstrap_probe_setup, _setup_pid}, 2_000
     await_bootstrap_complete!()
 
     register_live_web_leases()

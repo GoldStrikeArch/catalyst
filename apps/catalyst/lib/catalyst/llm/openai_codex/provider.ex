@@ -333,7 +333,7 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
       req.session_id,
       "codex.request",
       "ws response.create model=#{req.model.id} reused=#{reused?} delta=#{delta?} " <>
-        "body=#{Debug.truncate(frame, 3_000)}"
+        "body=#{frame |> Debug.scrub_image_payloads() |> Debug.truncate(3_000)}"
     )
 
     # Retry/fallback safety is judged by what the SINK saw, not by how many

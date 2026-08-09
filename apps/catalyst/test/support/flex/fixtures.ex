@@ -50,6 +50,7 @@ defmodule Catalyst.Flex.Fixtures do
       source =~ "result(text)" -> "result_helpers"
       source =~ "Catalyst.Ext.CountMatches" -> "count_matches"
       source =~ "Catalyst.Ext.HttpGet" -> "http_get"
+      source =~ "Catalyst.Ext.ComputerUseGate" -> "computer_use_gate"
       source =~ "Catalyst.Extensions.load_file" -> "manual_load"
       true -> raise "unclassified Elixir guide block:\n#{source}"
     end

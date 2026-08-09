@@ -45,7 +45,7 @@ defmodule Catalyst.LLM.OpenAICodex.SSETransport do
       session_id,
       "codex.request",
       "POST #{url} model=#{body_map["model"]} bytes=#{byte_size(body)} " <>
-        "body=#{Debug.truncate(body, 3_000)}"
+        "body=#{body |> Debug.scrub_image_payloads() |> Debug.truncate(3_000)}"
     )
 
     request = Finch.build(:post, url, headers, body)

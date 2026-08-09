@@ -57,6 +57,9 @@ defmodule Catalyst.MixProject do
       # Codex websocket transport (Mint is already in the tree via Finch).
       {:mint_web_socket, "~> 1.0"},
       {:req, "~> 0.5"},
+      # `fetch` reduces HTML to readable text. Floki's default mochiweb backend
+      # is pure Erlang, so this adds no NIF and no packaging risk.
+      {:floki, "~> 0.36"},
       {:bandit, "~> 1.5"},
       {:plug, "~> 1.16"},
       # Test-only: local websocket server for the Codex websocket client tests.

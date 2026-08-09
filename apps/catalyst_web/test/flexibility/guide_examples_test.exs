@@ -17,8 +17,92 @@ defmodule CatalystWeb.Flex.GuideExamplesTest do
     manifest = @manifest |> File.read!() |> Jason.decode!()
     manifest_by_id = Map.new(manifest, &{&1["id"], &1})
 
-    assert length(blocks) == 6
+    assert length(blocks) == 7
     assert Enum.sort(Map.keys(manifest_by_id)) == Enum.sort(Enum.map(blocks, & &1.id))
+  end
+
+  test "G1: ComputerUseGate compiles without setup and gates the documented tool set" do
+    block = guide_block!("computer_use_gate")
+    assert {:ok, _ast} = Code.string_to_quoted(block.source)
+
+    # The recipe must gate the machine-control tools and speak in retryable
+    # block reasons — the auto-allow counterweight the guide promises.
+    assert block.source =~ "before_tool_call"
+    assert block.source =~ ~s({:block,)
+
+    for tool <- ~w(computer applescript open_app clipboard shell_session) do
+      assert block.source =~ tool
+    end
+
+    purge_module(Catalyst.Ext.ComputerUseGate)
+
+    try do
+      assert [{Catalyst.Ext.ComputerUseGate, _binary}] = Code.compile_string(block.source)
+      assert function_exported?(Catalyst.Ext.ComputerUseGate, :setup, 1)
+    after
+      purge_module(Catalyst.Ext.ComputerUseGate)
+    end
+  end
+
+  # AUDIT: the gate is the *only* counterweight to auto-allow, and it excludes
+  # `bash` — which is always advertised — while its own block reason hands the
+  # model the exact command that opens the gate ("touch <approval_path>"). The
+  # model can approve itself through ungated bash and retry, with no human in
+  # the loop. Either bash is gated too, or approval must not be reachable from
+  # any tool the gate lets through.
+  @tag :audit
+  test "G1: ComputerUseGate cannot be opened by the tools it lets through" do
+    install_guide_block!(guide_block!("computer_use_gate"), "guide_computer_gate")
+
+    approval = Path.expand("~/.catalyst/computer_use_approved")
+    refute File.exists?(approval), "test would be meaningless: the gate is already open"
+
+    self_approval = %{
+      name: "bash",
+      args: %{"command" => "touch #{approval}"},
+      call_id: "audit",
+      cwd: File.cwd!(),
+      assistant: nil
+    }
+
+    assert match?({:block, _reason}, Catalyst.Hooks.before_tool_call(self_approval)),
+           "the gate let an ungated tool create its own approval file"
+  end
+
+  # AUDIT (resolved): approval and confirmation now live in the gate's
+  # supervised state process, whose only writers are human channels — the
+  # `/computer` chat command (dispatched exclusively from text the user types
+  # into the chat input; no tool can issue it) and the module's console
+  # functions, which that command calls. This test drives those human-side
+  # controls directly; the pinned property is unchanged: a consequential call,
+  # once the user has confirmed it, is allowed to run.
+  @tag :audit
+  test "G1: ComputerUseGate lets a confirmed consequential call proceed" do
+    install_guide_block!(guide_block!("computer_use_gate"), "guide_computer_gate")
+
+    # The human switches machine control on (in the app: `/computer on`).
+    gate = Catalyst.Ext.ComputerUseGate
+    assert :ok = apply(gate, :enable, [])
+
+    risky = %{
+      name: "applescript",
+      args: %{"script" => ~s(do shell script "sudo softwareupdate -l")},
+      call_id: "audit",
+      cwd: File.cwd!(),
+      assistant: nil
+    }
+
+    assert {:block, reason} = Catalyst.Hooks.before_tool_call(risky)
+    assert reason =~ "confirm"
+
+    # The human confirms the pending consequential call (`/computer confirm`).
+    assert :ok = apply(gate, :confirm_next, [])
+
+    refute match?({:block, _}, Catalyst.Hooks.before_tool_call(risky)),
+           "a consequential call stays blocked after the user confirmed it"
+
+    # One confirmation covers exactly one call: the next one re-blocks.
+    assert {:block, _reason} = Catalyst.Hooks.before_tool_call(risky)
   end
 
   test "G1: WordCount installs verbatim and executes" do
@@ -96,6 +180,9 @@ defmodule CatalystWeb.Flex.GuideExamplesTest do
   test "G1: result helper snippet parses and its two shapes execute in a generated tool module" do
     block = guide_block!("result_helpers")
     assert {:ok, _ast} = Code.string_to_quoted(block.source)
+    # function_exported?/3 is false for a not-yet-loaded module; load first so
+    # this doesn't depend on which earlier test happened to touch Tool.
+    assert Code.ensure_loaded?(Catalyst.Tools.Tool)
     assert function_exported?(Catalyst.Tools.Tool, :result, 1)
     assert function_exported?(Catalyst.Tools.Tool, :result, 2)
 

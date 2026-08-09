@@ -15,6 +15,21 @@ defmodule Catalyst.Context.Tokens do
   @bytes_per_token 4
   @image_token_floor 1_024
 
+  # Images are projected as `digest + bytes`, never as their base64 payload, so
+  # their cost is priced from the recorded byte size instead of being counted as
+  # text at `@bytes_per_token`.  Calibrated so ~1 MB of base64 lands near 1,750
+  # tokens (Anthropic's measured per-screenshot cost) and larger unresized
+  # images over-count conservatively — over-counting is the context guard's safe
+  # direction, under-counting is not.
+  @image_bytes_per_token 600
+
+  # Harness-built image projections carry this ATOM key (`tag_image_block/1`).
+  # Model-written tool-call arguments are decoded JSON and can therefore only
+  # ever contain string keys, so the tag is unforgeable by the model: a map in
+  # `arguments` merely shaped like an image block is counted as text, never
+  # priced as an image (which would let the model steer the context guard).
+  @image_tag :__catalyst_image__
+
   @type fingerprint_source :: :provider | :coarse
 
   @type estimate :: %{
@@ -108,12 +123,21 @@ defmodule Catalyst.Context.Tokens do
     }
   end
 
-  @doc "Token estimate for a projection, used by provider adapters without recursion."
+  @doc """
+  Token estimate for a projection, used by provider adapters without recursion.
+
+  Image blocks carry no payload in a projection — only a digest and a byte
+  count — so each is priced at `max(#{@image_token_floor}, bytes /
+  #{@image_bytes_per_token})` on top of the canonical binary rather than being
+  counted as text within it. A block with no recorded size falls back to the
+  floor. Only blocks tagged by `tag_image_block/1` are priced this way —
+  model-controlled data (tool-call arguments) can never carry the atom tag,
+  so it is always counted as plain text.
+  """
   @spec estimate_projection(term()) :: non_neg_integer()
   def estimate_projection(projection) do
     bytes = projection |> canonical_binary() |> byte_size()
-    image_floor = count_images(projection) * @image_token_floor
-    div(bytes + @bytes_per_token - 1, @bytes_per_token) + image_floor
+    div(bytes + @bytes_per_token - 1, @bytes_per_token) + image_tokens(projection)
   end
 
   @doc """
@@ -163,6 +187,19 @@ defmodule Catalyst.Context.Tokens do
   @doc false
   @spec canonical_binary(term()) :: binary()
   def canonical_binary(term), do: :erlang.term_to_binary(canonical(term), [:deterministic])
+
+  @doc """
+  Mark a projection block as a harness-built image block so
+  `estimate_projection/1` prices it from its recorded byte size.
+
+  The mark is an atom key. Model-written tool-call arguments are decoded
+  JSON — string keys only — so nothing the model produces can carry it;
+  projection sites must apply it only to blocks the harness itself built
+  (and, when the projection is JSON-normalized, only **after** that
+  normalization, which would stringify the atom).
+  """
+  @spec tag_image_block(map()) :: map()
+  def tag_image_block(block) when is_map(block), do: Map.put(block, @image_tag, true)
 
   defp estimate_with_source(model, context, opts) do
     case adapter_call(opts, :estimate_tokens, [model, context, adapter_opts(opts)]) do
@@ -333,8 +370,21 @@ defmodule Catalyst.Context.Tokens do
     }
   end
 
+  # The base64 payload never enters the projection: it would be counted as text
+  # at four bytes per token, inflating a single screenshot into six figures. The
+  # SHA-256 digest keeps image identity — the projection also feeds
+  # `context_fingerprint/3`, anchor matching, and the websocket delta-upload
+  # prefix check — while `bytes` carries the size `estimate_projection/1` prices.
+  # `tag_image_block/1` marks the block as harness-built so it (and nothing the
+  # model wrote) is eligible for image pricing.
   defp content_projection(%Content.Image{data: data, mime_type: mime}),
-    do: %{type: :image, mime_type: mime, data: data}
+    do:
+      tag_image_block(%{
+        type: :image,
+        mime_type: mime,
+        digest: :crypto.hash(:sha256, data),
+        bytes: byte_size(data)
+      })
 
   defp content_projection(%Content.ToolCall{} = call),
     do: %{type: :tool_call, id: call.id, name: call.name, arguments: call.arguments}
@@ -424,12 +474,28 @@ defmodule Catalyst.Context.Tokens do
   defp canonical_key(key) when is_atom(key), do: "a:" <> Atom.to_string(key)
   defp canonical_key(key), do: "o:" <> inspect(key)
 
-  defp count_images(%{type: type}) when type in [:image, :input_image], do: 1
-  defp count_images(%{"type" => type}) when type in ["image", "input_image"], do: 1
-  defp count_images(map) when is_map(map), do: map |> Map.values() |> Enum.sum_by(&count_images/1)
-  defp count_images(list) when is_list(list), do: Enum.sum_by(list, &count_images/1)
-  defp count_images(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> count_images()
-  defp count_images(_value), do: 0
+  # Size-scaled cost of every image block reachable in a projection, recognised
+  # ONLY by the atom tag `tag_image_block/1` applies at the harness projection
+  # sites (`content_projection/1` here, `Request.semantic_item/1` for Codex).
+  # A `"type"`-shaped map is deliberately not enough: tool-call arguments are
+  # model-written decoded JSON embedded verbatim in the projection, and pricing
+  # them as images would let the model inflate — and steer — the estimate.
+  @spec image_tokens(term()) :: non_neg_integer()
+  defp image_tokens(%{@image_tag => true} = block), do: image_cost(block)
+
+  defp image_tokens(map) when is_map(map),
+    do: map |> Map.values() |> Enum.sum_by(&image_tokens/1)
+
+  defp image_tokens(list) when is_list(list), do: Enum.sum_by(list, &image_tokens/1)
+  defp image_tokens(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> image_tokens()
+  defp image_tokens(_value), do: 0
+
+  defp image_cost(block),
+    do: max(@image_token_floor, div(image_bytes(block), @image_bytes_per_token))
+
+  defp image_bytes(%{bytes: bytes}) when is_integer(bytes) and bytes >= 0, do: bytes
+  defp image_bytes(%{"bytes" => bytes}) when is_integer(bytes) and bytes >= 0, do: bytes
+  defp image_bytes(_block), do: 0
 
   defp option(opts, key) when is_list(opts), do: Keyword.get(opts, key)
   defp option(opts, key) when is_map(opts), do: Map.get(opts, key)

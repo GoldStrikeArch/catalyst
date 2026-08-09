@@ -51,7 +51,7 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
     stop_attached_session(socket)
 
     model = Settings.provider_config(socket.assigns.codex_prefs)
-    run_opts = Settings.run_opts(socket.assigns.codex_prefs)
+    run_opts = Settings.start_opts(socket)
 
     case Manager.start_session(
            cwd: socket.assigns.cwd,
@@ -122,7 +122,7 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   # one call covers both the warm and the restarted-VM case.
   defp restart_persisted_session(socket, id, cwd) do
     model = Settings.provider_config(socket.assigns.codex_prefs)
-    run_opts = Settings.run_opts(socket.assigns.codex_prefs)
+    run_opts = Settings.start_opts(socket)
 
     case Manager.start_session(id: id, cwd: cwd, model: model, opts: run_opts) do
       {:ok, %{id: ^id, pid: pid}} ->

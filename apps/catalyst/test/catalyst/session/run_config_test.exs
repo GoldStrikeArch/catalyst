@@ -43,6 +43,9 @@ defmodule Catalyst.Session.RunConfigTest do
     assert RunConfig.inheritable_opts(
              reasoning_effort: "high",
              context_threshold: 42_000,
+             # A bare boolean passes `inheritable_term?/1`, so the machine-access
+             # grant is only kept out of children by the denylist.
+             computer_use: true,
              session_id: "parent",
              workflow: "parent-loop",
              callback: fn -> :unsafe end,

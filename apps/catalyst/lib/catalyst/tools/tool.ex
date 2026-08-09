@@ -44,7 +44,21 @@ defmodule Catalyst.Tools.Tool do
   """
   @callback execution_mode() :: :parallel | :sequential
 
-  @optional_callbacks execution_mode: 0
+  @doc """
+  Return the capabilities a run must grant before this tool is advertised.
+
+  Capabilities are non-bypassable: `Catalyst.Workflow.Support.filter_capabilities/2`
+  drops a tool declaring an ungranted capability after every tool source is
+  resolved, so neither an explicit `tools:` list nor an extension registration
+  can add it back. The values are validated and cached with the rest of the
+  tool's metadata (`Catalyst.Tools.Registry.capabilities_of/1`).
+
+  This callback is optional and defaults to `[]` — no capability required — for
+  modules using this behaviour's `__using__/1` macro.
+  """
+  @callback capabilities() :: [atom()]
+
+  @optional_callbacks execution_mode: 0, capabilities: 0
 
   defmacro __using__(_opts) do
     quote do
@@ -55,6 +69,10 @@ defmodule Catalyst.Tools.Tool do
       @doc false
       def execution_mode, do: :parallel
       defoverridable execution_mode: 0
+
+      @doc false
+      def capabilities, do: []
+      defoverridable capabilities: 0
     end
   end
 

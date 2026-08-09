@@ -18,6 +18,13 @@ defmodule CatalystWeb.Router do
   scope "/", CatalystWeb do
     pipe_through :browser
 
+    # Digest-addressed transcript images (CatalystWeb.UI.ImageStore); served
+    # out of line so reconnects don't re-embed every capture as base64. The
+    # path is deliberately /image (singular): /images is a Plug.Static path
+    # (CatalystWeb.static_paths/0) and would be shadowed there and treated as
+    # a static asset by verified routes.
+    get "/image/:digest", ImageController, :show
+
     # One LiveView for everything; the catch-all resolves runtime-registered
     # pages by path (e.g. /settings) with no router recompile per page.
     live "/", ShellLive, :index

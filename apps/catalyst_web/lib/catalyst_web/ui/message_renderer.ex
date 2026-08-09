@@ -8,7 +8,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   use CatalystWeb, :html
 
   alias Catalyst.{Content, Message}
-  alias CatalystWeb.UI.{Markdown, Registry, SafeRender}
+  alias CatalystWeb.UI.{ImageStore, Markdown, Registry, SafeRender}
 
   @doc "Render a message: a registered `:message` renderer if one matches, else built-in."
   @spec render_message(map()) :: Phoenix.LiveView.Rendered.t() | Phoenix.HTML.safe()
@@ -60,7 +60,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
       <div class="max-w-[82%] rounded-2xl bg-neutral-200/70 px-4 py-2.5 text-sm leading-6 text-neutral-900 dark:bg-white/10 dark:text-neutral-100">
         <img
           :for={img <- user_images(@msg.content)}
-          src={"data:#{img.mime_type};base64,#{img.data}"}
+          src={image_src(img)}
           alt="attached image"
           class="mb-2 max-h-64 max-w-full rounded-xl"
         />
@@ -100,6 +100,18 @@ defmodule CatalystWeb.UI.MessageRenderer do
           >
             error
           </span>
+        </div>
+        <div
+          :if={user_images(@msg.content) != []}
+          data-block-kind="tool-image"
+          class="border-b border-current/10 px-3 py-2"
+        >
+          <img
+            :for={img <- user_images(@msg.content)}
+            src={image_src(img)}
+            alt="tool result image"
+            class="mb-2 max-h-64 max-w-full rounded-xl last:mb-0"
+          />
         </div>
         <pre class="max-h-60 overflow-y-auto whitespace-pre-wrap px-3 py-2">{tool_output(@msg)}</pre>
       </div>
@@ -331,4 +343,18 @@ defmodule CatalystWeb.UI.MessageRenderer do
     do: Enum.filter(content, &match?(%Content.Image{}, &1))
 
   defp user_images(_), do: []
+
+  # Images render as digest-addressed references served by
+  # CatalystWeb.ImageController, never as inline data URIs: a reconnect
+  # re-streams the whole transcript, and inlining made screenshot-heavy
+  # sessions unreconnectable (100+ MB of HTML for 100 captures). A failed
+  # registration (invalid base64, non-raster MIME, oversized) yields a
+  # src-less <img> that shows its alt text, and an entry later evicted from
+  # the bounded store 404s into the same degraded state — never a crash.
+  defp image_src(%Content.Image{data: data, mime_type: mime_type}) do
+    case ImageStore.register(data, mime_type) do
+      {:ok, digest} -> ~p"/image/#{digest}"
+      :error -> nil
+    end
+  end
 end

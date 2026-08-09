@@ -28,5 +28,10 @@
     "id": "manual_load",
     "fingerprint": "e1f0a3d33af1c7ce476d6bdc1397b75dfc79d424e631372b7eb26679910e4e5f",
     "treatment": "parse_and_check_calls"
+  },
+  {
+    "id": "computer_use_gate",
+    "fingerprint": "26637b8c30652243495133021801cf08a5563f382185833b09cd84e9d2a7cbd9",
+    "treatment": "install_and_execute"
   }
 ]

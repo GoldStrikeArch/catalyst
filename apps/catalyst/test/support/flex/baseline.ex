@@ -14,7 +14,13 @@ defmodule Catalyst.Flex.Baseline do
 
   @ui_registry Module.concat([CatalystWeb, UI, Registry])
   @shell_live Module.concat([CatalystWeb, ShellLive])
-  @async_dimensions [:extension_processes, :sessions]
+  # Dimensions whose teardown is asynchronous get a bounded retry poll in
+  # `assert_clean!/2`: process/registry teardown rides monitor DOWNs, and the
+  # tool table refills through the Extensions server's *background* bootstrap
+  # replay after a runtime-group restart, so both can transiently lag the
+  # baseline without anything having leaked. A real leak still fails at the
+  # 1s deadline.
+  @async_dimensions [:extension_processes, :sessions, :shell_sessions, :tools]
   @app_env [
     {:catalyst, :home},
     {:catalyst, :auth_path},
@@ -47,9 +53,16 @@ defmodule Catalyst.Flex.Baseline do
     {:catalyst, :flex_echo_script},
     {:catalyst, :flex_observer_pid},
     {:catalyst, :flex_safe_mode_sentinel},
+    {:catalyst, :computer_use},
+    {:catalyst, :computer_helper_path},
+    {:catalyst, :computer_backend_available},
+    {:catalyst, :computer_backend},
+    {:catalyst, :computer_screenshot_retain},
+    {:catalyst, :shell_session_idle_ms},
+    {:catalyst, :shell_session_max},
     {:catalyst_web, :reattach_sessions}
   ]
-  @persistent_keys [:current_session, :codex_prefs, :ui_prefs]
+  @persistent_keys [:current_session, :codex_prefs, :ui_prefs, :machine_prefs]
 
   @type t :: map()
 
@@ -71,6 +84,10 @@ defmodule Catalyst.Flex.Baseline do
       hooks: hook_snapshot(),
       extension_processes: extension_process_snapshot(),
       sessions: registry_keys(Catalyst.Session.Registry),
+      # PTY shell sessions (shell_session tool) — extension_processes only
+      # watches the extensions registry, so a leaked shell needs its own
+      # dimension. Async: reaping rides monitor DOWNs and registry cleanup.
+      shell_sessions: registry_keys(Catalyst.Tools.Shell.Registry),
       app_env: app_env_snapshot(),
       system_prompt: Harness.file_snapshot(Catalyst.SystemPrompt.path()),
       prompt_files: source_manifest(Catalyst.SystemPrompt.prompts_dir()),

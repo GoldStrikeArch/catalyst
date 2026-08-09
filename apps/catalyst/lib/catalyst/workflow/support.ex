@@ -12,6 +12,7 @@ defmodule Catalyst.Workflow.Support do
   alias Catalyst.Context.{Guard, Tokens, Window}
   alias Catalyst.Session.EventSink
   alias Catalyst.Message
+  alias Catalyst.Tools.Computer.Availability
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @default_subagent_max_depth 3
@@ -51,12 +52,33 @@ defmodule Catalyst.Workflow.Support do
     |> Map.put(:tool_index, ToolRegistry.index(tools))
   end
 
-  @doc "Apply non-bypassable capability limits after every tool source is resolved."
+  @doc """
+  Apply non-bypassable capability limits after every tool source is resolved.
+
+  Two rules run in order: `spawn_agent` is stripped at the subagent depth cap,
+  then any tool declaring a capability this run does not grant is dropped.
+  Because this runs after `Catalyst.Extensions.resolve/1`, neither an explicit
+  `tools:` list nor an extension registration can add a gated tool back.
+  """
   @spec filter_capabilities([module()], map()) :: [module()]
   def filter_capabilities(tools, config) when is_list(tools) and is_map(config) do
-    case at_subagent_depth_limit?(config) do
-      true -> Enum.reject(tools, &(&1 == spawn_agent_module()))
-      false -> tools
+    tools
+    |> reject_at_depth_limit(config)
+    |> reject_ungranted(config)
+  end
+
+  @doc """
+  The capabilities this run grants, as declared by tools' `capabilities/0`.
+
+  `:computer_use` is granted only when the session option (or the
+  `config :catalyst, :computer_use` default) is enabled **and** the machine can
+  actually run the backend — see `Catalyst.Tools.Computer.Availability`.
+  """
+  @spec granted_capabilities(map()) :: [atom()]
+  def granted_capabilities(config) when is_map(config) do
+    case computer_use_granted?(config) do
+      true -> [:computer_use]
+      false -> []
     end
   end
 
@@ -269,4 +291,40 @@ defmodule Catalyst.Workflow.Support do
 
   defp non_negative(value, _default) when is_integer(value) and value >= 0, do: value
   defp non_negative(_value, default), do: default
+
+  defp reject_at_depth_limit(tools, config) do
+    case at_subagent_depth_limit?(config) do
+      true -> Enum.reject(tools, &(&1 == spawn_agent_module()))
+      false -> tools
+    end
+  end
+
+  # Capabilities come from the fingerprint-keyed registry cache, so no
+  # extension callback runs on the turn-assembly path. Both sides are tiny
+  # lists (most tools declare none), so a plain membership test is right.
+  defp reject_ungranted(tools, config) do
+    granted = granted_capabilities(config)
+
+    Enum.reject(tools, fn module ->
+      module |> ToolRegistry.capabilities_of() |> Enum.any?(&(&1 not in granted))
+    end)
+  end
+
+  # Child sessions (agent_depth > 0) never see the app-env fallback:
+  # `RunConfig.inheritable_opts/1` strips `:computer_use` so a child "says
+  # nothing", and letting the global default answer for it would silently
+  # re-grant every subagent full machine control when the operator sets
+  # `config :catalyst, :computer_use, true` — the prompt-injection escape
+  # hatch the denylist exists to close.
+  defp computer_use_granted?(config) do
+    enabled? = option(config, :computer_use, app_default_computer_use(config))
+    enabled? == true and Availability.available?()
+  end
+
+  defp app_default_computer_use(config) do
+    case non_negative(option(config, :agent_depth, 0), 0) do
+      0 -> Application.get_env(:catalyst, :computer_use, false)
+      _child -> false
+    end
+  end
 end

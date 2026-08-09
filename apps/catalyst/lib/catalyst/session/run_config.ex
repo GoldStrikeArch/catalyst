@@ -237,11 +237,20 @@ defmodule Catalyst.Session.RunConfig do
       :ok
   end
 
-  @doc "Return provider/context options safe to copy into a child run."
+  @doc """
+  Return provider/context options safe to copy into a child run.
+
+  Process terms and parent-only controls are dropped. `:computer_use` is
+  dropped for a second reason: it is a machine-access **grant**, and a bare
+  boolean would otherwise pass `inheritable_term?/1` and hand every subagent
+  spawned by a prompt-injected run full control of the machine. A child session
+  therefore never inherits computer use — it must be granted explicitly.
+  """
   @spec inheritable_opts(keyword()) :: keyword()
   def inheritable_opts(opts) when is_list(opts) do
     opts
     |> Keyword.drop([
+      :computer_use,
       :session_id,
       :system_prompt,
       :loop,

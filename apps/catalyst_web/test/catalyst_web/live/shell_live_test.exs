@@ -311,8 +311,12 @@ defmodule CatalystWeb.ShellLiveTest do
     view |> form("#chat-form", %{"message" => "what is in this screenshot?"}) |> render_submit()
     assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 5_000
 
-    # The user bubble shows the attached thumbnail alongside the text.
-    assert has_element?(view, ~s(#message-stream img[src^="data:image/png;base64,"]))
+    # The user bubble shows the attached thumbnail alongside the text. Images are
+    # served out of line by digest (CatalystWeb.ImageController) rather than
+    # inlined as data URIs, so a reconnect does not re-stream every capture.
+    digest = :sha256 |> :crypto.hash(@png_bytes) |> Base.encode16(case: :lower)
+
+    assert has_element?(view, ~s(#message-stream img[src="/image/#{digest}"]))
     assert has_element?(view, "#message-stream", "what is in this screenshot?")
 
     # And the session's transcript carries a real image content block.

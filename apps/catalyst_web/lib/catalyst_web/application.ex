@@ -24,7 +24,13 @@ defmodule CatalystWeb.Application do
       # Runtime UI registry: pages, renderers, components, commands.
       CatalystWeb.UI.Registry,
       # Start to serve requests, typically the last entry
-      CatalystWeb.Endpoint
+      CatalystWeb.Endpoint,
+      # Bounded digest-addressed store for transcript images served out of
+      # line by CatalystWeb.ImageController. After the endpoint on purpose:
+      # under rest_for_one a store crash must not bounce the endpoint, and
+      # both the renderer and the controller already degrade (placeholder /
+      # 404) while the table is briefly absent.
+      CatalystWeb.UI.ImageStore
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

@@ -54,6 +54,29 @@ defmodule Catalyst.Tools.RegistryTest do
     def execute(_args, _ctx), do: :ok
   end
 
+  defmodule DeclaredCapabilities do
+    use Catalyst.Tools.Tool
+
+    @impl true
+    def name, do: "declared_capabilities"
+    @impl true
+    def description, do: "declares a capability"
+    @impl true
+    def parameters, do: %{"type" => "object"}
+    @impl true
+    def capabilities, do: [:computer_use]
+    @impl true
+    def execute(_args, _ctx), do: result("ok")
+  end
+
+  defmodule BadCapabilities do
+    def name, do: "bad_capabilities"
+    def description, do: "declares capabilities that are not atoms"
+    def parameters, do: %{"type" => "object"}
+    def capabilities, do: ["computer_use"]
+    def execute(_args, _ctx), do: :ok
+  end
+
   test "fetch/2 returns {:ok, module} for a known name and :error for an unknown one" do
     tools = Registry.default_tools()
 
@@ -198,6 +221,59 @@ defmodule Catalyst.Tools.RegistryTest do
 
     assert :ok = ExJsonSchema.Validator.validate(reloaded_schema, %{"count" => "ok"})
     assert {:error, _errors} = ExJsonSchema.Validator.validate(reloaded_schema, %{})
+  end
+
+  test "capabilities are validated into the cached definition and served from it" do
+    on_exit(fn -> Registry.invalidate(DeclaredCapabilities) end)
+
+    assert {:ok, %{capabilities: [:computer_use]}} = Registry.definition(DeclaredCapabilities)
+    assert Registry.capabilities_of(DeclaredCapabilities) == [:computer_use]
+
+    # Tools that never declare any: the default from `use Catalyst.Tools.Tool`
+    # and a plain module without the callback both read as ungated.
+    assert Registry.capabilities_of(Catalyst.Tools.Read) == []
+    assert {:ok, %{capabilities: []}} = Registry.definition(Catalyst.Tools.Read)
+  end
+
+  test "a malformed capability list makes the tool unavailable rather than ungated" do
+    assert {:error, {:bad_tool_capabilities, ["computer_use"]}} =
+             Registry.definition(BadCapabilities)
+
+    assert Registry.capabilities_of(BadCapabilities) == []
+
+    log = capture_log(fn -> assert Registry.index([BadCapabilities]) == %{} end)
+    assert log =~ "metadata unavailable"
+  end
+
+  test "a hot reload revalidates capabilities like the rest of the metadata" do
+    module = Catalyst.Test.CapabilityRegistryTool
+
+    on_exit(fn ->
+      Registry.invalidate(module)
+      :code.purge(module)
+      :code.delete(module)
+    end)
+
+    compile_capability_tool("[:computer_use]")
+    assert Registry.capabilities_of(module) == [:computer_use]
+
+    compile_capability_tool("[]")
+    assert Registry.capabilities_of(module) == []
+  end
+
+  defp compile_capability_tool(capabilities) do
+    source = """
+    defmodule Catalyst.Test.CapabilityRegistryTool do
+      def name, do: "capability_registry_tool"
+      def description, do: "capability metadata probe"
+      def parameters, do: %{"type" => "object"}
+      def capabilities, do: #{capabilities}
+      def execute(_args, _context), do: %{content: [], details: %{}, terminate: false}
+    end
+    """
+
+    {_compiled, _stderr} = with_io(:stderr, fn -> Code.compile_string(source) end)
+    :ok
   end
 
   defp compile_reloadable_tool(mode, required) do

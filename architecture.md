@@ -967,4 +967,72 @@ prompt + guide point at it — so when something fails in the packaged app (a to
 close, a TCC `:eperm`), the agent and the developer have the same trail. This log is how the
 `Finch.stream/5` 3-tuple transport-close crash (§6 caveat) was found and fixed.
 
+## 13. Computer use
+
+An opt-in capability tier (planned in `hhhh.md`, delivered as P6) that lets the agent operate the
+machine the way a person does: see the screen, click and type, drive native apps, reach the
+network, and hold interactive shells open. **Off by default; full machine access by design when
+on** — there is no sandbox and no approval UI (the counterweight is the `before_tool_call`
+gate recipe in `guide.md`, plus off-by-default, non-inheritance, and untrusted marking).
+
+- **Capability seam.** Tools declare `capabilities/0` (optional callback on `Catalyst.Tools.Tool`,
+  default `[]`, cached in the Registry's validated `definition`). `Workflow.Support.
+  filter_capabilities/2` — the same non-bypassable post-resolution gate that strips `spawn_agent`
+  at the depth cap — now also rejects tools whose capabilities are not granted, so neither an
+  extension nor an explicit `tools:` list can re-add them. The `:computer_use` grant is a session
+  opt (`Session.Server.configure(pid, opts: [computer_use: true])`, header toggle, persisted in
+  the `machine_prefs` persistent_term) and requires backend availability
+  (`Catalyst.Tools.Computer.Availability`: Darwin + helper binary). `:computer_use` is on the
+  `RunConfig.inheritable_opts/1` denylist: **child sessions never inherit the grant**.
+- **Native helper.** `rel/macos/computer_helper.m` → `catalyst-input`, a long-lived
+  newline-delimited-JSON process on a BEAM Port owned by the supervised
+  `Catalyst.Tools.Computer.Helper` GenServer (lazy Port open so no TCC prompt at boot; permanent,
+  reopens on EXIT). The helper executes strictly serially, so the Helper is **write-when-idle**:
+  at most one op is in flight at the native helper, the rest wait in a bounded server-side FIFO
+  (one physical pointer — a global input lock), with per-op timeout budgets, cancel-on-timeout
+  reaping of still-queued ops (a timed-out op never fires later as ghost input), and a
+  server-side wedge deadline that closes a hung helper and fails all waiters. **Abort safety:**
+  held buttons are tracked per caller; a monitor posts the compensating mouse-up when the calling
+  tool task dies. When the helper itself dies or wedges while any input op was in flight, the
+  Helper reopens and posts the tracked explicit mouse-ups plus a `release_all` sweep (all five
+  modifiers and tracked buttons) — best-effort: a key held inside an in-flight `hold_key` stays
+  physically down between the death and the reopen. Input posts real modifier
+  key events (not just `CGEventSetFlags`, which latches session state). Keycodes are layout-aware
+  (`UCKeyTranslate` reverse scan). The same binary's `--test-target` mode opens an instrumented
+  window reporting every event it receives — the round-trip instrument for `mix test.computer`.
+- **Backend behaviour.** `Computer.Backend` (`screens/windows/cursor/input/capture/grants`) with
+  `MacOS` (helper + `screencapture` + `sips`) and `Unsupported` implementations, selected by
+  `config :catalyst, :computer_backend` (default `:os.type()` dispatch); tests inject a stub, so
+  the whole tool surface runs with no desktop and no TCC.
+- **Tools.** `computer` (Anthropic-shaped action enum; screenshots downscaled to ≤1366px,
+  returned as `Content.Image`, details `untrusted: true`; coordinates are last-screenshot pixel
+  space mapped through `Capture.to_point/4` — screenshot px ÷ downscale ÷ backing scale +
+  display origin in points), `applescript` (osascript via temp file; the preferred zero-screenshot
+  path), `open_app`, `list_apps`, `clipboard`, `shell_session` (cross-turn PTY via `script(1)`,
+  per-shell supervised GenServers registered under the owning session, idle timeout + global cap +
+  session-death reaping) — all gated. `fetch` (Req + Floki HTML→text, streaming byte cap,
+  in-band untrusted notice) is **ungated**: it adds nothing `bash` + `curl` lack.
+- **Token accounting.** Image content is projected as `digest`+`bytes` (never raw base64) in both
+  the coarse and Codex-semantic estimators, priced at
+  `max(1_024, div(bytes, 600))` tokens — without this the estimator counted base64 at 4 bytes/token
+  and a single screenshot deadlocked compaction (§ hhhh.md Appendix A, VETO 1). The digest keeps
+  fingerprinting/anchor identity; the wire request still carries real base64 (live-verified:
+  Codex accepts images inside `function_call_output`).
+- **Context discipline.** Prefer the semantic path (`open_app`/`applescript`) over the pixel loop;
+  window-scoped capture over full-display (which shows Catalyst's own window). Optional
+  `config :catalyst, :computer_screenshot_retain` prunes all but the last N screenshots via an
+  idempotent `transform_context` hook (costs: full re-upload per turn, and compaction persists
+  replacements untransformed). Debug logs never contain image bytes (mime+size+digest only);
+  transcripts do — screenshots persist unencrypted in session JSONL (documented in `guide.md`).
+- **Packaging.** `bundle_computer_helper/1` compiles + ad-hoc signs the helper into the release
+  before the installer seals it; `release_preflight!/1` checks the source + `cc`;
+  `Binaries` resolves `catalyst_input` with a "run `mix catalyst.computer.build`" hint;
+  `NSAppleEventsUsageDescription` is inserted via `plutil` in `native_macos_launcher/1`. TCC
+  grants key on the helper's cdhash (ad-hoc signing ⇒ re-grant after rebuild) and there are up to
+  three TCC subjects (helper, `osascript`, the app) — see `guide.md`.
+- **Verification tiers.** Always-on stub tests (gating, abort compensation, coordinate math,
+  PTY against a real `script(1)` shell); opt-in `mix test.computer` drives the real window server
+  through the production input path against the `--test-target` window (skips loudly without
+  grants); opt-in `:live_wire` test pins the image-in-`function_call_output` wire contract.
+
 See `plan.md` for the phased delivery sequence, exit criteria, and risks.

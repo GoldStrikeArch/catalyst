@@ -368,6 +368,46 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   decoded enums via whitelist + `String.to_existing_atom/1`, which crashes when no loaded module
   references the atom yet (lazily loaded VM), making `load_state` fail and resume come back
   empty; replaced with explicit total mappings. `mix precommit` (582+4+114+2 green) + dialyzer.
+- **P6 — Computer Use — DONE ✅ (code complete; packaged-app TCC smoke still manual).** Delivered
+  per the reviewed plan (`hhhh.md`), phases C0–C7. (C0) Spikes: live Codex turn **confirmed**
+  images inside `function_call_output` are accepted (kept as a permanent opt-in `:live_wire` test);
+  estimator repro measured a ~1 MB image at **263k phantom tokens**. (C1) Image token accounting
+  fixed: digest+bytes projection in both coarse and Codex-semantic paths, per-image cost
+  `max(1_024, div(bytes, 600))` (1 MB ≈ 1.7k, 5 MB ≈ 8.7k); wire bodies unchanged; **all persisted
+  anchors invalidate once** (sessions re-anchor on the next response — expected, harmless). (C2)
+  `capabilities/0` tool callback + registry-cached gate in `Workflow.Support.filter_capabilities/2`;
+  `:computer_use` session opt (default off), **not inheritable by child sessions**; header
+  "Computer" toggle (new `machine_prefs` persistent_term) + `/computer` page (grant status, helper
+  liveness, screens/windows preview). Deviation from the plan's wording, fail-safe direction: the
+  grant is persisted UI-side in `machine_prefs` and re-applied at session start, not written into
+  the durable `settings_snapshot` — a headless resume therefore comes back ungranted. (C3) `rel/macos/computer_helper.m` (`catalyst-input`):
+  CGEvent input with layout-aware keycodes, window enumeration, TCC preflight ops, `--test-target`
+  instrumented window; supervised multiplexing `Computer.Helper` Port owner with held-input
+  release invariant (compensating mouse-up on caller death/port restart), per-op timeout budgets,
+  bounded FIFO; `computer` tool (full Anthropic action enum, ≤1366px screenshots as
+  `Content.Image`, px→point transform incl. Retina + multi-display origins); tool-result images
+  now render in the transcript (`data-block-kind="tool-image"`); `mix catalyst.computer.build`;
+  **`mix test.computer` real-desktop tier ran 6/6 green** and caught a real CGEventSetFlags
+  modifier-latch bug (fixed by posting real modifier key events); `before_tool_call` permission-
+  gate recipe in `guide.md`. (C4) `applescript` (temp-file osascript, JXA, untrusted), `open_app`,
+  `list_apps`, `clipboard`. (C5) ungated `fetch`: Req streaming byte cap (256 KB/1 MB), Floki
+  HTML→text, redirect/timeout caps, in-band untrusted-content notice (new dep `floki`; also bumped
+  `mint` 1.9.0→1.9.3 for EEF-CVE-2026-58229/59249 — the fetch path exposes Mint to hostile
+  responses; `hackney` 1.25.0 advisories remain, transitive + no fixed release, not on the fetch
+  path). (C6) `shell_session` cross-turn PTY (`script -q /dev/null`, echo + `\r\n` documented):
+  per-shell supervised GenServers under `Tools.Shell.Supervisor`/`Registry`, ownership pinned to
+  the calling session (foreign ids refused), idle timeout (15 min), global cap (4), reaping on
+  session death verified at the OS level (script + child shell both killed via pgid). (C7)
+  packaging (`bundle_computer_helper/1` before installer seal, preflight source+cc checks,
+  `Binaries` `catalyst_input` entry with build hint, `NSAppleEventsUsageDescription` via plutil) +
+  docs (`architecture.md` §13, `guide.md` computer-use section incl. screenshots-at-rest warning
+  and TCC subjects). Debug logs never contain image bytes (mime+size+digest). Security posture is
+  the locked decision: auto-allow, no sandbox, off by default, child sessions excluded, untrusted
+  marking on screen/web/AX content. **`mix test`: 838 (catalyst) + 4 (cli) + 136 (web) + 2
+  (desktop) green; `mix dialyzer` 0 errors; opt-in tiers: `mix test.computer` 6/6,
+  `:live_wire` 1/1.** Remaining manual residue (needs a human at the keyboard): packaged-`.app`
+  TCC grant flow + rebuild re-grant, revoked-grant `/computer` reporting, and the LibreOffice
+  zero-screenshot drive (LibreOffice not installed).
 - **Next options:** notarize for distribution (the launcher step must then re-sign inside-out +
   re-sign the dmg); replace the placeholder icon; optional approval gate as an extension via the
   `before_tool_call` hook (a panel toggle could install it); optional `self_test/0` extension

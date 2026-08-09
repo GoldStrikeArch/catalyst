@@ -589,7 +589,7 @@ defmodule Catalyst.Session.Server do
     Catalyst.Debug.log_async(
       state.id,
       "error",
-      "run failed: " <> Catalyst.Debug.truncate(reason, 8_000)
+      "run failed: " <> Catalyst.Debug.truncate(Catalyst.Debug.scrub_term(reason), 8_000)
     )
 
     state = complete_orphaned_tool_calls(state, reason)

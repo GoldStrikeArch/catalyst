@@ -74,7 +74,8 @@ defmodule Catalyst.Umbrella.MixProject do
         precommit: :test,
         dialyzer: :dev,
         "test.flex": :test,
-        "test.release": :test
+        "test.release": :test,
+        "test.computer": :test
       ]
     ]
   end
@@ -105,7 +106,7 @@ defmodule Catalyst.Umbrella.MixProject do
       ] ++
         for exe <- @fast_tools do
           {System.find_executable(exe), "fast tool `#{exe}` on PATH"}
-        end
+        end ++ computer_helper_checks()
 
     case for {nil, label} <- checks, do: label do
       [] ->
@@ -117,6 +118,25 @@ defmodule Catalyst.Umbrella.MixProject do
 
         #{Enum.map_join(missing, "\n", &("  - " <> &1))}
         """
+    end
+  end
+
+  # The native computer-use input helper is compiled during bundling
+  # (bundle_computer_helper/1), so its inputs are preflight-checked on Darwin.
+  # Non-Darwin desktop builds ship without it by design (macOS-only feature).
+  @computer_helper_src "rel/macos/computer_helper.m"
+
+  defp computer_helper_checks do
+    case :os.type() do
+      {:unix, :darwin} ->
+        [
+          {if(File.exists?(@computer_helper_src), do: @computer_helper_src),
+           "computer-use helper source #{@computer_helper_src}"},
+          {System.find_executable("cc"), "C compiler `cc` on PATH (Xcode command line tools)"}
+        ]
+
+      _other ->
+        []
     end
   end
 
@@ -181,7 +201,39 @@ defmodule Catalyst.Umbrella.MixProject do
     IO.puts("bundle_assets: workspace at #{ws}")
 
     bundle_fast_tools(release)
+    bundle_computer_helper(release)
     release
+  end
+
+  # Release step (desktop): compile + ad-hoc sign the native computer-use input
+  # helper into the core app's priv/bin, mirroring `mix catalyst.computer.build`.
+  # Runs inside bundle_assets so the binary lands in the bundle before
+  # generate_installer/1 seals it. Signed here explicitly: the launcher step's
+  # comment records that codesign fails when it seals a bundle containing an
+  # unsigned executable. macOS-only; other hosts skip (the backend is
+  # unavailable there anyway).
+  defp bundle_computer_helper(release) do
+    case :os.type() do
+      {:unix, :darwin} ->
+        dest = release |> core_dir() |> Path.join("priv/bin/catalyst-input")
+        File.mkdir_p!(Path.dirname(dest))
+
+        cmd!(
+          "cc",
+          ["-arch", "arm64", "-O2", "-fobjc-arc", "-Wno-deprecated-declarations"] ++
+            ~w(-framework ApplicationServices -framework Carbon -framework Foundation
+               -framework AppKit) ++ ["-o", dest, @computer_helper_src]
+        )
+
+        File.chmod!(dest, 0o755)
+        cmd!("codesign", ["--force", "-s", "-", dest])
+        IO.puts("bundle_computer_helper: built and signed #{dest}")
+        :ok
+
+      _other ->
+        IO.puts("bundle_computer_helper: not macOS, skipping (macOS-only feature)")
+        :ok
+    end
   end
 
   # Release step (desktop): give the .app a native arm64 main executable.
@@ -222,6 +274,20 @@ defmodule Catalyst.Umbrella.MixProject do
         # bundle, which fails on the unsigned `run` script.
         cmd!("codesign", ["--force", "-s", "-", launcher])
         cmd!("plutil", ["-replace", "CFBundleExecutable", "-string", name, plist])
+
+        # Computer use: Automation (Apple Events) prompts require a usage
+        # string in the bundle's Info.plist. desktop_deployment generates the
+        # plist, so it is patched here — the one existing place we already
+        # rewrite it (plutil -replace inserts when the key is absent).
+        cmd!("plutil", [
+          "-replace",
+          "NSAppleEventsUsageDescription",
+          "-string",
+          "Catalyst uses Apple Events to control and read other applications " <>
+            "when computer use is enabled.",
+          plist
+        ])
+
         IO.puts("native_macos_launcher: installed native arm64 launcher (#{name})")
 
         rebuild_installers(release, app)
@@ -350,7 +416,11 @@ defmodule Catalyst.Umbrella.MixProject do
         "do --app catalyst --app catalyst_web cmd mix test --only flexibility"
       ],
       # release smoke tier (excluded from plain `mix test`; builds a real release)
-      "test.release": ["do --app catalyst_cli cmd mix test --only release"]
+      "test.release": ["do --app catalyst_cli cmd mix test --only release"],
+      # real-desktop computer-use tier (excluded from plain `mix test`; drives
+      # the built helper against its own --test-target window — needs
+      # Accessibility + Screen Recording granted to the test runner)
+      "test.computer": ["do --app catalyst cmd mix test --only computer"]
     ]
   end
 end

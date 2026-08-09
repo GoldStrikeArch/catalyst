@@ -11,7 +11,11 @@ defmodule CatalystWeb.UI.PageRenderer do
 
   alias CatalystWeb.UI.{Registry, SafeRender}
 
-  @trusted_pages [CatalystWeb.Pages.ChatPage, CatalystWeb.Pages.ExtensionsPage]
+  @trusted_pages [
+    CatalystWeb.Pages.ChatPage,
+    CatalystWeb.Pages.ExtensionsPage,
+    CatalystWeb.Pages.ComputerPage
+  ]
 
   @doc "Renders the active registered page, falling back to the built-in chat page."
   @spec render(map()) :: Phoenix.LiveView.Rendered.t() | {:safe, iodata()}
