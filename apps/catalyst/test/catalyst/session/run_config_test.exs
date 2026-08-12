@@ -47,7 +47,14 @@ defmodule Catalyst.Session.RunConfigTest do
              # grant is only kept out of children by the denylist.
              computer_use: true,
              session_id: "parent",
+             # Workflow selection and prompt overrides are parent-only: children
+             # run their own file-backed definitions (spawn_agent), never the
+             # parent's loop or persona. Pinned here because the UI now persists
+             # and restores these keys — inheriting them would hand every
+             # subagent the parent's workflow/prompt by accident.
              workflow: "parent-loop",
+             loop: Catalyst.Agent.Loop,
+             system_prompt: "parent persona",
              callback: fn -> :unsafe end,
              nested_pid: %{owner: self()},
              nested_ref: [ref]

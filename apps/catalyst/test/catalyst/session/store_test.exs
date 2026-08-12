@@ -144,7 +144,14 @@ defmodule Catalyst.Session.StoreTest do
     Store.append_reset(store)
     Store.append_model_change(store, model)
     Store.append_thinking_level_change(store, "high")
-    Store.append_settings_snapshot(store, model, "high")
+
+    Store.append_settings_snapshot(store, %{
+      model: model,
+      thinking_level: "high",
+      workflow: "review",
+      system_prompt: "Be terse."
+    })
+
     Store.append_message(store, Message.user("replaced by compaction"))
 
     summary = Message.user("summary")
@@ -195,21 +202,93 @@ defmodule Catalyst.Session.StoreTest do
 
     m1 = %Catalyst.Model{id: "m-1", api: "faux", provider: "faux", input: [:text]}
 
-    Store.append_settings_snapshot(store, m1, "high")
+    Store.append_settings_snapshot(store, %{
+      model: m1,
+      thinking_level: "high",
+      workflow: "review",
+      system_prompt: "Be terse."
+    })
+
     settings = Store.load_settings(store.path)
 
     assert settings.model.id == "m-1"
     assert settings.thinking_level == "high"
+    assert settings.workflow == "review"
+    assert settings.system_prompt == "Be terse."
     assert settings.model_set?
     assert settings.thinking_level_set?
+    assert settings.workflow_set?
+    assert settings.system_prompt_set?
 
-    Store.append_settings_snapshot(store, nil, nil)
+    Store.append_settings_snapshot(store, %{
+      model: nil,
+      thinking_level: nil,
+      workflow: nil,
+      system_prompt: nil
+    })
+
     settings = Store.load_settings(store.path)
 
     assert settings.model == nil
     assert settings.thinking_level == nil
+    assert settings.workflow == nil
+    assert settings.system_prompt == nil
     assert settings.model_set?
     assert settings.thinking_level_set?
+    assert settings.workflow_set?
+    assert settings.system_prompt_set?
+  end
+
+  test "legacy settings_snapshot lines without the new keys never fabricate tombstones" do
+    store = Store.new("/tmp/proj_settings_snapshot_legacy")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    # Written by a pre-workflow build: only model + thinking_level keys exist.
+    legacy =
+      Jason.encode!(%{
+        "type" => "settings_snapshot",
+        "model" => nil,
+        "thinking_level" => "high"
+      })
+
+    File.write!(store.path, legacy <> "\n", [:append])
+
+    settings = Store.load_settings(store.path)
+    assert settings.thinking_level_set?
+    refute settings.workflow_set?
+    refute settings.system_prompt_set?
+    assert settings.workflow == nil
+    assert settings.system_prompt == nil
+
+    # A later full snapshot then owns every field, including explicit clears.
+    Store.append_settings_snapshot(store, %{
+      model: nil,
+      thinking_level: "high",
+      workflow: "review",
+      system_prompt: nil
+    })
+
+    settings = Store.load_settings(store.path)
+    assert settings.workflow == "review"
+    assert settings.workflow_set?
+    assert settings.system_prompt == nil
+    assert settings.system_prompt_set?
+  end
+
+  test "append_settings_snapshot rejects malformed settings" do
+    store = Store.new("/tmp/proj_settings_snapshot_invalid")
+    on_exit(fn -> File.rm_rf!(store.path) end)
+
+    valid = %{model: nil, thinking_level: nil, workflow: nil, system_prompt: nil}
+
+    assert {:error, {:build_failed, :invalid_settings_snapshot}} =
+             Store.append_settings_snapshot(store, %{valid | workflow: :not_a_name})
+
+    assert {:error, {:build_failed, :invalid_settings_snapshot}} =
+             Store.append_settings_snapshot(store, %{valid | system_prompt: 42})
+
+    assert {:error, {:build_failed, {:invalid_settings_snapshot, _}}} =
+             Store.append_settings_snapshot(store, :not_a_map)
   end
 
   test "open returns tagged errors for inaccessible roots" do

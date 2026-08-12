@@ -156,6 +156,87 @@ defmodule Catalyst.Session.ServerTest do
     refute Keyword.has_key?(snap.opts, :reasoning_effort)
   end
 
+  test "a resumed session keeps its configured workflow and system prompt override", %{
+    tmp: tmp,
+    model: model
+  } do
+    {id, pid} = start(tmp, model, [{:text, "ok"}])
+
+    :ok =
+      Server.configure(pid,
+        system_prompt: "You are the review bot.",
+        opts: [workflow: "review"]
+      )
+
+    Manager.stop(id)
+    wait_until(fn -> Manager.whereis(id) == :error end)
+
+    # Restarted WITHOUT the workflow/prompt: the persisted snapshot must win.
+    {:ok, %{pid: pid2}} =
+      Manager.start_session(
+        id: id,
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        opts: [script: [{:text, "ok"}]]
+      )
+
+    snap = Server.state(pid2)
+    assert Keyword.get(snap.opts, :workflow) == "review"
+    assert snap.system_prompt == "You are the review bot."
+  end
+
+  test "cleared workflow and system prompt stay cleared after restart", %{
+    tmp: tmp,
+    model: model
+  } do
+    {id, pid} = start(tmp, model, [{:text, "ok"}])
+
+    :ok = Server.configure(pid, system_prompt: "pinned", opts: [workflow: "review"])
+    :ok = Server.configure(pid, system_prompt: nil, opts: [workflow: nil])
+
+    Manager.stop(id)
+    wait_until(fn -> Manager.whereis(id) == :error end)
+
+    # Restarted WITH a boot-time workflow/prompt: the persisted clear
+    # tombstones must still win over the caller's defaults.
+    {:ok, %{pid: pid2}} =
+      Manager.start_session(
+        id: id,
+        cwd: tmp,
+        provider: Catalyst.LLM.Faux,
+        model: model,
+        system_prompt: "boot default",
+        workflow: "boot-flow",
+        opts: [script: [{:text, "ok"}]]
+      )
+
+    snap = Server.state(pid2)
+    refute Keyword.has_key?(snap.opts, :workflow)
+    assert snap.system_prompt == nil
+  end
+
+  test "configure rejects a blank or non-binary system prompt unchanged", %{
+    tmp: tmp,
+    model: model
+  } do
+    {_id, pid} = start(tmp, model, [{:text, "ok"}])
+
+    :ok = Server.configure(pid, system_prompt: "keep me")
+
+    assert {:error, {:invalid_system_prompt, "   "}} =
+             Server.configure(pid, system_prompt: "   ")
+
+    assert {:error, {:invalid_system_prompt, 42}} = Server.configure(pid, system_prompt: 42)
+
+    # The rejected calls changed nothing — including the persisted snapshot.
+    snap = Server.state(pid)
+    assert snap.system_prompt == "keep me"
+
+    settings = Store.load_settings(snap.store_path)
+    assert settings.system_prompt == "keep me"
+  end
+
   test "manager rejects unsafe session ids before starting a server", %{tmp: tmp} do
     for id <- ["../escape", "nested/id", "", :not_a_string] do
       assert {:error, {:invalid_session_id, ^id}} = Manager.start_session(id: id, cwd: tmp)

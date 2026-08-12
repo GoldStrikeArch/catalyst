@@ -32,9 +32,19 @@ defmodule Catalyst.Session.Store do
           model_set?: boolean(),
           thinking_level: String.t() | nil,
           thinking_level_set?: boolean(),
+          workflow: String.t() | nil,
+          workflow_set?: boolean(),
+          system_prompt: String.t() | nil,
+          system_prompt_set?: boolean(),
           parent_id: String.t() | nil,
           root_session_id: String.t() | nil,
           agent_depth: non_neg_integer()
+        }
+  @type persisted_settings :: %{
+          model: Catalyst.Model.t() | nil,
+          thinking_level: String.t() | nil,
+          workflow: String.t() | nil,
+          system_prompt: String.t() | nil
         }
 
   @doc "Root directory for all session logs (override with `config :catalyst, :sessions_root`)."
@@ -162,44 +172,70 @@ defmodule Catalyst.Session.Store do
 
   @doc """
   Append a `settings_snapshot` entry (authoritative snapshot of current settings).
+
+  Every field is written on each snapshot; a `nil` is an explicit clear
+  tombstone. Entries written before the `workflow`/`system_prompt` fields
+  existed simply omit those keys, and the loader treats an absent key as
+  "never written" rather than a clear.
   """
-  @spec append_settings_snapshot(handle(), Catalyst.Model.t() | nil, String.t() | nil) ::
+  @spec append_settings_snapshot(handle(), persisted_settings()) ::
           :ok | {:error, append_error()}
-  def append_settings_snapshot(handle, model, level)
-      when (is_struct(model, Catalyst.Model) or is_nil(model)) and
-             (is_binary(level) or is_nil(level)) do
-    append_line(handle, fn ->
-      %{
-        "type" => "settings_snapshot",
-        "model" => encode_setting_model(model),
-        "thinking_level" => level
-      }
-    end)
+  def append_settings_snapshot(handle, %{} = settings) do
+    case valid_settings?(settings) do
+      true ->
+        append_line(handle, fn ->
+          %{
+            "type" => "settings_snapshot",
+            "model" => encode_setting_model(settings.model),
+            "thinking_level" => settings.thinking_level,
+            "workflow" => settings.workflow,
+            "system_prompt" => settings.system_prompt
+          }
+        end)
+
+      false ->
+        {:error, {:build_failed, :invalid_settings_snapshot}}
+    end
   end
 
-  def append_settings_snapshot(_handle, _model, _level),
-    do: {:error, {:build_failed, :invalid_settings_snapshot}}
+  def append_settings_snapshot(_handle, settings),
+    do: {:error, {:build_failed, {:invalid_settings_snapshot, settings}}}
+
+  defp valid_settings?(settings) do
+    match?(
+      %{model: model, thinking_level: level, workflow: workflow, system_prompt: prompt}
+      when (is_struct(model, Catalyst.Model) or is_nil(model)) and
+             (is_binary(level) or is_nil(level)) and
+             (is_binary(workflow) or is_nil(workflow)) and
+             (is_binary(prompt) or is_nil(prompt)),
+      settings
+    )
+  end
 
   def append_thinking_level_change(handle, level) when is_binary(level) or is_nil(level) do
     append_line(handle, fn -> %{"type" => "thinking_level_change", "level" => level} end)
   end
 
   # test seam. Folds the settings entries: the LAST persisted model/thinking
-  # level plus flags recording whether each setting has ever been written. A
-  # written nil is an explicit clear tombstone, distinct from a fresh session
-  # with no entry. Deliberately independent of `reset` markers — a transcript
-  # reset does not undo a model choice.
+  # level/workflow/system prompt plus flags recording whether each setting has
+  # ever been written. A written nil is an explicit clear tombstone, distinct
+  # from a fresh session with no entry. Deliberately independent of `reset`
+  # markers — a transcript reset does not undo a model choice.
   @doc false
   @spec load_settings(String.t()) :: %{
           model: Catalyst.Model.t() | nil,
           model_set?: boolean(),
           thinking_level: String.t() | nil,
-          thinking_level_set?: boolean()
+          thinking_level_set?: boolean(),
+          workflow: String.t() | nil,
+          workflow_set?: boolean(),
+          system_prompt: String.t() | nil,
+          system_prompt_set?: boolean()
         }
   def load_settings(path) do
     case load_state(path) do
       {:ok, state} ->
-        Map.take(state, [:model, :model_set?, :thinking_level, :thinking_level_set?])
+        Map.take(state, settings_keys())
 
       {:error, reason} ->
         Logger.warning(
@@ -210,8 +246,21 @@ defmodule Catalyst.Session.Store do
     end
   end
 
+  defp settings_keys do
+    [
+      :model,
+      :model_set?,
+      :thinking_level,
+      :thinking_level_set?,
+      :workflow,
+      :workflow_set?,
+      :system_prompt,
+      :system_prompt_set?
+    ]
+  end
+
   defp empty_settings do
-    Map.take(empty_loaded_state(), [:model, :model_set?, :thinking_level, :thinking_level_set?])
+    Map.take(empty_loaded_state(), settings_keys())
   end
 
   defp append_line(handle, build) do
@@ -365,6 +414,10 @@ defmodule Catalyst.Session.Store do
       model_set?: false,
       thinking_level: nil,
       thinking_level_set?: false,
+      workflow: nil,
+      workflow_set?: false,
+      system_prompt: nil,
+      system_prompt_set?: false,
       parent_id: nil,
       root_session_id: nil,
       agent_depth: 0
@@ -381,7 +434,7 @@ defmodule Catalyst.Session.Store do
   end
 
   defp fold_entry(
-         %{"type" => "settings_snapshot", "model" => encoded, "thinking_level" => level},
+         %{"type" => "settings_snapshot", "model" => encoded, "thinking_level" => level} = entry,
          state
        )
        when is_binary(level) or is_nil(level) do
@@ -394,6 +447,8 @@ defmodule Catalyst.Session.Store do
             thinking_level: level,
             thinking_level_set?: true
         }
+        |> fold_optional_setting(entry, "workflow", :workflow, :workflow_set?)
+        |> fold_optional_setting(entry, "system_prompt", :system_prompt, :system_prompt_set?)
 
       :error ->
         state
@@ -453,6 +508,19 @@ defmodule Catalyst.Session.Store do
   end
 
   defp fold_entry(_entry, state), do: state
+
+  # Legacy `settings_snapshot` lines predate the workflow/system_prompt keys:
+  # only a PRESENT key is a value-or-tombstone write. An absent key must not
+  # fabricate a clear, and a malformed value is skipped like any corrupt line.
+  defp fold_optional_setting(state, entry, key, field, flag) do
+    case Map.fetch(entry, key) do
+      {:ok, value} when is_binary(value) or is_nil(value) ->
+        state |> Map.put(field, value) |> Map.put(flag, true)
+
+      _absent_or_invalid ->
+        state
+    end
+  end
 
   defp decode_messages(messages) do
     messages

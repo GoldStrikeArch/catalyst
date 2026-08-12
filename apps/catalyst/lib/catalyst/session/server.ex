@@ -81,9 +81,20 @@ defmodule Catalyst.Session.Server do
 
   @doc """
   Reconfigure the session for subsequent runs: `:model` (a `%Catalyst.Model{}`),
-  `:provider`, and/or `:opts` (a keyword merged into the session opts; a nil
-  value deletes the key). Takes effect on the NEXT run — an in-flight run keeps
-  the config it started with (`RunConfig.build/3` reads state per run).
+  `:provider`, `:system_prompt` (a nonblank override binary; nil clears it back
+  to the prompt policy's file/built-in chain), and/or `:opts` (a keyword merged
+  into the session opts; a nil value deletes the key). Takes effect on the NEXT
+  run — an in-flight run keeps the config it started with (`RunConfig.build/3`
+  reads state per run).
+
+  Model, thinking level, workflow name (`opts[:workflow]`), and the system
+  prompt override persist across restarts through one authoritative
+  `settings_snapshot` entry. An `opts[:loop]` module is process-local and
+  deliberately not persisted — modules are not portable across restarts;
+  durable selection goes through registered workflow names.
+
+  Returns `{:error, {:invalid_system_prompt, value}}` for a blank or non-binary
+  override without changing the session.
   """
   @spec configure(GenServer.server(), keyword()) :: :ok | {:error, term()}
   def configure(server, changes) when is_list(changes),
@@ -226,26 +237,9 @@ defmodule Catalyst.Session.Server do
   def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
 
   def handle_call({:configure, changes}, _from, %State{} = state) do
-    new_state = %State{
-      state
-      | model: Keyword.get(changes, :model, state.model),
-        provider: Keyword.get(changes, :provider, state.provider),
-        opts:
-          state.opts
-          |> merge_opts(Keyword.get(changes, :opts, []))
-          |> normalize_session_opts()
-    }
-
-    case persist_settings_snapshot(state, new_state) do
-      :ok ->
-        # Changed model/options invalidate any prewarmed continuation's body
-        # probe. Cancel the previous warmup before starting its replacement so it
-        # cannot land stale state after the new configuration wins.
-        {:reply, :ok, restart_prewarm(new_state)}
-
-      {:error, reason} ->
-        log_persistence_failure(state, :settings_snapshot, reason)
-        {:reply, {:error, reason}, state}
+    case validate_configure(changes) do
+      :ok -> configure_session(state, changes)
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -488,7 +482,8 @@ defmodule Catalyst.Session.Server do
     %State{
       state
       | model: restore_model(state.model, loaded),
-        opts: restore_thinking_level(state.opts, loaded),
+        opts: state.opts |> restore_thinking_level(loaded) |> restore_workflow(loaded),
+        system_prompt: restore_system_prompt(state.system_prompt, loaded),
         messages: Enum.reverse(loaded.messages),
         parent_id: loaded.parent_id || state.parent_id,
         root_session_id: loaded.root_session_id || state.root_session_id || state.id,
@@ -506,6 +501,19 @@ defmodule Catalyst.Session.Server do
     do: Keyword.put(opts, :reasoning_effort, level)
 
   defp restore_thinking_level(opts, _settings), do: opts
+
+  defp restore_workflow(opts, %{workflow_set?: true, workflow: nil}),
+    do: Keyword.delete(opts, :workflow)
+
+  defp restore_workflow(opts, %{workflow_set?: true, workflow: name}),
+    do: Keyword.put(opts, :workflow, name)
+
+  defp restore_workflow(opts, _settings), do: opts
+
+  defp restore_system_prompt(_default, %{system_prompt_set?: true, system_prompt: override}),
+    do: override
+
+  defp restore_system_prompt(default, _settings), do: default
 
   defp persist(state, %Event.MessageEnd{message: m}), do: Store.append_message(state.store, m)
 
@@ -710,25 +718,75 @@ defmodule Catalyst.Session.Server do
   defp normalize(text) when is_binary(text), do: Message.user(text)
   defp normalize(content) when is_list(content), do: Message.user(content)
 
-  # Persist a single replayable settings record before changing live state. The
-  # loader keeps decoding legacy model_change/thinking_level_change records.
-  defp persist_settings_snapshot(old, new) do
-    case persisted_settings_changed?(old, new) do
-      true ->
-        Store.append_settings_snapshot(
-          new.store,
-          new.model,
-          Keyword.get(new.opts, :reasoning_effort)
-        )
+  defp configure_session(%State{} = state, changes) do
+    new_state = %State{
+      state
+      | model: Keyword.get(changes, :model, state.model),
+        provider: Keyword.get(changes, :provider, state.provider),
+        system_prompt: Keyword.get(changes, :system_prompt, state.system_prompt),
+        opts:
+          state.opts
+          |> merge_opts(Keyword.get(changes, :opts, []))
+          |> normalize_session_opts()
+    }
 
-      false ->
-        :ok
+    case persist_settings_snapshot(state, new_state) do
+      :ok ->
+        # Changed model/options invalidate any prewarmed continuation's body
+        # probe. Cancel the previous warmup before starting its replacement so it
+        # cannot land stale state after the new configuration wins.
+        {:reply, :ok, restart_prewarm(new_state)}
+
+      {:error, reason} ->
+        log_persistence_failure(state, :settings_snapshot, reason)
+        {:reply, {:error, reason}, state}
     end
   end
 
-  defp persisted_settings_changed?(old, new) do
-    old.model != new.model or
-      Keyword.get(old.opts, :reasoning_effort) != Keyword.get(new.opts, :reasoning_effort)
+  # An invalid override is rejected at the configure boundary: accepting it
+  # would only surface later, failing the next run's prompt resolution.
+  defp validate_configure(changes) do
+    case Keyword.fetch(changes, :system_prompt) do
+      :error -> :ok
+      {:ok, nil} -> :ok
+      {:ok, text} -> validate_system_prompt(text)
+    end
+  end
+
+  defp validate_system_prompt(text) do
+    case is_binary(text) and Catalyst.Prompt.Config.nonblank_text?(text) do
+      true -> :ok
+      false -> {:error, {:invalid_system_prompt, text}}
+    end
+  end
+
+  # Persist a single replayable settings record before changing live state. The
+  # loader keeps decoding legacy model_change/thinking_level_change records.
+  defp persist_settings_snapshot(old, new) do
+    case persisted_settings(old) != persisted_settings(new) do
+      true -> Store.append_settings_snapshot(new.store, persisted_settings(new))
+      false -> :ok
+    end
+  end
+
+  # The JSON-safe projection persisted in each settings_snapshot line. An
+  # `opts[:loop]` module is deliberately absent (not portable across restarts);
+  # a non-binary `opts[:workflow]` value is treated as unset rather than raised
+  # on, matching the registry's own name validation at run time.
+  defp persisted_settings(%State{} = state) do
+    %{
+      model: state.model,
+      thinking_level: Keyword.get(state.opts, :reasoning_effort),
+      workflow: persisted_workflow(state.opts),
+      system_prompt: state.system_prompt
+    }
+  end
+
+  defp persisted_workflow(opts) do
+    case Keyword.get(opts, :workflow) do
+      name when is_binary(name) -> name
+      _absent_or_invalid -> nil
+    end
   end
 
   defp finish_successful_run(state) do

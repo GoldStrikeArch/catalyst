@@ -74,6 +74,22 @@ defmodule Catalyst.Workflow.Registry do
     end
   end
 
+  @doc """
+  List every currently selectable workflow with its winning module and source.
+
+  Composes the runtime overlay, the live `:workflows` application map, and the
+  default chain into picker-ready `selection()` rows: the effective `:default`
+  first, then named workflows in name order. Each row reports the same layer
+  `resolve/1` would select for that name right now. Names whose winning layer
+  is invalid (a misconfigured module, a malformed `:workflows` value) are
+  omitted rather than raised on — explicitly selecting such a name still
+  returns its tagged error from `resolve/1`.
+  """
+  @spec list() :: [selection()]
+  def list do
+    default_rows() ++ named_rows()
+  end
+
   @doc "Register or refresh a runtime workflow, tagged with an optional owner."
   @spec register_workflow(term(), term(), keyword()) :: :ok | {:error, term()}
   def register_workflow(name, module, opts \\ []) when is_list(opts) do
@@ -131,6 +147,47 @@ defmodule Catalyst.Workflow.Registry do
   def handle_call({:unregister_owner, owner}, _from, state) do
     :ets.match_delete(@table, {:_, :_, owner})
     {:reply, :ok, state}
+  end
+
+  defp default_rows do
+    case resolve_default() do
+      {:ok, module, source} -> [%{name: :default, module: module, source: source}]
+      {:error, _reason} -> []
+    end
+  end
+
+  defp named_rows do
+    (runtime_names() ++ application_names())
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.flat_map(&named_row/1)
+  end
+
+  defp named_row(name) do
+    case resolve_named(name) do
+      {:ok, module, source} -> [%{name: name, module: module, source: source}]
+      {:error, _reason} -> []
+    end
+  end
+
+  defp runtime_names do
+    case table_rows() do
+      {:ok, rows} ->
+        for {{:workflow, name}, _module, _owner} <- rows, valid_named_workflow?(name), do: name
+
+      :error ->
+        []
+    end
+  end
+
+  defp application_names do
+    case Application.fetch_env(:catalyst, :workflows) do
+      {:ok, workflows} when is_map(workflows) ->
+        for {name, _module} <- workflows, valid_named_workflow?(name), do: name
+
+      _missing_or_malformed ->
+        []
+    end
   end
 
   defp resolve_options({:present, loop}, _workflow) when not is_nil(loop) do

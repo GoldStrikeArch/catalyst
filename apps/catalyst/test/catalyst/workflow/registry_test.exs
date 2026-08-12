@@ -175,6 +175,70 @@ defmodule Catalyst.Workflow.RegistryTest do
     assert {:ok, %{name: :default, module: WorkflowA}} = Registry.resolve([])
   end
 
+  test "list/0 composes runtime, application, and built-in layers into picker rows", %{
+    owner: owner
+  } do
+    # Built-in-only baseline: exactly the default row.
+    assert Registry.list() == [
+             %{name: :default, module: Catalyst.Agent.Loop, source: :builtin}
+           ]
+
+    Application.put_env(:catalyst, :workflows, %{
+      "zeta" => WorkflowA,
+      "review" => WorkflowA,
+      default: WorkflowB
+    })
+
+    assert :ok = Registry.register_workflow("review", WorkflowB, owner: owner)
+    assert :ok = Registry.register_workflow("alpha", WorkflowA, owner: owner)
+
+    assert Registry.list() == [
+             %{
+               name: :default,
+               module: WorkflowB,
+               source: {:application, {:workflows, :default}}
+             },
+             %{name: "alpha", module: WorkflowA, source: {:runtime, owner, {:workflow, "alpha"}}},
+             %{
+               name: "review",
+               module: WorkflowB,
+               source: {:runtime, owner, {:workflow, "review"}}
+             },
+             %{name: "zeta", module: WorkflowA, source: {:application, {:workflows, "zeta"}}}
+           ]
+
+    # A runtime default outranks the application default in the same row.
+    assert :ok = Registry.register_workflow(:default, WorkflowA, owner: owner)
+
+    assert %{name: :default, module: WorkflowA, source: {:runtime, ^owner, {:workflow, :default}}} =
+             hd(Registry.list())
+  end
+
+  test "list/0 omits invalid rows instead of raising", %{owner: owner} do
+    Application.put_env(:catalyst, :workflows, %{
+      "review" => NotAWorkflow,
+      default: NotAWorkflow
+    })
+
+    assert :ok = Registry.register_workflow("valid", WorkflowA, owner: owner)
+
+    # The misconfigured app names and default are skipped; resolve/1 still
+    # reports them as tagged errors when explicitly selected.
+    assert Registry.list() == [
+             %{name: "valid", module: WorkflowA, source: {:runtime, owner, {:workflow, "valid"}}}
+           ]
+
+    assert {:error, {:invalid_configuration, {:workflows, "review"}, NotAWorkflow}} =
+             Registry.resolve(workflow: "review")
+
+    # A malformed :workflows value degrades list/0 to the valid layers only.
+    Application.put_env(:catalyst, :workflows, :malformed)
+
+    assert Registry.list() == [
+             %{name: "valid", module: WorkflowA, source: {:runtime, owner, {:workflow, "valid"}}}
+           ]
+  end
+
   test "an explicit unknown name and malformed selected configuration are tagged errors" do
     Application.put_env(:catalyst, :workflows, %{default: WorkflowA})
 
