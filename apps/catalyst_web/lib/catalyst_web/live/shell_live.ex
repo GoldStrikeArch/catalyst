@@ -46,6 +46,7 @@ defmodule CatalystWeb.ShellLive do
         codex_prefs: Settings.load_codex(),
         ui_prefs: Settings.load_ui(),
         machine_prefs: Settings.load_machine(),
+        workflow_prefs: Settings.load_workflow(),
         session_model: nil,
         session_opts: [],
         file_search: nil,
@@ -103,6 +104,7 @@ defmodule CatalystWeb.ShellLive do
     assign(socket,
       codex_catalog: catalog.models,
       selected_codex_entry: catalog.selected,
+      workflow_options: Settings.workflow_options(socket.assigns.workflow_prefs),
       shell_pages: CatalystWeb.UI.Registry.list_pages()
     )
   end
@@ -289,6 +291,16 @@ defmodule CatalystWeb.ShellLive do
 
   def handle_event("toggle_quiet", _params, socket) do
     {:noreply, Settings.toggle_quiet(socket)}
+  end
+
+  # Workflow choice applies to the session's NEXT run; the options list is
+  # recomputed so an unavailable marker row appears/disappears with the choice.
+  def handle_event("select_workflow", %{"workflow" => value}, socket) do
+    {:noreply,
+     socket
+     |> Settings.select_workflow(value)
+     |> refresh_shell_chrome()
+     |> maybe_refresh_panel()}
   end
 
   # The grant changes which tools the next run advertises, so the resolved

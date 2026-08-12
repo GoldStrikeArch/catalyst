@@ -197,6 +197,11 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
       file_refs: %{},
       chat_form: ChatInput.form("")
     )
+    # Reconcile the workflow preference from what the session actually got:
+    # `Settings.workflow_opts/1` drops a saved name that no longer resolves,
+    # and the picker must self-heal to default rather than display a workflow
+    # the new session does not have.
+    |> Settings.sync_workflow_from_opts(run_opts)
   end
 
   defp session_start_failed(socket, reason) do

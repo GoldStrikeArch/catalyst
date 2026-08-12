@@ -9,9 +9,11 @@ defmodule CatalystWeb.ShellLive.Settings do
   """
 
   import Phoenix.Component, only: [assign: 2]
+  import Phoenix.LiveView, only: [put_flash: 3]
 
   alias Catalyst.LLM.OpenAICodex
   alias Catalyst.Session.Server
+  alias Catalyst.Workflow.Registry, as: WorkflowRegistry
 
   @codex_prefs_ptr {CatalystWeb.ShellLive, :codex_prefs}
   @ui_prefs_ptr {CatalystWeb.ShellLive, :ui_prefs}
@@ -20,6 +22,9 @@ defmodule CatalystWeb.ShellLive.Settings do
   # drop anything else stored there, and `ui_prefs` is display-only state that
   # never configures the session.
   @machine_prefs_ptr {CatalystWeb.ShellLive, :machine_prefs}
+  # Workflow selection is provider-agnostic, so it also gets its own key
+  # rather than riding in `codex_prefs` (same wholesale-rebuild hazard).
+  @workflow_prefs_ptr {CatalystWeb.ShellLive, :workflow_prefs}
 
   @type codex_prefs :: %{
           model: String.t(),
@@ -29,6 +34,12 @@ defmodule CatalystWeb.ShellLive.Settings do
         }
   @type ui_prefs :: %{quiet: boolean()}
   @type machine_prefs :: %{computer_use: boolean()}
+  @type workflow_prefs :: %{workflow: String.t() | nil}
+  @type workflow_option :: %{
+          name: Catalyst.Workflow.Registry.name(),
+          module: module() | nil,
+          source: Catalyst.Workflow.Registry.source() | :unavailable
+        }
   @type socket :: Phoenix.LiveView.Socket.t()
 
   @doc "Loads persisted Codex controls over the current application defaults."
@@ -53,6 +64,17 @@ defmodule CatalystWeb.ShellLive.Settings do
     defaults = %{quiet: false}
 
     case :persistent_term.get(@ui_prefs_ptr, nil) do
+      %{} = saved -> Map.merge(defaults, saved)
+      _not_saved -> defaults
+    end
+  end
+
+  @doc "Loads the persisted workflow selection (nil selects the default chain)."
+  @spec load_workflow() :: workflow_prefs()
+  def load_workflow do
+    defaults = %{workflow: nil}
+
+    case :persistent_term.get(@workflow_prefs_ptr, nil) do
       %{} = saved -> Map.merge(defaults, saved)
       _not_saved -> defaults
     end
@@ -93,10 +115,31 @@ defmodule CatalystWeb.ShellLive.Settings do
   @spec machine_opts(machine_prefs()) :: keyword()
   def machine_opts(prefs), do: [computer_use: prefs.computer_use]
 
-  @doc "Session run options for a new session: Codex controls plus machine grants."
+  @doc """
+  Converts the workflow selection into session start options.
+
+  A saved name whose workflow no longer resolves (its extension was purged or
+  the VM restarted without it) is dropped rather than passed on: an unknown
+  explicit name fails every run, so a stale preference must not poison a fresh
+  session. `sync_workflow_from_opts/2` then self-heals the preference from
+  what the session actually got.
+  """
+  @spec workflow_opts(workflow_prefs()) :: keyword()
+  def workflow_opts(%{workflow: nil}), do: []
+
+  def workflow_opts(%{workflow: name}) do
+    case WorkflowRegistry.fetch(name) do
+      {:ok, _module} -> [workflow: name]
+      {:error, _reason} -> []
+    end
+  end
+
+  @doc "Session run options for a new session: Codex controls, machine grants, workflow."
   @spec start_opts(socket()) :: keyword()
   def start_opts(socket) do
-    run_opts(socket.assigns.codex_prefs) ++ machine_opts(socket.assigns.machine_prefs)
+    run_opts(socket.assigns.codex_prefs) ++
+      machine_opts(socket.assigns.machine_prefs) ++
+      workflow_opts(socket.assigns.workflow_prefs)
   end
 
   @doc "Merges a Codex controls form submission and enforces model capabilities."
@@ -123,6 +166,62 @@ defmodule CatalystWeb.ShellLive.Settings do
       pid when is_pid(pid) -> configure_session(socket, pid, prefs)
       _no_session -> socket
     end
+  end
+
+  @doc """
+  Applies a workflow picked in the UI to the preference and the live session.
+
+  The empty select value picks the default chain (the session's `:workflow`
+  key is deleted). A named selection is validated against the live registry
+  BEFORE it is persisted or configured — an unknown name would otherwise fail
+  every subsequent run — and rejection leaves prefs and session untouched.
+  """
+  @spec select_workflow(socket(), term()) :: socket()
+  def select_workflow(socket, value) do
+    case normalize_workflow(value) do
+      {:ok, workflow} ->
+        apply_workflow(socket, workflow)
+
+      {:error, reason} ->
+        put_flash(socket, :error, workflow_error(reason))
+    end
+  end
+
+  @doc """
+  Picker rows for the workflow select: the live registry list plus a bare
+  `:unavailable` entry when the current selection is missing from it, so the
+  browser cannot silently display another workflow (the Codex model picker
+  desync lesson from P5a applies here unchanged).
+  """
+  @spec workflow_options(workflow_prefs()) :: [workflow_option()]
+  def workflow_options(prefs) do
+    rows = WorkflowRegistry.list()
+
+    case prefs.workflow do
+      nil ->
+        rows
+
+      name ->
+        case Enum.any?(rows, &(&1.name == name)) do
+          true -> rows
+          false -> rows ++ [%{name: name, module: nil, source: :unavailable}]
+        end
+    end
+  end
+
+  @doc """
+  Reconciles the workflow preference from a session's authoritative options.
+
+  Unlike the computer-use grant, reconciliation is unconditional: a missing
+  `:workflow` key has a defined meaning (the default chain), so an attached
+  session without one must show — and persist — "default" rather than keep a
+  stale browser preference the session does not have.
+  """
+  @spec sync_workflow_from_opts(socket(), keyword()) :: socket()
+  def sync_workflow_from_opts(socket, opts) do
+    prefs = %{workflow: valid_workflow_opt(Keyword.get(opts, :workflow))}
+    persist(@workflow_prefs_ptr, prefs)
+    assign(socket, workflow_prefs: prefs)
   end
 
   @doc "Toggles and persists quiet mode without touching the agent session."
@@ -189,6 +288,7 @@ defmodule CatalystWeb.ShellLive.Settings do
     socket
     |> assign(codex_prefs: prefs)
     |> sync_machine_from_opts(opts)
+    |> sync_workflow_from_opts(opts)
   end
 
   # The session's :computer_use option wins over the browser preference exactly
@@ -238,6 +338,59 @@ defmodule CatalystWeb.ShellLive.Settings do
       :exit, _reason -> socket
     end
   end
+
+  defp normalize_workflow(""), do: {:ok, nil}
+
+  defp normalize_workflow(name) when is_binary(name) do
+    case WorkflowRegistry.fetch(name) do
+      {:ok, _module} -> {:ok, name}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_workflow(other), do: {:error, {:invalid_workflow, other}}
+
+  defp apply_workflow(socket, workflow) do
+    prefs = %{workflow: workflow}
+    persist(@workflow_prefs_ptr, prefs)
+    socket = assign(socket, workflow_prefs: prefs)
+
+    case socket.assigns.session_pid do
+      pid when is_pid(pid) -> configure_workflow(socket, pid, workflow)
+      _no_session -> socket
+    end
+  end
+
+  defp configure_workflow(socket, pid, workflow) do
+    opts = [workflow: workflow]
+
+    try do
+      :ok = Server.configure(pid, opts: opts)
+      # Mirror the server's merge semantics locally: a nil value DELETES the
+      # key, so the assigns never show a workflow the session no longer has.
+      assign(socket, session_opts: merge_local_opts(socket.assigns.session_opts || [], opts))
+    catch
+      # The session can die during a control change. The monitor callback will
+      # reattach, while the persisted preference applies to the next session.
+      :exit, _reason -> socket
+    end
+  end
+
+  defp merge_local_opts(opts, changes) do
+    Enum.reduce(changes, opts, fn
+      {key, nil}, acc -> Keyword.delete(acc, key)
+      {key, value}, acc -> Keyword.put(acc, key, value)
+    end)
+  end
+
+  defp valid_workflow_opt(name) when is_binary(name), do: name
+  defp valid_workflow_opt(_absent_or_invalid), do: nil
+
+  defp workflow_error({:unknown_workflow, name}) do
+    "workflow #{inspect(name)} is no longer available (its extension may have been unloaded) — pick another or default"
+  end
+
+  defp workflow_error(reason), do: "could not select workflow: #{inspect(reason)}"
 
   defp put_if_present(prefs, _key, nil), do: prefs
   defp put_if_present(prefs, key, value), do: Map.put(prefs, key, value)

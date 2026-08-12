@@ -24,6 +24,7 @@ defmodule CatalystWeb.ShellComponents do
     assigns =
       assign(assigns,
         codex_form: codex_form(assigns.codex_prefs),
+        workflow_form: workflow_form(assigns.workflow_prefs),
         diagnostic_prompt: diagnostic_prompt(assigns),
         diagnostic_workflow: metadata_value(assigns.run_metadata, :workflow),
         diagnostic_context: metadata_value(assigns.run_metadata, :context)
@@ -119,6 +120,28 @@ defmodule CatalystWeb.ShellComponents do
             >
               <.icon name="hero-computer-desktop" class="size-3.5" /> Computer
             </button>
+
+            <%!-- Hidden while only the default chain exists (a one-option
+              select is noise); a non-default selection keeps it visible even
+              when its workflow vanished, so the unavailable state stays
+              recoverable from the header. --%>
+            <.form
+              :if={show_workflow_picker?(@workflow_options, @workflow_prefs)}
+              for={@workflow_form}
+              id="workflow-form"
+              phx-change="select_workflow"
+              class="m-0 flex items-center"
+            >
+              <.input
+                field={@workflow_form[:workflow]}
+                id="workflow-select"
+                type="select"
+                options={workflow_select_options(@workflow_options)}
+                container_class="m-0"
+                class={codex_select_class()}
+                title="Agent workflow (applies to the next run)"
+              />
+            </.form>
 
             <div
               id="codex-control-group"
@@ -234,6 +257,30 @@ defmodule CatalystWeb.ShellComponents do
       "transport" => prefs.transport
     })
   end
+
+  defp workflow_form(prefs) do
+    to_form(%{"workflow" => prefs.workflow || ""})
+  end
+
+  defp show_workflow_picker?(options, prefs) do
+    length(options) > 1 or prefs.workflow != nil
+  end
+
+  # The default row maps to the empty select value ("no explicit workflow"),
+  # named rows to their names. Provenance rides in the label so extension- or
+  # config-supplied workflows are distinguishable at a glance.
+  defp workflow_select_options(options) do
+    Enum.map(options, fn
+      %{name: :default, source: source} -> {"default" <> workflow_suffix(source), ""}
+      %{name: name, source: source} -> {name <> workflow_suffix(source), name}
+    end)
+  end
+
+  defp workflow_suffix(:builtin), do: ""
+  defp workflow_suffix(:unavailable), do: " (unavailable)"
+  defp workflow_suffix({:runtime, _owner, _key}), do: " (extension)"
+  defp workflow_suffix({:application, _setting}), do: " (config)"
+  defp workflow_suffix(_source), do: ""
 
   attr :status, :map, required: true
 
