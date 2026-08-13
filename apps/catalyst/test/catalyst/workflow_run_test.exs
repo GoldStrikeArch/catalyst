@@ -1,6 +1,10 @@
 defmodule Catalyst.WorkflowRunTest do
   use ExUnit.Case, async: false
 
+  alias Catalyst.Agent.Event
+  alias Catalyst.{Content, Model}
+  alias Catalyst.Session.{Manager, Server}
+  alias Catalyst.Session.Store.Codec
   alias Catalyst.WorkflowRun
   alias Catalyst.WorkflowRun.{Names, Store}
 
@@ -110,7 +114,8 @@ defmodule Catalyst.WorkflowRunTest do
                     %{
                       "type" => "cancelled",
                       "checkpoint" => %{"status" => "cancelled", "reason" => reason}
-                    }}
+                    }},
+                   2_000
 
     assert reason =~ "parent exited"
   end
@@ -133,6 +138,91 @@ defmodule Catalyst.WorkflowRunTest do
 
     assert {:ok, %{"status" => "cancelled", "reason" => %{"from" => "test"}}} =
              WorkflowRun.get(id)
+  end
+
+  test "checkpoint transition failure emits a terminal event instead of hanging" do
+    id = unique_id()
+    :ok = WorkflowRun.subscribe(id)
+
+    assert {:ok, _run} =
+             WorkflowRun.start(
+               id: id,
+               attempt_module: @attempt_module,
+               stages: [%{"name" => "persist"}]
+             )
+
+    assert_receive {:workflow_attempt, attempt, _context, _emit}
+    root = Application.fetch_env!(:catalyst, :workflow_runs_root)
+    File.rm_rf!(root)
+    File.write!(root, "not a directory")
+    send(attempt, {:return, {:ok, %{"artifact" => "done"}}})
+
+    assert_receive {:workflow_run_event, ^id,
+                    %{
+                      "type" => "failed",
+                      "checkpoint" => %{
+                        "status" => "failed",
+                        "error" => %{"checkpoint_write_failed" => _reason}
+                      }
+                    }}
+  end
+
+  test "failed initial supervisor start leaves an explicitly resumable checkpoint" do
+    id = unique_id()
+    supervisor = Catalyst.WorkflowRun.DynamicSupervisor
+
+    assert :ok = Supervisor.terminate_child(Catalyst.Supervisor, supervisor)
+
+    on_exit(fn ->
+      case Process.whereis(supervisor) do
+        nil -> Supervisor.restart_child(Catalyst.Supervisor, supervisor)
+        _pid -> :ok
+      end
+    end)
+
+    assert {:error, {:workflow_run_supervisor, _reason}} =
+             WorkflowRun.start(
+               id: id,
+               attempt_module: @attempt_module,
+               stages: [%{"name" => "wait"}]
+             )
+
+    assert {:ok, %{"status" => "interrupted"}} = WorkflowRun.get(id)
+    assert {:ok, _pid} = Supervisor.restart_child(Catalyst.Supervisor, supervisor)
+  end
+
+  test "explicit resume delivers the final artifact to the parent session" do
+    id = unique_id()
+    parent_id = "workflow-parent-" <> Catalyst.Ids.hex(6)
+    cwd = Path.join(Application.fetch_env!(:catalyst, :home), parent_id)
+    model = %Model{id: "faux", api: "faux"}
+
+    assert {:ok, %{pid: parent}} =
+             Manager.start_session(
+               id: parent_id,
+               cwd: cwd,
+               model: model,
+               provider: Catalyst.LLM.Faux
+             )
+
+    on_exit(fn ->
+      Manager.stop(parent_id)
+      File.rm_rf!(cwd)
+    end)
+
+    :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(parent_id))
+    parent_ref = Process.monitor(parent)
+    assert :ok = Manager.stop(parent_id)
+    assert_receive {:DOWN, ^parent_ref, :process, ^parent, :shutdown}
+    assert :ok = Store.put(interrupted_checkpoint(id, parent_id, cwd, model))
+    assert {:ok, _run} = WorkflowRun.resume_to_parent(id, attempt_module: @attempt_module)
+    assert_receive {:workflow_attempt, attempt, _context, _emit}
+    send(attempt, {:return, {:ok, %{"artifact_id" => "result", "artifact" => "recovered"}}})
+
+    assert_receive {:agent_event, ^parent_id, %Event.MessageEnd{message: assistant}}, 2_000
+    assert Content.text_of(assistant.content) == "recovered"
+    assert {:ok, resumed_parent} = Manager.whereis(parent_id)
+    assert Enum.any?(Server.state(resumed_parent).messages, &(&1 == assistant))
   end
 
   test "a coordinator crash reloads the checkpoint and explicitly restarts its attempt" do
@@ -191,6 +281,30 @@ defmodule Catalyst.WorkflowRunTest do
   defp assert_eventually_completed(id) do
     assert_receive {:workflow_run_event, ^id, %{"type" => "completed"}}
     assert {:ok, %{"status" => "completed"}} = WorkflowRun.get(id)
+  end
+
+  defp interrupted_checkpoint(id, parent_id, cwd, model) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    %{
+      "version" => 1,
+      "id" => id,
+      "status" => "interrupted",
+      "stages" => [%{"name" => "resume", "max_attempts" => 1}],
+      "stage_index" => 0,
+      "attempt" => 0,
+      "stage_session_id" => nil,
+      "input" => %{
+        "parent_session_id" => parent_id,
+        "cwd" => cwd,
+        "model" => Codec.encode_model(model)
+      },
+      "results" => [],
+      "last_error" => nil,
+      "error" => nil,
+      "inserted_at" => now,
+      "updated_at" => now
+    }
   end
 
   defp unique_id, do: "workflow-run-test-" <> Catalyst.Ids.hex(6)

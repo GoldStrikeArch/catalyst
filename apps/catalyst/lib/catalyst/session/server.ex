@@ -70,6 +70,11 @@ defmodule Catalyst.Session.Server do
   @spec state(GenServer.server()) :: map()
   def state(server), do: GenServer.call(server, :state)
 
+  @doc "Persist and broadcast an assistant message recovered outside an active session run."
+  @spec append_recovered(GenServer.server(), Message.Assistant.t()) :: :ok | {:error, term()}
+  def append_recovered(server, %Message.Assistant{} = message),
+    do: GenServer.call(server, {:append_recovered, message})
+
   @doc """
   Clear the transcript and abort any active run. A reset marker is appended to
   the session file before live state changes, so a crash-restarted (or resumed)
@@ -235,6 +240,15 @@ defmodule Catalyst.Session.Server do
   end
 
   def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
+
+  def handle_call({:append_recovered, message}, _from, state) do
+    event = %Event.MessageEnd{message: message}
+
+    case persist_and_accept(state, event) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
 
   def handle_call({:configure, changes}, _from, %State{} = state) do
     case validate_configure(changes) do

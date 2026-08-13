@@ -7,6 +7,9 @@ defmodule Catalyst.WorkflowRun do
   implementation unless one is configured as `:workflow_run_attempt_module`.
   """
 
+  alias Catalyst.{Content, Message}
+  alias Catalyst.Session.{Manager, Server}
+  alias Catalyst.Session.Store.Codec
   alias Catalyst.WorkflowRun.{Coordinator, Names, Store}
 
   @dynamic_supervisor Catalyst.WorkflowRun.DynamicSupervisor
@@ -27,13 +30,23 @@ defmodule Catalyst.WorkflowRun do
          {:ok, input} <- validate_json(Keyword.get(opts, :input, %{}), :input),
          :ok <- ensure_new(id),
          checkpoint = new_checkpoint(id, stages, input),
-         :ok <- Store.put(checkpoint),
-         {:ok, pid} <- start_supervisor(id, module, Keyword.get(opts, :owner)) do
-      {:ok, %{id: id, pid: pid}}
+         :ok <- Store.put(checkpoint) do
+      start_persisted(id, module, Keyword.get(opts, :owner), checkpoint)
     end
   end
 
   def start(opts), do: {:error, {:invalid_workflow_run_options, opts}}
+
+  defp start_persisted(id, module, owner, checkpoint) do
+    case start_supervisor(id, module, owner) do
+      {:ok, pid} ->
+        {:ok, %{id: id, pid: pid}}
+
+      {:error, reason} ->
+        _ = Store.put(Map.put(checkpoint, "status", "interrupted"))
+        {:error, reason}
+    end
+  end
 
   @doc "List all durable checkpoints, newest first."
   @spec list() :: [map()]
@@ -57,6 +70,23 @@ defmodule Catalyst.WorkflowRun do
          {:ok, module} <- attempt_module(opts),
          {:ok, pid} <- start_supervisor(id, module, Keyword.get(opts, :owner)) do
       {:ok, %{id: id, pid: pid}}
+    end
+  end
+
+  @doc "Resume a run in a supervised task and deliver its final artifact to its parent session."
+  @spec resume_to_parent(String.t(), keyword()) ::
+          {:ok, %{id: String.t(), pid: pid()}} | {:error, term()}
+  def resume_to_parent(id, opts \\ []) do
+    caller = self()
+    ref = make_ref()
+
+    case Task.Supervisor.start_child(Catalyst.TaskSupervisor, fn ->
+           result = subscribe_and_resume(id, opts)
+           send(caller, {ref, result})
+           await_parent_delivery(id, result)
+         end) do
+      {:ok, task} -> await_resume_start(ref, task)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -87,11 +117,95 @@ defmodule Catalyst.WorkflowRun do
         restart: :temporary
       )
 
-    case DynamicSupervisor.start_child(@dynamic_supervisor, child_spec) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      other -> other
+    try do
+      case DynamicSupervisor.start_child(@dynamic_supervisor, child_spec) do
+        {:ok, pid} -> {:ok, pid}
+        {:error, {:already_started, pid}} -> {:ok, pid}
+        other -> other
+      end
+    catch
+      :exit, reason -> {:error, {:workflow_run_supervisor, reason}}
     end
+  end
+
+  defp subscribe_and_resume(id, opts) do
+    with :ok <- subscribe(id) do
+      resume(id, Keyword.put(opts, :owner, self()))
+    end
+  end
+
+  defp await_resume_start(ref, task) do
+    receive do
+      {^ref, result} -> result
+    after
+      5_000 ->
+        Task.Supervisor.terminate_child(Catalyst.TaskSupervisor, task)
+        {:error, :workflow_resume_start_timeout}
+    end
+  end
+
+  defp await_parent_delivery(_id, {:error, _reason}), do: :ok
+
+  defp await_parent_delivery(id, {:ok, %{pid: supervisor}}) do
+    monitor = Process.monitor(supervisor)
+
+    receive do
+      {:workflow_run_event, ^id, %{"type" => "completed", "checkpoint" => checkpoint}} ->
+        Process.demonitor(monitor, [:flush])
+        deliver_to_parent(checkpoint)
+
+      {:workflow_run_event, ^id, %{"type" => status}}
+      when status in ["failed", "cancelled"] ->
+        Process.demonitor(monitor, [:flush])
+        :ok
+
+      {:DOWN, ^monitor, :process, ^supervisor, _reason} ->
+        with {:ok, %{"status" => "completed"} = checkpoint} <- get(id) do
+          deliver_to_parent(checkpoint)
+        end
+    end
+  end
+
+  defp deliver_to_parent(checkpoint) do
+    with parent when is_binary(parent) <- checkpoint["input"]["parent_session_id"],
+         artifact when is_binary(artifact) <- final_artifact(checkpoint),
+         {:ok, session} <- parent_session(parent, checkpoint["input"]),
+         {:ok, model} <- Codec.decode_model(checkpoint["input"]["model"]) do
+      Server.append_recovered(session, recovered_message(artifact, model.id))
+    else
+      _missing_or_unavailable -> :ok
+    end
+  end
+
+  defp parent_session(id, input) do
+    case Manager.whereis(id) do
+      {:ok, pid} ->
+        {:ok, pid}
+
+      :error ->
+        case Manager.start_session(id: id, cwd: input["cwd"]) do
+          {:ok, %{pid: pid}} -> {:ok, pid}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp final_artifact(%{"results" => results}) when is_list(results) do
+    case List.last(results) do
+      %{"artifact" => artifact} -> artifact
+      _missing -> nil
+    end
+  end
+
+  defp final_artifact(_checkpoint), do: nil
+
+  defp recovered_message(artifact, model) do
+    %Message.Assistant{
+      content: Content.text(artifact),
+      model: model,
+      stop_reason: :stop,
+      timestamp: Message.now()
+    }
   end
 
   defp attempt_module(opts) do

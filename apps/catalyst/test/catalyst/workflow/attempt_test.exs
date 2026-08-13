@@ -229,6 +229,28 @@ defmodule Catalyst.Workflow.AttemptTest do
     assert Attempt.classify_error({:invalid_artifacts, :bad}) == :terminal
   end
 
+  test "length-limited output is recoverable instead of advancing a workflow" do
+    {:ok, worker} = start_supervised({Attempt, attempt_opts()})
+    {child_id, _child} = allow_start_and_prompt()
+    assert_receive {:workflow_attempt, ^worker, {:started, _details}}
+
+    assistant = %Message.Assistant{
+      content: Catalyst.Content.text("partial"),
+      stop_reason: :length
+    }
+
+    send(worker, {:agent_event, child_id, %Event.AgentEnd{messages: [assistant]}})
+
+    assert_receive {:workflow_attempt, ^worker,
+                    {:finished,
+                     {:error,
+                      %{
+                        class: :recoverable,
+                        reason: :child_incomplete_assistant,
+                        child_session_id: ^child_id
+                      }}}}
+  end
+
   defp attempt_opts(overrides \\ []) do
     defaults = [
       owner: self(),

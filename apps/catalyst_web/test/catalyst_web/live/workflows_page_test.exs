@@ -115,6 +115,22 @@ defmodule CatalystWeb.WorkflowsPageTest do
     assert has_element?(view, "#workflow-save")
   end
 
+  test "keeps stages compact until a node is selected", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/workflows")
+
+    view |> element("#workflow-template-builtin-review") |> render_click()
+
+    assert has_element?(view, "#workflow-stage-node-review")
+    assert has_element?(view, "#workflow-stage-inspector-empty")
+    refute has_element?(view, "#workflow-stage-form-review")
+
+    view |> element("#workflow-stage-node-review") |> render_click()
+
+    assert has_element?(view, "#workflow-stage-inspector")
+    assert has_element?(view, "#workflow-stage-form-review")
+    refute has_element?(view, "#workflow-stage-inspector-empty")
+  end
+
   test "creates, builds, edits, and saves a connected stage", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/workflows")
 

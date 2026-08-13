@@ -7,7 +7,7 @@ defmodule CatalystWeb.ShellLive.Workflows do
   """
 
   import Phoenix.Component, only: [assign: 2, assign: 3, to_form: 1]
-  import Phoenix.LiveView, only: [put_flash: 3, stream: 4]
+  import Phoenix.LiveView, only: [put_flash: 3, stream: 4, stream_insert: 3]
 
   alias CatalystWeb.WorkflowTemplates
 
@@ -27,6 +27,7 @@ defmodule CatalystWeb.ShellLive.Workflows do
     socket
     |> assign(
       workflow_template: :none,
+      workflow_selected_stage: :none,
       workflow_form: template_form(),
       workflow_error: nil,
       workflow_presets: preset_options(),
@@ -71,19 +72,25 @@ defmodule CatalystWeb.ShellLive.Workflows do
   @doc "Explicitly resumes an interrupted durable workflow run."
   @spec resume_run(Phoenix.LiveView.Socket.t(), String.t()) :: Phoenix.LiveView.Socket.t()
   def resume_run(socket, id) do
-    case WorkflowTemplates.call(:resume_run, [id]) do
-      {:ok, _run} ->
-        socket
-        |> refresh_runs()
-        |> put_flash(:info, "Workflow run resumed.")
-
-      {:error, reason} ->
-        put_flash(socket, :error, error_message(reason))
+    with :ok <- Catalyst.WorkflowRun.subscribe(id),
+         {:ok, _run} <- WorkflowTemplates.call(:resume_run, [id]) do
+      socket
+      |> refresh_runs()
+      |> put_flash(:info, "Workflow run resumed.")
+    else
+      {:error, reason} -> put_flash(socket, :error, error_message(reason))
     end
   end
 
   @doc "Refreshes durable run status after a terminal workflow event."
   @spec run_event(Phoenix.LiveView.Socket.t(), map()) :: Phoenix.LiveView.Socket.t()
+  def run_event(socket, %{"type" => status, "checkpoint" => checkpoint})
+      when status in ["completed", "failed", "cancelled"] do
+    socket
+    |> assign(:workflow_runs_empty?, false)
+    |> stream_insert(:workflow_runs, checkpoint)
+  end
+
   def run_event(socket, %{"type" => status})
       when status in ["completed", "failed", "cancelled"] do
     refresh_runs(socket)
@@ -153,6 +160,7 @@ defmodule CatalystWeb.ShellLive.Workflows do
         current_stages
         |> Kernel.++([stage])
         |> then(&put_stages(socket, template, &1))
+        |> select_stage(stage_id)
 
       :error ->
         put_flash(socket, :error, "Unknown stage preset.")
@@ -160,6 +168,23 @@ defmodule CatalystWeb.ShellLive.Workflows do
   end
 
   def add_stage(socket, _preset), do: socket
+
+  @doc "Selects a compact stage node for metadata inspection or editing."
+  @spec select_stage(Phoenix.LiveView.Socket.t(), String.t()) :: Phoenix.LiveView.Socket.t()
+  def select_stage(%{assigns: %{workflow_template: template}} = socket, stage_id)
+      when is_map(template) do
+    case Enum.find(stages(template), &(to_string(id(&1)) == stage_id)) do
+      nil ->
+        socket
+
+      stage ->
+        socket
+        |> assign(:workflow_selected_stage, stage_view(stage))
+        |> stream(:workflow_stages, stage_views(stages(template)), reset: true)
+    end
+  end
+
+  def select_stage(socket, _stage_id), do: socket
 
   @doc "Updates a stage draft from submitted form parameters."
   @spec update_stage(Phoenix.LiveView.Socket.t(), String.t(), map()) ::
@@ -223,7 +248,11 @@ defmodule CatalystWeb.ShellLive.Workflows do
     case WorkflowTemplates.call(:delete, [to_string(id(template))]) do
       :ok ->
         socket
-        |> assign(workflow_template: :none, workflow_form: template_form())
+        |> assign(
+          workflow_template: :none,
+          workflow_selected_stage: :none,
+          workflow_form: template_form()
+        )
         |> stream(:workflow_stages, [], reset: true)
         |> refresh()
         |> put_flash(:info, "Workflow deleted.")
@@ -239,27 +268,48 @@ defmodule CatalystWeb.ShellLive.Workflows do
     socket
     |> assign(
       workflow_template: template,
+      workflow_selected_stage: :none,
       workflow_form:
         template_form(%{
           "name" => value(template, :name, ""),
           "description" => value(template, :description, "")
         })
     )
-    |> stream(:workflow_stages, Enum.map(stages(template), &stage_view/1), reset: true)
+    |> stream(:workflow_stages, stage_views(stages(template)), reset: true)
   end
 
   defp put_stages(socket, template, stages) do
     updated = Map.put(template, :stages, stages)
+    selected_stage = selected_stage(stages, socket.assigns.workflow_selected_stage)
 
     socket
-    |> assign(:workflow_template, updated)
-    |> stream(:workflow_stages, Enum.map(stages, &stage_view/1), reset: true)
+    |> assign(workflow_template: updated, workflow_selected_stage: selected_stage)
+    |> stream(:workflow_stages, stage_views(stages), reset: true)
   end
 
-  defp stage_view(stage) do
+  defp stage_view(stage, position \\ nil) do
     stage
     |> Map.put(:id, id(stage))
     |> Map.put(:form, stage |> stringify() |> to_form())
+    |> maybe_put_position(position)
+  end
+
+  defp stage_views(stages) do
+    stages
+    |> Enum.with_index(1)
+    |> Enum.map(fn {stage, position} -> stage_view(stage, position) end)
+  end
+
+  defp maybe_put_position(stage, nil), do: stage
+  defp maybe_put_position(stage, position), do: Map.put(stage, :position, position)
+
+  defp selected_stage(_stages, :none), do: :none
+
+  defp selected_stage(stages, selected) do
+    case Enum.find(stages, &(id(&1) == id(selected))) do
+      nil -> :none
+      stage -> stage_view(stage)
+    end
   end
 
   defp normalize_stage(params) do

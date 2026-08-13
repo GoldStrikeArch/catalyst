@@ -20,10 +20,13 @@ defmodule Catalyst.Workflow.Runner do
 
     with {:ok, template} <- selected_template(config),
          {:ok, goal} <- goal(prompts),
-         {:ok, id} <- start_run(template, goal, config) do
+         {:ok, id, supervisor} <- start_run(template, goal, config) do
+      monitor = Process.monitor(supervisor)
+
       try do
-        await(id, template, prompts, context, config, emit)
+        await(id, monitor, supervisor, template, prompts, context, config, emit)
       after
+        Process.demonitor(monitor, [:flush])
         cancel_if_running(id)
       end
     end
@@ -66,15 +69,15 @@ defmodule Catalyst.Workflow.Runner do
     stages = template |> Template.to_map() |> Map.fetch!("stages")
 
     with :ok <- Catalyst.WorkflowRun.subscribe(id),
-         {:ok, _run} <-
+         {:ok, run} <-
            Catalyst.WorkflowRun.start(id: id, stages: stages, input: input, owner: self()) do
-      {:ok, id}
+      {:ok, id, run.pid}
     else
       {:error, reason} -> {:error, {:workflow_run_start, reason}}
     end
   end
 
-  defp await(id, template, prompts, context, config, emit) do
+  defp await(id, monitor, supervisor, template, prompts, context, config, emit) do
     receive do
       {:workflow_run_event, ^id, %{"type" => "attempt_started", "context" => attempt}} ->
         stage = attempt["stage"]
@@ -87,7 +90,7 @@ defmodule Catalyst.Workflow.Runner do
           attempt: attempt["attempt"]
         })
 
-        await(id, template, prompts, context, config, emit)
+        await(id, monitor, supervisor, template, prompts, context, config, emit)
 
       {:workflow_run_event, ^id, %{"type" => "stage_completed"} = event} ->
         stage = event["stage"]
@@ -100,7 +103,7 @@ defmodule Catalyst.Workflow.Runner do
           status: :completed
         })
 
-        await(id, template, prompts, context, config, emit)
+        await(id, monitor, supervisor, template, prompts, context, config, emit)
 
       {:workflow_run_event, ^id, %{"type" => "completed", "checkpoint" => checkpoint}} ->
         finish(checkpoint, prompts, context, config, emit)
@@ -110,7 +113,23 @@ defmodule Catalyst.Workflow.Runner do
         {:error, {:workflow_run_failed, status, checkpoint["error"] || checkpoint["reason"]}}
 
       {:workflow_run_event, ^id, _progress} ->
-        await(id, template, prompts, context, config, emit)
+        await(id, monitor, supervisor, template, prompts, context, config, emit)
+
+      {:DOWN, ^monitor, :process, ^supervisor, reason} ->
+        finish_after_down(id, reason, prompts, context, config, emit)
+    end
+  end
+
+  defp finish_after_down(id, reason, prompts, context, config, emit) do
+    case Catalyst.WorkflowRun.get(id) do
+      {:ok, %{"status" => "completed"} = checkpoint} ->
+        finish(checkpoint, prompts, context, config, emit)
+
+      {:ok, %{"status" => status} = checkpoint} when status in ["failed", "cancelled"] ->
+        {:error, {:workflow_run_failed, status, checkpoint["error"] || checkpoint["reason"]}}
+
+      _missing_or_running ->
+        {:error, {:workflow_run_down, reason}}
     end
   end
 
