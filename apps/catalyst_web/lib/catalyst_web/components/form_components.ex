@@ -16,7 +16,7 @@ defmodule CatalystWeb.FormComponents do
   attr :type, :string,
     default: "text",
     values: ~w(color date datetime-local email file month number password
-               search select tel text time url week)
+               hidden search select tel text textarea time url week)
 
   attr :field, Phoenix.HTML.FormField,
     doc: "a form field struct retrieved from the form, for example: @form[:email]"
@@ -72,6 +72,31 @@ defmodule CatalystWeb.FormComponents do
           <option :if={@prompt} value="">{@prompt}</option>
           {Phoenix.HTML.Form.options_for_select(@options, @value)}
         </select>
+      </label>
+      <.error :for={message <- @errors}>{message}</.error>
+    </div>
+    """
+  end
+
+  def input(%{type: "textarea"} = assigns) do
+    ~H"""
+    <div class={@container_class}>
+      <label for={@id} class="block">
+        <span
+          :if={@label}
+          class="mb-1 block text-sm font-medium text-neutral-700 dark:text-neutral-200"
+        >
+          {@label}
+        </span>
+        <textarea
+          id={@id}
+          name={@name}
+          class={[
+            @class || text_input_class(),
+            @errors != [] && (@error_class || invalid_class())
+          ]}
+          {@rest}
+        >{@value}</textarea>
       </label>
       <.error :for={message <- @errors}>{message}</.error>
     </div>

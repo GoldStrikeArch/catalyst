@@ -297,6 +297,7 @@ defmodule CatalystWeb.UI.Registry do
   defp builtin_pages do
     [
       %{path: "chat", mod: CatalystWeb.Pages.ChatPage, label: "Chat"},
+      %{path: "prompts", mod: CatalystWeb.Pages.PromptsPage, label: "Models & Prompts"},
       %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"},
       %{path: "computer", mod: CatalystWeb.Pages.ComputerPage, label: "Computer"}
     ]

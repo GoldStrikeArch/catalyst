@@ -100,6 +100,34 @@ defmodule CatalystWeb.WorkflowPickerTest do
     assert :persistent_term.get(@workflow_prefs_ptr) == %{workflow: "review"}
   end
 
+  test "a persistence failure is shown without changing the preference or session", %{
+    conn: conn,
+    owner: owner
+  } do
+    :ok = WorkflowRegistry.register_workflow("review", StubWorkflow, owner: owner)
+
+    {:ok, view, _html} = live(conn, "/")
+    pid = session_pid(view)
+    store_path = Server.state(pid).store_path
+    original = File.read!(store_path)
+
+    on_exit(fn ->
+      File.rm_rf!(store_path)
+      File.mkdir_p!(Path.dirname(store_path))
+      File.write!(store_path, original)
+    end)
+
+    File.rm!(store_path)
+    File.mkdir_p!(store_path)
+
+    html = view |> form("#workflow-form") |> render_change(%{"workflow" => "review"})
+
+    assert html =~ "could not select workflow"
+    assert :persistent_term.get(@workflow_prefs_ptr) == %{workflow: nil}
+    refute Keyword.has_key?(Server.state(pid).opts, :workflow)
+    assert has_element?(view, "#workflow-select option[value=''][selected]")
+  end
+
   test "a selected workflow purged from the registry stays visible as unavailable", %{
     conn: conn,
     owner: owner

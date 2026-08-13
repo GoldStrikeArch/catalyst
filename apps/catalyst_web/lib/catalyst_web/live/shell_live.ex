@@ -61,6 +61,7 @@ defmodule CatalystWeb.ShellLive do
         diagnostics_open: false,
         cwd: SessionLifecycle.default_cwd()
       )
+      |> stream_configure(:prompt_rows, dom_id: & &1.id)
       |> Conversation.init()
       |> allow_upload(:image,
         accept: ~w(.png .jpg .jpeg .gif .webp),
@@ -137,6 +138,15 @@ defmodule CatalystWeb.ShellLive do
           }
         ),
       boot_status: Catalyst.Extensions.boot_status()
+    )
+  end
+
+  defp maybe_refresh_panel(%{assigns: %{page: "prompts"}} = socket) do
+    stream(
+      socket,
+      :prompt_rows,
+      CatalystWeb.Pages.PromptsPage.panel_data(socket.assigns.codex_catalog),
+      reset: true
     )
   end
 
@@ -301,6 +311,24 @@ defmodule CatalystWeb.ShellLive do
      |> Settings.select_workflow(value)
      |> refresh_shell_chrome()
      |> maybe_refresh_panel()}
+  end
+
+  def handle_event("save_prompt", %{"target" => encoded, "text" => text}, socket) do
+    result =
+      with {:ok, target} <- prompt_target(encoded) do
+        Catalyst.Prompt.Store.save(target, text)
+      end
+
+    {:noreply, finish_prompt_action(socket, result, "Prompt saved for the next run.")}
+  end
+
+  def handle_event("delete_prompt", %{"target" => encoded}, socket) do
+    result =
+      with {:ok, target} <- prompt_target(encoded) do
+        Catalyst.Prompt.Store.delete(target)
+      end
+
+    {:noreply, finish_prompt_action(socket, result, "Prompt reset to inherited behavior.")}
   end
 
   # The grant changes which tools the next run advertises, so the resolved
@@ -516,6 +544,27 @@ defmodule CatalystWeb.ShellLive do
 
   @impl true
   def render(assigns), do: CatalystWeb.ShellComponents.render(assigns)
+
+  defp prompt_target("default"), do: {:ok, :default}
+  defp prompt_target("append"), do: {:ok, :append}
+  defp prompt_target("api:" <> key), do: {:ok, {:api, key}}
+  defp prompt_target("model:" <> key), do: {:ok, {:model, key}}
+  defp prompt_target(target), do: {:error, {:invalid_prompt_target, target}}
+
+  defp finish_prompt_action(socket, :ok, message) do
+    socket
+    |> maybe_refresh_panel()
+    |> RunDiagnostics.preview()
+    |> put_flash(:info, message)
+  end
+
+  defp finish_prompt_action(socket, {:error, reason}, _message) do
+    put_flash(socket, :error, prompt_error(reason))
+  end
+
+  defp prompt_error(:blank_prompt), do: "Prompt cannot be blank. Use Reset to inherit."
+  defp prompt_error(:prompt_too_large), do: "Prompt must be 64 KiB or smaller."
+  defp prompt_error(reason), do: "Could not save prompt: #{inspect(reason)}"
 
   defp submission(socket, text) do
     cond do

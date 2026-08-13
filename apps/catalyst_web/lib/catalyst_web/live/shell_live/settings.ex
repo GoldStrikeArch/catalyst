@@ -351,13 +351,9 @@ defmodule CatalystWeb.ShellLive.Settings do
   defp normalize_workflow(other), do: {:error, {:invalid_workflow, other}}
 
   defp apply_workflow(socket, workflow) do
-    prefs = %{workflow: workflow}
-    persist(@workflow_prefs_ptr, prefs)
-    socket = assign(socket, workflow_prefs: prefs)
-
     case socket.assigns.session_pid do
       pid when is_pid(pid) -> configure_workflow(socket, pid, workflow)
-      _no_session -> socket
+      _no_session -> commit_workflow(socket, workflow)
     end
   end
 
@@ -365,15 +361,28 @@ defmodule CatalystWeb.ShellLive.Settings do
     opts = [workflow: workflow]
 
     try do
-      :ok = Server.configure(pid, opts: opts)
-      # Mirror the server's merge semantics locally: a nil value DELETES the
-      # key, so the assigns never show a workflow the session no longer has.
-      assign(socket, session_opts: merge_local_opts(socket.assigns.session_opts || [], opts))
+      case Server.configure(pid, opts: opts) do
+        :ok ->
+          socket
+          |> commit_workflow(workflow)
+          # Mirror the server's merge semantics locally: a nil value DELETES the
+          # key, so the assigns never show a workflow the session no longer has.
+          |> assign(session_opts: merge_local_opts(socket.assigns.session_opts || [], opts))
+
+        {:error, reason} ->
+          put_flash(socket, :error, workflow_error(reason))
+      end
     catch
       # The session can die during a control change. The monitor callback will
-      # reattach, while the persisted preference applies to the next session.
-      :exit, _reason -> socket
+      # reattach and reconcile the preference from its authoritative options.
+      :exit, _reason -> put_flash(socket, :error, "Session is restarting — try again.")
     end
+  end
+
+  defp commit_workflow(socket, workflow) do
+    prefs = %{workflow: workflow}
+    persist(@workflow_prefs_ptr, prefs)
+    assign(socket, workflow_prefs: prefs)
   end
 
   defp merge_local_opts(opts, changes) do
