@@ -82,6 +82,34 @@ defmodule Catalyst.Workflow.RunnerTest do
     assert_receive {:runner_event, %Event.AgentEnd{messages: [^prompt, ^assistant]}}, 2_000
   end
 
+  test "returns when the per-run supervisor exhausts its restart budget" do
+    test = self()
+    config = config(template())
+
+    start_supervised!(
+      {Task,
+       fn ->
+         result =
+           Runner.run(
+             [Message.user("Crash")],
+             %{system_prompt: nil, messages: []},
+             config,
+             fn _event -> :ok end
+           )
+
+         send(test, {:runner_result, result})
+       end}
+    )
+
+    for _attempt <- 1..4 do
+      assert_receive {:runner_attempt, _attempt, context}, 2_000
+      {:ok, coordinator} = Catalyst.WorkflowRun.Names.whereis(:coordinator, context["run_id"])
+      Process.exit(coordinator, :kill)
+    end
+
+    assert_receive {:runner_result, {:error, {:workflow_run_down, _reason}}}, 2_000
+  end
+
   defp config(template) do
     %{
       workflow: %{template: template},

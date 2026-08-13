@@ -89,7 +89,8 @@ defmodule Catalyst.Workflow.Attempt do
              :hard_timeout,
              :inactivity_timeout,
              :child_missing_assistant,
-             :child_blank_assistant
+             :child_blank_assistant,
+             :child_incomplete_assistant
            ],
       do: :recoverable
 
@@ -454,6 +455,9 @@ defmodule Catalyst.Workflow.Attempt do
 
   defp classify_assistant(%Message.Assistant{stop_reason: :aborted}, _max_bytes),
     do: {:error, :aborted}
+
+  defp classify_assistant(%Message.Assistant{stop_reason: :length}, _max_bytes),
+    do: {:error, :child_incomplete_assistant}
 
   defp classify_assistant(%Message.Assistant{} = assistant, max_bytes) do
     text = assistant.content |> Content.text_of() |> Truncate.scrub_utf8()

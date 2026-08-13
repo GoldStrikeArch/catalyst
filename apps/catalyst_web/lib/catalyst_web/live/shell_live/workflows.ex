@@ -7,7 +7,7 @@ defmodule CatalystWeb.ShellLive.Workflows do
   """
 
   import Phoenix.Component, only: [assign: 2, assign: 3, to_form: 1]
-  import Phoenix.LiveView, only: [put_flash: 3, stream: 4]
+  import Phoenix.LiveView, only: [put_flash: 3, stream: 4, stream_insert: 3]
 
   alias CatalystWeb.WorkflowTemplates
 
@@ -71,19 +71,25 @@ defmodule CatalystWeb.ShellLive.Workflows do
   @doc "Explicitly resumes an interrupted durable workflow run."
   @spec resume_run(Phoenix.LiveView.Socket.t(), String.t()) :: Phoenix.LiveView.Socket.t()
   def resume_run(socket, id) do
-    case WorkflowTemplates.call(:resume_run, [id]) do
-      {:ok, _run} ->
-        socket
-        |> refresh_runs()
-        |> put_flash(:info, "Workflow run resumed.")
-
-      {:error, reason} ->
-        put_flash(socket, :error, error_message(reason))
+    with :ok <- Catalyst.WorkflowRun.subscribe(id),
+         {:ok, _run} <- WorkflowTemplates.call(:resume_run, [id]) do
+      socket
+      |> refresh_runs()
+      |> put_flash(:info, "Workflow run resumed.")
+    else
+      {:error, reason} -> put_flash(socket, :error, error_message(reason))
     end
   end
 
   @doc "Refreshes durable run status after a terminal workflow event."
   @spec run_event(Phoenix.LiveView.Socket.t(), map()) :: Phoenix.LiveView.Socket.t()
+  def run_event(socket, %{"type" => status, "checkpoint" => checkpoint})
+      when status in ["completed", "failed", "cancelled"] do
+    socket
+    |> assign(:workflow_runs_empty?, false)
+    |> stream_insert(:workflow_runs, checkpoint)
+  end
+
   def run_event(socket, %{"type" => status})
       when status in ["completed", "failed", "cancelled"] do
     refresh_runs(socket)

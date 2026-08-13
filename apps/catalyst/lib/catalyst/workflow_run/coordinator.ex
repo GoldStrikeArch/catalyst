@@ -83,8 +83,12 @@ defmodule Catalyst.WorkflowRun.Coordinator do
         state = terminate_attempt(state)
 
         case finish(state, "cancelled", %{"reason" => json_value(reason)}) do
-          {:ok, state} -> {:stop, :normal, :ok, state}
-          {:error, state} -> {:reply, {:error, :checkpoint_write_failed}, state}
+          {:ok, state} ->
+            {:stop, :normal, :ok, state}
+
+          {:error, state, reason} ->
+            broadcast_persistence_failure(state, reason)
+            {:stop, :normal, {:error, reason}, state}
         end
     end
   end
@@ -97,7 +101,7 @@ defmodule Catalyst.WorkflowRun.Coordinator do
       child_id when is_binary(child_id) ->
         case persist(state, %{"stage_session_id" => child_id}) do
           {:ok, state} -> {:noreply, state}
-          {:error, state} -> {:noreply, state}
+          {:error, state, reason} -> persistence_failure(state, reason)
         end
 
       _no_child ->
@@ -126,7 +130,7 @@ defmodule Catalyst.WorkflowRun.Coordinator do
 
     case finish(state, "cancelled", %{"reason" => "parent exited: #{inspect(reason)}"}) do
       {:ok, state} -> {:stop, :normal, state}
-      {:error, state} -> {:noreply, state}
+      {:error, state, reason} -> persistence_failure(state, reason)
     end
   end
 
@@ -208,7 +212,7 @@ defmodule Catalyst.WorkflowRun.Coordinator do
 
     case Store.put(checkpoint) do
       :ok -> start_persisted_attempt(%{state | checkpoint: checkpoint})
-      {:error, reason} -> persistence_error(state, reason)
+      {:error, reason} -> persistence_failure(state, reason)
     end
   end
 
@@ -264,22 +268,22 @@ defmodule Catalyst.WorkflowRun.Coordinator do
         broadcast(state.id, %{"type" => status, "checkpoint" => state.checkpoint})
         {:ok, state}
 
-      {:error, state} ->
-        {:error, state}
+      {:error, state, reason} ->
+        {:error, state, reason}
     end
   end
 
   defp finish_reply(state, status, fields) do
     case finish(state, status, fields) do
       {:ok, state} -> {:stop, :normal, state}
-      {:error, state} -> {:noreply, state}
+      {:error, state, reason} -> persistence_failure(state, reason)
     end
   end
 
   defp persist_and_start(state, fields) do
     case persist(state, fields) do
       {:ok, state} -> start_attempt(state)
-      {:error, state} -> {:noreply, state}
+      {:error, state, reason} -> persistence_failure(state, reason)
     end
   end
 
@@ -295,13 +299,23 @@ defmodule Catalyst.WorkflowRun.Coordinator do
 
       {:error, reason} ->
         broadcast(state.id, %{"type" => "persistence_failed", "reason" => inspect(reason)})
-        {:error, state}
+        {:error, state, reason}
     end
   end
 
-  defp persistence_error(state, reason) do
-    broadcast(state.id, %{"type" => "persistence_failed", "reason" => inspect(reason)})
-    {:noreply, state}
+  defp persistence_failure(state, reason) do
+    broadcast_persistence_failure(state, reason)
+    {:stop, :normal, state}
+  end
+
+  defp broadcast_persistence_failure(state, reason) do
+    checkpoint =
+      Map.merge(state.checkpoint, %{
+        "status" => "failed",
+        "error" => %{"checkpoint_write_failed" => inspect(reason)}
+      })
+
+    broadcast(state.id, %{"type" => "failed", "checkpoint" => checkpoint})
   end
 
   defp terminate_attempt(%{attempt_pid: nil} = state), do: state

@@ -95,9 +95,7 @@ defmodule CatalystWeb.WorkflowTemplates do
   defp core_call(:list_runs, []), do: Catalyst.WorkflowRun.list() |> Enum.take(20)
 
   defp core_call(:resume_run, [id]) do
-    with :ok <- Catalyst.WorkflowRun.subscribe(id) do
-      Catalyst.WorkflowRun.resume(id)
-    end
+    Catalyst.WorkflowRun.resume_to_parent(id)
   end
 
   defp core_call(_operation, _arguments), do: {:error, :store_unavailable}
