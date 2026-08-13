@@ -197,98 +197,212 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
           </div>
 
           <div
-            id="workflow-stage-list"
-            phx-update="stream"
-            class="relative space-y-4 before:absolute before:bottom-6 before:left-6 before:top-6 before:w-px before:bg-indigo-200 dark:before:bg-indigo-400/20"
+            id="workflow-stage-builder"
+            class="grid items-start gap-5 xl:grid-cols-[minmax(16rem,0.72fr)_minmax(0,1.28fr)]"
           >
-            <div
-              id="workflow-stage-empty"
-              class="hidden only:block rounded-2xl border border-dashed border-neutral-300 p-10 text-center text-sm text-neutral-500 dark:border-white/15"
+            <section
+              id="workflow-stage-map"
+              class="rounded-2xl border border-neutral-200 bg-neutral-50/80 p-4 shadow-sm dark:border-white/10 dark:bg-black/10"
             >
-              Add the first stage from the preset palette.
-            </div>
-            <article
-              :for={{dom_id, stage} <- @streams.workflow_stages}
-              id={dom_id}
-              class="relative ml-12 rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm transition hover:border-neutral-300 dark:border-white/10 dark:bg-white/5"
+              <header class="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <p class="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-500">
+                    Flow
+                  </p>
+                  <p class="mt-1 text-xs text-neutral-500">Select a stage to inspect its settings.</p>
+                </div>
+                <span class="rounded-full bg-white px-2.5 py-1 text-[0.65rem] font-semibold text-neutral-500 shadow-sm ring-1 ring-neutral-200 dark:bg-white/5 dark:ring-white/10">
+                  {length(template_stages(@workflow_template))} stages
+                </span>
+              </header>
+
+              <div class="mx-auto max-w-sm">
+                <div class="mx-auto flex h-10 w-36 items-center justify-center rounded-lg border border-sky-300/70 bg-sky-50 px-3 text-xs font-semibold text-sky-800 shadow-sm dark:border-sky-400/40 dark:bg-sky-400/10 dark:text-sky-200">
+                  User task
+                </div>
+                <div class="mx-auto h-4 w-px bg-neutral-300 dark:bg-white/15"></div>
+
+                <div
+                  id="workflow-stage-list"
+                  phx-update="stream"
+                  class="space-y-2"
+                >
+                  <div
+                    id="workflow-stage-empty"
+                    class="hidden only:block rounded-xl border border-dashed border-neutral-300 p-7 text-center text-xs text-neutral-500 dark:border-white/15"
+                  >
+                    Add the first stage from the preset palette.
+                  </div>
+                  <article
+                    :for={{dom_id, stage} <- @streams.workflow_stages}
+                    id={dom_id}
+                    class="relative pt-4 first:pt-0 before:absolute before:left-1/2 before:top-0 before:h-4 before:w-px before:-translate-x-1/2 before:bg-neutral-300 first:before:hidden dark:before:bg-white/15"
+                  >
+                    <button
+                      id={"workflow-stage-node-#{stage.id}"}
+                      type="button"
+                      phx-click="workflow_select_stage"
+                      phx-value-id={stage.id}
+                      aria-pressed={selected_stage?(@workflow_selected_stage, stage)}
+                      class={[
+                        "group mx-auto flex min-h-12 w-full max-w-[15rem] items-center gap-3 rounded-lg border bg-white px-3 py-2 text-left shadow-sm transition duration-200 hover:-translate-y-px hover:border-indigo-300 hover:shadow-md dark:bg-white/5",
+                        selected_stage?(@workflow_selected_stage, stage) &&
+                          "border-indigo-400 ring-2 ring-indigo-500/15 dark:border-indigo-400/70",
+                        !selected_stage?(@workflow_selected_stage, stage) &&
+                          "border-neutral-200 dark:border-white/10"
+                      ]}
+                    >
+                      <span class={[
+                        "grid size-7 shrink-0 place-items-center rounded-md text-[0.65rem] font-bold transition",
+                        selected_stage?(@workflow_selected_stage, stage) &&
+                          "bg-indigo-600 text-white",
+                        !selected_stage?(@workflow_selected_stage, stage) &&
+                          "bg-neutral-100 text-neutral-500 group-hover:bg-indigo-50 group-hover:text-indigo-600 dark:bg-white/10 dark:text-neutral-300"
+                      ]}>
+                        {stage.position}
+                      </span>
+                      <span class="min-w-0 flex-1">
+                        <span class="block truncate text-xs font-semibold text-neutral-900 dark:text-white">
+                          {stage_name(stage)}
+                        </span>
+                        <span class="mt-0.5 block truncate text-[0.65rem] capitalize text-neutral-500">
+                          {stage_profile(stage)} · {stage_effort(stage)} effort
+                        </span>
+                      </span>
+                      <.icon
+                        name="hero-chevron-right"
+                        class={[
+                          "size-3.5 shrink-0 transition",
+                          selected_stage?(@workflow_selected_stage, stage) &&
+                            "text-indigo-500",
+                          !selected_stage?(@workflow_selected_stage, stage) &&
+                            "text-neutral-300 group-hover:text-indigo-400"
+                        ]}
+                      />
+                    </button>
+                  </article>
+                </div>
+
+                <div
+                  :if={template_stages(@workflow_template) != []}
+                  class="mx-auto h-4 w-px bg-neutral-300 dark:bg-white/15"
+                >
+                </div>
+                <div
+                  :if={template_stages(@workflow_template) != []}
+                  class="mx-auto flex h-10 w-36 items-center justify-center rounded-lg border border-emerald-300/70 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 shadow-sm dark:border-emerald-400/40 dark:bg-emerald-400/10 dark:text-emerald-200"
+                >
+                  Final result
+                </div>
+              </div>
+            </section>
+
+            <aside
+              :if={@workflow_selected_stage == :none}
+              id="workflow-stage-inspector-empty"
+              class="grid min-h-72 place-items-center rounded-2xl border border-dashed border-neutral-300 bg-white/40 p-8 text-center dark:border-white/15 dark:bg-white/[0.02] xl:sticky xl:top-4"
             >
-              <span class="absolute -left-[2.15rem] top-6 size-5 rounded-full border-4 border-neutral-50 bg-indigo-500 dark:border-neutral-900">
-              </span>
+              <div class="max-w-xs">
+                <span class="mx-auto grid size-11 place-items-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-400/10 dark:text-indigo-300">
+                  <.icon name="hero-cursor-arrow-rays" class="size-5" />
+                </span>
+                <h3 class="mt-3 text-sm font-semibold">Choose a stage</h3>
+                <p class="mt-1.5 text-xs leading-5 text-neutral-500">
+                  Stage metadata stays tucked away until you select a block in the flow.
+                </p>
+              </div>
+            </aside>
+
+            <aside
+              :if={is_map(@workflow_selected_stage)}
+              id="workflow-stage-inspector"
+              class="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/5 xl:sticky xl:top-4"
+            >
+              <div class="mb-5 flex items-start justify-between gap-4">
+                <div class="min-w-0">
+                  <p class="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-500">
+                    Stage settings
+                  </p>
+                  <h3 class="mt-1 truncate text-base font-semibold">
+                    {stage_name(@workflow_selected_stage)}
+                  </h3>
+                </div>
+                <div :if={!built_in?(@workflow_template)} class="flex shrink-0 gap-1">
+                  <button
+                    id={"workflow-stage-up-#{@workflow_selected_stage.id}"}
+                    type="button"
+                    phx-click="workflow_move_stage"
+                    phx-value-id={@workflow_selected_stage.id}
+                    phx-value-direction="up"
+                    class="rounded-lg p-2 text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
+                    title="Move stage up"
+                  >
+                    <.icon name="hero-chevron-up" class="size-4" />
+                  </button>
+                  <button
+                    id={"workflow-stage-down-#{@workflow_selected_stage.id}"}
+                    type="button"
+                    phx-click="workflow_move_stage"
+                    phx-value-id={@workflow_selected_stage.id}
+                    phx-value-direction="down"
+                    class="rounded-lg p-2 text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
+                    title="Move stage down"
+                  >
+                    <.icon name="hero-chevron-down" class="size-4" />
+                  </button>
+                  <button
+                    id={"workflow-stage-delete-#{@workflow_selected_stage.id}"}
+                    type="button"
+                    phx-click="workflow_delete_stage"
+                    phx-value-id={@workflow_selected_stage.id}
+                    class="rounded-lg p-2 text-neutral-400 transition hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-400/10"
+                    title="Delete stage"
+                  >
+                    <.icon name="hero-trash" class="size-4" />
+                  </button>
+                </div>
+              </div>
+
               <.form
-                for={stage.form}
-                id={"workflow-stage-form-#{stage.id}"}
+                for={@workflow_selected_stage.form}
+                id={"workflow-stage-form-#{@workflow_selected_stage.id}"}
                 phx-change="workflow_update_stage"
                 class="space-y-4"
               >
-                <input type="hidden" name="stage_id" value={stage.id} />
-                <div class="flex items-start gap-3">
-                  <div class="min-w-0 flex-1">
-                    <.input
-                      field={stage.form[:name]}
-                      id={"workflow-stage-name-#{stage.id}"}
-                      label="Stage name"
-                      disabled={built_in?(@workflow_template)}
-                    />
-                  </div>
-                  <div :if={!built_in?(@workflow_template)} class="flex gap-1 pt-7">
-                    <button
-                      id={"workflow-stage-up-#{stage.id}"}
-                      type="button"
-                      phx-click="workflow_move_stage"
-                      phx-value-id={stage.id}
-                      phx-value-direction="up"
-                      class="rounded-lg p-2 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-900 dark:hover:bg-white/10"
-                    >
-                      <.icon name="hero-chevron-up" class="size-4" />
-                    </button>
-                    <button
-                      id={"workflow-stage-down-#{stage.id}"}
-                      type="button"
-                      phx-click="workflow_move_stage"
-                      phx-value-id={stage.id}
-                      phx-value-direction="down"
-                      class="rounded-lg p-2 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-900 dark:hover:bg-white/10"
-                    >
-                      <.icon name="hero-chevron-down" class="size-4" />
-                    </button>
-                    <button
-                      id={"workflow-stage-delete-#{stage.id}"}
-                      type="button"
-                      phx-click="workflow_delete_stage"
-                      phx-value-id={stage.id}
-                      class="rounded-lg p-2 text-neutral-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-400/10"
-                    >
-                      <.icon name="hero-trash" class="size-4" />
-                    </button>
-                  </div>
-                </div>
+                <input type="hidden" name="stage_id" value={@workflow_selected_stage.id} />
                 <.input
-                  field={stage.form[:instructions]}
-                  id={"workflow-stage-instructions-#{stage.id}"}
+                  field={@workflow_selected_stage.form[:name]}
+                  id={"workflow-stage-name-#{@workflow_selected_stage.id}"}
+                  label="Stage name"
+                  disabled={built_in?(@workflow_template)}
+                />
+                <.input
+                  field={@workflow_selected_stage.form[:instructions]}
+                  id={"workflow-stage-instructions-#{@workflow_selected_stage.id}"}
                   type="textarea"
                   rows="4"
                   label="Instructions"
                   disabled={built_in?(@workflow_template)}
                 />
-                <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div class="grid gap-3 sm:grid-cols-2">
                   <.input
-                    field={stage.form[:profile]}
-                    id={"workflow-stage-profile-#{stage.id}"}
+                    field={@workflow_selected_stage.form[:profile]}
+                    id={"workflow-stage-profile-#{@workflow_selected_stage.id}"}
                     type="select"
                     label="Profile"
                     options={[{"Coding", "coding"}, {"Inspect only", "inspect"}]}
                     disabled={built_in?(@workflow_template)}
                   />
                   <.input
-                    field={stage.form[:model]}
-                    id={"workflow-stage-model-#{stage.id}"}
+                    field={@workflow_selected_stage.form[:model]}
+                    id={"workflow-stage-model-#{@workflow_selected_stage.id}"}
                     label="Model override"
                     placeholder="Default"
                     disabled={built_in?(@workflow_template)}
                   />
                   <.input
-                    field={stage.form[:effort]}
-                    id={"workflow-stage-effort-#{stage.id}"}
+                    field={@workflow_selected_stage.form[:effort]}
+                    id={"workflow-stage-effort-#{@workflow_selected_stage.id}"}
                     type="select"
                     label="Effort"
                     options={[
@@ -303,8 +417,8 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                     disabled={built_in?(@workflow_template)}
                   />
                   <.input
-                    field={stage.form[:attempts]}
-                    id={"workflow-stage-attempts-#{stage.id}"}
+                    field={@workflow_selected_stage.form[:attempts]}
+                    id={"workflow-stage-attempts-#{@workflow_selected_stage.id}"}
                     type="number"
                     min="1"
                     max="5"
@@ -312,25 +426,23 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                     disabled={built_in?(@workflow_template)}
                   />
                   <.input
-                    field={stage.form[:timeout_ms]}
-                    id={"workflow-stage-timeout-#{stage.id}"}
+                    field={@workflow_selected_stage.form[:timeout_ms]}
+                    id={"workflow-stage-timeout-#{@workflow_selected_stage.id}"}
                     type="number"
                     min="1000"
                     label="Timeout (ms)"
                     disabled={built_in?(@workflow_template)}
                   />
-                  <div class="sm:col-span-2 xl:col-span-3">
-                    <.input
-                      field={stage.form[:input_artifacts]}
-                      id={"workflow-stage-artifacts-#{stage.id}"}
-                      label="Input artifacts"
-                      placeholder="plan.md, previous.diff"
-                      disabled={built_in?(@workflow_template)}
-                    />
-                  </div>
+                  <.input
+                    field={@workflow_selected_stage.form[:input_artifacts]}
+                    id={"workflow-stage-artifacts-#{@workflow_selected_stage.id}"}
+                    label="Input artifacts"
+                    placeholder="plan.md, previous.diff"
+                    disabled={built_in?(@workflow_template)}
+                  />
                 </div>
               </.form>
-            </article>
+            </aside>
           </div>
         </section>
       </div>
@@ -341,8 +453,14 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
   defp template_id(template), do: value(template, :id, "")
   defp template_name(template), do: value(template, :name, "Untitled workflow")
   defp template_description(template), do: value(template, :description, "")
+  defp template_stages(template), do: value(template, :stages, [])
   defp built_in?(template), do: value(template, :built_in, false)
   defp selected?(:none, _template), do: false
   defp selected?(selected, template), do: template_id(selected) == template_id(template)
+  defp selected_stage?(:none, _stage), do: false
+  defp selected_stage?(selected, stage), do: value(selected, :id, "") == value(stage, :id, "")
+  defp stage_name(stage), do: value(stage, :name, "Untitled stage")
+  defp stage_profile(stage), do: value(stage, :profile, "default")
+  defp stage_effort(stage), do: value(stage, :effort, "inherit")
   defp value(map, key, default), do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
 end

@@ -349,6 +349,9 @@ defmodule CatalystWeb.ShellLive do
   def handle_event("workflow_add_stage", %{"preset" => preset}, socket),
     do: {:noreply, Workflows.add_stage(socket, preset)}
 
+  def handle_event("workflow_select_stage", %{"id" => id}, socket),
+    do: {:noreply, Workflows.select_stage(socket, id)}
+
   def handle_event("workflow_update_stage", %{"stage_id" => id} = params, socket),
     do: {:noreply, Workflows.update_stage(socket, id, Map.delete(params, "stage_id"))}
 
