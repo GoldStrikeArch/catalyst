@@ -13,8 +13,11 @@ defmodule Catalyst.Workflow.Stage do
     :prompt,
     :preset,
     :tool_profile,
+    :model,
+    :reasoning_effort,
     :inputs,
     :artifact,
+    :inactivity_timeout_ms,
     :timeout_ms,
     :max_attempts
   ]
@@ -27,8 +30,11 @@ defmodule Catalyst.Workflow.Stage do
           prompt: String.t(),
           preset: String.t(),
           tool_profile: String.t(),
+          model: String.t(),
+          reasoning_effort: String.t(),
           inputs: [String.t()],
           artifact: String.t(),
+          inactivity_timeout_ms: pos_integer(),
           timeout_ms: pos_integer(),
           max_attempts: pos_integer()
         }

@@ -15,10 +15,10 @@ defmodule Catalyst.Workflow.Registry do
     6. `Catalyst.Agent.Loop`.
 
   The template store module is configured as `:workflow_template_store` and
-  defaults to `Catalyst.Workflow.Template.Store`. It must expose `list/0` and
+  defaults to `Catalyst.Workflow.Store`. It must expose `list/0` and
   `fetch/1`, returning `{:ok, [template]}` and
   `{:ok, template} | :error | {:error, reason}` respectively. Validated
-  templates must be maps with a non-empty binary `:name`. A selected template
+  templates must have a non-empty binary `:id`. A selected template
   is pinned in the selection map and runs through `Catalyst.Workflow.Runner`.
 
   An explicit unknown name is an error and never falls through to the default.
@@ -30,6 +30,7 @@ defmodule Catalyst.Workflow.Registry do
 
   alias Catalyst.ExtensionAPI
   alias Catalyst.Extensions.Owner
+  alias Catalyst.Workflow.Template
 
   @table :catalyst_workflows
   @builtin Catalyst.Agent.Loop
@@ -37,7 +38,7 @@ defmodule Catalyst.Workflow.Registry do
 
   @type name :: String.t() | :default
   @type key :: {:workflow, name()}
-  @type template :: %{required(:name) => String.t(), optional(atom()) => term()}
+  @type template :: Template.t()
   @type source ::
           {:session, :loop}
           | {:runtime, term(), key()}
@@ -216,7 +217,7 @@ defmodule Catalyst.Workflow.Registry do
     case template_store_call(:list, []) do
       {:ok, templates} when is_list(templates) ->
         for template <- templates,
-            {:ok, name} <- [template_name(template)],
+            {:ok, name} <- [template_id(template)],
             do: name
 
       _missing_or_invalid ->
@@ -372,31 +373,26 @@ defmodule Catalyst.Workflow.Registry do
     end
   end
 
-  defp validate_template(name, template) do
-    case template_name(template) do
-      {:ok, ^name} -> {:ok, @template_runner, {:template, template_metadata(template)}, template}
-      {:ok, other} -> {:error, {:workflow_template_name_mismatch, name, other}}
-      :error -> {:error, {:invalid_workflow_template, name, template}}
-    end
-  end
+  defp validate_template(name, %Template{id: name} = template),
+    do: {:ok, @template_runner, {:template, template_metadata(template)}, template}
 
-  defp template_name(template) when is_map(template) do
-    case Map.get(template, :name) do
-      name when is_binary(name) ->
-        case String.trim(name) do
-          "" -> :error
-          _non_empty -> {:ok, name}
-        end
+  defp validate_template(name, %Template{id: other}),
+    do: {:error, {:workflow_template_name_mismatch, name, other}}
 
-      _invalid ->
-        :error
-    end
-  end
+  defp validate_template(name, template),
+    do: {:error, {:invalid_workflow_template, name, template}}
 
-  defp template_name(_template), do: :error
+  defp template_id(%Template{id: name}), do: {:ok, name}
 
-  defp template_metadata(template) do
-    Map.take(template, [:name, :id, :version, :revision, :digest])
+  defp template_id(_template), do: :error
+
+  defp template_metadata(%Template{} = template) do
+    %{
+      id: template.id,
+      name: template.name,
+      version: template.version,
+      digest: Template.digest(template)
+    }
   end
 
   defp template_store_call(function, arguments) do
@@ -404,7 +400,7 @@ defmodule Catalyst.Workflow.Registry do
       Application.get_env(
         :catalyst,
         :workflow_template_store,
-        Catalyst.Workflow.Template.Store
+        Catalyst.Workflow.Store
       )
 
     case is_atom(store) and Code.ensure_loaded?(store) and

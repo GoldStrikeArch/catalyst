@@ -63,10 +63,15 @@ defmodule Catalyst.Workflow.TemplateTest do
 
   test "built-ins are valid, distinct, and immutable values" do
     templates = Builtins.all()
+    {:ok, build_review} = Builtins.fetch("build-review")
+    {:ok, secure_build} = Builtins.fetch("secure-build")
 
     assert Enum.map(templates, & &1.id) == ~w(research build-review secure-build)
     assert Enum.all?(templates, &(Template.new(Template.to_map(&1)) == {:ok, &1}))
     assert Enum.uniq(Enum.map(templates, &Template.digest/1)) |> length() == 3
+
+    assert Enum.find(build_review.stages, &(&1.preset == "code_review")).inputs == ["goal"]
+    assert Enum.find(secure_build.stages, &(&1.preset == "security_review")).inputs == ["goal"]
   end
 
   defp replace_first(attrs, key, value) do
@@ -85,10 +90,13 @@ defmodule Catalyst.Workflow.TemplateTest do
           "id" => "build",
           "name" => "Build",
           "prompt" => "Implement the goal.",
-          "preset" => "balanced",
-          "tool_profile" => "workspace",
+          "preset" => "implementation",
+          "tool_profile" => "coding",
+          "model" => "inherit",
+          "reasoning_effort" => "high",
           "inputs" => ["goal"],
           "artifact" => "code",
+          "inactivity_timeout_ms" => 30_000,
           "timeout_ms" => 60_000,
           "max_attempts" => 2
         },
@@ -96,10 +104,13 @@ defmodule Catalyst.Workflow.TemplateTest do
           "id" => "inspect",
           "name" => "Inspect",
           "prompt" => "Inspect the implementation.",
-          "preset" => "thorough",
-          "tool_profile" => "review",
+          "preset" => "code_review",
+          "tool_profile" => "inspect",
+          "model" => "inherit",
+          "reasoning_effort" => "high",
           "inputs" => ["goal", "code"],
           "artifact" => "review",
+          "inactivity_timeout_ms" => 30_000,
           "timeout_ms" => 30_000,
           "max_attempts" => 1
         }

@@ -7,6 +7,7 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
   alias Catalyst.LLM.OpenAICodex.Catalog
   alias Catalyst.Prompt.Registry, as: PromptRegistry
   alias Catalyst.Session.RunContext
+  alias Catalyst.Workflow.Template
 
   defmodule TemplateStore do
     def list, do: {:ok, [template()]}
@@ -14,12 +15,31 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
     def fetch(_name), do: :error
 
     defp template do
-      %{
-        name: "pinned-template",
-        revision: 7,
-        digest: "sha256:pinned",
-        steps: [%{prompt: "Pinned step"}]
-      }
+      {:ok, template} =
+        Catalyst.Workflow.Template.new(%{
+          "version" => 1,
+          "id" => "pinned-template",
+          "name" => "Pinned template",
+          "description" => "Pinned test template",
+          "stages" => [
+            %{
+              "id" => "pinned-step",
+              "name" => "Pinned step",
+              "prompt" => "Pinned step",
+              "preset" => "implementation",
+              "tool_profile" => "coding",
+              "model" => "inherit",
+              "reasoning_effort" => "high",
+              "inputs" => ["goal"],
+              "artifact" => "result",
+              "inactivity_timeout_ms" => 30_000,
+              "timeout_ms" => 60_000,
+              "max_attempts" => 3
+            }
+          ]
+        })
+
+      template
     end
   end
 
@@ -50,6 +70,8 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
     Application.put_env(:catalyst, :workflow_template_store, TemplateStore)
 
     on_exit(fn -> restore_env(:workflow_template_store, previous_store) end)
+    template = TemplateStore.fetch("pinned-template") |> elem(1)
+    digest = Template.digest(template)
 
     state =
       model("template-model", "template-provider")
@@ -69,8 +91,14 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
              name: "pinned-template",
              module: Catalyst.Workflow.Runner,
              source:
-               {:template, %{name: "pinned-template", revision: 7, digest: "sha256:pinned"}},
-             template: %{steps: [%{prompt: "Pinned step"}]}
+               {:template,
+                %{
+                  id: "pinned-template",
+                  name: "Pinned template",
+                  version: 1,
+                  digest: ^digest
+                }},
+             template: ^template
            } = run.config.workflow
 
     assert run.metadata.workflow == run.config.workflow

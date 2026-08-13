@@ -118,6 +118,16 @@ defmodule Catalyst.Agent.Event do
           }
   end
 
+  defmodule WorkflowStageStart do
+    @moduledoc "Transient progress emitted when a durable workflow stage starts."
+    defstruct [:id, :name, :index, :total, :attempt]
+  end
+
+  defmodule WorkflowStageEnd do
+    @moduledoc "Transient progress emitted when a durable workflow stage completes."
+    defstruct [:id, :name, :index, :total, :status]
+  end
+
   @type t ::
           %AgentStart{}
           | %AgentEnd{}
@@ -131,4 +141,6 @@ defmodule Catalyst.Agent.Event do
           | %ToolExecutionEnd{}
           | %ContextStatus{}
           | %ContextCompacted{}
+          | %WorkflowStageStart{}
+          | %WorkflowStageEnd{}
 end

@@ -32,6 +32,40 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
             </p>
           </header>
 
+          <section
+            :if={!@workflow_runs_empty?}
+            id="workflow-run-list"
+            class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/5"
+          >
+            <p class="text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500">
+              Recent runs
+            </p>
+            <div id="workflow-runs" phx-update="stream" class="mt-3 space-y-2">
+              <div
+                :for={{dom_id, run} <- @streams.workflow_runs}
+                id={dom_id}
+                class="flex items-center justify-between gap-3 rounded-xl bg-neutral-50 px-3 py-2 dark:bg-white/5"
+              >
+                <div class="min-w-0">
+                  <p class="truncate text-xs font-medium">{run["id"]}</p>
+                  <p class="mt-0.5 text-[0.65rem] uppercase tracking-wide text-neutral-500">
+                    {run["status"]} · stage {run["stage_index"] + 1}/{length(run["stages"])}
+                  </p>
+                </div>
+                <button
+                  :if={run["status"] == "interrupted"}
+                  id={"workflow-run-resume-#{run["id"]}"}
+                  type="button"
+                  phx-click="workflow_resume_run"
+                  phx-value-id={run["id"]}
+                  class="rounded-full bg-indigo-600 px-3 py-1.5 text-[0.65rem] font-semibold text-white transition hover:bg-indigo-500"
+                >
+                  Resume
+                </button>
+              </div>
+            </div>
+          </section>
+
           <p
             :if={@workflow_error}
             id="workflow-store-error"
@@ -240,7 +274,9 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                   <.input
                     field={stage.form[:profile]}
                     id={"workflow-stage-profile-#{stage.id}"}
+                    type="select"
                     label="Profile"
+                    options={[{"Coding", "coding"}, {"Inspect only", "inspect"}]}
                     disabled={built_in?(@workflow_template)}
                   />
                   <.input
@@ -255,7 +291,15 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                     id={"workflow-stage-effort-#{stage.id}"}
                     type="select"
                     label="Effort"
-                    options={[{"Low", "low"}, {"Medium", "medium"}, {"High", "high"}]}
+                    options={[
+                      {"Inherit", "inherit"},
+                      {"Low", "low"},
+                      {"Medium", "medium"},
+                      {"High", "high"},
+                      {"Extra high", "xhigh"},
+                      {"Max", "max"},
+                      {"Ultra", "ultra"}
+                    ]}
                     disabled={built_in?(@workflow_template)}
                   />
                   <.input
@@ -263,7 +307,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                     id={"workflow-stage-attempts-#{stage.id}"}
                     type="number"
                     min="1"
-                    max="10"
+                    max="5"
                     label="Attempts"
                     disabled={built_in?(@workflow_template)}
                   />

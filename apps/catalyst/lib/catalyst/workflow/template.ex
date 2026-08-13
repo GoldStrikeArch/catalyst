@@ -26,8 +26,9 @@ defmodule Catalyst.Workflow.Template do
   @timeout_range 1_000..3_600_000
   @attempt_range 1..5
   @id_regex ~r/\A[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?\z/
-  @presets ~w(balanced fast thorough)
-  @tool_profiles ~w(read_only workspace review security)
+  @presets ~w(research implementation code_review repair security_review verification)
+  @tool_profiles Catalyst.Tools.Profiles.known()
+  @reasoning_efforts ~w(inherit low medium high xhigh max ultra)
 
   @typedoc "A validated workflow template."
   @type t :: %__MODULE__{
@@ -149,9 +150,22 @@ defmodule Catalyst.Workflow.Template do
          {:ok, preset} <- member(attrs["preset"], @presets, path <> ".preset"),
          {:ok, tool_profile} <-
            member(attrs["tool_profile"], @tool_profiles, path <> ".tool_profile"),
+         {:ok, model} <- optional_model(attrs["model"], path <> ".model"),
+         {:ok, reasoning_effort} <-
+           member(
+             Map.get(attrs, "reasoning_effort", "inherit"),
+             @reasoning_efforts,
+             path <> ".reasoning_effort"
+           ),
          {:ok, inputs} <- inputs(attrs["inputs"], available, path <> ".inputs"),
          {:ok, artifact} <- id(attrs["artifact"], path <> ".artifact"),
          :ok <- unique(artifact, available, path <> ".artifact"),
+         {:ok, inactivity_timeout_ms} <-
+           integer(
+             Map.get(attrs, "inactivity_timeout_ms", 300_000),
+             @timeout_range,
+             path <> ".inactivity_timeout_ms"
+           ),
          {:ok, timeout_ms} <-
            integer(attrs["timeout_ms"], @timeout_range, path <> ".timeout_ms"),
          {:ok, max_attempts} <-
@@ -162,8 +176,11 @@ defmodule Catalyst.Workflow.Template do
         prompt: prompt,
         preset: preset,
         tool_profile: tool_profile,
+        model: model,
+        reasoning_effort: reasoning_effort,
         inputs: inputs,
         artifact: artifact,
+        inactivity_timeout_ms: inactivity_timeout_ms,
         timeout_ms: timeout_ms,
         max_attempts: max_attempts
       }
@@ -238,6 +255,13 @@ defmodule Catalyst.Workflow.Template do
 
   defp member(value, _allowed, path), do: invalid(path, {:expected_string, value})
 
+  defp optional_model(nil, _path), do: {:ok, "inherit"}
+  defp optional_model("inherit", _path), do: {:ok, "inherit"}
+
+  defp optional_model(value, path) do
+    text(value, path, @max_name_bytes, false)
+  end
+
   defp integer(value, first..last//1, path) do
     case is_integer(value) and value >= first and value <= last do
       true -> {:ok, value}
@@ -264,8 +288,11 @@ defmodule Catalyst.Workflow.Template do
       "prompt" => stage.prompt,
       "preset" => stage.preset,
       "tool_profile" => stage.tool_profile,
+      "model" => stage.model,
+      "reasoning_effort" => stage.reasoning_effort,
       "inputs" => stage.inputs,
       "artifact" => stage.artifact,
+      "inactivity_timeout_ms" => stage.inactivity_timeout_ms,
       "timeout_ms" => stage.timeout_ms,
       "max_attempts" => stage.max_attempts
     }

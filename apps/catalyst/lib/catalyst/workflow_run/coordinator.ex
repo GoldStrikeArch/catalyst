@@ -17,7 +17,9 @@ defmodule Catalyst.WorkflowRun.Coordinator do
           attempt_module: module(),
           attempt_pid: pid() | nil,
           attempt_ref: reference() | nil,
-          monitor_ref: reference() | nil
+          monitor_ref: reference() | nil,
+          owner: pid() | nil,
+          owner_ref: reference() | nil
         }
 
   @doc false
@@ -40,6 +42,7 @@ defmodule Catalyst.WorkflowRun.Coordinator do
   def init(opts) do
     id = Keyword.fetch!(opts, :id)
     module = Keyword.fetch!(opts, :attempt_module)
+    owner = Keyword.get(opts, :owner)
 
     case Store.get(id) do
       {:ok, checkpoint} ->
@@ -49,7 +52,9 @@ defmodule Catalyst.WorkflowRun.Coordinator do
           attempt_module: module,
           attempt_pid: nil,
           attempt_ref: nil,
-          monitor_ref: nil
+          monitor_ref: nil,
+          owner: owner,
+          owner_ref: monitor_owner(owner)
         }
 
         {:ok, state, {:continue, :recover}}
@@ -78,7 +83,7 @@ defmodule Catalyst.WorkflowRun.Coordinator do
         state = terminate_attempt(state)
 
         case finish(state, "cancelled", %{"reason" => json_value(reason)}) do
-          {:ok, state} -> {:reply, :ok, state}
+          {:ok, state} -> {:stop, :normal, :ok, state}
           {:error, state} -> {:reply, {:error, :checkpoint_write_failed}, state}
         end
     end
@@ -87,7 +92,17 @@ defmodule Catalyst.WorkflowRun.Coordinator do
   @impl true
   def handle_info({:attempt_progress, ref, event}, %{attempt_ref: ref} = state) do
     broadcast(state.id, %{"type" => "progress", "event" => event})
-    {:noreply, state}
+
+    case Map.get(event, "child_session_id") do
+      child_id when is_binary(child_id) ->
+        case persist(state, %{"stage_session_id" => child_id}) do
+          {:ok, state} -> {:noreply, state}
+          {:error, state} -> {:noreply, state}
+        end
+
+      _no_child ->
+        {:noreply, state}
+    end
   end
 
   def handle_info({:attempt_result, ref, result}, %{attempt_ref: ref} = state) do
@@ -103,6 +118,18 @@ defmodule Catalyst.WorkflowRun.Coordinator do
     handle_result({:retry, %{"attempt_crash" => inspect(reason)}}, state)
   end
 
+  def handle_info(
+        {:DOWN, owner_ref, :process, owner, reason},
+        %{owner_ref: owner_ref, owner: owner} = state
+      ) do
+    state = terminate_attempt(state)
+
+    case finish(state, "cancelled", %{"reason" => "parent exited: #{inspect(reason)}"}) do
+      {:ok, state} -> {:stop, :normal, state}
+      {:error, state} -> {:noreply, state}
+    end
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   defp handle_result({:ok, result}, state) do
@@ -113,9 +140,13 @@ defmodule Catalyst.WorkflowRun.Coordinator do
   end
 
   defp handle_result({:retry, reason}, state) do
+    fields =
+      %{"last_error" => json_value(reason)}
+      |> maybe_put_session_id(reason)
+
     case retry_available?(state.checkpoint) do
       true ->
-        persist_and_start(state, %{"last_error" => json_value(reason)})
+        persist_and_start(state, fields)
 
       false ->
         fail_reply(state, %{"retry_exhausted" => json_value(reason)})
@@ -138,14 +169,33 @@ defmodule Catalyst.WorkflowRun.Coordinator do
 
     case next_index < length(checkpoint["stages"]) do
       true ->
+        stage = Enum.at(checkpoint["stages"], checkpoint["stage_index"])
+
+        broadcast(state.id, %{
+          "type" => "stage_completed",
+          "stage" => stage,
+          "stage_index" => checkpoint["stage_index"],
+          "total_stages" => length(checkpoint["stages"])
+        })
+
         persist_and_start(state, %{
           "results" => results,
           "stage_index" => next_index,
           "attempt" => 0,
+          "stage_session_id" => nil,
           "last_error" => nil
         })
 
       false ->
+        stage = Enum.at(checkpoint["stages"], checkpoint["stage_index"])
+
+        broadcast(state.id, %{
+          "type" => "stage_completed",
+          "stage" => stage,
+          "stage_index" => checkpoint["stage_index"],
+          "total_stages" => length(checkpoint["stages"])
+        })
+
         finish_reply(state, "completed", %{"results" => results})
     end
   end
@@ -193,7 +243,9 @@ defmodule Catalyst.WorkflowRun.Coordinator do
       "stage_index" => checkpoint["stage_index"],
       "attempt" => checkpoint["attempt"],
       "results" => checkpoint["results"],
-      "input" => checkpoint["input"]
+      "input" => checkpoint["input"],
+      "stage_session_id" => checkpoint["stage_session_id"],
+      "last_error" => checkpoint["last_error"]
     }
   end
 
@@ -219,7 +271,7 @@ defmodule Catalyst.WorkflowRun.Coordinator do
 
   defp finish_reply(state, status, fields) do
     case finish(state, status, fields) do
-      {:ok, state} -> {:noreply, state}
+      {:ok, state} -> {:stop, :normal, state}
       {:error, state} -> {:noreply, state}
     end
   end
@@ -286,6 +338,14 @@ defmodule Catalyst.WorkflowRun.Coordinator do
       {:error, _reason} -> inspect(value)
     end
   end
+
+  defp maybe_put_session_id(fields, %{"child_session_id" => id}) when is_binary(id),
+    do: Map.put(fields, "stage_session_id", id)
+
+  defp maybe_put_session_id(fields, _reason), do: fields
+
+  defp monitor_owner(owner) when is_pid(owner), do: Process.monitor(owner)
+  defp monitor_owner(_owner), do: nil
 
   defp broadcast(id, event) do
     Phoenix.PubSub.broadcast(

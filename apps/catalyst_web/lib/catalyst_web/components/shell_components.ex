@@ -280,6 +280,7 @@ defmodule CatalystWeb.ShellComponents do
   defp workflow_suffix(:unavailable), do: " (unavailable)"
   defp workflow_suffix({:runtime, _owner, _key}), do: " (extension)"
   defp workflow_suffix({:application, _setting}), do: " (config)"
+  defp workflow_suffix({:template, _metadata}), do: " (template)"
   defp workflow_suffix(_source), do: ""
 
   attr :status, :map, required: true

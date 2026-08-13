@@ -61,6 +61,60 @@ defmodule Catalyst.WorkflowRunTest do
     assert Enum.any?(WorkflowRun.list(), &(&1["id"] == id))
   end
 
+  test "retries resume the checkpointed child session" do
+    id = unique_id()
+
+    assert {:ok, _run} =
+             WorkflowRun.start(
+               id: id,
+               attempt_module: @attempt_module,
+               stages: [%{"name" => "repair", "max_attempts" => 2}]
+             )
+
+    assert_receive {:workflow_attempt, first, %{"stage_session_id" => nil}, emit}
+    emit.(%{"child_session_id" => "child-session"})
+    send(first, {:return, {:retry, %{"child_session_id" => "child-session"}}})
+
+    assert_receive {:workflow_attempt, retry,
+                    %{"attempt" => 2, "stage_session_id" => "child-session"}, _emit}
+
+    send(retry, {:return, {:ok, %{"artifact" => "repaired"}}})
+  end
+
+  test "a parent exit cancels its durable run and active attempt" do
+    id = unique_id()
+    :ok = WorkflowRun.subscribe(id)
+
+    owner =
+      spawn(fn ->
+        {:ok, _run} =
+          WorkflowRun.start(
+            id: id,
+            owner: self(),
+            attempt_module: @attempt_module,
+            stages: [%{"name" => "wait"}]
+          )
+
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    assert_receive {:workflow_attempt, attempt, _context, _emit}
+    attempt_ref = Process.monitor(attempt)
+    send(owner, :stop)
+
+    assert_receive {:DOWN, ^attempt_ref, :process, ^attempt, :shutdown}
+
+    assert_receive {:workflow_run_event, ^id,
+                    %{
+                      "type" => "cancelled",
+                      "checkpoint" => %{"status" => "cancelled", "reason" => reason}
+                    }}
+
+    assert reason =~ "parent exited"
+  end
+
   test "cancellation terminates the temporary attempt and persists terminal state" do
     id = unique_id()
 

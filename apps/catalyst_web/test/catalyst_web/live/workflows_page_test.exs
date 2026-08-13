@@ -58,6 +58,20 @@ defmodule CatalystWeb.WorkflowsPageTest do
 
       :ok
     end
+
+    def list_runs, do: Agent.get(__MODULE__, & &1.runs)
+
+    def resume_run(id) do
+      Agent.get_and_update(__MODULE__, fn state ->
+        runs =
+          Enum.map(state.runs, fn
+            %{"id" => ^id} = run -> Map.put(run, "status", "running")
+            run -> run
+          end)
+
+        {{:ok, %{id: id, pid: self()}}, %{state | runs: runs}}
+      end)
+    end
   end
 
   setup do
@@ -70,7 +84,7 @@ defmodule CatalystWeb.WorkflowsPageTest do
     }
 
     custom = %{id: "custom-build", name: "Build", description: "Build a feature", stages: []}
-    start_supervised!({StoreFake, %{built_ins: [built_in], custom: [custom]}})
+    start_supervised!({StoreFake, %{built_ins: [built_in], custom: [custom], runs: []}})
 
     previous = Application.get_env(:catalyst_web, :workflow_template_store)
     Application.put_env(:catalyst_web, :workflow_template_store, StoreFake)
@@ -105,7 +119,7 @@ defmodule CatalystWeb.WorkflowsPageTest do
     {:ok, view, _html} = live(conn, "/workflows")
 
     view |> element("#workflow-create") |> render_click()
-    view |> element("#workflow-add-implement") |> render_click()
+    view |> element("#workflow-add-implementation") |> render_click()
 
     assert has_element?(view, "#workflow-stage-form-draft-1")
 
@@ -131,6 +145,23 @@ defmodule CatalystWeb.WorkflowsPageTest do
     assert {:ok, saved} = StoreFake.get("custom-new")
     assert saved.name == "Release flow"
     assert [%{"name" => "Ship", "attempts" => 3, "timeout_ms" => 60_000}] = saved.stages
+  end
+
+  test "shows and explicitly resumes interrupted runs", %{conn: conn} do
+    run = %{
+      "id" => "interrupted-run",
+      "status" => "interrupted",
+      "stage_index" => 0,
+      "stages" => [%{"name" => "Review"}]
+    }
+
+    Agent.update(StoreFake, &%{&1 | runs: [run]})
+    {:ok, view, _html} = live(conn, "/workflows")
+
+    assert has_element?(view, "#workflow-run-resume-interrupted-run")
+    view |> element("#workflow-run-resume-interrupted-run") |> render_click()
+    refute has_element?(view, "#workflow-run-resume-interrupted-run")
+    assert [%{"status" => "running"}] = StoreFake.list_runs()
   end
 
   defp stage(id, name) do

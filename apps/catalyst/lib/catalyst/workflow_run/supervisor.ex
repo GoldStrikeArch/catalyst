@@ -17,9 +17,17 @@ defmodule Catalyst.WorkflowRun.Supervisor do
 
     children = [
       {Catalyst.WorkflowRun.AttemptSupervisor, id: id},
-      {Catalyst.WorkflowRun.Coordinator, opts}
+      Supervisor.child_spec({Catalyst.WorkflowRun.Coordinator, opts},
+        restart: :transient,
+        significant: true
+      )
     ]
 
-    Supervisor.init(children, strategy: :one_for_all)
+    Supervisor.init(children,
+      strategy: :one_for_all,
+      max_restarts: 3,
+      max_seconds: 5,
+      auto_shutdown: :any_significant
+    )
   end
 end

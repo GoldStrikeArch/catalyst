@@ -199,10 +199,13 @@ defmodule Catalyst.Workflow.Store do
           "id" => "path",
           "name" => "path",
           "prompt" => "path",
-          "preset" => "balanced",
-          "tool_profile" => "read_only",
+          "preset" => "research",
+          "tool_profile" => "inspect",
+          "model" => "inherit",
+          "reasoning_effort" => "inherit",
           "inputs" => ["goal"],
           "artifact" => "path",
+          "inactivity_timeout_ms" => 1_000,
           "timeout_ms" => 1_000,
           "max_attempts" => 1
         }

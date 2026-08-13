@@ -89,10 +89,13 @@ defmodule Catalyst.Workflow.StoreTest do
           "id" => "work",
           "name" => "Work",
           "prompt" => "Complete the goal.",
-          "preset" => "balanced",
-          "tool_profile" => "workspace",
+          "preset" => "implementation",
+          "tool_profile" => "coding",
+          "model" => "inherit",
+          "reasoning_effort" => "high",
           "inputs" => ["goal"],
           "artifact" => "result",
+          "inactivity_timeout_ms" => 30_000,
           "timeout_ms" => 60_000,
           "max_attempts" => 2
         }

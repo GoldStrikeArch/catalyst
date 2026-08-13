@@ -1,9 +1,10 @@
 defmodule Catalyst.Workflow.Builtins do
   @moduledoc """
-  Immutable workflow templates shipped with Catalyst.
+  Immutable linear workflow templates shipped with Catalyst.
 
-  Built-ins participate in store lookup and listing, but cannot be overwritten
-  or deleted by the user-defined template store.
+  Review stages intentionally receive only the original goal and current
+  workspace. They never consume implementation-agent artifacts, preserving an
+  independent adversarial review context.
   """
 
   alias Catalyst.Workflow.Template
@@ -23,12 +24,12 @@ defmodule Catalyst.Workflow.Builtins do
 
   @doc "List every immutable built-in template."
   @spec all() :: [Template.t()]
-  def all,
-    do:
-      Enum.map(@ids, fn id ->
-        {:ok, template} = fetch(id)
-        template
-      end)
+  def all do
+    Enum.map(@ids, fn id ->
+      {:ok, template} = fetch(id)
+      template
+    end)
+  end
 
   defp template(attrs) do
     {:ok, template} = Template.new(attrs)
@@ -36,86 +37,100 @@ defmodule Catalyst.Workflow.Builtins do
   end
 
   defp research do
-    base("research", "Research", "Investigate a goal and synthesize findings.", [
+    base("research", "Research", "Research a codebase without modifying it.", [
       stage(
-        "investigate",
-        "Investigate",
-        "Gather relevant evidence for the goal.",
-        "thorough",
-        "read_only",
+        "research",
+        "Research",
+        "Research the goal in the current workspace. Report relevant architecture, files, risks, and a concise plan.",
+        "research",
+        "inspect",
         ["goal"],
-        "evidence"
-      ),
-      stage(
-        "synthesize",
-        "Synthesize",
-        "Turn the evidence into a concise, sourced answer.",
-        "balanced",
-        "read_only",
-        ["goal", "evidence"],
-        "report"
+        "research"
       )
     ])
   end
 
   defp build_review do
-    base(
-      "build-review",
-      "Build and review",
-      "Implement a change, then review it independently.",
-      [
-        stage(
-          "build",
-          "Build",
-          "Implement and test the requested change.",
-          "balanced",
-          "workspace",
-          ["goal"],
-          "implementation"
-        ),
-        stage(
-          "review",
-          "Review",
-          "Review the implementation and report actionable findings.",
-          "thorough",
-          "review",
-          ["goal", "implementation"],
-          "review"
-        )
-      ]
-    )
-  end
-
-  defp secure_build do
-    base("secure-build", "Secure build", "Research, implement, and security-review a change.", [
+    base("build-review", "Build and review", "Research, implement, review, repair, and verify.", [
       stage(
-        "threat-model",
-        "Threat model",
-        "Identify security constraints and likely abuse cases.",
-        "thorough",
-        "security",
+        "research",
+        "Research",
+        "Research the goal and produce an implementation handoff.",
+        "research",
+        "inspect",
         ["goal"],
-        "threat-model"
+        "research"
       ),
       stage(
-        "build",
-        "Build",
-        "Implement and test the goal within the identified constraints.",
-        "balanced",
-        "workspace",
-        ["goal", "threat-model"],
+        "implement",
+        "Implement",
+        "Implement the goal using the research handoff. Add focused tests.",
+        "implementation",
+        "coding",
+        ["goal", "research"],
         "implementation"
       ),
       stage(
-        "security-review",
-        "Security review",
-        "Audit the implementation against the threat model and report findings.",
-        "thorough",
-        "security",
-        ["goal", "threat-model", "implementation"],
-        "security-review"
+        "review",
+        "Adversarial code review",
+        "Independently review the current workspace changes. Report only actionable correctness, reliability, and maintainability findings.",
+        "code_review",
+        "inspect",
+        ["goal"],
+        "review"
+      ),
+      stage(
+        "repair",
+        "Repair review findings",
+        "Verify each review finding and repair the actionable issues. Preserve correct behavior and tests.",
+        "repair",
+        "coding",
+        ["goal", "review"],
+        "repair"
+      ),
+      stage(
+        "verify",
+        "Verify",
+        "Run the repository-required checks and summarize the final outcome.",
+        "verification",
+        "coding",
+        ["goal"],
+        "verification"
       )
     ])
+  end
+
+  defp secure_build do
+    base(
+      "secure-build",
+      "Secure build",
+      "Research, implement, independently review, security-review, repair, and verify.",
+      build_review()["stages"]
+      |> List.insert_at(
+        4,
+        stage(
+          "security-review",
+          "Adversarial security review",
+          "Independently audit the current workspace for trust-boundary, injection, filesystem, process, capability, persistence, secret, and network risks.",
+          "security_review",
+          "inspect",
+          ["goal"],
+          "security-review"
+        )
+      )
+      |> List.insert_at(
+        5,
+        stage(
+          "security-repair",
+          "Repair security findings",
+          "Verify and repair actionable security findings, then add focused regressions.",
+          "repair",
+          "coding",
+          ["goal", "security-review"],
+          "security-repair"
+        )
+      )
+    )
   end
 
   defp base(id, name, description, stages) do
@@ -135,10 +150,13 @@ defmodule Catalyst.Workflow.Builtins do
       "prompt" => prompt,
       "preset" => preset,
       "tool_profile" => tool_profile,
+      "model" => "inherit",
+      "reasoning_effort" => if(tool_profile == "inspect", do: "high", else: "inherit"),
       "inputs" => inputs,
       "artifact" => artifact,
-      "timeout_ms" => 900_000,
-      "max_attempts" => 2
+      "inactivity_timeout_ms" => 300_000,
+      "timeout_ms" => 1_800_000,
+      "max_attempts" => 3
     }
   end
 end

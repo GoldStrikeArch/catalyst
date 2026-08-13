@@ -364,6 +364,9 @@ defmodule CatalystWeb.ShellLive do
   def handle_event("workflow_delete", _params, socket),
     do: {:noreply, Workflows.delete(socket)}
 
+  def handle_event("workflow_resume_run", %{"id" => id}, socket),
+    do: {:noreply, Workflows.resume_run(socket, id)}
+
   # The grant changes which tools the next run advertises, so the resolved
   # prompt/tool preview and the panel snapshots are recomputed with it.
   def handle_event("toggle_computer_use", _params, socket) do
@@ -453,6 +456,9 @@ defmodule CatalystWeb.ShellLive do
   end
 
   @impl true
+  def handle_info({:workflow_run_event, _id, event}, socket),
+    do: {:noreply, Workflows.run_event(socket, event)}
+
   def handle_info({:agent_event, id, event}, socket) do
     case id == socket.assigns.session_id do
       true ->

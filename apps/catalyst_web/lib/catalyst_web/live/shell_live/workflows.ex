@@ -12,10 +12,13 @@ defmodule CatalystWeb.ShellLive.Workflows do
   alias CatalystWeb.WorkflowTemplates
 
   @presets %{
-    "plan" => {"Plan", "Understand the request and produce an implementation plan."},
-    "implement" => {"Implement", "Implement the approved changes with focused tests."},
-    "review" => {"Review", "Review the result, address issues, and summarize verification."},
-    "verify" => {"Verify", "Run validation and report any remaining gaps."}
+    "research" => {"Research", "Research the goal and produce a concise handoff.", "inspect"},
+    "implementation" => {"Implement", "Implement the goal with focused tests.", "coding"},
+    "code_review" => {"Code review", "Independently review the current changes.", "inspect"},
+    "repair" => {"Repair", "Verify and address actionable review findings.", "coding"},
+    "security_review" =>
+      {"Security review", "Independently perform an adversarial security review.", "inspect"},
+    "verification" => {"Verify", "Run required checks and summarize the result.", "coding"}
   }
 
   @doc "Initializes workflow forms and streams."
@@ -26,10 +29,12 @@ defmodule CatalystWeb.ShellLive.Workflows do
       workflow_template: :none,
       workflow_form: template_form(),
       workflow_error: nil,
-      workflow_presets: preset_options()
+      workflow_presets: preset_options(),
+      workflow_runs_empty?: true
     )
     |> stream(:workflow_templates, [], dom_id: &"workflow-template-#{id(&1)}")
     |> stream(:workflow_stages, [], dom_id: &"workflow-stage-#{id(&1)}")
+    |> stream(:workflow_runs, [], dom_id: &"workflow-run-#{&1["id"]}")
   end
 
   @doc "Loads templates when the workflow page becomes active."
@@ -41,9 +46,13 @@ defmodule CatalystWeb.ShellLive.Workflows do
         Enum.map(built_ins, &Map.put(&1, :built_in, true)) ++
           Enum.map(custom, &Map.put_new(&1, :built_in, false))
 
+      runs = runs()
+
       socket
       |> assign(:workflow_error, nil)
+      |> assign(:workflow_runs_empty?, runs == [])
       |> stream(:workflow_templates, templates, reset: true)
+      |> stream(:workflow_runs, runs, reset: true)
     else
       {:error, reason} ->
         assign(socket, :workflow_error, error_message(reason))
@@ -56,6 +65,44 @@ defmodule CatalystWeb.ShellLive.Workflows do
     case WorkflowTemplates.call(:get, [id]) do
       {:ok, template} -> put_template(socket, template)
       {:error, reason} -> put_flash(socket, :error, error_message(reason))
+    end
+  end
+
+  @doc "Explicitly resumes an interrupted durable workflow run."
+  @spec resume_run(Phoenix.LiveView.Socket.t(), String.t()) :: Phoenix.LiveView.Socket.t()
+  def resume_run(socket, id) do
+    case WorkflowTemplates.call(:resume_run, [id]) do
+      {:ok, _run} ->
+        socket
+        |> refresh_runs()
+        |> put_flash(:info, "Workflow run resumed.")
+
+      {:error, reason} ->
+        put_flash(socket, :error, error_message(reason))
+    end
+  end
+
+  @doc "Refreshes durable run status after a terminal workflow event."
+  @spec run_event(Phoenix.LiveView.Socket.t(), map()) :: Phoenix.LiveView.Socket.t()
+  def run_event(socket, %{"type" => status})
+      when status in ["completed", "failed", "cancelled"] do
+    refresh_runs(socket)
+  end
+
+  def run_event(socket, _event), do: socket
+
+  defp refresh_runs(socket) do
+    runs = runs()
+
+    socket
+    |> assign(:workflow_runs_empty?, runs == [])
+    |> stream(:workflow_runs, runs, reset: true)
+  end
+
+  defp runs do
+    case WorkflowTemplates.call(:list_runs) do
+      runs when is_list(runs) -> runs
+      _unavailable -> []
     end
   end
 
@@ -84,19 +131,23 @@ defmodule CatalystWeb.ShellLive.Workflows do
   def add_stage(%{assigns: %{workflow_template: template}} = socket, preset)
       when is_map(template) do
     case Map.fetch(@presets, preset) do
-      {:ok, {name, instructions}} ->
+      {:ok, {name, instructions, profile}} ->
         current_stages = stages(template)
+        stage_id = next_stage_id(current_stages)
 
         stage = %{
-          id: "draft-#{length(current_stages) + 1}",
+          id: stage_id,
           name: name,
           instructions: instructions,
-          profile: "default",
-          model: "",
-          effort: "medium",
-          attempts: 1,
-          timeout_ms: 300_000,
-          input_artifacts: ""
+          preset: preset,
+          profile: profile,
+          model: "inherit",
+          effort: "inherit",
+          attempts: 3,
+          timeout_ms: 1_800_000,
+          inactivity_timeout_ms: 300_000,
+          artifact: stage_id,
+          input_artifacts: "goal"
         }
 
         current_stages
@@ -221,6 +272,15 @@ defmodule CatalystWeb.ShellLive.Workflows do
 
   defp persisted_stage(stage), do: stage |> Map.drop([:form]) |> stringify()
 
+  defp next_stage_id(stages) do
+    used = MapSet.new(stages, &(id(&1) |> to_string()))
+
+    Enum.find_value(1..(length(stages) + 1), fn index ->
+      candidate = "draft-#{index}"
+      candidate not in used && candidate
+    end)
+  end
+
   defp move(stages, stage_id, direction) do
     index = Enum.find_index(stages, &(to_string(id(&1)) == stage_id))
     target = target_index(index, direction, length(stages))
@@ -247,7 +307,7 @@ defmodule CatalystWeb.ShellLive.Workflows do
   defp id(value), do: value(value, :id, "")
   defp value(map, key, default), do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
   defp template_form(params \\ %{"name" => "", "description" => ""}), do: to_form(params)
-  defp preset_options, do: Enum.map(@presets, fn {key, {name, _}} -> {name, key} end)
+  defp preset_options, do: Enum.map(@presets, fn {key, {name, _, _}} -> {name, key} end)
 
   defp integer(value, default) do
     case Integer.parse(to_string(value)) do

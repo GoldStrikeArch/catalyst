@@ -3,7 +3,7 @@ defmodule Catalyst.Workflow.RegistryTest do
 
   import Catalyst.EnvCase, only: [restore_env: 2]
 
-  alias Catalyst.Workflow.Registry
+  alias Catalyst.Workflow.{Registry, Template}
 
   defmodule WorkflowA do
     @behaviour Catalyst.Workflow
@@ -33,7 +33,7 @@ defmodule Catalyst.Workflow.RegistryTest do
 
     def fetch(name) do
       case Enum.find(Application.get_env(:catalyst, :workflow_registry_test_templates, []), fn
-             %{name: ^name} -> true
+             %Catalyst.Workflow.Template{id: ^name} -> true
              _template -> false
            end) do
         nil -> :error
@@ -163,12 +163,8 @@ defmodule Catalyst.Workflow.RegistryTest do
   end
 
   test "persisted templates resolve through the generic runner with pinned data" do
-    template = %{
-      name: "review",
-      revision: 3,
-      digest: "sha256:review",
-      steps: [%{prompt: "Review the change"}]
-    }
+    template = template("review", "Review")
+    digest = Template.digest(template)
 
     Application.put_env(:catalyst, :workflow_registry_test_templates, [template])
 
@@ -176,7 +172,7 @@ defmodule Catalyst.Workflow.RegistryTest do
             %{
               name: "review",
               module: Catalyst.Workflow.Runner,
-              source: {:template, %{name: "review", revision: 3, digest: "sha256:review"}},
+              source: {:template, %{id: "review", name: "Review", version: 1, digest: ^digest}},
               template: ^template
             }} = Registry.resolve(workflow: "review")
 
@@ -184,7 +180,7 @@ defmodule Catalyst.Workflow.RegistryTest do
   end
 
   test "module workflows retain precedence over templates", %{owner: owner} do
-    template = %{name: "review", revision: 1, steps: []}
+    template = template("review", "Review")
     Application.put_env(:catalyst, :workflow_registry_test_templates, [template])
     Application.put_env(:catalyst, :workflows, %{"review" => WorkflowA})
 
@@ -198,12 +194,13 @@ defmodule Catalyst.Workflow.RegistryTest do
   end
 
   test "list/0 includes templates and omits malformed template rows" do
-    alpha = %{name: "alpha", version: "v1", steps: []}
+    alpha = template("alpha", "Alpha")
+    digest = Template.digest(alpha)
 
     Application.put_env(
       :catalyst,
       :workflow_registry_test_templates,
-      [%{name: "  "}, alpha, :malformed]
+      [%{id: "  "}, alpha, :malformed]
     )
 
     assert Registry.list() == [
@@ -211,10 +208,38 @@ defmodule Catalyst.Workflow.RegistryTest do
              %{
                name: "alpha",
                module: Catalyst.Workflow.Runner,
-               source: {:template, %{name: "alpha", version: "v1"}},
+               source: {:template, %{id: "alpha", name: "Alpha", version: 1, digest: digest}},
                template: alpha
              }
            ]
+  end
+
+  defp template(id, name) do
+    {:ok, template} =
+      Template.new(%{
+        "version" => 1,
+        "id" => id,
+        "name" => name,
+        "description" => "Test workflow",
+        "stages" => [
+          %{
+            "id" => "review",
+            "name" => "Review",
+            "prompt" => "Review the goal.",
+            "preset" => "code_review",
+            "tool_profile" => "inspect",
+            "model" => "inherit",
+            "reasoning_effort" => "high",
+            "inputs" => ["goal"],
+            "artifact" => "review",
+            "inactivity_timeout_ms" => 30_000,
+            "timeout_ms" => 60_000,
+            "max_attempts" => 3
+          }
+        ]
+      })
+
+    template
   end
 
   test "full selection precedence is deterministic", %{owner: owner} do

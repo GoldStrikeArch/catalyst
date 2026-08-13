@@ -28,7 +28,7 @@ defmodule Catalyst.WorkflowRun do
          :ok <- ensure_new(id),
          checkpoint = new_checkpoint(id, stages, input),
          :ok <- Store.put(checkpoint),
-         {:ok, pid} <- start_supervisor(id, module) do
+         {:ok, pid} <- start_supervisor(id, module, Keyword.get(opts, :owner)) do
       {:ok, %{id: id, pid: pid}}
     end
   end
@@ -55,7 +55,7 @@ defmodule Catalyst.WorkflowRun do
     with {:ok, checkpoint} <- Store.get(id),
          :ok <- resumable(checkpoint),
          {:ok, module} <- attempt_module(opts),
-         {:ok, pid} <- start_supervisor(id, module) do
+         {:ok, pid} <- start_supervisor(id, module, Keyword.get(opts, :owner)) do
       {:ok, %{id: id, pid: pid}}
     end
   end
@@ -80,10 +80,10 @@ defmodule Catalyst.WorkflowRun do
   @spec whereis(String.t()) :: {:ok, pid()} | :error
   def whereis(id), do: Names.whereis(:supervisor, id)
 
-  defp start_supervisor(id, module) do
+  defp start_supervisor(id, module, owner) do
     child_spec =
       Supervisor.child_spec(
-        {Catalyst.WorkflowRun.Supervisor, id: id, attempt_module: module},
+        {Catalyst.WorkflowRun.Supervisor, id: id, attempt_module: module, owner: owner},
         restart: :temporary
       )
 
@@ -97,7 +97,11 @@ defmodule Catalyst.WorkflowRun do
   defp attempt_module(opts) do
     module =
       Keyword.get(opts, :attempt_module) ||
-        Application.get_env(:catalyst, :workflow_run_attempt_module)
+        Application.get_env(
+          :catalyst,
+          :workflow_run_attempt_module,
+          Catalyst.WorkflowRun.SessionAttempt
+        )
 
     case Code.ensure_loaded?(module) and function_exported?(module, :run, 2) do
       true -> {:ok, module}
@@ -158,6 +162,7 @@ defmodule Catalyst.WorkflowRun do
       "stages" => stages,
       "stage_index" => 0,
       "attempt" => 0,
+      "stage_session_id" => nil,
       "input" => input,
       "results" => [],
       "last_error" => nil,

@@ -40,9 +40,12 @@ defmodule CatalystWeb.WorkflowPickerTest do
     pid
   end
 
-  test "picker is hidden while only the default chain exists", %{conn: conn} do
+  test "picker includes persisted built-in templates", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
-    refute has_element?(view, "#workflow-form")
+    assert has_element?(view, "#workflow-form")
+    assert has_element?(view, "#workflow-select option[value='research']", "(template)")
+    assert has_element?(view, "#workflow-select option[value='build-review']", "(template)")
+    assert has_element?(view, "#workflow-select option[value='secure-build']", "(template)")
   end
 
   test "selecting a workflow configures the live session and new sessions inherit it", %{
@@ -160,10 +163,11 @@ defmodule CatalystWeb.WorkflowPickerTest do
 
     {:ok, view, _html} = live(conn, "/")
 
-    # The unknown name was dropped from start opts (it would fail every run),
-    # the preference reconciled to default, and the one-option picker hides.
+    # The unknown name was dropped from start opts (it would fail every run)
+    # and the preference reconciled to default while valid templates remain.
     refute Keyword.has_key?(Server.state(session_pid(view)).opts, :workflow)
     assert :persistent_term.get(@workflow_prefs_ptr) == %{workflow: nil}
-    refute has_element?(view, "#workflow-form")
+    assert has_element?(view, "#workflow-select option[value=''][selected]")
+    refute has_element?(view, "#workflow-select option[value='ghost']")
   end
 end
