@@ -26,16 +26,37 @@ defmodule Catalyst.Workflow.RegistryTest do
     def nope, do: :ok
   end
 
+  defmodule TemplateStore do
+    def list do
+      {:ok, Application.get_env(:catalyst, :workflow_registry_test_templates, [])}
+    end
+
+    def fetch(name) do
+      case Enum.find(Application.get_env(:catalyst, :workflow_registry_test_templates, []), fn
+             %{name: ^name} -> true
+             _template -> false
+           end) do
+        nil -> :error
+        template -> {:ok, template}
+      end
+    end
+  end
+
   setup do
     ensure_registry_started()
 
     previous = %{
       workflows: Application.fetch_env(:catalyst, :workflows),
-      agent_loop: Application.fetch_env(:catalyst, :agent_loop)
+      agent_loop: Application.fetch_env(:catalyst, :agent_loop),
+      workflow_template_store: Application.fetch_env(:catalyst, :workflow_template_store),
+      workflow_registry_test_templates:
+        Application.fetch_env(:catalyst, :workflow_registry_test_templates)
     }
 
     Application.delete_env(:catalyst, :workflows)
     Application.delete_env(:catalyst, :agent_loop)
+    Application.put_env(:catalyst, :workflow_template_store, TemplateStore)
+    Application.put_env(:catalyst, :workflow_registry_test_templates, [])
 
     owner = "workflow_registry_test_#{System.unique_integer([:positive])}"
 
@@ -46,6 +67,12 @@ defmodule Catalyst.Workflow.RegistryTest do
 
       restore_env(:workflows, previous.workflows)
       restore_env(:agent_loop, previous.agent_loop)
+      restore_env(:workflow_template_store, previous.workflow_template_store)
+
+      restore_env(
+        :workflow_registry_test_templates,
+        previous.workflow_registry_test_templates
+      )
     end)
 
     {:ok, owner: owner}
@@ -133,6 +160,61 @@ defmodule Catalyst.Workflow.RegistryTest do
 
     assert {:ok, %{name: :default, module: Catalyst.Agent.Loop, source: :builtin}} =
              Registry.resolve([])
+  end
+
+  test "persisted templates resolve through the generic runner with pinned data" do
+    template = %{
+      name: "review",
+      revision: 3,
+      digest: "sha256:review",
+      steps: [%{prompt: "Review the change"}]
+    }
+
+    Application.put_env(:catalyst, :workflow_registry_test_templates, [template])
+
+    assert {:ok,
+            %{
+              name: "review",
+              module: Catalyst.Workflow.Runner,
+              source: {:template, %{name: "review", revision: 3, digest: "sha256:review"}},
+              template: ^template
+            }} = Registry.resolve(workflow: "review")
+
+    assert {:ok, Catalyst.Workflow.Runner} = Registry.fetch("review")
+  end
+
+  test "module workflows retain precedence over templates", %{owner: owner} do
+    template = %{name: "review", revision: 1, steps: []}
+    Application.put_env(:catalyst, :workflow_registry_test_templates, [template])
+    Application.put_env(:catalyst, :workflows, %{"review" => WorkflowA})
+
+    assert {:ok, %{module: WorkflowA, source: {:application, {:workflows, "review"}}}} =
+             Registry.resolve(workflow: "review")
+
+    assert :ok = Registry.register_workflow("review", WorkflowB, owner: owner)
+
+    assert {:ok, %{module: WorkflowB, source: {:runtime, ^owner, {:workflow, "review"}}}} =
+             Registry.resolve(workflow: "review")
+  end
+
+  test "list/0 includes templates and omits malformed template rows" do
+    alpha = %{name: "alpha", version: "v1", steps: []}
+
+    Application.put_env(
+      :catalyst,
+      :workflow_registry_test_templates,
+      [%{name: "  "}, alpha, :malformed]
+    )
+
+    assert Registry.list() == [
+             %{name: :default, module: Catalyst.Agent.Loop, source: :builtin},
+             %{
+               name: "alpha",
+               module: Catalyst.Workflow.Runner,
+               source: {:template, %{name: "alpha", version: "v1"}},
+               template: alpha
+             }
+           ]
   end
 
   test "full selection precedence is deterministic", %{owner: owner} do

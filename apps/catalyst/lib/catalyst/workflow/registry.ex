@@ -2,18 +2,24 @@ defmodule Catalyst.Workflow.Registry do
   @moduledoc """
   Owned runtime overlay and live resolver for agent workflows.
 
-  Only runtime registrations live in ETS. Application configuration is read at
-  resolution time, so `Application.put_env/3` and `Application.delete_env/2`
-  take effect without restarting this process. The effective selection order
-  is:
+  Only runtime registrations live in ETS. Application configuration and
+  persisted templates are read at resolution time, so changes take effect
+  without restarting this process. The effective selection order is:
 
     1. a valid `opts[:loop]` module;
     2. an explicit `opts[:workflow]` name in the runtime overlay, then the live
-       `:workflows` application map;
+       `:workflows` application map, then the template store;
     3. the runtime `:default` workflow;
     4. the live `:workflows` default;
     5. the live `:agent_loop` application setting; and
     6. `Catalyst.Agent.Loop`.
+
+  The template store module is configured as `:workflow_template_store` and
+  defaults to `Catalyst.Workflow.Template.Store`. It must expose `list/0` and
+  `fetch/1`, returning `{:ok, [template]}` and
+  `{:ok, template} | :error | {:error, reason}` respectively. Validated
+  templates must be maps with a non-empty binary `:name`. A selected template
+  is pinned in the selection map and runs through `Catalyst.Workflow.Runner`.
 
   An explicit unknown name is an error and never falls through to the default.
   Reads remain useful while the ETS owner is restarting: a missing table simply
@@ -27,15 +33,25 @@ defmodule Catalyst.Workflow.Registry do
 
   @table :catalyst_workflows
   @builtin Catalyst.Agent.Loop
+  @template_runner Catalyst.Workflow.Runner
 
   @type name :: String.t() | :default
   @type key :: {:workflow, name()}
+  @type template :: %{required(:name) => String.t(), optional(atom()) => term()}
   @type source ::
           {:session, :loop}
           | {:runtime, term(), key()}
           | {:application, {:workflows, name()} | :agent_loop}
+          | {:template, map()}
           | :builtin
-  @type selection :: %{name: name() | :loop, module: module(), source: source()}
+  @type selection ::
+          %{name: name() | :loop, module: module(), source: source()}
+          | %{
+              name: String.t(),
+              module: module(),
+              source: source(),
+              template: template()
+            }
   @type runtime_entry :: %{key: key(), value: module(), owner: term()}
 
   @doc "Start the singleton workflow registry."
@@ -65,11 +81,11 @@ defmodule Catalyst.Workflow.Registry do
   # test seam. Resolves one named workflow together with its winning source.
   @doc false
   @spec fetch_with_source(name()) :: {:ok, module(), source()} | {:error, term()}
-  def fetch_with_source(:default), do: resolve_default()
+  def fetch_with_source(:default), do: resolve_default() |> without_template()
 
   def fetch_with_source(name) do
     case valid_named_workflow?(name) do
-      true -> resolve_named(name)
+      true -> name |> resolve_named() |> without_template()
       false -> {:error, {:invalid_configuration, {:workflow, :name}, name}}
     end
   end
@@ -157,7 +173,7 @@ defmodule Catalyst.Workflow.Registry do
   end
 
   defp named_rows do
-    (runtime_names() ++ application_names())
+    (runtime_names() ++ application_names() ++ template_names())
     |> Enum.uniq()
     |> Enum.sort()
     |> Enum.flat_map(&named_row/1)
@@ -165,8 +181,14 @@ defmodule Catalyst.Workflow.Registry do
 
   defp named_row(name) do
     case resolve_named(name) do
-      {:ok, module, source} -> [%{name: name, module: module, source: source}]
-      {:error, _reason} -> []
+      {:ok, module, source} ->
+        [%{name: name, module: module, source: source}]
+
+      {:ok, module, source, template} ->
+        [%{name: name, module: module, source: source, template: template}]
+
+      {:error, _reason} ->
+        []
     end
   end
 
@@ -186,6 +208,18 @@ defmodule Catalyst.Workflow.Registry do
         for {name, _module} <- workflows, valid_named_workflow?(name), do: name
 
       _missing_or_malformed ->
+        []
+    end
+  end
+
+  defp template_names do
+    case template_store_call(:list, []) do
+      {:ok, templates} when is_list(templates) ->
+        for template <- templates,
+            {:ok, name} <- [template_name(template)],
+            do: name
+
+      _missing_or_invalid ->
         []
     end
   end
@@ -216,6 +250,9 @@ defmodule Catalyst.Workflow.Registry do
 
   defp selection({:ok, module, source}, name),
     do: {:ok, %{name: name, module: module, source: source}}
+
+  defp selection({:ok, module, source, template}, name),
+    do: {:ok, %{name: name, module: module, source: source, template: template}}
 
   defp selection({:error, _reason} = error, _name), do: error
 
@@ -257,8 +294,7 @@ defmodule Catalyst.Workflow.Registry do
     end
   end
 
-  defp missing_application_workflow(name, :required),
-    do: {:error, {:unknown_workflow, name}}
+  defp missing_application_workflow(name, :required), do: resolve_template(name)
 
   defp missing_application_workflow(:default, :optional), do: application_agent_loop()
 
@@ -325,6 +361,61 @@ defmodule Catalyst.Workflow.Registry do
   defp valid_name?(name), do: valid_named_workflow?(name)
 
   defp valid_named_workflow?(name), do: is_binary(name) and String.trim(name) != ""
+
+  defp resolve_template(name) do
+    case template_store_call(:fetch, [name]) do
+      {:ok, template} -> validate_template(name, template)
+      :error -> {:error, {:unknown_workflow, name}}
+      {:error, :not_found} -> {:error, {:unknown_workflow, name}}
+      {:error, reason} -> {:error, {:workflow_template_store, reason}}
+      other -> {:error, {:invalid_workflow_template_store_response, :fetch, other}}
+    end
+  end
+
+  defp validate_template(name, template) do
+    case template_name(template) do
+      {:ok, ^name} -> {:ok, @template_runner, {:template, template_metadata(template)}, template}
+      {:ok, other} -> {:error, {:workflow_template_name_mismatch, name, other}}
+      :error -> {:error, {:invalid_workflow_template, name, template}}
+    end
+  end
+
+  defp template_name(template) when is_map(template) do
+    case Map.get(template, :name) do
+      name when is_binary(name) ->
+        case String.trim(name) do
+          "" -> :error
+          _non_empty -> {:ok, name}
+        end
+
+      _invalid ->
+        :error
+    end
+  end
+
+  defp template_name(_template), do: :error
+
+  defp template_metadata(template) do
+    Map.take(template, [:name, :id, :version, :revision, :digest])
+  end
+
+  defp template_store_call(function, arguments) do
+    store =
+      Application.get_env(
+        :catalyst,
+        :workflow_template_store,
+        Catalyst.Workflow.Template.Store
+      )
+
+    case is_atom(store) and Code.ensure_loaded?(store) and
+           function_exported?(store, function, length(arguments)) do
+      true -> apply(store, function, arguments)
+      false -> :error
+    end
+  end
+
+  defp without_template({:ok, module, source, _template}), do: {:ok, module, source}
+  defp without_template(result), do: result
 
   defp valid_workflow_module?(module) do
     is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :run, 4)

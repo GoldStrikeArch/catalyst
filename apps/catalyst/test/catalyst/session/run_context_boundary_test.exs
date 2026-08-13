@@ -8,6 +8,21 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
   alias Catalyst.Prompt.Registry, as: PromptRegistry
   alias Catalyst.Session.RunContext
 
+  defmodule TemplateStore do
+    def list, do: {:ok, [template()]}
+    def fetch("pinned-template"), do: {:ok, template()}
+    def fetch(_name), do: :error
+
+    defp template do
+      %{
+        name: "pinned-template",
+        revision: 7,
+        digest: "sha256:pinned",
+        steps: [%{prompt: "Pinned step"}]
+      }
+    end
+  end
+
   setup do
     previous_timeout = Application.fetch_env(:catalyst, :prompt_policy_timeout)
     previous_policy = runtime_policy(PromptRegistry)
@@ -28,6 +43,37 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
     end)
 
     :ok
+  end
+
+  test "template selections are pinned in run config and diagnostics" do
+    previous_store = Application.fetch_env(:catalyst, :workflow_template_store)
+    Application.put_env(:catalyst, :workflow_template_store, TemplateStore)
+
+    on_exit(fn -> restore_env(:workflow_template_store, previous_store) end)
+
+    state =
+      model("template-model", "template-provider")
+      |> build_state()
+      |> Map.update!(:opts, fn opts ->
+        opts
+        |> Keyword.delete(:loop)
+        |> Keyword.put(:workflow, "pinned-template")
+      end)
+
+    assert {:ok, run} =
+             RunContext.build(state, self(), make_ref(), Catalyst.LLM.Faux)
+
+    assert run.config.loop == Catalyst.Workflow.Runner
+
+    assert %{
+             name: "pinned-template",
+             module: Catalyst.Workflow.Runner,
+             source:
+               {:template, %{name: "pinned-template", revision: 7, digest: "sha256:pinned"}},
+             template: %{steps: [%{prompt: "Pinned step"}]}
+           } = run.config.workflow
+
+    assert run.metadata.workflow == run.config.workflow
   end
 
   test "worker prompt failures are normalized at the supervised task boundary" do
