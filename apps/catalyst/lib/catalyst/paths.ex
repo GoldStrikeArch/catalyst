@@ -92,6 +92,10 @@ defmodule Catalyst.Paths do
   @spec workflows() :: Path.t()
   def workflows, do: join("workflows")
 
+  @doc "Default directory for durable workflow-run checkpoints."
+  @spec workflow_runs() :: Path.t()
+  def workflow_runs, do: join("workflow_runs")
+
   @doc "Default extension boot marker."
   @spec boot_marker() :: Path.t()
   def boot_marker, do: join("boot_marker")

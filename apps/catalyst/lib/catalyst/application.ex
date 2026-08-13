@@ -11,6 +11,17 @@ defmodule Catalyst.Application do
 
     children = [
       {Phoenix.PubSub, name: Catalyst.PubSub},
+      # Durable workflow runs are explicitly started or resumed. Boot discovery
+      # marks abandoned checkpoints interrupted but never starts their processes.
+      {Registry, keys: :unique, name: Catalyst.WorkflowRun.Registry},
+      {
+        DynamicSupervisor,
+        name: Catalyst.WorkflowRun.DynamicSupervisor,
+        strategy: :one_for_one,
+        max_restarts: 100,
+        max_seconds: 5
+      },
+      Catalyst.WorkflowRun.Bootstrap,
       # HTTP pool for LLM SSE streaming.
       {Finch, name: Catalyst.Finch},
       # Supervises the loop/tool Tasks spawned per run (and token refreshes),
