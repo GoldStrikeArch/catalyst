@@ -14,6 +14,7 @@ defmodule CatalystWeb.UI.PageRenderer do
   @trusted_pages [
     CatalystWeb.Pages.ChatPage,
     CatalystWeb.Pages.PromptsPage,
+    CatalystWeb.Pages.WorkflowsPage,
     CatalystWeb.Pages.ExtensionsPage,
     CatalystWeb.Pages.ComputerPage
   ]

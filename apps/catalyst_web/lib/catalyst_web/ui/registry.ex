@@ -298,6 +298,7 @@ defmodule CatalystWeb.UI.Registry do
     [
       %{path: "chat", mod: CatalystWeb.Pages.ChatPage, label: "Chat"},
       %{path: "prompts", mod: CatalystWeb.Pages.PromptsPage, label: "Models & Prompts"},
+      %{path: "workflows", mod: CatalystWeb.Pages.WorkflowsPage, label: "Workflows"},
       %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"},
       %{path: "computer", mod: CatalystWeb.Pages.ComputerPage, label: "Computer"}
     ]

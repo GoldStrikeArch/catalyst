@@ -26,7 +26,8 @@ defmodule CatalystWeb.ShellLive do
     ExtensionActions,
     RunDiagnostics,
     SessionLifecycle,
-    Settings
+    Settings,
+    Workflows
   }
 
   @impl true
@@ -62,6 +63,7 @@ defmodule CatalystWeb.ShellLive do
         cwd: SessionLifecycle.default_cwd()
       )
       |> stream_configure(:prompt_rows, dom_id: & &1.id)
+      |> Workflows.init()
       |> Conversation.init()
       |> allow_upload(:image,
         accept: ~w(.png .jpg .jpeg .gif .webp),
@@ -148,6 +150,10 @@ defmodule CatalystWeb.ShellLive do
       CatalystWeb.Pages.PromptsPage.panel_data(socket.assigns.codex_catalog),
       reset: true
     )
+  end
+
+  defp maybe_refresh_panel(%{assigns: %{page: "workflows"}} = socket) do
+    Workflows.refresh(socket)
   end
 
   # The /computer backend snapshot (grants, capture readiness, screens,
@@ -330,6 +336,33 @@ defmodule CatalystWeb.ShellLive do
 
     {:noreply, finish_prompt_action(socket, result, "Prompt reset to inherited behavior.")}
   end
+
+  def handle_event("workflow_select", %{"id" => id}, socket),
+    do: {:noreply, Workflows.select(socket, id)}
+
+  def handle_event("workflow_create", _params, socket),
+    do: {:noreply, Workflows.create(socket)}
+
+  def handle_event("workflow_clone", %{"id" => id}, socket),
+    do: {:noreply, Workflows.clone(socket, id)}
+
+  def handle_event("workflow_add_stage", %{"preset" => preset}, socket),
+    do: {:noreply, Workflows.add_stage(socket, preset)}
+
+  def handle_event("workflow_update_stage", %{"stage_id" => id} = params, socket),
+    do: {:noreply, Workflows.update_stage(socket, id, Map.delete(params, "stage_id"))}
+
+  def handle_event("workflow_move_stage", %{"id" => id, "direction" => direction}, socket),
+    do: {:noreply, Workflows.move_stage(socket, id, direction)}
+
+  def handle_event("workflow_delete_stage", %{"id" => id}, socket),
+    do: {:noreply, Workflows.delete_stage(socket, id)}
+
+  def handle_event("workflow_save", params, socket),
+    do: {:noreply, Workflows.save(socket, params)}
+
+  def handle_event("workflow_delete", _params, socket),
+    do: {:noreply, Workflows.delete(socket)}
 
   # The grant changes which tools the next run advertises, so the resolved
   # prompt/tool preview and the panel snapshots are recomputed with it.
