@@ -13,9 +13,11 @@ defmodule Catalyst.Workflow.Support do
   alias Catalyst.Session.EventSink
   alias Catalyst.Message
   alias Catalyst.Tools.Computer.Availability
+  alias Catalyst.Tools.Profiles
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @default_subagent_max_depth 3
+  @default_tool_profile "coding"
 
   @doc "Build, transform, account for, and compact one ordinary request when needed."
   @spec prepare_request(map(), map(), (Event.t() -> any()), keyword() | map()) ::
@@ -31,13 +33,14 @@ defmodule Catalyst.Workflow.Support do
     EventSink.observed(emit, observer_key)
   end
 
-  @doc "Resolve the original live tool source, then apply final capability filtering."
+  @doc "Resolve the original live tool source, then apply final capability and profile filtering."
   @spec resolve_tools(map()) :: [module()]
   def resolve_tools(config) when is_map(config) do
     config
     |> tool_source()
     |> Catalyst.Extensions.resolve()
     |> filter_capabilities(config)
+    |> Profiles.filter(tool_profile(config))
   end
 
   @doc "Return a turn config with one validated tool index and its exact provider definitions."
@@ -88,6 +91,22 @@ defmodule Catalyst.Workflow.Support do
     case Map.fetch(config, :tool_source) do
       {:ok, source} -> source
       :error -> Map.get(config, :tools, :extensions)
+    end
+  end
+
+  @doc """
+  Return the canonical persisted tool profile for a run.
+
+  Missing values retain the original coding behavior. Invalid values are
+  returned as-is so the final profile filter fails closed.
+  """
+  @spec tool_profile(map()) :: term()
+  def tool_profile(config) when is_map(config) do
+    profile = option(config, :tool_profile, @default_tool_profile)
+
+    case Profiles.normalize(profile) do
+      {:ok, normalized} -> normalized
+      :error -> profile
     end
   end
 

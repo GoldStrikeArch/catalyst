@@ -37,6 +37,11 @@ defmodule Catalyst.Session.RunConfigTest do
     assert config.opts[:session_id] == "run-config-test"
   end
 
+  test "the persisted tool profile is exposed as run policy" do
+    assert build_base!(state(opts: [])).tool_profile == "coding"
+    assert build_base!(state(opts: [tool_profile: "inspect"])).tool_profile == "inspect"
+  end
+
   test "child inheritance keeps tuning data and removes parent controls and process terms" do
     ref = make_ref()
 

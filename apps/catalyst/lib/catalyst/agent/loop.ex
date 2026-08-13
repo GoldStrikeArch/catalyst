@@ -39,6 +39,7 @@ defmodule Catalyst.Agent.Loop do
           {:ok, [Message.t()], map()} | {:error, term()}
   def run(prompts, context, config, emit) do
     emit = Support.observed_emit(emit, config)
+    config = Map.put(config, :tool_profile, Support.tool_profile(config))
 
     emit.(%Event.AgentStart{})
 
@@ -221,7 +222,12 @@ defmodule Catalyst.Agent.Loop do
     {context, hooked} =
       Hooks.prepare_next_turn(context, config, hook_ctx, Map.fetch!(config, :hook_snapshot))
 
-    {context, retarget_tool_source(hooked, config), hook_ctx}
+    config =
+      hooked
+      |> retarget_tool_source(config)
+      |> Map.put(:tool_profile, config.tool_profile)
+
+    {context, config, hook_ctx}
   end
 
   # A hook that changes `:tools` supplies a NEW selector for the next turn; the

@@ -338,6 +338,61 @@ defmodule Catalyst.Agent.LoopHooksTest do
     assert Content.text_of(second.content) =~ "unknown tool"
   end
 
+  test "prepare-next-turn cannot upgrade an inspect profile or add a write tool", %{
+    tmp: tmp,
+    owner: owner
+  } do
+    File.write!(Path.join(tmp, "inspect-source.txt"), "fixture")
+
+    Hooks.register(
+      :prepare_next_turn,
+      fn {context, config}, ctx ->
+        case ctx.cwd == tmp do
+          true ->
+            config =
+              config
+              |> Map.put(:tools, [Catalyst.Tools.Write])
+              |> Map.put(:tool_profile, "coding")
+
+            {:ok, {context, config}}
+
+          false ->
+            {:ok, {context, config}}
+        end
+      end,
+      owner: owner
+    )
+
+    script = [
+      {:tool, "read", %{"path" => "inspect-source.txt"}},
+      {:tool, "write", %{"path" => "forbidden.txt", "content" => "no"}},
+      {:text, "done"}
+    ]
+
+    config = %{
+      provider: Catalyst.LLM.Faux,
+      model: %Model{id: "faux", api: "faux", provider: "faux"},
+      cwd: tmp,
+      tools: Registry.default_tools(),
+      tool_profile: "inspect",
+      opts: [script: script]
+    }
+
+    assert {:ok, messages, _context} =
+             Loop.run(
+               [Message.user("go")],
+               %{system_prompt: nil, messages: []},
+               config,
+               fn _event -> :ok end
+             )
+
+    assert [read, write] = Enum.filter(messages, &match?(%Message.ToolResult{}, &1))
+    refute read.is_error
+    assert write.is_error
+    assert Content.text_of(write.content) =~ "unknown tool"
+    refute File.exists?(Path.join(tmp, "forbidden.txt"))
+  end
+
   test "prepare_next_turn also runs on a toolless (natural-stop) turn", %{tmp: tmp, owner: owner} do
     parent = self()
 

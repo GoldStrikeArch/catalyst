@@ -26,6 +26,7 @@ defmodule Catalyst.Session.RunConfig do
           required(:cwd) => String.t(),
           required(:tools) => term(),
           required(:tool_source) => term(),
+          required(:tool_profile) => term(),
           required(:parent_session_id) => String.t(),
           required(:root_session_id) => String.t(),
           required(:agent_depth) => non_neg_integer(),
@@ -56,6 +57,7 @@ defmodule Catalyst.Session.RunConfig do
        cwd: state.cwd,
        tools: source,
        tool_source: source,
+       tool_profile: Keyword.get(opts, :tool_profile, "coding"),
        parent_session_id: state.id,
        root_session_id: Map.get(state, :root_session_id) || state.id,
        agent_depth: Map.get(state, :agent_depth, 0),
@@ -213,6 +215,7 @@ defmodule Catalyst.Session.RunConfig do
           %{
             tools: state.tools,
             tool_source: state.tools,
+            tool_profile: Keyword.get(state.opts || [], :tool_profile, "coding"),
             opts: state.opts || [],
             agent_depth: Map.get(state, :agent_depth, 0)
           }
