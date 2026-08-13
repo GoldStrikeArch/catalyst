@@ -27,6 +27,7 @@ defmodule Catalyst.PathsTest do
     assert Paths.system_prompt() == Path.join(home, "system_prompt.md")
     assert Paths.prompts() == Path.join(home, "prompts")
     assert Paths.agents() == Path.join(home, "agents")
+    assert Paths.workflows() == Path.join(home, "workflows")
     assert Paths.join("bin") == Path.join(home, "bin")
   end
 
@@ -41,6 +42,7 @@ defmodule Catalyst.PathsTest do
     assert Paths.system_prompt() == Path.join(root, "system_prompt.md")
     assert Paths.prompts() == Path.join(root, "prompts")
     assert Paths.agents() == Path.join(root, "agents")
+    assert Paths.workflows() == Path.join(root, "workflows")
   end
 
   test "CATALYST_HOME relocates home in a release, but app env wins" do

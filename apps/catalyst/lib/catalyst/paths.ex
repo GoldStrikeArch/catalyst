@@ -88,6 +88,10 @@ defmodule Catalyst.Paths do
   @spec agents() :: Path.t()
   def agents, do: join("agents")
 
+  @doc "Default directory for user-defined workflow templates."
+  @spec workflows() :: Path.t()
+  def workflows, do: join("workflows")
+
   @doc "Default extension boot marker."
   @spec boot_marker() :: Path.t()
   def boot_marker, do: join("boot_marker")
