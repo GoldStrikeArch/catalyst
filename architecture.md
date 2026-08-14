@@ -102,7 +102,7 @@ catalyst/                      # umbrella
                  reducer.ex, run_config.ex, run_context.ex, snapshot.ex,
                  catalog.ex, server/state.ex, store/codec.ex}
                                                    # thin server + extracted state/codec + hot-swap logic
-                                                   # + persisted {id, cwd} session catalog
+                                                   # + persisted {id, cwd, title} session catalog
         tools/{tool.ex, registry.ex, exec.ex, binaries.ex, truncate.ex, listing.ex, paths.ex,
                diff.ex,
                context.ex, read.ex, write.ex, edit.ex, ls.ex, bash.ex,
@@ -127,7 +127,7 @@ catalyst/                      # umbrella
         live/shell_live.ex                         # ONE LiveView; catch-all routes / and /:page
         live/shell_live/{chat_input.ex, commands.ex, conversation.ex,
                          extension_actions.ex, run_diagnostics.ex,
-                         session_lifecycle.ex, settings.ex}
+                         session_lifecycle.ex, settings.ex, threads.ex}
                                                    # extracted ShellLive concerns
         pages/chat_page.ex                         # the chat as a registry-registered page
         pages/extensions_page.ex                   # extensions/settings panel (also a seeded page, §11)
@@ -359,15 +359,17 @@ trims the raw tail to the open block's source. Fenced code gets **syntax highlig
 `textContent`) the moment its fence closes, and the `message_end` swap to the final message
 renders the same blocks through the same pipeline — visually a no-op. A late joiner seeds
 committed blocks + tail from the snapshot's `streaming_message`. Tool spinners show a live
-output tail streamed by `bash` via `ToolExecutionUpdate`. A header **Quiet** toggle
+output tail streamed by `bash` via `ToolExecutionUpdate`. A composer **Quiet** toggle
 (display-only, persisted in its own persistent_term separate from the Codex prefs) sets
 `data-quiet` on the transcript container; CSS rules in `app.css` then hide tool chips,
 tool-result cards, and thinking — CSS rather than re-render because stream/ignore regions
 never re-render on assign changes. Spinners stay visible; the session is never touched.
 `ContextCompacted` resets and re-streams the replacement transcript; `ContextStatus` updates
-header-only context diagnostics without adding a chat block. The header shows used tokens,
+footer context diagnostics without adding a chat block. The footer shows used tokens,
 effective threshold/source, anchored versus estimated state, and read-only prompt
-text/digest/provenance from the current or last-successful run.
+text/digest/provenance from the current or last-successful run. A toggleable sidebar lists
+**projects** (unique `cwd`s) and **threads** (`Session.Server`s). New/switch never stop
+sibling sessions; close stops the process and drops the catalog entry.
 
 ---
 
@@ -496,7 +498,7 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   persisted values or Codex's 272,000-token default. `Store.Codec` persists the normalized fields
   and `context_window_source`; it does not persist a live catalog object. Thus a catalog refresh
   changes the next eligible run, while a deliberately fixed session override stays fixed.
-- **Run options** (session opts, set live from the header UI via `Session.Server.configure/2`,
+- **Run options** (session opts, set live from the composer bar via `Session.Server.configure/2`,
   applied on the next run): `:reasoning_effort`, `:service_tier` (`"priority"` = **Fast mode**,
   ~1.5x speed / increased usage, the GPT-5.6 family plus gpt-5.5 and gpt-5.4), `:transport`.
   `:session_id` is reserved:

@@ -84,7 +84,7 @@ defmodule CatalystWeb.FlexCase do
     old_id = session_id(view)
 
     view
-    |> Phoenix.LiveViewTest.element(~s(button[phx-click="new_session"]))
+    |> Phoenix.LiveViewTest.element("#new-session-button")
     |> Phoenix.LiveViewTest.render_click()
 
     new_id = session_id(view)

@@ -61,6 +61,14 @@ defmodule Catalyst.Session.Manager do
     end
   end
 
+  @doc "Currently registered live sessions as `{id, pid}` pairs."
+  @spec list_live() :: [{String.t(), pid()}]
+  def list_live do
+    @registry
+    |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.filter(fn {_id, pid} -> Process.alive?(pid) end)
+  end
+
   @doc "Terminate a session."
   @spec stop(String.t()) :: :ok | {:error, term()}
   def stop(id) do

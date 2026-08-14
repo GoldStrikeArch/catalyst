@@ -6,6 +6,8 @@ defmodule Catalyst.Session.CatalogTest do
 
   alias Catalyst.Session.{Catalog, Store}
 
+  doctest Catalyst.Session.Catalog, import: true
+
   setup do
     dir = Path.join(System.tmp_dir!(), "catalyst_catalog_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
@@ -23,6 +25,37 @@ defmodule Catalyst.Session.CatalogTest do
   defp create_store!(cwd, id) do
     {:ok, _handle} = Store.open(cwd, id: id)
     :ok
+  end
+
+  test "remember keeps an optional title and put_title updates in place" do
+    create_store!("/tmp/proj-a", "sess-a")
+
+    assert :ok = Catalog.remember("sess-a", "/tmp/proj-a")
+    assert {:ok, %{id: "sess-a", title: nil}} = Catalog.lookup("sess-a")
+
+    assert :ok = Catalog.put_title("sess-a", "Analyze CLAUDE.md")
+    assert {:ok, %{title: "Analyze CLAUDE.md", last_used_at: first_at}} = Catalog.lookup("sess-a")
+
+    assert :ok = Catalog.remember("sess-a", "/tmp/proj-a")
+    assert {:ok, %{title: "Analyze CLAUDE.md", last_used_at: later_at}} = Catalog.lookup("sess-a")
+    assert later_at >= first_at
+
+    assert :ok = Catalog.put_title_if_blank("sess-a", "ignored")
+    assert {:ok, %{title: "Analyze CLAUDE.md"}} = Catalog.lookup("sess-a")
+
+    assert Catalog.display_title(%{title: "Analyze CLAUDE.md"}) == "Analyze CLAUDE.md"
+    assert Catalog.display_title(%{title: nil}) == "New thread"
+  end
+
+  test "older catalogs without a title field still decode", %{path: path} do
+    create_store!("/tmp/proj-a", "sess-a")
+
+    File.write!(
+      path,
+      ~s({"version": 1, "entries": [{"id": "sess-a", "cwd": "/tmp/proj-a", "last_used_at": "2026-01-01T00:00:00.000Z"}]})
+    )
+
+    assert {:ok, [%{id: "sess-a", cwd: "/tmp/proj-a", title: nil}]} = Catalog.entries()
   end
 
   test "roundtrip: remember, entries, most_recent, lookup, forget" do

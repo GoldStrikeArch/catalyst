@@ -12,8 +12,10 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   import Phoenix.Component, only: [assign: 2]
   import Phoenix.LiveView, only: [put_flash: 3]
 
+  alias Catalyst.Content
+  alias Catalyst.Message
   alias Catalyst.Session.{Catalog, Manager, Server}
-  alias CatalystWeb.ShellLive.{ChatInput, Conversation, Settings}
+  alias CatalystWeb.ShellLive.{ChatInput, Conversation, Settings, Threads}
 
   @session_ptr {CatalystWeb.ShellLive, :current_session}
   @attach_retries 5
@@ -45,28 +47,61 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
     end
   end
 
-  @doc "Starts a new session, replacing the one currently attached to the shell."
-  @spec start(socket()) :: socket()
-  def start(socket) do
-    stop_attached_session(socket)
+  @doc """
+  Starts a new session in the current working directory.
 
+  Sibling threads stay alive: the previous `Session.Server` is only
+  unfocused, never stopped. The new session becomes the shell's focus.
+  """
+  @spec start(socket()) :: socket()
+  def start(socket), do: start_in(socket, socket.assigns.cwd)
+
+  @doc "Starts a new session at `cwd` without stopping sibling threads."
+  @spec start_in(socket(), String.t()) :: socket()
+  def start_in(socket, cwd) when is_binary(cwd) do
+    socket = release_focus(socket)
     model = Settings.provider_config(socket.assigns.codex_prefs)
     run_opts = Settings.start_opts(socket)
 
-    case Manager.start_session(
-           cwd: socket.assigns.cwd,
-           model: model,
-           opts: run_opts
-         ) do
+    case Manager.start_session(cwd: cwd, model: model, opts: run_opts) do
       {:ok, %{id: id, pid: pid}} ->
-        attach_new_session(socket, id, pid, model, run_opts)
+        socket
+        |> assign(cwd: cwd)
+        |> attach_new_session(id, pid, model, run_opts)
+        |> refresh_sidebar()
 
       {:error, reason} ->
         session_start_failed(socket, reason)
     end
   end
 
-  @doc "Changes the working directory and replaces the session at that location."
+  @doc """
+  Focus a cataloged session by id without stopping the previous thread.
+
+  Missing or unreadable catalog entries are a flash; the current focus is
+  left attached.
+  """
+  @spec switch(socket(), String.t()) :: socket()
+  def switch(socket, id) when is_binary(id) do
+    case socket.assigns.session_id do
+      ^id ->
+        socket
+
+      _other ->
+        case Catalog.lookup(id) do
+          {:ok, %{id: ^id, cwd: cwd}} ->
+            focus_cataloged(socket, id, cwd)
+
+          {:error, :not_found} ->
+            put_flash(socket, :error, "Thread no longer exists.")
+
+          {:error, reason} ->
+            put_flash(socket, :error, "Could not open thread: #{inspect(reason)}")
+        end
+    end
+  end
+
+  @doc "Changes the working directory and opens a new thread there."
   @spec change_cwd(socket(), String.t()) :: socket()
   def change_cwd(socket, path) do
     expanded = Path.expand(path, socket.assigns.cwd)
@@ -74,14 +109,62 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
     case File.dir?(expanded) do
       true ->
         socket
-        |> assign(cwd: expanded)
         |> ChatInput.put_text("")
-        |> start()
+        |> start_in(expanded)
 
       false ->
         put_flash(socket, :error, "Not a directory: #{expanded}")
     end
   end
+
+  @doc "Rebuilds the sidebar assign from the persisted catalog and live pids."
+  @spec refresh_sidebar(socket()) :: socket()
+  def refresh_sidebar(socket) do
+    entries =
+      case Catalog.entries() do
+        {:ok, list} -> list
+        {:error, _reason} -> []
+      end
+
+    assign(socket, thread_sidebar: Threads.project(entries, socket.assigns.session_id))
+  end
+
+  @doc """
+  Stop `id` and drop it from the catalog.
+
+  Closing the focused thread starts a replacement in the same cwd.
+  """
+  @spec close(socket(), String.t()) :: socket()
+  def close(socket, id) when is_binary(id) do
+    _ = Manager.stop(id)
+    _ = Catalog.forget(id)
+
+    case socket.assigns.session_id do
+      ^id -> start_in(socket, socket.assigns.cwd)
+      _other -> refresh_sidebar(socket)
+    end
+  end
+
+  @doc "Persist a thread title from the first real user prompt, if still blank."
+  @spec maybe_title(socket(), Message.t()) :: socket()
+  def maybe_title(socket, %Message.User{content: content}) do
+    case Catalog.title_from_text(Content.text_of(content)) do
+      nil ->
+        socket
+
+      title ->
+        case socket.assigns.session_id do
+          nil ->
+            socket
+
+          id ->
+            _ = Catalog.put_title_if_blank(id, title)
+            refresh_sidebar(socket)
+        end
+    end
+  end
+
+  def maybe_title(socket, _message), do: socket
 
   @doc """
   Retries attaching to a remembered session that was not yet registered.
@@ -93,11 +176,61 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   @spec retry_attach(socket(), String.t(), non_neg_integer()) :: socket()
   def retry_attach(socket, id, retries_left), do: try_attach(socket, id, retries_left)
 
+  @doc "Drop the focused session after it exits, then attach or start a replacement."
+  @spec after_exit(socket()) :: socket()
+  def after_exit(socket) do
+    unsubscribe_topic(socket.assigns.session_id)
+    demonitor(socket.assigns.session_ref)
+
+    socket
+    |> assign(session_ref: nil, session_id: nil, session_pid: nil, running: false)
+    |> attach_or_start()
+  end
+
   defp attach_or_resume(socket) do
-    case :persistent_term.get(@session_ptr, nil) do
-      %{id: id} -> attach_remembered(socket, id)
-      _cold -> resume_from_catalog(socket)
+    socket =
+      case :persistent_term.get(@session_ptr, nil) do
+        %{id: id} -> attach_remembered(socket, id)
+        _cold -> resume_from_catalog(socket)
+      end
+
+    refresh_sidebar(socket)
+  end
+
+  defp focus_cataloged(socket, id, cwd) do
+    socket = socket |> release_focus() |> assign(cwd: cwd)
+
+    case Manager.whereis(id) do
+      {:ok, pid} ->
+        remember_session(id, cwd)
+
+        socket
+        |> reattach(id, pid)
+        |> refresh_sidebar()
+
+      :error ->
+        restart_persisted_session(socket, id, cwd)
     end
+  end
+
+  # Drop focus of the current thread without stopping it.
+  defp release_focus(socket) do
+    unsubscribe_topic(socket.assigns.session_id)
+    demonitor(socket.assigns.session_ref)
+    assign(socket, session_ref: nil, session_pid: nil)
+  end
+
+  # Phoenix.PubSub uses a duplicate-keys Registry, so a second subscribe
+  # from the same process delivers every event twice.
+  defp subscribe_topic(socket, id) do
+    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+    socket
+  end
+
+  defp unsubscribe_topic(nil), do: :ok
+
+  defp unsubscribe_topic(id) when is_binary(id) do
+    Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
   end
 
   # After a full VM restart the :persistent_term pointer is gone but the
@@ -131,10 +264,11 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
         socket
         |> assign(cwd: cwd)
         |> reattach(id, pid)
+        |> refresh_sidebar()
 
       {:error, reason} ->
         Logger.warning("[shell] could not resume cataloged session #{id}: #{inspect(reason)}")
-        start(socket)
+        start_in(socket, cwd)
     end
   end
 
@@ -166,9 +300,8 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   end
 
   defp reattach(socket, id, pid) do
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
-
     socket
+    |> subscribe_topic(id)
     |> monitor(pid)
     |> assign(session_id: id, session_pid: pid)
     |> Conversation.replay(pid)
@@ -177,12 +310,12 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
     # Only a dead GenServer is recoverable here. Projection bugs should still
     # crash visibly rather than masquerading as transcript loss.
     :exit, _reason ->
-      Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
+      unsubscribe_topic(id)
       start(socket)
   end
 
   defp attach_new_session(socket, id, pid, model, run_opts) do
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+    socket = subscribe_topic(socket, id)
     remember_session(id, socket.assigns.cwd)
 
     socket
@@ -218,17 +351,6 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
       tools: %{}
     )
     |> put_flash(:error, "Could not start a session: #{inspect(reason)}")
-  end
-
-  defp stop_attached_session(socket) do
-    case socket.assigns.session_id do
-      nil ->
-        :ok
-
-      id ->
-        Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
-        Manager.stop(id)
-    end
   end
 
   defp monitor(socket, pid) do

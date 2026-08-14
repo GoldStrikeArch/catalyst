@@ -60,7 +60,8 @@ defmodule CatalystWeb.ShellLive do
         prompt_preview_ref: nil,
         prompt_preview_pid: nil,
         diagnostics_open: false,
-        cwd: SessionLifecycle.default_cwd()
+        cwd: SessionLifecycle.default_cwd(),
+        thread_sidebar: %{projects: []}
       )
       |> stream_configure(:prompt_rows, dom_id: & &1.id)
       |> Workflows.init()
@@ -257,12 +258,25 @@ defmodule CatalystWeb.ShellLive do
   end
 
   def handle_event("new_session", _params, socket) do
+    {:noreply, start_thread(socket, socket.assigns.cwd)}
+  end
+
+  def handle_event("close_session", %{"id" => id}, socket) when is_binary(id) do
+    {:noreply, close_thread(socket, id)}
+  end
+
+  def handle_event("switch_session", %{"id" => id}, socket) when is_binary(id) do
     {:noreply,
      socket
-     |> SessionLifecycle.start()
+     |> assign(diagnostics_open: false)
+     |> SessionLifecycle.switch(id)
      |> RunDiagnostics.preview()
      |> refresh_shell_chrome()
      |> maybe_refresh_panel()}
+  end
+
+  def handle_event("toggle_sidebar", _params, socket) do
+    {:noreply, Settings.toggle_sidebar(socket)}
   end
 
   def handle_event("login", _params, %{assigns: %{login_state: :pending}} = socket) do
@@ -405,6 +419,10 @@ defmodule CatalystWeb.ShellLive do
 
   def handle_event("toggle_diagnostics", _params, socket) do
     {:noreply, assign(socket, diagnostics_open: !socket.assigns.diagnostics_open)}
+  end
+
+  def handle_event("close_diagnostics", _params, socket) do
+    {:noreply, assign(socket, diagnostics_open: false)}
   end
 
   # Extension compilation and git operations run one at a time in supervised
@@ -569,12 +587,9 @@ defmodule CatalystWeb.ShellLive do
   end
 
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{assigns: %{session_ref: ref}} = socket) do
-    unsubscribe_session(socket.assigns.session_id)
-
     socket =
       socket
-      |> assign(session_ref: nil, session_id: nil, session_pid: nil, running: false)
-      |> SessionLifecycle.attach_or_start()
+      |> SessionLifecycle.after_exit()
       |> RunDiagnostics.preview()
       |> refresh_shell_chrome()
       |> maybe_refresh_panel()
@@ -657,6 +672,24 @@ defmodule CatalystWeb.ShellLive do
     end
   end
 
+  defp start_thread(socket, cwd) do
+    socket
+    |> assign(diagnostics_open: false)
+    |> SessionLifecycle.start_in(cwd)
+    |> RunDiagnostics.preview()
+    |> refresh_shell_chrome()
+    |> maybe_refresh_panel()
+  end
+
+  defp close_thread(socket, id) do
+    socket
+    |> assign(diagnostics_open: false)
+    |> SessionLifecycle.close(id)
+    |> RunDiagnostics.preview()
+    |> refresh_shell_chrome()
+    |> maybe_refresh_panel()
+  end
+
   defp maybe_refresh_after_event(socket, %Event.ContextStatus{}) do
     RunDiagnostics.refresh(socket, preserve_status: true)
   end
@@ -670,13 +703,11 @@ defmodule CatalystWeb.ShellLive do
     |> maybe_refresh_panel()
   end
 
-  defp maybe_refresh_after_event(socket, _event), do: socket
-
-  defp unsubscribe_session(nil), do: :ok
-
-  defp unsubscribe_session(id) do
-    Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
+  defp maybe_refresh_after_event(socket, %Event.MessageEnd{message: message}) do
+    SessionLifecycle.maybe_title(socket, message)
   end
+
+  defp maybe_refresh_after_event(socket, _event), do: socket
 
   defp page_path("chat"), do: ~p"/"
   defp page_path(page), do: ~p"/#{page}"

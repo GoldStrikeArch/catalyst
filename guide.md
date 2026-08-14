@@ -101,7 +101,7 @@ is temporarily unavailable, Catalyst's bundled fallback includes the GPT-5.6 fam
 | `gpt-5.6-luna` | Fast, affordable coding work | low, medium, high, xhigh, max | medium | Yes |
 
 The bundled Codex metadata gives each model a 272,000-token working context. A newer live catalog
-always wins when available. Changing the model or effort in the header configures the next run
+always wins when available. Changing the model or effort in the composer bar configures the next run
 without discarding the current transcript; **Fast** sends the subscription's priority service tier
 and increases usage.
 

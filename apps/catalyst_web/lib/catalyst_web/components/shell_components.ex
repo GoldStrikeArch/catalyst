@@ -3,9 +3,9 @@ defmodule CatalystWeb.ShellComponents do
   Rendering for the persistent application shell around runtime-registered pages.
 
   The LiveView owns events and state transitions; this module owns shell chrome,
-  Codex controls, extension recovery status, and delegation to the live UI
-  registry. Keeping it stateless makes markup hot-swappable without moving
-  process ownership out of `CatalystWeb.ShellLive`.
+  the project/thread sidebar, Codex controls, extension recovery status, and
+  delegation to the live UI registry. Keeping it stateless makes markup
+  hot-swappable without moving process ownership out of `CatalystWeb.ShellLive`.
   """
 
   use CatalystWeb, :html
@@ -15,9 +15,9 @@ defmodule CatalystWeb.ShellComponents do
   @doc """
   Renders the complete shell around the currently selected page.
 
-  Expects `@codex_catalog`, `@selected_codex_entry`, and `@shell_pages` to be
-  assigned by `CatalystWeb.ShellLive` at its refresh points — they are not
-  recomputed per render.
+  Expects `@codex_catalog`, `@selected_codex_entry`, `@shell_pages`, and
+  `@thread_sidebar` to be assigned by `CatalystWeb.ShellLive` at its refresh
+  points — they are not recomputed per render.
   """
   @spec render(map()) :: Phoenix.LiveView.Rendered.t()
   def render(assigns) do
@@ -40,156 +40,52 @@ defmodule CatalystWeb.ShellComponents do
         data-session-id={@session_id || ""}
         class="flex h-screen flex-col bg-neutral-50 dark:bg-neutral-900"
       >
-        <%!-- relative + z-40: the header must own a stacking context above the
-          page content, or the absolutely-positioned diagnostics popover paints
-          underneath later siblings (main renders after the header).
-
-          The status and control regions use separate grid tracks. Below 2xl
-          they stack, giving the fixed-width run controls a full row; above 2xl
-          they share the row. This keeps either region from painting through
-          the other when desktop windows are narrower than their contents. --%>
         <header
           id="shell-header"
-          class="relative z-40 grid min-h-12 grid-cols-1 items-center gap-x-3 gap-y-1.5 border-b border-neutral-200 bg-neutral-50 px-3 py-1.5 2xl:grid-cols-[minmax(0,1fr)_auto] dark:border-white/10 dark:bg-neutral-900"
+          class="relative z-40 flex min-h-12 shrink-0 items-center gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-1.5 dark:border-white/10 dark:bg-neutral-900"
         >
-          <div id="shell-header-status" class="flex min-w-0 items-center gap-2">
-            <span :if={@running} class="flex items-center gap-1" aria-label="Agent running">
-              <span class="size-1.5 animate-pulse rounded-full bg-indigo-500"></span>
-              <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-150"></span>
-              <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-300"></span>
-            </span>
-
-            <nav :if={length(@shell_pages) > 1} id="shell-page-nav" class="flex items-center gap-1">
-              <.link
-                :for={page <- @shell_pages}
-                id={"page-nav-#{page.path}"}
-                patch={~p"/#{page.path}"}
-                class={[
-                  "rounded-full px-3 py-1 text-xs font-medium transition",
-                  @page == page.path &&
-                    "bg-neutral-200/70 text-neutral-900 dark:bg-white/10 dark:text-white",
-                  @page != page.path &&
-                    "text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/5 dark:hover:text-white"
-                ]}
-              >
-                {page.label}
-              </.link>
-            </nav>
-
-            <span
-              id="header-cwd"
-              class="ml-2 min-w-0 flex-1 truncate font-mono text-xs text-neutral-400 dark:text-neutral-500"
-              title={"#{@cwd} — change with /cd <path>"}
-            >
-              {short_cwd(@cwd)}
-            </span>
-
-            <.context_meter :if={@context_status} status={@context_status} />
-            <.run_diagnostics
-              prompt={@diagnostic_prompt}
-              workflow={@diagnostic_workflow}
-              context={@diagnostic_context}
-              preview={@prompt_preview}
-              open={@diagnostics_open}
-            />
-          </div>
-
-          <div
-            id="shell-header-controls"
-            class="flex w-full min-w-0 flex-wrap items-center gap-1.5 sm:justify-end 2xl:w-auto 2xl:justify-self-end"
+          <button
+            id="sidebar-toggle"
+            type="button"
+            phx-click="toggle_sidebar"
+            aria-pressed={to_string(@ui_prefs.sidebar)}
+            aria-controls="shell-sidebar"
+            title={if(@ui_prefs.sidebar, do: "Hide sidebar", else: "Show sidebar")}
+            class="flex size-8 shrink-0 items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
           >
-            {PageRenderer.render_components(:header_extra, assigns)}
+            <.icon name="hero-bars-3" class="size-4" />
+          </button>
 
-            <button
-              id="quiet-toggle"
-              type="button"
-              phx-click="toggle_quiet"
-              title="Quiet mode: hide tool calls/results and thinking (display only)"
-              class={quiet_button_class(@ui_prefs.quiet)}
+          <span :if={@running} class="flex items-center gap-1" aria-label="Agent running">
+            <span class="size-1.5 animate-pulse rounded-full bg-indigo-500"></span>
+            <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-150"></span>
+            <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-300"></span>
+          </span>
+
+          <nav
+            :if={length(@shell_pages) > 1}
+            id="shell-page-nav"
+            class="flex min-w-0 items-center gap-1"
+          >
+            <.link
+              :for={page <- @shell_pages}
+              id={"page-nav-#{page.path}"}
+              patch={~p"/#{page.path}"}
+              class={[
+                "rounded-full px-3 py-1 text-xs font-medium transition",
+                @page == page.path &&
+                  "bg-neutral-200/70 text-neutral-900 dark:bg-white/10 dark:text-white",
+                @page != page.path &&
+                  "text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/5 dark:hover:text-white"
+              ]}
             >
-              <.icon name="hero-eye-slash" class="size-3.5" /> Quiet
-            </button>
+              {page.label}
+            </.link>
+          </nav>
 
-            <button
-              id="computer-toggle"
-              type="button"
-              phx-click="toggle_computer_use"
-              aria-pressed={to_string(@machine_prefs.computer_use)}
-              title="Computer use: let the agent see the screen and drive this machine. Full access, no sandbox — applies to the next run and is never inherited by subagents."
-              class={computer_button_class(@machine_prefs.computer_use)}
-            >
-              <.icon name="hero-computer-desktop" class="size-3.5" /> Computer
-            </button>
+          {PageRenderer.render_components(:header_extra, assigns)}
 
-            <%!-- Hidden while only the default chain exists (a one-option
-              select is noise); a non-default selection keeps it visible even
-              when its workflow vanished, so the unavailable state stays
-              recoverable from the header. --%>
-            <.form
-              :if={show_workflow_picker?(@workflow_options, @workflow_prefs)}
-              for={@workflow_form}
-              id="workflow-form"
-              phx-change="select_workflow"
-              class="m-0 flex items-center"
-            >
-              <.input
-                field={@workflow_form[:workflow]}
-                id="workflow-select"
-                type="select"
-                options={workflow_select_options(@workflow_options)}
-                container_class="m-0"
-                class={codex_select_class()}
-                title="Agent workflow (applies to the next run)"
-              />
-            </.form>
-
-            <div
-              id="codex-control-group"
-              class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
-            >
-              <.form
-                for={@codex_form}
-                id="codex-opts"
-                phx-change="codex_opts"
-                class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
-              >
-                <.input
-                  field={@codex_form[:model]}
-                  type="select"
-                  options={Enum.map(@codex_catalog, &{&1.name, &1.id})}
-                  container_class="m-0"
-                  class={codex_select_class()}
-                  title="Codex model"
-                />
-                <.input
-                  field={@codex_form[:effort]}
-                  type="select"
-                  options={@selected_codex_entry.efforts}
-                  container_class="m-0"
-                  class={codex_select_class()}
-                  title="Reasoning effort"
-                />
-                <.input
-                  field={@codex_form[:transport]}
-                  type="select"
-                  options={[{"auto", "auto"}, {"ws", "websocket"}, {"sse", "sse"}]}
-                  container_class="m-0"
-                  class={codex_select_class()}
-                  title="Transport: auto = websocket with SSE fallback"
-                />
-              </.form>
-              <button
-                :if={@selected_codex_entry.fast?}
-                id="codex-fast-toggle"
-                type="button"
-                phx-click="codex_fast"
-                title="Fast mode (priority service tier): ~1.5x speed, increased usage"
-                class={fast_button_class(@codex_prefs.fast)}
-              >
-                ⚡ Fast
-              </button>
-            </div>
-
+          <div class="ml-auto flex shrink-0 items-center gap-1.5">
             <Layouts.theme_toggle />
 
             <%= if @logged_in do %>
@@ -222,15 +118,6 @@ defmodule CatalystWeb.ShellComponents do
                 finish in your browser…
               </span>
             <% end %>
-
-            <button
-              id="new-session-button"
-              class="rounded-full px-3 py-1.5 text-xs font-medium text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
-              phx-click="new_session"
-              type="button"
-            >
-              New
-            </button>
           </div>
         </header>
 
@@ -244,9 +131,371 @@ defmodule CatalystWeb.ShellComponents do
           (disable or roll back the offender, then load again), or ask the agent to run <code class="font-mono">reload_extensions</code>.
         </div>
 
-        {PageRenderer.render(assigns)}
+        <div class="flex min-h-0 flex-1">
+          <.sidebar sidebar={@thread_sidebar} open?={@ui_prefs.sidebar} root={assigns} />
+
+          <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div class={[
+              "min-h-0 flex-1",
+              @page == "chat" && "flex flex-col",
+              @page != "chat" && "overflow-y-auto"
+            ]}>
+              {PageRenderer.render(assigns)}
+            </div>
+
+            <footer
+              id="shell-footer"
+              class="relative z-30 shrink-0 border-t border-neutral-200 bg-neutral-50 dark:border-white/10 dark:bg-neutral-900"
+            >
+              <.file_search_popover :if={@page == "chat"} file_search={@file_search} />
+              <.composer :if={@page == "chat"} {assigns} />
+              <.run_bar
+                cwd={@cwd}
+                context_status={@context_status}
+                diagnostic_prompt={@diagnostic_prompt}
+                diagnostic_workflow={@diagnostic_workflow}
+                diagnostic_context={@diagnostic_context}
+                prompt_preview={@prompt_preview}
+                diagnostics_open={@diagnostics_open}
+                ui_prefs={@ui_prefs}
+                machine_prefs={@machine_prefs}
+                workflow_form={@workflow_form}
+                workflow_options={@workflow_options}
+                workflow_prefs={@workflow_prefs}
+                codex_form={@codex_form}
+                codex_catalog={@codex_catalog}
+                selected_codex_entry={@selected_codex_entry}
+                codex_prefs={@codex_prefs}
+              />
+            </footer>
+          </div>
+        </div>
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :sidebar, :map, required: true
+  attr :open?, :boolean, required: true
+  attr :root, :map, required: true
+
+  defp sidebar(assigns) do
+    ~H"""
+    <aside
+      :if={@open?}
+      id="shell-sidebar"
+      class="flex w-60 shrink-0 flex-col overflow-y-auto border-r border-neutral-200 bg-neutral-100/70 dark:border-white/10 dark:bg-neutral-950/40"
+    >
+      {PageRenderer.render_components(:sidebar, @root)}
+
+      <section id="sidebar-projects" class="px-2 pb-2 pt-3">
+        <p class="mb-1 px-2 text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+          Projects
+        </p>
+
+        <p
+          :if={@sidebar.projects == []}
+          class="px-2 py-3 text-xs text-neutral-400 dark:text-neutral-500"
+        >
+          No threads yet
+        </p>
+
+        <div :for={project <- @sidebar.projects} id={project.id} class="mb-1">
+          <div class="flex items-center gap-1 rounded-md px-2 py-1">
+            <.icon name="hero-folder" class="size-3.5 shrink-0 text-neutral-400" />
+            <span class="min-w-0 flex-1 truncate text-xs font-medium text-neutral-700 dark:text-neutral-200">
+              {project.label}
+            </span>
+          </div>
+
+          <div
+            :for={thread <- project.threads}
+            id={"thread-#{thread.id}"}
+            class={[
+              "flex items-center gap-1 rounded-md py-0.5 pl-6 pr-1",
+              thread.current? && "bg-neutral-200/80 dark:bg-white/10",
+              !thread.current? && "hover:bg-neutral-200/50 dark:hover:bg-white/5"
+            ]}
+          >
+            <button
+              id={"switch-thread-#{thread.id}"}
+              type="button"
+              phx-click="switch_session"
+              phx-value-id={thread.id}
+              class={[
+                "flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left text-xs transition",
+                thread.current? && "text-neutral-900 dark:text-white",
+                !thread.current? &&
+                  "text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200"
+              ]}
+            >
+              <span class={[
+                "size-1.5 shrink-0 rounded-full",
+                thread.live? && "bg-emerald-500/80",
+                !thread.live? && "bg-neutral-300 dark:bg-neutral-600"
+              ]}>
+              </span>
+              <span class="min-w-0 truncate">{thread.title}</span>
+            </button>
+            <button
+              id={"close-thread-#{thread.id}"}
+              type="button"
+              phx-click="close_session"
+              phx-value-id={thread.id}
+              title="Close thread"
+              class="rounded p-0.5 text-neutral-400 transition hover:bg-neutral-300/70 hover:text-neutral-800 dark:hover:bg-white/10 dark:hover:text-white"
+            >
+              <.icon name="hero-x-mark" class="size-3" />
+            </button>
+          </div>
+        </div>
+      </section>
+    </aside>
+    """
+  end
+
+  attr :file_search, :any, default: nil
+
+  defp file_search_popover(assigns) do
+    ~H"""
+    <div
+      :if={@file_search}
+      id="file-search-results"
+      class="border-b border-neutral-200 bg-neutral-50 px-4 py-2 dark:border-white/10 dark:bg-neutral-900"
+    >
+      <div class="mx-auto max-w-5xl">
+        <p class="text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+          <%= if @file_search.results == [] do %>
+            no files match “@{@file_search.query}”
+          <% else %>
+            files matching “@{@file_search.query}” — Enter picks the first
+          <% end %>
+        </p>
+        <div class="mt-1 flex flex-col">
+          <button
+            :for={r <- @file_search.results}
+            type="button"
+            phx-click="pick_file"
+            phx-value-label={r.label}
+            phx-value-path={r.path}
+            class="flex items-baseline gap-3 rounded-lg px-2 py-1 text-left text-xs transition hover:bg-neutral-200/50 dark:hover:bg-white/10"
+          >
+            <code class="shrink-0 font-mono font-semibold text-neutral-900 dark:text-neutral-100">
+              {r.label}
+            </code>
+            <span class="truncate font-mono text-neutral-400 dark:text-neutral-500">{r.path}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp composer(assigns) do
+    ~H"""
+    <.form
+      for={@chat_form}
+      id="chat-form"
+      phx-submit="send"
+      phx-change="typing"
+      phx-hook="PasteImages"
+      class="px-4 pt-3"
+    >
+      <div
+        :if={@uploads.image.entries != []}
+        class="mx-auto mb-2 flex max-w-5xl flex-wrap items-center gap-2"
+      >
+        <div :for={entry <- @uploads.image.entries} class="relative" data-image-entry>
+          <.live_img_preview
+            entry={entry}
+            class="h-16 w-16 rounded-lg border border-neutral-200 object-cover dark:border-white/10"
+          />
+          <button
+            type="button"
+            phx-click="cancel_image"
+            phx-value-ref={entry.ref}
+            aria-label="remove image"
+            class="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full bg-neutral-950 text-xs text-white shadow dark:bg-white dark:text-neutral-950"
+          >
+            ×
+          </button>
+          <span
+            :if={not entry.done?}
+            class="absolute inset-x-0 bottom-0 rounded-b-lg bg-neutral-950/70 text-center text-[0.6rem] text-white"
+          >
+            {entry.progress}%
+          </span>
+          <p :for={err <- upload_errors(@uploads.image, entry)} class="text-xs text-red-500">
+            {upload_error_label(err)}
+          </p>
+        </div>
+        <p :for={err <- upload_errors(@uploads.image)} class="text-xs text-red-500">
+          {upload_error_label(err)}
+        </p>
+      </div>
+
+      <div class="mx-auto max-w-5xl">
+        <div class="flex items-center gap-2 rounded-2xl border border-neutral-300 bg-white py-1.5 pl-2 pr-1.5 transition focus-within:border-neutral-400 dark:border-white/15 dark:bg-white/5 dark:focus-within:border-white/30">
+          <.input
+            field={@chat_form[:message]}
+            type="text"
+            autocomplete="off"
+            phx-debounce="150"
+            placeholder="Ask Catalyst…  (@ references a file, paste an image to attach it)"
+            container_class="m-0 min-w-0 flex-1"
+            class="w-full border-0 bg-transparent px-2 py-1.5 text-sm text-neutral-900 outline-none placeholder:text-neutral-400 focus:ring-0 dark:text-white dark:placeholder:text-neutral-500"
+          />
+          <.live_file_input upload={@uploads.image} class="hidden" />
+          <button
+            :if={!@running}
+            id="chat-send"
+            type="submit"
+            aria-label="Send"
+            title="Send"
+            class="flex size-8 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+          >
+            <.icon name="hero-arrow-up" class="size-4" />
+          </button>
+          <button
+            :if={@running}
+            id="chat-stop"
+            type="button"
+            phx-click="abort"
+            aria-label="Stop"
+            title="Stop the run"
+            class="flex size-8 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+          >
+            <.icon name="hero-stop-solid" class="size-3.5" />
+          </button>
+        </div>
+      </div>
+    </.form>
+    """
+  end
+
+  defp run_bar(assigns) do
+    ~H"""
+    <div
+      id="shell-run-bar"
+      class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-1.5 px-4 py-2"
+    >
+      <div id="shell-header-status" class="flex min-w-0 items-center gap-2">
+        <.icon name="hero-folder" class="size-3.5 shrink-0 text-neutral-400" />
+        <span
+          id="header-cwd"
+          class="min-w-0 truncate font-mono text-xs text-neutral-400 dark:text-neutral-500"
+          title={"#{@cwd} — change with /cd <path>"}
+        >
+          {short_cwd(@cwd)}
+        </span>
+        <button
+          id="new-session-button"
+          class="rounded-md p-1 text-neutral-400 transition hover:bg-neutral-200/60 hover:text-neutral-800 dark:hover:bg-white/10 dark:hover:text-white"
+          phx-click="new_session"
+          type="button"
+          title="New thread"
+        >
+          <.icon name="hero-plus" class="size-3.5" />
+        </button>
+        <.context_meter :if={@context_status} status={@context_status} />
+      </div>
+
+      <div
+        id="shell-header-controls"
+        class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5"
+      >
+        <button
+          id="quiet-toggle"
+          type="button"
+          phx-click="toggle_quiet"
+          title="Quiet mode: hide tool calls/results and thinking (display only)"
+          class={quiet_button_class(@ui_prefs.quiet)}
+        >
+          <.icon name="hero-eye-slash" class="size-3.5" /> Quiet
+        </button>
+
+        <button
+          id="computer-toggle"
+          type="button"
+          phx-click="toggle_computer_use"
+          aria-pressed={to_string(@machine_prefs.computer_use)}
+          title="Computer use: let the agent see the screen and drive this machine. Full access, no sandbox — applies to the next run and is never inherited by subagents."
+          class={computer_button_class(@machine_prefs.computer_use)}
+        >
+          <.icon name="hero-computer-desktop" class="size-3.5" /> Computer
+        </button>
+
+        <.form
+          :if={show_workflow_picker?(@workflow_options, @workflow_prefs)}
+          for={@workflow_form}
+          id="workflow-form"
+          phx-change="select_workflow"
+          class="m-0 flex items-center"
+        >
+          <.input
+            field={@workflow_form[:workflow]}
+            id="workflow-select"
+            type="select"
+            options={workflow_select_options(@workflow_options)}
+            container_class="m-0"
+            class={codex_select_class()}
+            title="Agent workflow (applies to the next run)"
+          />
+        </.form>
+
+        <div id="codex-control-group" class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
+          <.form
+            for={@codex_form}
+            id="codex-opts"
+            phx-change="codex_opts"
+            class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
+          >
+            <.input
+              field={@codex_form[:model]}
+              type="select"
+              options={Enum.map(@codex_catalog, &{&1.name, &1.id})}
+              container_class="m-0"
+              class={codex_select_class()}
+              title="Codex model"
+            />
+            <.input
+              field={@codex_form[:effort]}
+              type="select"
+              options={@selected_codex_entry.efforts}
+              container_class="m-0"
+              class={codex_select_class()}
+              title="Reasoning effort"
+            />
+            <.input
+              field={@codex_form[:transport]}
+              type="select"
+              options={[{"auto", "auto"}, {"ws", "websocket"}, {"sse", "sse"}]}
+              container_class="m-0"
+              class={codex_select_class()}
+              title="Transport: auto = websocket with SSE fallback"
+            />
+          </.form>
+          <button
+            :if={@selected_codex_entry.fast?}
+            id="codex-fast-toggle"
+            type="button"
+            phx-click="codex_fast"
+            title="Fast mode (priority service tier): ~1.5x speed, increased usage"
+            class={fast_button_class(@codex_prefs.fast)}
+          >
+            ⚡ Fast
+          </button>
+        </div>
+
+        <.run_diagnostics
+          prompt={@diagnostic_prompt}
+          workflow={@diagnostic_workflow}
+          context={@diagnostic_context}
+          preview={@prompt_preview}
+          open={@diagnostics_open}
+        />
+      </div>
+    </div>
     """
   end
 
@@ -266,9 +515,6 @@ defmodule CatalystWeb.ShellComponents do
     length(options) > 1 or prefs.workflow != nil
   end
 
-  # The default row maps to the empty select value ("no explicit workflow"),
-  # named rows to their names. Provenance rides in the label so extension- or
-  # config-supplied workflows are distinguishable at a glance.
   defp workflow_select_options(options) do
     Enum.map(options, fn
       %{name: :default, source: source} -> {"default" <> workflow_suffix(source), ""}
@@ -300,7 +546,7 @@ defmodule CatalystWeb.ShellComponents do
     ~H"""
     <div
       id="context-meter"
-      class="ml-2 hidden shrink-0 items-center gap-2 whitespace-nowrap rounded-full border border-neutral-200 px-2.5 py-1 text-[0.65rem] text-neutral-500 sm:flex dark:border-white/10 dark:text-neutral-400"
+      class="hidden shrink-0 items-center gap-2 whitespace-nowrap rounded-full border border-neutral-200 px-2.5 py-1 text-[0.65rem] text-neutral-500 sm:flex dark:border-white/10 dark:text-neutral-400"
       title={"Context threshold source: #{@source_label}"}
     >
       <.icon
@@ -353,7 +599,7 @@ defmodule CatalystWeb.ShellComponents do
       :if={@prompt || @workflow || @context || @preview == :loading || match?({:error, _}, @preview)}
       id="run-diagnostics"
       data-open={to_string(@open)}
-      class="group relative ml-1 hidden shrink-0 md:block"
+      class="relative ml-1 hidden shrink-0 md:block"
     >
       <button
         id="run-diagnostics-toggle"
@@ -376,30 +622,40 @@ defmodule CatalystWeb.ShellComponents do
 
       <div
         :if={@open}
-        id="run-diagnostics-panel"
-        class="absolute left-0 top-[calc(100%+0.5rem)] z-50 w-[min(38rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-neutral-200 bg-white text-xs shadow-xl shadow-neutral-950/10 dark:border-white/10 dark:bg-neutral-800 dark:shadow-black/40"
+        id="run-diagnostics-backdrop"
+        class="fixed inset-0 z-40"
+        phx-click="close_diagnostics"
       >
-        <div class="border-b border-neutral-200/70 px-4 py-3 dark:border-white/10">
+      </div>
+
+      <div
+        :if={@open}
+        id="run-diagnostics-panel"
+        phx-window-keydown="close_diagnostics"
+        phx-key="Escape"
+        class="fixed bottom-16 right-4 z-50 flex max-h-[min(70vh,36rem)] w-[min(38rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white text-xs shadow-xl shadow-neutral-950/10 dark:border-white/10 dark:bg-neutral-800 dark:shadow-black/40"
+      >
+        <div class="shrink-0 border-b border-neutral-200/70 px-4 py-3 dark:border-white/10">
           <p class="font-semibold text-neutral-900 dark:text-white">Run diagnostics</p>
-          <p class="mt-0.5 text-[0.65rem] text-neutral-400 dark:text-neutral-500">
+          <p class="mt-0.5 text-[0.65rem] leading-4 text-neutral-400 dark:text-neutral-500">
             Read-only resolution data; it is never reused as configuration.
           </p>
         </div>
 
-        <div class="max-h-[70vh] space-y-4 overflow-y-auto p-4">
+        <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
           <section :if={@context} id="model-context-diagnostics">
             <h3 class="font-semibold text-neutral-700 dark:text-neutral-200">Model context</h3>
             <dl class="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.7rem]">
               <dt class="text-neutral-400">model</dt>
-              <dd class="font-mono text-neutral-700 dark:text-neutral-300">
+              <dd class="break-all font-mono text-neutral-700 dark:text-neutral-300">
                 {@context[:model_id] || "—"}
               </dd>
               <dt class="text-neutral-400">API</dt>
-              <dd class="font-mono text-neutral-700 dark:text-neutral-300">
+              <dd class="break-all font-mono text-neutral-700 dark:text-neutral-300">
                 {@context[:api] || "—"}
               </dd>
               <dt class="text-neutral-400">window</dt>
-              <dd class="font-mono text-neutral-700 dark:text-neutral-300">
+              <dd class="break-all font-mono text-neutral-700 dark:text-neutral-300">
                 {format_threshold(@context[:context_window])} · {source_label(
                   @context[:context_window_source]
                 )}
@@ -439,7 +695,7 @@ defmodule CatalystWeb.ShellComponents do
               id="resolved-prompt-text"
               readonly
               rows="10"
-              class="mt-3 w-full resize-y rounded-xl border border-neutral-200 bg-neutral-50 p-3 font-mono text-[0.7rem] leading-5 text-neutral-700 outline-none dark:border-white/10 dark:bg-white/5 dark:text-neutral-300"
+              class="mt-3 w-full resize-y whitespace-pre-wrap break-words rounded-xl border border-neutral-200 bg-neutral-50 p-3 font-mono text-[0.7rem] leading-5 text-neutral-700 outline-none dark:border-white/10 dark:bg-white/5 dark:text-neutral-300"
             >{@prompt.text}</textarea>
           </section>
 
@@ -467,9 +723,6 @@ defmodule CatalystWeb.ShellComponents do
   defp metadata_value(%{} = metadata, key), do: Map.get(metadata, key)
   defp metadata_value(_metadata, _key), do: nil
 
-  # The header shows only the tail of the working directory (the full path is
-  # in the tooltip and the empty state) — a full absolute path starves the
-  # rest of the header row of space.
   defp short_cwd(cwd) when is_binary(cwd) do
     case Path.split(cwd) do
       parts when length(parts) > 3 -> "…/" <> (parts |> Enum.take(-2) |> Path.join())
@@ -500,12 +753,16 @@ defmodule CatalystWeb.ShellComponents do
   defp format_threshold(value) when is_integer(value), do: format_tokens(value)
   defp format_threshold(value), do: to_string(value)
 
-  # Single boot-status presenter — core owns the sum type's wording.
   defp boot_status_heading(status),
     do: status |> Catalyst.Extensions.describe_boot_status() |> elem(0)
 
   defp boot_status_reason(status),
     do: status |> Catalyst.Extensions.describe_boot_status() |> elem(1)
+
+  defp upload_error_label(:too_large), do: "image too large (max 5MB)"
+  defp upload_error_label(:not_accepted), do: "unsupported image type"
+  defp upload_error_label(:too_many_files), do: "too many images (max 4)"
+  defp upload_error_label(other), do: to_string(other)
 
   defp codex_select_class do
     "cursor-pointer rounded-full border border-neutral-200 bg-transparent px-2 py-1 text-xs " <>
@@ -534,8 +791,6 @@ defmodule CatalystWeb.ShellComponents do
     ]
   end
 
-  # Armed computer use means full, unsandboxed machine control, so the active
-  # state is deliberately louder than Quiet's neutral pill.
   defp computer_button_class(active?) do
     [
       "flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold transition",

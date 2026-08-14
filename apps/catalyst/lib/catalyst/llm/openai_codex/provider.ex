@@ -93,7 +93,7 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
 
       {:error, reason} ->
         {:error,
-         "not authenticated (#{inspect(reason)}). Sign in to ChatGPT from the header " <>
+         "not authenticated (#{inspect(reason)}). Sign in to ChatGPT from the sign-in button " <>
            "(or run Catalyst.Auth.login_openai_codex/0)."}
     end
   end

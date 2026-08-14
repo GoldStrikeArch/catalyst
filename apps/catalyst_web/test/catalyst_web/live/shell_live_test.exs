@@ -55,7 +55,7 @@ defmodule CatalystWeb.ShellLiveTest do
     {:ok, view, _html} = live(conn, "/broken")
     refute has_element?(view, "#catalyst-shell", "BROKEN-PAGE")
     assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
-    assert has_element?(view, "#chat-form")
+    assert has_element?(view, "#messages")
   end
 
   test "a custom message renderer overrides the built-in tool card", %{conn: conn} do
@@ -82,16 +82,17 @@ defmodule CatalystWeb.ShellLiveTest do
     assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
   end
 
-  test "the shell header keeps status and wrapping controls in separate regions", %{conn: conn} do
+  test "the shell keeps page nav in the header and run controls in the footer", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 
-    assert has_element?(view, "#shell-header.grid")
-    assert has_element?(view, "#shell-header > #shell-header-status.min-w-0")
-    assert has_element?(view, "#shell-header-status #header-cwd.min-w-0.flex-1")
-    assert has_element?(view, "#shell-header > #shell-header-controls.flex-wrap")
-    assert has_element?(view, "#shell-header-controls #codex-control-group.flex-wrap")
-    assert has_element?(view, "#codex-control-group #codex-opts.flex-wrap")
-    assert has_element?(view, "#shell-header-controls #new-session-button")
+    assert has_element?(view, "#shell-header")
+    assert has_element?(view, "#sidebar-toggle")
+    assert has_element?(view, "#shell-sidebar")
+    assert has_element?(view, "#shell-footer")
+    assert has_element?(view, "#shell-run-bar #header-cwd")
+    assert has_element?(view, "#shell-header-controls #codex-control-group")
+    assert has_element?(view, "#codex-control-group #codex-opts")
+    assert has_element?(view, "#new-session-button")
   end
 
   test "the chat starts empty and renders messages through a LiveView stream", %{conn: conn} do

@@ -16,7 +16,10 @@ defmodule Catalyst.Session.Catalog do
   via `Catalyst.Files.AtomicWrite`:
 
       {"version": 1,
-       "entries": [{"id": "…", "cwd": "…", "last_used_at": "2026-07-23T…Z"}]}
+       "entries": [{"id": "…", "cwd": "…", "title": "…", "last_used_at": "2026-07-23T…Z"}]}
+
+  `title` is optional. Older catalogs without it still decode; a missing title
+  displays as `"New thread"`.
 
   Entries whose session transcript no longer exists on disk are pruned on
   every read and rewrite. Reads of a corrupt catalog return tagged errors;
@@ -34,8 +37,13 @@ defmodule Catalyst.Session.Catalog do
 
   @version 1
 
-  @typedoc "One catalog entry (`last_used_at` is UTC ISO 8601)."
-  @type entry :: %{id: String.t(), cwd: String.t(), last_used_at: String.t()}
+  @typedoc "One catalog entry (`last_used_at` is UTC ISO 8601; `title` may be nil)."
+  @type entry :: %{
+          id: String.t(),
+          cwd: String.t(),
+          last_used_at: String.t(),
+          title: String.t() | nil
+        }
 
   @typedoc "Tagged failures shared by the read/write API."
   @type error ::
@@ -56,12 +64,88 @@ defmodule Catalyst.Session.Catalog do
   Upsert `{id, cwd}` as the most recently used session and persist the pruned
   catalog. An unreadable or corrupt existing catalog is logged and rebuilt
   rather than propagated, so one bad write can never disable resume forever.
+
+  A previous title for `id` is kept.
   """
   @spec remember(String.t(), String.t()) :: :ok | {:error, error()}
   def remember(id, cwd) when is_binary(id) and is_binary(cwd) do
     entries = readable_entries()
-    persist([new_entry(id, cwd) | Enum.reject(entries, &(&1.id == id))])
+    previous = Enum.find(entries, &(&1.id == id))
+    persist([new_entry(id, cwd, title_of(previous)) | Enum.reject(entries, &(&1.id == id))])
   end
+
+  @doc """
+  Set `title` on an existing entry without changing its recency.
+
+  A blank title is stored as `nil`. Returns `{:error, :not_found}` when the
+  id is not in the catalog.
+  """
+  @spec put_title(String.t(), String.t() | nil) :: :ok | {:error, :not_found} | {:error, error()}
+  def put_title(id, title) when is_binary(id) do
+    case entries() do
+      {:ok, entries} ->
+        case Enum.any?(entries, &(&1.id == id)) do
+          true ->
+            persist(
+              Enum.map(entries, fn
+                %{id: ^id} = entry -> %{entry | title: normalize_title(title)}
+                entry -> entry
+              end)
+            )
+
+          false ->
+            {:error, :not_found}
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @doc "Persist `title` only when the entry has none yet."
+  @spec put_title_if_blank(String.t(), String.t() | nil) ::
+          :ok | {:error, :not_found} | {:error, error()}
+  def put_title_if_blank(id, title) when is_binary(id) do
+    case lookup(id) do
+      {:ok, %{title: existing}} when is_binary(existing) and existing != "" ->
+        :ok
+
+      {:ok, _entry} ->
+        put_title(id, title)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @doc "Label shown for a thread: stored title, else `\"New thread\"`."
+  @spec display_title(entry() | map()) :: String.t()
+  def display_title(%{title: title}) when is_binary(title) and title != "", do: title
+  def display_title(_entry), do: "New thread"
+
+  @doc """
+  Collapse whitespace and truncate a prompt into a catalog title.
+
+  Returns `nil` for blank strings and slash commands (`/cd`, `/help`, …).
+
+      iex> Catalyst.Session.Catalog.title_from_text("  Analyze CLAUDE.md  ")
+      "Analyze CLAUDE.md"
+
+      iex> Catalyst.Session.Catalog.title_from_text("/cd /tmp")
+      nil
+  """
+  @spec title_from_text(term()) :: String.t() | nil
+  def title_from_text(text) when is_binary(text) do
+    trimmed = text |> String.trim() |> String.replace(~r/\s+/, " ")
+
+    cond do
+      trimmed == "" -> nil
+      String.starts_with?(trimmed, "/") -> nil
+      true -> string_head(trimmed, 60)
+    end
+  end
+
+  def title_from_text(_text), do: nil
 
   @doc "Remove `id` from the catalog (a missing entry is not an error)."
   @spec forget(String.t()) :: :ok | {:error, error()}
@@ -104,7 +188,24 @@ defmodule Catalyst.Session.Catalog do
 
   # ---- helpers --------------------------------------------------------------
 
-  defp new_entry(id, cwd), do: %{id: id, cwd: cwd, last_used_at: now()}
+  defp new_entry(id, cwd, title),
+    do: %{id: id, cwd: cwd, last_used_at: now(), title: normalize_title(title)}
+
+  defp title_of(%{title: title}), do: normalize_title(title)
+  defp title_of(_entry), do: nil
+
+  defp normalize_title(title) when is_binary(title) do
+    case String.trim(title) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_title(_title), do: nil
+
+  # String.slice/2 counts graphemes; a hard byte cap is enough for a label.
+  defp string_head(text, max) when byte_size(text) <= max, do: text
+  defp string_head(text, max), do: String.slice(text, 0, max)
 
   defp now do
     DateTime.utc_now() |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601()
@@ -140,8 +241,14 @@ defmodule Catalyst.Session.Catalog do
     end
   end
 
-  defp encode_entry(%{id: id, cwd: cwd, last_used_at: at}),
-    do: %{"id" => id, "cwd" => cwd, "last_used_at" => at}
+  defp encode_entry(%{id: id, cwd: cwd, last_used_at: at} = entry) do
+    base = %{"id" => id, "cwd" => cwd, "last_used_at" => at}
+
+    case entry do
+      %{title: title} when is_binary(title) and title != "" -> Map.put(base, "title", title)
+      _no_title -> base
+    end
+  end
 
   defp ensure_dir(path) do
     case path |> Path.dirname() |> File.mkdir_p() do
@@ -187,9 +294,12 @@ defmodule Catalyst.Session.Catalog do
   # each entry is independent and the transcripts remain the source of truth.
   defp decode_entries(entries) do
     for %{"id" => id, "cwd" => cwd} = entry <- entries, is_binary(id), is_binary(cwd) do
-      %{id: id, cwd: cwd, last_used_at: timestamp_of(entry)}
+      %{id: id, cwd: cwd, last_used_at: timestamp_of(entry), title: decode_title(entry)}
     end
   end
+
+  defp decode_title(%{"title" => title}) when is_binary(title) and title != "", do: title
+  defp decode_title(_entry), do: nil
 
   defp timestamp_of(%{"last_used_at" => at}) when is_binary(at), do: at
   defp timestamp_of(_entry), do: now()

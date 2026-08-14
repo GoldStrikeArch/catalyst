@@ -32,7 +32,7 @@ defmodule CatalystWeb.ShellLive.Settings do
           fast: boolean(),
           transport: String.t()
         }
-  @type ui_prefs :: %{quiet: boolean()}
+  @type ui_prefs :: %{quiet: boolean(), sidebar: boolean()}
   @type machine_prefs :: %{computer_use: boolean()}
   @type workflow_prefs :: %{workflow: String.t() | nil}
   @type workflow_option :: %{
@@ -61,7 +61,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   @doc "Loads persisted display preferences over their defaults."
   @spec load_ui() :: ui_prefs()
   def load_ui do
-    defaults = %{quiet: false}
+    defaults = %{quiet: false, sidebar: true}
 
     case :persistent_term.get(@ui_prefs_ptr, nil) do
       %{} = saved -> Map.merge(defaults, saved)
@@ -228,6 +228,14 @@ defmodule CatalystWeb.ShellLive.Settings do
   @spec toggle_quiet(socket()) :: socket()
   def toggle_quiet(socket) do
     prefs = Map.update!(socket.assigns.ui_prefs, :quiet, &(!&1))
+    persist(@ui_prefs_ptr, prefs)
+    assign(socket, ui_prefs: prefs)
+  end
+
+  @doc "Toggles and persists sidebar visibility without touching the agent session."
+  @spec toggle_sidebar(socket()) :: socket()
+  def toggle_sidebar(socket) do
+    prefs = Map.update(socket.assigns.ui_prefs, :sidebar, false, &(!&1))
     persist(@ui_prefs_ptr, prefs)
     assign(socket, ui_prefs: prefs)
   end
