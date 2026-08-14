@@ -147,8 +147,6 @@ defmodule CatalystWeb.ShellComponents do
               id="shell-footer"
               class="relative z-30 shrink-0 border-t border-neutral-200 bg-neutral-50 dark:border-white/10 dark:bg-neutral-900"
             >
-              <.file_search_popover :if={@page == "chat"} file_search={@file_search} />
-              <.composer :if={@page == "chat"} {assigns} />
               <.run_bar
                 cwd={@cwd}
                 context_status={@context_status}
@@ -257,14 +255,15 @@ defmodule CatalystWeb.ShellComponents do
 
   attr :file_search, :any, default: nil
 
-  defp file_search_popover(assigns) do
+  @doc "File-search dropdown shown above the inline draft."
+  def file_search_popover(assigns) do
     ~H"""
     <div
       :if={@file_search}
       id="file-search-results"
-      class="border-b border-neutral-200 bg-neutral-50 px-4 py-2 dark:border-white/10 dark:bg-neutral-900"
+      class="mb-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 dark:border-white/10 dark:bg-white/5"
     >
-      <div class="mx-auto max-w-5xl">
+      <div>
         <p class="text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
           <%= if @file_search.results == [] do %>
             no files match “@{@file_search.query}”
@@ -292,7 +291,8 @@ defmodule CatalystWeb.ShellComponents do
     """
   end
 
-  defp composer(assigns) do
+  @doc "Inline transcript draft. Enter sends or queues; Shift+Enter is a newline."
+  def composer(assigns) do
     ~H"""
     <.form
       for={@chat_form}
@@ -300,11 +300,11 @@ defmodule CatalystWeb.ShellComponents do
       phx-submit="send"
       phx-change="typing"
       phx-hook="PasteImages"
-      class="px-3 pt-2"
+      class="mt-2"
     >
       <div
         :if={@uploads.image.entries != []}
-        class="mx-auto mb-2 flex max-w-5xl flex-wrap items-center gap-2"
+        class="mb-2 flex flex-wrap items-center gap-2"
       >
         <div :for={entry <- @uploads.image.entries} class="relative" data-image-entry>
           <.live_img_preview
@@ -335,40 +335,40 @@ defmodule CatalystWeb.ShellComponents do
         </p>
       </div>
 
-      <div class="mx-auto max-w-5xl">
-        <div class="flex items-center gap-2 rounded-2xl border border-neutral-300 bg-white py-1.5 pl-2 pr-1.5 transition focus-within:border-neutral-400 dark:border-white/15 dark:bg-white/5 dark:focus-within:border-white/30">
-          <.input
-            field={@chat_form[:message]}
-            type="text"
-            autocomplete="off"
-            phx-debounce="150"
-            placeholder="Ask Catalyst…  (@ references a file, paste an image to attach it)"
-            container_class="m-0 min-w-0 flex-1"
-            class="w-full border-0 bg-transparent px-2 py-1.5 text-sm text-neutral-900 outline-none placeholder:text-neutral-400 focus:ring-0 dark:text-white dark:placeholder:text-neutral-500"
-          />
-          <.live_file_input upload={@uploads.image} class="hidden" />
-          <button
-            :if={!@running}
-            id="chat-send"
-            type="submit"
-            aria-label="Send"
-            title="Send"
-            class="flex size-8 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
-          >
-            <.icon name="hero-arrow-up" class="size-4" />
-          </button>
-          <button
-            :if={@running}
-            id="chat-stop"
-            type="button"
-            phx-click="abort"
-            aria-label="Stop"
-            title="Stop the run"
-            class="flex size-8 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
-          >
-            <.icon name="hero-stop-solid" class="size-3.5" />
-          </button>
-        </div>
+      <div class="flex items-end gap-1">
+        <.input
+          field={@chat_form[:message]}
+          type="textarea"
+          id="chat-input"
+          autocomplete="off"
+          phx-debounce="150"
+          phx-hook="ChatSubmit"
+          rows="1"
+          placeholder="Ask Catalyst…"
+          container_class="m-0 min-w-0 flex-1"
+          class="w-full resize-none border-0 bg-transparent px-0 py-1 text-sm leading-6 text-neutral-900 outline-none placeholder:text-neutral-400 focus:ring-0 dark:text-white dark:placeholder:text-neutral-500"
+        />
+        <.live_file_input upload={@uploads.image} class="hidden" />
+        <button
+          id="chat-send"
+          type="submit"
+          aria-label={if(@running, do: "Queue", else: "Send")}
+          title={if(@running, do: "Queue for after this run", else: "Send")}
+          class="flex size-7 shrink-0 items-center justify-center rounded-md text-neutral-400 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
+        >
+          <.icon name="hero-arrow-up" class="size-3.5" />
+        </button>
+        <button
+          :if={@running}
+          id="chat-stop"
+          type="button"
+          phx-click="abort"
+          aria-label="Stop"
+          title="Stop the run"
+          class="flex size-7 shrink-0 items-center justify-center rounded-md text-neutral-400 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
+        >
+          <.icon name="hero-stop-solid" class="size-3" />
+        </button>
       </div>
     </.form>
     """

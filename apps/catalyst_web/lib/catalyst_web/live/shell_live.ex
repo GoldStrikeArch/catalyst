@@ -237,6 +237,9 @@ defmodule CatalystWeb.ShellLive do
 
       :prompt ->
         submit_prompt(socket, text)
+
+      :queue ->
+        queue_prompt(socket, text)
     end
   end
 
@@ -641,14 +644,18 @@ defmodule CatalystWeb.ShellLive do
 
   defp submission(socket, text) do
     cond do
-      socket.assigns.running ->
-        :ignore
-
       text == "" and not ChatInput.completed_images?(socket) ->
         :ignore
 
       is_nil(socket.assigns.session_pid) ->
         {:error, "No active session — click New to start one."}
+
+      socket.assigns.running ->
+        case command_or_prompt(socket, text) do
+          :prompt -> :queue
+          {:command, _name, _argument} -> {:error, "Wait for the run to finish."}
+          other -> other
+        end
 
       true ->
         command_or_prompt(socket, text)
@@ -683,6 +690,22 @@ defmodule CatalystWeb.ShellLive do
         {:error, reason} ->
           {:noreply, put_flash(socket, :error, "Can't start a run: #{inspect(reason)}")}
       end
+    catch
+      :exit, _reason ->
+        {:noreply, put_flash(socket, :error, "Session is restarting — try again.")}
+    end
+  end
+
+  defp queue_prompt(socket, text) do
+    content = ChatInput.consume_prompt(socket, text)
+
+    try do
+      :ok = Server.follow_up(socket.assigns.session_pid, content)
+
+      {:noreply,
+       socket
+       |> ChatInput.put_text("")
+       |> assign(file_search: nil, queued: socket.assigns.queued ++ [text])}
     catch
       :exit, _reason ->
         {:noreply, put_flash(socket, :error, "Session is restarting — try again.")}

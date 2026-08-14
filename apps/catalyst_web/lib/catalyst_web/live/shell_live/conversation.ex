@@ -43,7 +43,8 @@ defmodule CatalystWeb.ShellLive.Conversation do
       tools: %{},
       replayed_tail: [],
       run_metadata: nil,
-      context_status: nil
+      context_status: nil,
+      queued: []
     )
     |> set_message_count(0)
   end
@@ -68,7 +69,8 @@ defmodule CatalystWeb.ShellLive.Conversation do
       session_opts: Map.get(snapshot, :opts, []),
       replayed_tail: replayed_tail(snapshot.messages),
       run_metadata: run_metadata,
-      context_status: metadata_context_status(run_metadata)
+      context_status: metadata_context_status(run_metadata),
+      queued: []
     )
     |> seed_streaming(snapshot.streaming_message)
   end
@@ -153,7 +155,7 @@ defmodule CatalystWeb.ShellLive.Conversation do
 
   def apply_event(%Event.AgentEnd{}, socket) do
     socket
-    |> assign(running: false, tools: %{})
+    |> assign(running: false, tools: %{}, queued: [])
     |> clear_stream_bubble()
   end
 

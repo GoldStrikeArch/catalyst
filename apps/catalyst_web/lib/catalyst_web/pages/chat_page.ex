@@ -1,12 +1,13 @@
 defmodule CatalystWeb.Pages.ChatPage do
   @moduledoc """
-  The default page: the conversation view. The composer and run controls live
-  in `CatalystWeb.ShellComponents` so they stay visible on every page.
-  Registered as the `"chat"` page in `CatalystWeb.UI.Registry` and driven by
-  `ShellLive` assigns. Reloading this module hot-swaps the transcript UI.
+  The default page: the conversation view and the inline draft. Run controls
+  stay in `CatalystWeb.ShellComponents`. Registered as the `"chat"` page in
+  `CatalystWeb.UI.Registry` and driven by `ShellLive` assigns. Reloading this
+  module hot-swaps the transcript UI.
   """
   use CatalystWeb, :html
 
+  alias CatalystWeb.ShellComponents
   alias CatalystWeb.UI.MessageRenderer
 
   def render(assigns) do
@@ -19,21 +20,13 @@ defmodule CatalystWeb.Pages.ChatPage do
         class="flex-1 overflow-y-auto px-4 py-6 sm:px-6"
       >
         <div class="mx-auto flex max-w-5xl flex-col gap-3">
-          <div
-            :if={@message_count == 0 and is_nil(@streaming)}
+          <p
+            :if={@message_count == 0 and is_nil(@streaming) and @queued == []}
             id="chat-empty-state"
-            class="mx-auto mt-32 flex w-full max-w-md flex-col items-center px-4 text-center"
+            class="truncate text-xs text-neutral-400 dark:text-neutral-500"
           >
-            <div class="mb-4 flex size-11 items-center justify-center rounded-2xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900">
-              <.icon name="hero-sparkles" class="size-5" />
-            </div>
-            <p class="text-sm font-medium text-neutral-900 dark:text-white">
-              Ask Catalyst to inspect this project.
-            </p>
-            <p class="mt-1.5 max-w-full truncate font-mono text-xs text-neutral-400 dark:text-neutral-500">
-              {@cwd}
-            </p>
-          </div>
+            Ask Catalyst to inspect this project. <span class="font-mono">{@cwd}</span>
+          </p>
 
           <div id="message-stream" phx-update="stream" class="flex flex-col gap-3">
             <div :for={{dom_id, %{msg: msg}} <- @streams.messages} id={dom_id} phx-hook="Highlight">
@@ -122,6 +115,18 @@ defmodule CatalystWeb.Pages.ChatPage do
               class="max-w-[85%] overflow-x-auto whitespace-pre-wrap rounded-lg bg-neutral-100 px-2.5 py-1.5 font-mono text-[0.65rem] leading-relaxed text-neutral-500 dark:bg-white/5 dark:text-neutral-400"
             >{t[:partial]}</pre>
           </div>
+
+          <div
+            :for={{text, index} <- Enum.with_index(@queued)}
+            id={"queued-#{index}"}
+            class="text-sm leading-6 text-neutral-400 dark:text-neutral-500"
+          >
+            <span class="mr-2 text-[10px] font-medium uppercase tracking-wide">Queued</span>
+            {text}
+          </div>
+
+          <ShellComponents.file_search_popover file_search={@file_search} />
+          <ShellComponents.composer {assigns} />
         </div>
       </main>
 

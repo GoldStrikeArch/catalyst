@@ -208,6 +208,32 @@ const Hooks = {
   // Pasted screenshots: clipboard images anywhere in the chat form feed the
   // LiveView :image upload (chips render above the input; send attaches them
   // to the prompt as image content blocks).
+  // Enter submits (or queues) the inline draft; Shift+Enter inserts a newline.
+  ChatSubmit: {
+    mounted() {
+      this.resize = () => {
+        this.el.style.height = "auto";
+        this.el.style.height = `${this.el.scrollHeight}px`;
+      };
+      this.onKey = (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          this.el.form?.requestSubmit();
+        }
+      };
+      this.el.addEventListener("input", this.resize);
+      this.el.addEventListener("keydown", this.onKey);
+      this.resize();
+    },
+    updated() {
+      this.resize();
+    },
+    destroyed() {
+      this.el.removeEventListener("input", this.resize);
+      this.el.removeEventListener("keydown", this.onKey);
+    },
+  },
+
   PasteImages: {
     mounted() {
       this.el.addEventListener("paste", (e) => {

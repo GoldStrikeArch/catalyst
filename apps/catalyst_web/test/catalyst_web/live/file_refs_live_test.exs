@@ -47,7 +47,7 @@ defmodule CatalystWeb.FileRefsLiveTest do
 
     # The trailing @query is replaced by the short label in the input, and the
     # dropdown closes.
-    assert has_element?(view, ~s(#chat-form input[value="look at @session/server.ex "]))
+    assert has_element?(view, "#chat-form textarea", "look at @session/server.ex")
     refute has_element?(view, "#file-search-results")
   end
 
@@ -84,7 +84,7 @@ defmodule CatalystWeb.FileRefsLiveTest do
     |> render_submit()
 
     # Picked, not sent: the label landed in the input and no run started.
-    assert has_element?(view, ~s(#chat-form input[value="see @qwe/server.ex "]))
+    assert has_element?(view, "#chat-form textarea", "see @qwe/server.ex")
     assert has_element?(view, "#chat-empty-state")
   end
 end

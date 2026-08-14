@@ -141,6 +141,20 @@ defmodule CatalystWeb.ShellLiveTest do
     assert has_element?(view, "#message-stream", "final")
   end
 
+  test "a prompt submitted while a run is active is queued", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+
+    send(view.pid, {:agent_event, id, %Event.AgentStart{}})
+    render(view)
+
+    view |> form("#chat-form", %{"message" => "do this next"}) |> render_submit()
+
+    assert has_element?(view, "#queued-0", "do this next")
+    assert has_element?(view, "#chat-stop")
+    assert has_element?(view, "#chat-send")
+  end
+
   test "streaming commits stable markdown blocks progressively through the real renderer",
        %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
