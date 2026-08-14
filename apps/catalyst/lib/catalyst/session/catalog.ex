@@ -156,6 +156,36 @@ defmodule Catalyst.Session.Catalog do
     end
   end
 
+  @doc """
+  Drop untitled entries whose ids are not in `keep_ids`.
+
+  Live or focused threads should be passed in `keep_ids` so an empty
+  sibling the user just opened is not deleted.
+  """
+  @spec forget_untitled([String.t()]) :: {:ok, [entry()]} | {:error, error()}
+  def forget_untitled(keep_ids) when is_list(keep_ids) do
+    keep = MapSet.new(keep_ids)
+
+    case entries() do
+      {:ok, entries} ->
+        kept = Enum.reject(entries, &(untitled?(&1) and not MapSet.member?(keep, &1.id)))
+
+        cond do
+          length(kept) == length(entries) ->
+            {:ok, entries}
+
+          true ->
+            case persist(kept) do
+              :ok -> {:ok, kept}
+              {:error, _reason} = error -> error
+            end
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
   @doc "All entries, most recently used first, pruned of deleted transcripts."
   @spec entries() :: {:ok, [entry()]} | {:error, error()}
   def entries do
@@ -202,6 +232,9 @@ defmodule Catalyst.Session.Catalog do
   end
 
   defp normalize_title(_title), do: nil
+
+  defp untitled?(%{title: title}) when is_binary(title) and title != "", do: false
+  defp untitled?(_entry), do: true
 
   # String.slice/2 counts graphemes; a hard byte cap is enough for a label.
   defp string_head(text, max) when byte_size(text) <= max, do: text

@@ -102,4 +102,42 @@ defmodule CatalystWeb.UI.MarkdownTest do
       assert Markdown.stable_split("\n\n") == {[], "\n\n"}
     end
   end
+
+  test "emphasis does not steal a bold span" do
+    assert Markdown.parse("**bold** and *italic* and _also_") ==
+             [
+               {:paragraph,
+                [
+                  {:strong, [{:text, "bold"}]},
+                  {:text, " and "},
+                  {:em, [{:text, "italic"}]},
+                  {:text, " and "},
+                  {:em, [{:text, "also"}]}
+                ]}
+             ]
+  end
+
+  test "soft breaks inside a paragraph stay as line breaks" do
+    assert Markdown.parse("Intro paragraph\nspanning two lines.") ==
+             [
+               {:paragraph, [{:text, "Intro paragraph"}, {:br}, {:text, "spanning two lines."}]}
+             ]
+  end
+
+  describe "preview_tail/1" do
+    test "parses complete tail lines and leaves the unfinished line raw" do
+      assert Markdown.preview_tail("- one\n- two") ==
+               {[{:ul, [[{:text, "one"}]]}], "- two"}
+
+      assert Markdown.preview_tail("- one\n- two\n") ==
+               {[{:ul, [[{:text, "one"}], [{:text, "two"}]]}], ""}
+
+      assert Markdown.preview_tail("closing thoughts") == {[], "closing thoughts"}
+    end
+
+    test "does not parse a half-received hr line as a rule" do
+      assert Markdown.preview_tail("para text\n---") ==
+               {[{:paragraph, [{:text, "para text"}]}], "---"}
+    end
+  end
 end

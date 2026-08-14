@@ -226,7 +226,7 @@ defmodule CatalystWeb.ShellLive.Conversation do
   # is O(1), and the full string is materialized only at the newline-bearing
   # parse boundaries that need it (see `stream_text/1`).
   defp empty_stream_seed do
-    %{thinking: "", tail: "", acc: [], committed: 0, epoch: unique_epoch()}
+    %{thinking: "", tail: "", preview: [], acc: [], committed: 0, epoch: unique_epoch()}
   end
 
   defp unique_epoch, do: System.unique_integer([:positive])
@@ -246,27 +246,28 @@ defmodule CatalystWeb.ShellLive.Conversation do
   defp commit_stable_blocks(socket) do
     streaming = socket.assigns.streaming
     {blocks, tail} = Markdown.stable_split(stream_text(streaming))
+    {preview, raw} = Markdown.preview_tail(tail)
     block_count = length(blocks)
 
-    case block_count > streaming.committed do
-      true -> commit_new_blocks(socket, streaming, blocks, tail, block_count)
-      false -> socket
-    end
-  end
-
-  defp commit_new_blocks(socket, streaming, blocks, tail, block_count) do
     socket =
-      blocks
-      |> Enum.drop(streaming.committed)
-      |> Enum.with_index(streaming.committed)
-      |> Enum.reduce(socket, fn {block, index}, socket ->
-        item = %{id: "sb#{streaming.epoch}-#{index}", block: block}
-        stream_insert(socket, :stream_blocks, item)
-      end)
+      case block_count > streaming.committed do
+        true -> insert_new_blocks(socket, streaming, blocks)
+        false -> socket
+      end
 
     socket
-    |> assign(streaming: %{streaming | committed: block_count, tail: tail})
-    |> push_event("stream_tail", %{text: tail})
+    |> assign(streaming: %{streaming | committed: block_count, tail: raw, preview: preview})
+    |> push_event("stream_tail", %{text: raw})
+  end
+
+  defp insert_new_blocks(socket, streaming, blocks) do
+    blocks
+    |> Enum.drop(streaming.committed)
+    |> Enum.with_index(streaming.committed)
+    |> Enum.reduce(socket, fn {block, index}, socket ->
+      item = %{id: "sb#{streaming.epoch}-#{index}", block: block}
+      stream_insert(socket, :stream_blocks, item)
+    end)
   end
 
   defp seed_streaming(socket, %Message.Assistant{content: content}) do
@@ -281,11 +282,13 @@ defmodule CatalystWeb.ShellLive.Conversation do
       |> Enum.map_join("", & &1.text)
 
     {blocks, tail} = Markdown.stable_split(text)
+    {preview, raw} = Markdown.preview_tail(tail)
     epoch = unique_epoch()
 
     seed = %{
       thinking: thinking,
-      tail: tail,
+      tail: raw,
+      preview: preview,
       acc: [text],
       committed: length(blocks),
       epoch: epoch

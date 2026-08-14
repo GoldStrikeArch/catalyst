@@ -265,6 +265,12 @@ defmodule CatalystWeb.UI.MessageRenderer do
     """
   end
 
+  defp formatted_inline(%{inline: {:br}} = assigns) do
+    ~H"""
+    <br />
+    """
+  end
+
   defp formatted_inline(%{inline: {:text, text}} = assigns) do
     assigns = Map.put(assigns, :text, text)
 
@@ -290,6 +296,16 @@ defmodule CatalystWeb.UI.MessageRenderer do
     <strong class="font-semibold text-neutral-950 dark:text-white">
       <.formatted_inlines inlines={@inlines} />
     </strong>
+    """
+  end
+
+  defp formatted_inline(%{inline: {:em, inlines}} = assigns) do
+    assigns = Map.put(assigns, :inlines, inlines)
+
+    ~H"""
+    <em class="italic">
+      <.formatted_inlines inlines={@inlines} />
+    </em>
     """
   end
 

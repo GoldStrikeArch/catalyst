@@ -58,6 +58,23 @@ defmodule Catalyst.Session.CatalogTest do
     assert {:ok, [%{id: "sess-a", cwd: "/tmp/proj-a", title: nil}]} = Catalog.entries()
   end
 
+  test "forget_untitled drops idle untitled rows and keeps listed ids" do
+    create_store!("/tmp/proj-a", "keep-me")
+    create_store!("/tmp/proj-b", "drop-me")
+    create_store!("/tmp/proj-c", "titled")
+
+    assert :ok = Catalog.remember("keep-me", "/tmp/proj-a")
+    assert :ok = Catalog.remember("drop-me", "/tmp/proj-b")
+    assert :ok = Catalog.remember("titled", "/tmp/proj-c")
+    assert :ok = Catalog.put_title("titled", "Real prompt")
+
+    assert {:ok, kept} = Catalog.forget_untitled(["keep-me"])
+    ids = Enum.map(kept, & &1.id)
+    assert "keep-me" in ids
+    assert "titled" in ids
+    refute "drop-me" in ids
+  end
+
   test "roundtrip: remember, entries, most_recent, lookup, forget" do
     create_store!("/tmp/proj-a", "sess-a")
     create_store!("/tmp/proj-b", "sess-b")

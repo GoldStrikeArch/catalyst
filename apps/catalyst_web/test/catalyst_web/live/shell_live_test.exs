@@ -179,6 +179,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
     # The raw open tail ("closing thoughts", no newline yet) is NOT committed.
     refute has_element?(view, "#stream-blocks", "closing thoughts")
+    refute has_element?(view, "#stream-preview", "closing thoughts")
 
     full = "# Title\n\nintro para\n\n```elixir\ndef f, do: :ok\n```\n\nclosing thoughts"
     final = %Message.Assistant{content: Content.text(full)}
@@ -188,6 +189,32 @@ defmodule CatalystWeb.ShellLiveTest do
     refute has_element?(view, "#streaming-message")
     assert has_element?(view, "#message-stream pre code[data-lang=elixir]")
     assert has_element?(view, "#message-stream", "closing thoughts")
+  end
+
+  test "the open last block paints as markdown in the stream preview", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    id = session_id(view)
+
+    send(
+      view.pid,
+      {:agent_event, id, %Event.MessageStart{message: %Message.Assistant{content: []}}}
+    )
+
+    send(
+      view.pid,
+      {:agent_event, id, %Event.MessageUpdate{llm_event: %LLMEvent.TextDelta{delta: "- one\n"}}}
+    )
+
+    assert has_element?(view, "#stream-preview li", "one")
+    refute has_element?(view, "#stream-blocks", "one")
+
+    send(
+      view.pid,
+      {:agent_event, id, %Event.MessageUpdate{llm_event: %LLMEvent.TextDelta{delta: "- two\n"}}}
+    )
+
+    assert has_element?(view, "#stream-preview li", "two")
+    refute has_element?(view, "#stream-blocks", "two")
   end
 
   defmodule SlowStreamProvider do

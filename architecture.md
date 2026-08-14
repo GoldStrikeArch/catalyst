@@ -353,8 +353,9 @@ newline-carrying deltas the server re-parses the accumulated text with
 `UI.Markdown.stable_split/1` — every block except the last is **stable** (newline gating +
 line-anchored classification make commits monotone; a trailing fence-closed code block
 commits immediately) — and newly stabilized blocks render ONCE through the real
-`MessageRenderer` into a per-message stream inside the bubble, while a `stream_tail` event
-trims the raw tail to the open block's source. Fenced code gets **syntax highlighting**
+`MessageRenderer` into a per-message stream inside the bubble. Complete tail lines
+paint through `preview_tail/1` as markdown (so an open list is already a list);
+a `stream_tail` event trims the ignored raw region to the unfinished last line. Fenced code gets **syntax highlighting**
 (vendored highlight.js via the `Highlight` hook — explicit fence language only, input via
 `textContent`) the moment its fence closes, and the `message_end` swap to the final message
 renders the same blocks through the same pipeline — visually a no-op. A late joiner seeds

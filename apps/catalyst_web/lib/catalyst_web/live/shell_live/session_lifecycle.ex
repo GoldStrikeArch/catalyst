@@ -120,8 +120,12 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   @doc "Rebuilds the sidebar assign from the persisted catalog and live pids."
   @spec refresh_sidebar(socket()) :: socket()
   def refresh_sidebar(socket) do
+    keep_ids =
+      [socket.assigns.session_id | Enum.map(Manager.list_live(), &elem(&1, 0))]
+      |> Enum.filter(&is_binary/1)
+
     entries =
-      case Catalog.entries() do
+      case Catalog.forget_untitled(keep_ids) do
         {:ok, list} -> list
         {:error, _reason} -> []
       end

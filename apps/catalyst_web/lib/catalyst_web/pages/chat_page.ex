@@ -41,16 +41,14 @@ defmodule CatalystWeb.Pages.ChatPage do
             </div>
           </div>
 
-          <%!-- The live streaming bubble, in three regions:
+          <%!-- The live streaming bubble:
           1. thinking — client-appended raw text (phx-update="ignore");
-          2. committed markdown blocks — a LiveView stream; each stabilized
-             block renders ONCE through the real MessageRenderer (headings,
-             lists, highlighted code) as it completes;
-          3. the raw tail — the still-open last block, client-appended;
-             trimmed via the "stream_tail" event whenever blocks commit.
-        `@streaming` seeds the ignored regions on first paint (late joiners);
-        the completed message replaces all of it at MessageEnd, rendering the
-        same blocks through the same pipeline — a visual no-op. --%>
+          2. committed markdown blocks — a LiveView stream;
+          3. preview — parse(complete tail lines) through MessageRenderer so
+             the still-open list/paragraph is already markdown;
+          4. raw tail — only the unfinished last line, client-appended.
+        MessageEnd swaps to the finished message; committed + preview use
+        the same renderer, so the swap is a visual no-op. --%>
           <div
             :if={@streaming}
             id="streaming-message"
@@ -74,6 +72,11 @@ defmodule CatalystWeb.Pages.ChatPage do
                   id={dom_id}
                   phx-hook="Highlight"
                 >
+                  {MessageRenderer.markdown_block(%{block: block})}
+                </div>
+              </div>
+              <div id="stream-preview" phx-hook="Highlight" class="text-sm leading-6">
+                <div :for={{block, index} <- Enum.with_index(@streaming.preview)} id={"sp-#{index}"}>
                   {MessageRenderer.markdown_block(%{block: block})}
                 </div>
               </div>

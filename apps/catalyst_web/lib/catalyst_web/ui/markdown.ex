@@ -6,13 +6,16 @@ defmodule CatalystWeb.UI.Markdown do
   converting Markdown directly to raw HTML. That keeps model/user-provided
   content escaped while still supporting the common formatting assistant replies
   use: paragraphs, headings, lists, blockquotes, fenced code, inline code,
-  bold text, and links.
+  bold, italic, and links. Soft line breaks inside a paragraph stay as
+  line breaks.
   """
 
   @type inline ::
           {:text, String.t()}
           | {:code, String.t()}
           | {:strong, [inline()]}
+          | {:em, [inline()]}
+          | {:br}
           | {:link, [inline()], String.t()}
 
   @type block ::
@@ -36,7 +39,9 @@ defmodule CatalystWeb.UI.Markdown do
     {:code, ~r/`([^`\n]+)`/},
     {:link, ~r/\[([^\]\n]+)\]\(([^\s)]+)\)/},
     {:strong, ~r/\*\*([^*\n]+)\*\*/},
-    {:strong, ~r/__([^_\n]+)__/}
+    {:strong, ~r/__([^_\n]+)__/},
+    {:em, ~r/\*([^*\n]+)\*/},
+    {:em, ~r/_([^_\n]+)_/}
   ]
 
   @doc "Parse text into a small safe-renderable AST."
@@ -134,6 +139,33 @@ defmodule CatalystWeb.UI.Markdown do
 
   def safe_href?(_href), do: false
 
+  @doc """
+  Split a `stable_split/1` tail into `{preview_blocks, raw_partial}`.
+
+  Complete (newline-terminated) lines are parsed so the still-open last
+  block paints as markdown instead of source. The unfinished last line
+  stays raw — it has not been newline-gated yet.
+
+      iex> {blocks, raw} = CatalystWeb.UI.Markdown.preview_tail("- one\\n- two")
+      iex> blocks
+      [{:ul, [[{:text, "one"}]]}]
+      iex> raw
+      "- two"
+  """
+  @spec preview_tail(String.t()) :: {[block()], String.t()}
+  def preview_tail(tail) when is_binary(tail) do
+    lines = tail |> normalize_newlines() |> String.split("\n", trim: false)
+    {complete, [partial]} = Enum.split(lines, length(lines) - 1)
+
+    case Enum.any?(complete, &(not blank?(&1))) do
+      false ->
+        {[], tail}
+
+      true ->
+        {parse(Enum.join(complete, "\n")), partial}
+    end
+  end
+
   defp normalize_newlines(text) do
     text
     |> String.replace("\r\n", "\n")
@@ -204,9 +236,13 @@ defmodule CatalystWeb.UI.Markdown do
   defp take_paragraph(lines) do
     {paragraph_lines, rest} = Enum.split_while(lines, &(not blank?(&1) and not block_start?(&1)))
 
-    text = Enum.map_join(paragraph_lines, " ", &String.trim/1)
+    inlines =
+      paragraph_lines
+      |> Enum.map(&(&1 |> String.trim() |> parse_inlines()))
+      |> Enum.intersperse([{:br}])
+      |> List.flatten()
 
-    {{:paragraph, parse_inlines(text)}, rest}
+    {{:paragraph, inlines}, rest}
   end
 
   defp heading_block(line) do
@@ -254,6 +290,8 @@ defmodule CatalystWeb.UI.Markdown do
   defp inline_segment(:code, [code]), do: {:code, code}
 
   defp inline_segment(:strong, [text]), do: {:strong, parse_inlines(text)}
+
+  defp inline_segment(:em, [text]), do: {:em, parse_inlines(text)}
 
   defp inline_segment(:link, [label, href]), do: {:link, parse_inlines(label), href}
 
