@@ -148,7 +148,15 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   @doc "Persist a thread title from the first real user prompt, if still blank."
   @spec maybe_title(socket(), Message.t()) :: socket()
   def maybe_title(socket, %Message.User{content: content}) do
-    case Catalog.title_from_text(Content.text_of(content)) do
+    maybe_title_text(socket, Content.text_of(content))
+  end
+
+  def maybe_title(socket, _message), do: socket
+
+  @doc "Persist `text` as the thread title when the catalog entry is still blank."
+  @spec maybe_title_text(socket(), String.t()) :: socket()
+  def maybe_title_text(socket, text) when is_binary(text) do
+    case Catalog.title_from_text(text) do
       nil ->
         socket
 
@@ -163,8 +171,6 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
         end
     end
   end
-
-  def maybe_title(socket, _message), do: socket
 
   @doc """
   Retries attaching to a remembered session that was not yet registered.

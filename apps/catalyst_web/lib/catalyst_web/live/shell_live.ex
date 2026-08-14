@@ -60,6 +60,7 @@ defmodule CatalystWeb.ShellLive do
         prompt_preview_ref: nil,
         prompt_preview_pid: nil,
         diagnostics_open: false,
+        chrome_menu: nil,
         cwd: SessionLifecycle.default_cwd(),
         thread_sidebar: %{projects: []}
       )
@@ -268,7 +269,7 @@ defmodule CatalystWeb.ShellLive do
   def handle_event("switch_session", %{"id" => id}, socket) when is_binary(id) do
     {:noreply,
      socket
-     |> assign(diagnostics_open: false)
+     |> assign(diagnostics_open: false, chrome_menu: nil)
      |> SessionLifecycle.switch(id)
      |> RunDiagnostics.preview()
      |> refresh_shell_chrome()
@@ -302,6 +303,7 @@ defmodule CatalystWeb.ShellLive do
 
     {:noreply,
      socket
+     |> assign(chrome_menu: nil)
      |> Settings.apply_codex(prefs)
      |> RunDiagnostics.preview()
      |> refresh_shell_chrome()
@@ -328,9 +330,19 @@ defmodule CatalystWeb.ShellLive do
   def handle_event("select_workflow", %{"workflow" => value}, socket) do
     {:noreply,
      socket
+     |> assign(chrome_menu: nil)
      |> Settings.select_workflow(value)
      |> refresh_shell_chrome()
      |> maybe_refresh_panel()}
+  end
+
+  def handle_event("toggle_chrome_menu", %{"menu" => menu}, socket) do
+    next = toggle_chrome_menu(socket.assigns.chrome_menu, menu)
+    {:noreply, assign(socket, chrome_menu: next, diagnostics_open: false)}
+  end
+
+  def handle_event("close_chrome_menu", _params, socket) do
+    {:noreply, assign(socket, chrome_menu: nil)}
   end
 
   def handle_event("save_prompt", %{"target" => encoded, "text" => text}, socket) do
@@ -418,11 +430,15 @@ defmodule CatalystWeb.ShellLive do
   end
 
   def handle_event("toggle_diagnostics", _params, socket) do
-    {:noreply, assign(socket, diagnostics_open: !socket.assigns.diagnostics_open)}
+    {:noreply,
+     assign(socket,
+       diagnostics_open: !socket.assigns.diagnostics_open,
+       chrome_menu: nil
+     )}
   end
 
   def handle_event("close_diagnostics", _params, socket) do
-    {:noreply, assign(socket, diagnostics_open: false)}
+    {:noreply, assign(socket, diagnostics_open: false, chrome_menu: nil)}
   end
 
   # Extension compilation and git operations run one at a time in supervised
@@ -661,7 +677,8 @@ defmodule CatalystWeb.ShellLive do
           {:noreply,
            socket
            |> ChatInput.put_text("")
-           |> assign(running: true, file_search: nil)}
+           |> assign(running: true, file_search: nil)
+           |> SessionLifecycle.maybe_title_text(text)}
 
         {:error, reason} ->
           {:noreply, put_flash(socket, :error, "Can't start a run: #{inspect(reason)}")}
@@ -674,7 +691,7 @@ defmodule CatalystWeb.ShellLive do
 
   defp start_thread(socket, cwd) do
     socket
-    |> assign(diagnostics_open: false)
+    |> assign(diagnostics_open: false, chrome_menu: nil)
     |> SessionLifecycle.start_in(cwd)
     |> RunDiagnostics.preview()
     |> refresh_shell_chrome()
@@ -683,7 +700,7 @@ defmodule CatalystWeb.ShellLive do
 
   defp close_thread(socket, id) do
     socket
-    |> assign(diagnostics_open: false)
+    |> assign(diagnostics_open: false, chrome_menu: nil)
     |> SessionLifecycle.close(id)
     |> RunDiagnostics.preview()
     |> refresh_shell_chrome()
@@ -711,6 +728,14 @@ defmodule CatalystWeb.ShellLive do
 
   defp page_path("chat"), do: ~p"/"
   defp page_path(page), do: ~p"/#{page}"
+
+  defp toggle_chrome_menu(current, "model"), do: toggle_menu(current, :model)
+  defp toggle_chrome_menu(current, "effort"), do: toggle_menu(current, :effort)
+  defp toggle_chrome_menu(current, "workflow"), do: toggle_menu(current, :workflow)
+  defp toggle_chrome_menu(_current, _menu), do: nil
+
+  defp toggle_menu(current, menu) when current == menu, do: nil
+  defp toggle_menu(_current, menu), do: menu
 
   defp login_fun do
     Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)

@@ -42,7 +42,7 @@ defmodule CatalystWeb.ShellComponents do
       >
         <header
           id="shell-header"
-          class="relative z-40 flex min-h-12 shrink-0 items-center gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-1.5 dark:border-white/10 dark:bg-neutral-900"
+          class="relative z-40 flex h-9 shrink-0 items-center gap-1.5 border-b border-neutral-200 bg-neutral-50 px-2 dark:border-white/10 dark:bg-neutral-900"
         >
           <button
             id="sidebar-toggle"
@@ -51,28 +51,28 @@ defmodule CatalystWeb.ShellComponents do
             aria-pressed={to_string(@ui_prefs.sidebar)}
             aria-controls="shell-sidebar"
             title={if(@ui_prefs.sidebar, do: "Hide sidebar", else: "Show sidebar")}
-            class="flex size-8 shrink-0 items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
+            class="flex size-7 shrink-0 items-center justify-center rounded-md text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
           >
-            <.icon name="hero-bars-3" class="size-4" />
+            <.icon name="hero-bars-3" class="size-3.5" />
           </button>
 
-          <span :if={@running} class="flex items-center gap-1" aria-label="Agent running">
-            <span class="size-1.5 animate-pulse rounded-full bg-indigo-500"></span>
-            <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-150"></span>
-            <span class="size-1.5 animate-pulse rounded-full bg-indigo-500 delay-300"></span>
+          <span :if={@running} class="flex items-center gap-0.5" aria-label="Agent running">
+            <span class="size-1 animate-pulse rounded-full bg-indigo-500"></span>
+            <span class="size-1 animate-pulse rounded-full bg-indigo-500 delay-150"></span>
+            <span class="size-1 animate-pulse rounded-full bg-indigo-500 delay-300"></span>
           </span>
 
           <nav
             :if={length(@shell_pages) > 1}
             id="shell-page-nav"
-            class="flex min-w-0 items-center gap-1"
+            class="flex min-w-0 items-center gap-0.5"
           >
             <.link
               :for={page <- @shell_pages}
               id={"page-nav-#{page.path}"}
               patch={~p"/#{page.path}"}
               class={[
-                "rounded-full px-3 py-1 text-xs font-medium transition",
+                "rounded-md px-2 py-0.5 text-[11px] font-medium transition",
                 @page == page.path &&
                   "bg-neutral-200/70 text-neutral-900 dark:bg-white/10 dark:text-white",
                 @page != page.path &&
@@ -102,7 +102,7 @@ defmodule CatalystWeb.ShellComponents do
               <button
                 :if={@login_state != :pending}
                 id="login-button"
-                class="rounded-full bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+                class="rounded-md bg-neutral-900 px-2 py-1 text-[11px] font-semibold text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
                 phx-click="login"
                 type="button"
               >
@@ -166,6 +166,7 @@ defmodule CatalystWeb.ShellComponents do
                 codex_catalog={@codex_catalog}
                 selected_codex_entry={@selected_codex_entry}
                 codex_prefs={@codex_prefs}
+                chrome_menu={@chrome_menu}
               />
             </footer>
           </div>
@@ -184,26 +185,26 @@ defmodule CatalystWeb.ShellComponents do
     <aside
       :if={@open?}
       id="shell-sidebar"
-      class="flex w-60 shrink-0 flex-col overflow-y-auto border-r border-neutral-200 bg-neutral-100/70 dark:border-white/10 dark:bg-neutral-950/40"
+      class="flex w-52 shrink-0 flex-col overflow-y-auto border-r border-neutral-200 bg-neutral-100/50 dark:border-white/10 dark:bg-neutral-950/40"
     >
       {PageRenderer.render_components(:sidebar, @root)}
 
-      <section id="sidebar-projects" class="px-2 pb-2 pt-3">
-        <p class="mb-1 px-2 text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+      <section id="sidebar-projects" class="px-1.5 py-2">
+        <p class="mb-1 px-1.5 text-[10px] text-neutral-400 dark:text-neutral-500">
           Projects
         </p>
 
         <p
           :if={@sidebar.projects == []}
-          class="px-2 py-3 text-xs text-neutral-400 dark:text-neutral-500"
+          class="px-1.5 py-2 text-[11px] text-neutral-400 dark:text-neutral-500"
         >
           No threads yet
         </p>
 
-        <div :for={project <- @sidebar.projects} id={project.id} class="mb-1">
-          <div class="flex items-center gap-1 rounded-md px-2 py-1">
-            <.icon name="hero-folder" class="size-3.5 shrink-0 text-neutral-400" />
-            <span class="min-w-0 flex-1 truncate text-xs font-medium text-neutral-700 dark:text-neutral-200">
+        <div :for={project <- @sidebar.projects} id={project.id} class="mb-0.5">
+          <div class="flex items-center gap-1 px-1.5 py-0.5">
+            <.icon name="hero-folder" class="size-3 shrink-0 text-neutral-400" />
+            <span class="min-w-0 flex-1 truncate text-[11px] font-medium text-neutral-600 dark:text-neutral-300">
               {project.label}
             </span>
           </div>
@@ -212,7 +213,7 @@ defmodule CatalystWeb.ShellComponents do
             :for={thread <- project.threads}
             id={"thread-#{thread.id}"}
             class={[
-              "flex items-center gap-1 rounded-md py-0.5 pl-6 pr-1",
+              "group flex items-center gap-0.5 rounded-md py-px pl-5 pr-0.5",
               thread.current? && "bg-neutral-200/80 dark:bg-white/10",
               !thread.current? && "hover:bg-neutral-200/50 dark:hover:bg-white/5"
             ]}
@@ -223,14 +224,14 @@ defmodule CatalystWeb.ShellComponents do
               phx-click="switch_session"
               phx-value-id={thread.id}
               class={[
-                "flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left text-xs transition",
+                "flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] transition",
                 thread.current? && "text-neutral-900 dark:text-white",
                 !thread.current? &&
                   "text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200"
               ]}
             >
               <span class={[
-                "size-1.5 shrink-0 rounded-full",
+                "size-1 shrink-0 rounded-full",
                 thread.live? && "bg-emerald-500/80",
                 !thread.live? && "bg-neutral-300 dark:bg-neutral-600"
               ]}>
@@ -243,9 +244,9 @@ defmodule CatalystWeb.ShellComponents do
               phx-click="close_session"
               phx-value-id={thread.id}
               title="Close thread"
-              class="rounded p-0.5 text-neutral-400 transition hover:bg-neutral-300/70 hover:text-neutral-800 dark:hover:bg-white/10 dark:hover:text-white"
+              class="rounded p-0.5 text-neutral-400 opacity-0 transition hover:bg-neutral-300/70 hover:text-neutral-800 group-hover:opacity-100 dark:hover:bg-white/10 dark:hover:text-white"
             >
-              <.icon name="hero-x-mark" class="size-3" />
+              <.icon name="hero-x-mark" class="size-2.5" />
             </button>
           </div>
         </div>
@@ -299,7 +300,7 @@ defmodule CatalystWeb.ShellComponents do
       phx-submit="send"
       phx-change="typing"
       phx-hook="PasteImages"
-      class="px-4 pt-3"
+      class="px-3 pt-2"
     >
       <div
         :if={@uploads.image.entries != []}
@@ -375,43 +376,41 @@ defmodule CatalystWeb.ShellComponents do
 
   defp run_bar(assigns) do
     ~H"""
-    <div
-      id="shell-run-bar"
-      class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-1.5 px-4 py-2"
-    >
-      <div id="shell-header-status" class="flex min-w-0 items-center gap-2">
-        <.icon name="hero-folder" class="size-3.5 shrink-0 text-neutral-400" />
+    <div id="shell-run-bar" class="flex w-full items-center gap-1 px-2 py-1">
+      <div id="shell-header-status" class="flex min-w-0 items-center gap-1">
+        <.icon name="hero-folder" class="size-3 shrink-0 text-neutral-400" />
         <span
           id="header-cwd"
-          class="min-w-0 truncate font-mono text-xs text-neutral-400 dark:text-neutral-500"
+          class="min-w-0 truncate font-mono text-[11px] text-neutral-400 dark:text-neutral-500"
           title={"#{@cwd} — change with /cd <path>"}
         >
           {short_cwd(@cwd)}
         </span>
         <button
           id="new-session-button"
-          class="rounded-md p-1 text-neutral-400 transition hover:bg-neutral-200/60 hover:text-neutral-800 dark:hover:bg-white/10 dark:hover:text-white"
+          class="flex size-6 items-center justify-center rounded-md text-neutral-400 transition hover:bg-neutral-200/60 hover:text-neutral-800 dark:hover:bg-white/10 dark:hover:text-white"
           phx-click="new_session"
           type="button"
           title="New thread"
         >
-          <.icon name="hero-plus" class="size-3.5" />
+          <.icon name="hero-plus" class="size-3" />
         </button>
         <.context_meter :if={@context_status} status={@context_status} />
       </div>
 
       <div
         id="shell-header-controls"
-        class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5"
+        class="ml-auto flex min-w-0 items-center justify-end gap-0.5"
       >
         <button
           id="quiet-toggle"
           type="button"
           phx-click="toggle_quiet"
+          aria-pressed={to_string(@ui_prefs.quiet)}
           title="Quiet mode: hide tool calls/results and thinking (display only)"
-          class={quiet_button_class(@ui_prefs.quiet)}
+          class={icon_btn_class(@ui_prefs.quiet)}
         >
-          <.icon name="hero-eye-slash" class="size-3.5" /> Quiet
+          <.icon name="hero-eye-slash" class="size-3.5" />
         </button>
 
         <button
@@ -420,9 +419,9 @@ defmodule CatalystWeb.ShellComponents do
           phx-click="toggle_computer_use"
           aria-pressed={to_string(@machine_prefs.computer_use)}
           title="Computer use: let the agent see the screen and drive this machine. Full access, no sandbox — applies to the next run and is never inherited by subagents."
-          class={computer_button_class(@machine_prefs.computer_use)}
+          class={icon_btn_class(@machine_prefs.computer_use, :warn)}
         >
-          <.icon name="hero-computer-desktop" class="size-3.5" /> Computer
+          <.icon name="hero-computer-desktop" class="size-3.5" />
         </button>
 
         <.form
@@ -430,7 +429,7 @@ defmodule CatalystWeb.ShellComponents do
           for={@workflow_form}
           id="workflow-form"
           phx-change="select_workflow"
-          class="m-0 flex items-center"
+          class="sr-only"
         >
           <.input
             field={@workflow_form[:workflow]}
@@ -443,13 +442,28 @@ defmodule CatalystWeb.ShellComponents do
           />
         </.form>
 
-        <div id="codex-control-group" class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
-          <.form
-            for={@codex_form}
-            id="codex-opts"
-            phx-change="codex_opts"
-            class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
+        <.chrome_menu
+          :if={show_workflow_picker?(@workflow_options, @workflow_prefs)}
+          id="workflow-menu"
+          menu="workflow"
+          open?={@chrome_menu == :workflow}
+          label={workflow_label(@workflow_prefs, @workflow_options)}
+          title="Agent workflow (applies to the next run)"
+        >
+          <button
+            :for={option <- @workflow_options}
+            id={"workflow-option-#{workflow_option_value(option) || "default"}"}
+            type="button"
+            phx-click="select_workflow"
+            phx-value-workflow={workflow_option_value(option)}
+            class={menu_item_class(workflow_selected?(option, @workflow_prefs))}
           >
+            {workflow_option_label(option)}
+          </button>
+        </.chrome_menu>
+
+        <div id="codex-control-group" class="flex min-w-0 items-center gap-0.5">
+          <.form for={@codex_form} id="codex-opts" phx-change="codex_opts" class="sr-only">
             <.input
               field={@codex_form[:model]}
               type="select"
@@ -475,15 +489,55 @@ defmodule CatalystWeb.ShellComponents do
               title="Transport: auto = websocket with SSE fallback"
             />
           </.form>
+
+          <.chrome_menu
+            id="codex-model-menu"
+            menu="model"
+            open?={@chrome_menu == :model}
+            label={@selected_codex_entry.name}
+            title="Model"
+          >
+            <button
+              :for={entry <- @codex_catalog}
+              id={"codex-model-#{entry.id}"}
+              type="button"
+              phx-click="codex_opts"
+              phx-value-model={entry.id}
+              class={menu_item_class(entry.id == @codex_prefs.model)}
+            >
+              {entry.name}
+            </button>
+          </.chrome_menu>
+
+          <.chrome_menu
+            id="codex-effort-menu"
+            menu="effort"
+            open?={@chrome_menu == :effort}
+            label={@codex_prefs.effort}
+            title="Reasoning effort"
+          >
+            <button
+              :for={effort <- @selected_codex_entry.efforts}
+              id={"codex-effort-#{effort}"}
+              type="button"
+              phx-click="codex_opts"
+              phx-value-effort={effort}
+              class={menu_item_class(effort == @codex_prefs.effort)}
+            >
+              {effort}
+            </button>
+          </.chrome_menu>
+
           <button
             :if={@selected_codex_entry.fast?}
             id="codex-fast-toggle"
             type="button"
             phx-click="codex_fast"
+            aria-pressed={to_string(@codex_prefs.fast)}
             title="Fast mode (priority service tier): ~1.5x speed, increased usage"
-            class={fast_button_class(@codex_prefs.fast)}
+            class={icon_btn_class(@codex_prefs.fast, :fast)}
           >
-            ⚡ Fast
+            <span class="text-[11px] leading-none">⚡</span>
           </button>
         </div>
 
@@ -511,16 +565,88 @@ defmodule CatalystWeb.ShellComponents do
     to_form(%{"workflow" => prefs.workflow || ""})
   end
 
+  attr :id, :string, required: true
+  attr :menu, :string, required: true
+  attr :open?, :boolean, required: true
+  attr :label, :string, required: true
+  attr :title, :string, required: true
+  slot :inner_block, required: true
+
+  defp chrome_menu(assigns) do
+    ~H"""
+    <div class="relative">
+      <button
+        id={"#{@id}-toggle"}
+        type="button"
+        phx-click="toggle_chrome_menu"
+        phx-value-menu={@menu}
+        aria-expanded={to_string(@open?)}
+        aria-controls={"#{@id}-panel"}
+        title={@title}
+        class={[
+          "flex max-w-28 items-center truncate rounded-md px-1.5 py-1 text-[11px] text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white",
+          @open? && "bg-neutral-200/70 text-neutral-900 dark:bg-white/10 dark:text-white"
+        ]}
+      >
+        {@label}
+      </button>
+
+      <div
+        :if={@open?}
+        id={"#{@id}-backdrop"}
+        class="fixed inset-0 z-40"
+        phx-click="close_chrome_menu"
+      >
+      </div>
+
+      <div
+        :if={@open?}
+        id={"#{@id}-panel"}
+        phx-window-keydown="close_chrome_menu"
+        phx-key="Escape"
+        class="absolute bottom-full right-0 z-50 mb-1 max-h-64 min-w-44 overflow-y-auto rounded-lg border border-neutral-200 bg-white py-1 shadow-lg shadow-neutral-950/10 dark:border-white/10 dark:bg-neutral-800 dark:shadow-black/40"
+      >
+        {render_slot(@inner_block)}
+      </div>
+    </div>
+    """
+  end
+
   defp show_workflow_picker?(options, prefs) do
     length(options) > 1 or prefs.workflow != nil
   end
 
   defp workflow_select_options(options) do
-    Enum.map(options, fn
-      %{name: :default, source: source} -> {"default" <> workflow_suffix(source), ""}
-      %{name: name, source: source} -> {name <> workflow_suffix(source), name}
+    Enum.map(options, fn option ->
+      {workflow_option_label(option), workflow_option_value(option)}
     end)
   end
+
+  defp workflow_option_value(%{name: :default}), do: ""
+  defp workflow_option_value(%{name: name}), do: name
+
+  defp workflow_option_label(%{name: :default, source: source}),
+    do: "default" <> workflow_suffix(source)
+
+  defp workflow_option_label(%{name: name, source: source}),
+    do: name <> workflow_suffix(source)
+
+  defp workflow_selected?(%{name: :default}, %{workflow: nil}), do: true
+  defp workflow_selected?(%{name: name}, %{workflow: name}), do: true
+  defp workflow_selected?(_option, _prefs), do: false
+
+  defp workflow_label(%{workflow: nil}, _options), do: "default"
+
+  defp workflow_label(%{workflow: name}, options) do
+    case Enum.find(options, &(&1.name == name)) do
+      nil -> name
+      option -> workflow_option_label(option)
+    end
+  end
+
+  defp diagnostics_title(%{prompt: %{digest: digest}}), do: "Prompt " <> digest_prefix(digest)
+  defp diagnostics_title(%{preview: :loading}), do: "Resolving prompt…"
+  defp diagnostics_title(_assigns), do: "Run details"
 
   defp workflow_suffix(:builtin), do: ""
   defp workflow_suffix(:unavailable), do: " (unavailable)"
@@ -546,7 +672,7 @@ defmodule CatalystWeb.ShellComponents do
     ~H"""
     <div
       id="context-meter"
-      class="hidden shrink-0 items-center gap-2 whitespace-nowrap rounded-full border border-neutral-200 px-2.5 py-1 text-[0.65rem] text-neutral-500 sm:flex dark:border-white/10 dark:text-neutral-400"
+      class="hidden shrink-0 items-center gap-1 whitespace-nowrap text-[10px] text-neutral-400 sm:flex dark:text-neutral-500"
       title={"Context threshold source: #{@source_label}"}
     >
       <.icon
@@ -607,17 +733,10 @@ defmodule CatalystWeb.ShellComponents do
         phx-click="toggle_diagnostics"
         aria-expanded={to_string(@open)}
         aria-controls="run-diagnostics-panel"
-        class="flex max-w-full cursor-pointer items-center gap-1 overflow-hidden whitespace-nowrap rounded-full border border-neutral-200 px-2.5 py-1 text-[0.65rem] font-medium text-neutral-500 transition hover:border-neutral-300 hover:text-neutral-900 dark:border-white/10 dark:text-neutral-400 dark:hover:border-white/20 dark:hover:text-white"
+        class={icon_btn_class(@open)}
+        title={diagnostics_title(assigns)}
       >
         <.icon name="hero-document-text-micro" class="size-3.5" />
-        <%= cond do %>
-          <% @prompt -> %>
-            Prompt <code class="font-mono">{digest_prefix(@prompt.digest)}</code>
-          <% @preview == :loading -> %>
-            Resolving prompt…
-          <% true -> %>
-            Run details
-        <% end %>
       </button>
 
       <div
@@ -771,33 +890,26 @@ defmodule CatalystWeb.ShellComponents do
       "dark:text-neutral-300 dark:hover:border-white/20 dark:hover:text-white"
   end
 
-  defp fast_button_class(active?) do
+  defp icon_btn_class(active?, kind \\ :default) do
     [
-      "rounded-full border px-2.5 py-1 text-xs font-semibold transition",
-      active? &&
-        "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/10 dark:text-amber-300",
+      "flex size-7 items-center justify-center rounded-md transition",
       !active? &&
-        "border-neutral-200 text-neutral-500 hover:border-neutral-300 hover:text-neutral-900 dark:border-white/10 dark:text-neutral-400 dark:hover:border-white/20 dark:hover:text-white"
+        "text-neutral-400 hover:bg-neutral-200/60 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white",
+      active? && kind == :default &&
+        "bg-neutral-200/80 text-neutral-900 dark:bg-white/10 dark:text-white",
+      active? && kind == :warn &&
+        "bg-rose-500/10 text-rose-700 dark:bg-rose-400/10 dark:text-rose-300",
+      active? && kind == :fast &&
+        "bg-amber-500/10 text-amber-700 dark:bg-amber-400/10 dark:text-amber-300"
     ]
   end
 
-  defp quiet_button_class(active?) do
+  defp menu_item_class(selected?) do
     [
-      "flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold transition",
-      active? &&
-        "border-neutral-400 bg-neutral-200/70 text-neutral-900 dark:border-white/25 dark:bg-white/10 dark:text-white",
-      !active? &&
-        "border-neutral-200 text-neutral-500 hover:border-neutral-300 hover:text-neutral-900 dark:border-white/10 dark:text-neutral-400 dark:hover:border-white/20 dark:hover:text-white"
-    ]
-  end
-
-  defp computer_button_class(active?) do
-    [
-      "flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold transition",
-      active? &&
-        "border-rose-500/50 bg-rose-500/10 text-rose-700 dark:border-rose-400/40 dark:bg-rose-400/10 dark:text-rose-300",
-      !active? &&
-        "border-neutral-200 text-neutral-500 hover:border-neutral-300 hover:text-neutral-900 dark:border-white/10 dark:text-neutral-400 dark:hover:border-white/20 dark:hover:text-white"
+      "flex w-full px-3 py-1 text-left text-[11px] transition",
+      selected? && "bg-neutral-100 text-neutral-900 dark:bg-white/10 dark:text-white",
+      !selected? &&
+        "text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-white/5"
     ]
   end
 end
