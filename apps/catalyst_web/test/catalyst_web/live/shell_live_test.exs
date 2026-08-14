@@ -101,6 +101,19 @@ defmodule CatalystWeb.ShellLiveTest do
     assert has_element?(view, "#message-stream")
   end
 
+  test "user and assistant turns are jump-by-turn targets", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert has_element?(view, "#turn-jump-track")
+    assert has_element?(view, "#turn-jump-card")
+
+    submit_prompt(view, "list the files")
+
+    assert has_element?(view, ~s(#message-stream [data-turn="user"]))
+    assert has_element?(view, ~s(#message-stream [data-turn="assistant"]))
+    refute has_element?(view, ~s(#message-stream [data-turn="tool-result"]))
+    assert has_element?(view, ~s(#message-stream [data-message-role="tool-result"]))
+  end
+
   test "streaming pushes deltas to the client bubble, then the final message replaces it",
        %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
@@ -112,6 +125,7 @@ defmodule CatalystWeb.ShellLiveTest do
     )
 
     assert has_element?(view, "#streaming-message")
+    assert has_element?(view, ~s(#streaming-message[data-turn="assistant"]))
     assert has_element?(view, "#streaming-message [data-stream=text]")
     assert has_element?(view, "#stream-dots", "Assistant is working")
 

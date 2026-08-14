@@ -56,7 +56,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp message(%{msg: %Message.User{}} = assigns) do
     ~H"""
-    <div data-message-role="user" class="flex justify-end">
+    <div data-message-role="user" data-turn="user" class="flex justify-end">
       <div class="max-w-[82%] rounded-2xl bg-neutral-200/70 px-4 py-2.5 text-sm leading-6 text-neutral-900 dark:bg-white/10 dark:text-neutral-100">
         <img
           :for={img <- user_images(@msg.content)}
@@ -72,7 +72,12 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp message(%{msg: %Message.Assistant{}} = assigns) do
     ~H"""
-    <div :if={@msg.content != []} data-message-role="assistant" class="flex justify-start">
+    <div
+      :if={@msg.content != []}
+      data-message-role="assistant"
+      data-turn="assistant"
+      class="flex justify-start"
+    >
       <div class="w-full min-w-0 px-1 py-1 text-sm leading-6 text-neutral-800 dark:text-neutral-200">
         <%= for b <- @msg.content do %>
           {render_block(%{block: b})}

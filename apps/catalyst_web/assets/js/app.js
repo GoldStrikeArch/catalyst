@@ -279,6 +279,105 @@ const Hooks = {
       if (dots) dots.style.display = "none";
     },
   },
+
+  // Hover the right gutter of #messages: first-line preview of the turn
+  // under that Y. Click jumps. Alt/⌥+wheel steps user/assistant turns.
+  JumpByTurn: {
+    mounted() {
+      this.scroller = document.getElementById("messages");
+      this.card = document.getElementById("turn-jump-card");
+      this.roleEl = this.card?.querySelector("[data-turn-role]");
+      this.prevEl = this.card?.querySelector("[data-turn-preview]");
+      this.current = null;
+      if (!this.scroller || !this.card) return;
+
+      this.onMove = (e) => this.hover(e);
+      this.onLeave = () => this.hide();
+      this.onClick = (e) => {
+        if (!this.nearGutter(e) || !this.current) return;
+        e.preventDefault();
+        this.jump(this.current);
+      };
+      this.onWheel = (e) => {
+        if (!e.altKey) return;
+        const turns = this.turns();
+        if (turns.length === 0) return;
+        e.preventDefault();
+        const dir = e.deltaY > 0 ? 1 : -1;
+        const next = turns[this.clamp(this.nearestIndex() + dir, turns.length)];
+        this.jump(next);
+      };
+
+      this.scroller.addEventListener("mousemove", this.onMove);
+      this.scroller.addEventListener("mouseleave", this.onLeave);
+      this.scroller.addEventListener("click", this.onClick);
+      this.scroller.addEventListener("wheel", this.onWheel, { passive: false });
+    },
+    destroyed() {
+      if (!this.scroller) return;
+      this.scroller.removeEventListener("mousemove", this.onMove);
+      this.scroller.removeEventListener("mouseleave", this.onLeave);
+      this.scroller.removeEventListener("click", this.onClick);
+      this.scroller.removeEventListener("wheel", this.onWheel);
+    },
+    turns() {
+      return [...this.scroller.querySelectorAll("[data-turn]")];
+    },
+    contentTop(el) {
+      const s = this.scroller;
+      return el.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop;
+    },
+    nearGutter(e) {
+      const r = this.scroller.getBoundingClientRect();
+      const x = r.left + this.scroller.clientWidth;
+      return e.clientX >= x - 16 && e.clientX <= x;
+    },
+    turnAt(clientY) {
+      const s = this.scroller;
+      const r = s.getBoundingClientRect();
+      const y = ((clientY - r.top) / r.height) * s.scrollHeight;
+      let found = null;
+      for (const t of this.turns()) {
+        if (this.contentTop(t) <= y) found = t;
+        else break;
+      }
+      return found;
+    },
+    nearestIndex() {
+      const turns = this.turns();
+      const top = this.scroller.scrollTop + 8;
+      let i = 0;
+      for (let k = 0; k < turns.length; k++) {
+        if (this.contentTop(turns[k]) <= top) i = k;
+        else break;
+      }
+      return i;
+    },
+    clamp(i, n) {
+      return Math.max(0, Math.min(n - 1, i));
+    },
+    hover(e) {
+      if (!this.nearGutter(e)) return this.hide();
+      const turn = this.turnAt(e.clientY);
+      if (!turn) return this.hide();
+      this.current = turn;
+      this.roleEl.textContent = turn.dataset.turn === "user" ? "You" : "Assistant";
+      this.prevEl.textContent = (turn.innerText || "").trim().split("\n")[0] || "";
+      this.card.hidden = false;
+      const track = this.el.getBoundingClientRect();
+      const h = this.card.offsetHeight;
+      const y = e.clientY - track.top - h / 2;
+      this.card.style.top = `${Math.max(8, Math.min(y, track.height - h - 8))}px`;
+    },
+    hide() {
+      this.current = null;
+      this.card.hidden = true;
+    },
+    jump(el) {
+      if (!el) return;
+      el.scrollIntoView({ block: "start", behavior: "smooth" });
+    },
+  },
 };
 
 const csrfToken = document

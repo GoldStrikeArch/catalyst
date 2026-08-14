@@ -31,6 +31,7 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     html = render_html(Message.user("hello there"))
     assert html =~ "hello there"
     assert html =~ ~s(data-message-role="user")
+    assert html =~ ~s(data-turn="user")
   end
 
   test "an assistant message renders text and tool-call blocks" do
@@ -43,6 +44,7 @@ defmodule CatalystWeb.UI.MessageRendererTest do
 
     html = render_html(msg)
     assert html =~ ~s(data-message-role="assistant")
+    assert html =~ ~s(data-turn="assistant")
     assert html =~ "let me look"
     assert html =~ "ls("
   end
