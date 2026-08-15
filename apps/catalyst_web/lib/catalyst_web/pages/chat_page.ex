@@ -131,19 +131,20 @@ defmodule CatalystWeb.Pages.ChatPage do
         </div>
       </main>
 
-      <%!-- Hover the transcript's right gutter (just left of the scrollbar)
-        for a first-line turn preview; click jumps. Alt/⌥+wheel steps turns.
+      <%!-- Scrollbar tick rail: one mark per user/assistant turn. Hover the
+        gutter for a first-line preview; click jumps. Alt/⌥+wheel steps.
         Hook lives here so #messages can keep ScrollBottom (one hook / el). --%>
       <div
         id="turn-jump-track"
         phx-hook="JumpByTurn"
         phx-update="ignore"
-        class="pointer-events-none absolute inset-y-0 right-0 z-20 w-0"
+        class="pointer-events-none absolute inset-y-0 right-0 z-20 w-3"
       >
+        <div id="turn-jump-ticks" class="absolute inset-0"></div>
         <div
           id="turn-jump-card"
           hidden
-          class="pointer-events-none absolute right-5 max-w-xs rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs shadow-lg dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-100"
+          class="pointer-events-none absolute right-full mr-2 w-max max-w-xs rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs shadow-lg dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-100"
         >
           <div
             data-turn-role

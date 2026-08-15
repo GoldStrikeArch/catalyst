@@ -280,16 +280,17 @@ const Hooks = {
     },
   },
 
-  // Hover the right gutter of #messages: first-line preview of the turn
-  // under that Y. Click jumps. Alt/⌥+wheel steps user/assistant turns.
+  // Scrollbar tick rail: one mark per user/assistant turn. Hover the right
+  // gutter for a first-line preview; click jumps. Alt/⌥+wheel steps turns.
   JumpByTurn: {
     mounted() {
       this.scroller = document.getElementById("messages");
       this.card = document.getElementById("turn-jump-card");
+      this.ticks = document.getElementById("turn-jump-ticks");
       this.roleEl = this.card?.querySelector("[data-turn-role]");
       this.prevEl = this.card?.querySelector("[data-turn-preview]");
       this.current = null;
-      if (!this.scroller || !this.card) return;
+      if (!this.scroller || !this.card || !this.ticks) return;
 
       this.onMove = (e) => this.hover(e);
       this.onLeave = () => this.hide();
@@ -307,11 +308,25 @@ const Hooks = {
         const next = turns[this.clamp(this.nearestIndex() + dir, turns.length)];
         this.jump(next);
       };
+      this.onPaint = () => {
+        if (this.paintRaf) return;
+        this.paintRaf = requestAnimationFrame(() => {
+          this.paintRaf = null;
+          this.paintTicks();
+        });
+      };
 
       this.scroller.addEventListener("mousemove", this.onMove);
       this.scroller.addEventListener("mouseleave", this.onLeave);
       this.scroller.addEventListener("click", this.onClick);
       this.scroller.addEventListener("wheel", this.onWheel, { passive: false });
+      window.addEventListener("catalyst:autoscroll", this.onPaint);
+
+      this.resizeObs = new ResizeObserver(this.onPaint);
+      this.resizeObs.observe(this.scroller);
+      this.mutObs = new MutationObserver(this.onPaint);
+      this.mutObs.observe(this.scroller, { childList: true, subtree: true });
+      this.paintTicks();
     },
     destroyed() {
       if (!this.scroller) return;
@@ -319,6 +334,10 @@ const Hooks = {
       this.scroller.removeEventListener("mouseleave", this.onLeave);
       this.scroller.removeEventListener("click", this.onClick);
       this.scroller.removeEventListener("wheel", this.onWheel);
+      window.removeEventListener("catalyst:autoscroll", this.onPaint);
+      this.resizeObs?.disconnect();
+      this.mutObs?.disconnect();
+      if (this.paintRaf) cancelAnimationFrame(this.paintRaf);
     },
     turns() {
       return [...this.scroller.querySelectorAll("[data-turn]")];
@@ -330,7 +349,7 @@ const Hooks = {
     nearGutter(e) {
       const r = this.scroller.getBoundingClientRect();
       const x = r.left + this.scroller.clientWidth;
-      return e.clientX >= x - 16 && e.clientX <= x;
+      return e.clientX >= x - 16 && e.clientX <= r.right;
     },
     turnAt(clientY) {
       const s = this.scroller;
@@ -356,6 +375,34 @@ const Hooks = {
     clamp(i, n) {
       return Math.max(0, Math.min(n - 1, i));
     },
+    paintTicks() {
+      const turns = this.turns();
+      const total = Math.max(this.scroller.scrollHeight, 1);
+      const rail = this.el.clientHeight;
+      while (this.ticks.childElementCount > turns.length) this.ticks.lastChild.remove();
+      turns.forEach((t, i) => {
+        let mark = this.ticks.children[i];
+        if (!mark) {
+          mark = document.createElement("div");
+          mark.dataset.turnTick = "";
+          mark.className =
+            "absolute right-0.5 h-px w-2 -translate-y-1/2 rounded-full bg-neutral-400/70 dark:bg-white/40";
+          this.ticks.appendChild(mark);
+        }
+        mark.style.top = `${(this.contentTop(t) / total) * rail}px`;
+      });
+      this.syncActiveTick();
+    },
+    syncActiveTick() {
+      const turns = this.turns();
+      const i = this.current ? turns.indexOf(this.current) : -1;
+      [...this.ticks.children].forEach((mark, k) => {
+        mark.classList.toggle("bg-neutral-800", k === i);
+        mark.classList.toggle("dark:bg-white", k === i);
+        mark.classList.toggle("bg-neutral-400/70", k !== i);
+        mark.classList.toggle("dark:bg-white/40", k !== i);
+      });
+    },
     hover(e) {
       if (!this.nearGutter(e)) return this.hide();
       const turn = this.turnAt(e.clientY);
@@ -368,10 +415,12 @@ const Hooks = {
       const h = this.card.offsetHeight;
       const y = e.clientY - track.top - h / 2;
       this.card.style.top = `${Math.max(8, Math.min(y, track.height - h - 8))}px`;
+      this.syncActiveTick();
     },
     hide() {
       this.current = null;
       this.card.hidden = true;
+      this.syncActiveTick();
     },
     jump(el) {
       if (!el) return;
