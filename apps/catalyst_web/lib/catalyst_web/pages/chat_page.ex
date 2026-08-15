@@ -138,12 +138,12 @@ defmodule CatalystWeb.Pages.ChatPage do
         id="turn-jump-track"
         phx-hook="JumpByTurn"
         phx-update="ignore"
-        class="pointer-events-none absolute inset-y-0 right-0 z-20 w-0"
+        class="pointer-events-none absolute inset-y-0 right-4 z-20 w-64"
       >
         <div
           id="turn-jump-card"
           hidden
-          class="pointer-events-none absolute right-5 max-w-xs rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs shadow-lg dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-100"
+          class="pointer-events-none absolute right-0 w-max max-w-full rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs shadow-lg dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-100"
         >
           <div
             data-turn-role
