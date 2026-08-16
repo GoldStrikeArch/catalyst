@@ -27,11 +27,13 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     |> length()
   end
 
-  test "a user message renders its text on the right" do
+  test "a user message renders left-aligned with a user mark" do
     html = render_html(Message.user("hello there"))
     assert html =~ "hello there"
     assert html =~ ~s(data-message-role="user")
     assert html =~ ~s(data-turn="user")
+    assert html =~ ~s(data-user-mark)
+    refute html =~ "justify-end"
   end
 
   test "an assistant message renders text and tool-call blocks" do

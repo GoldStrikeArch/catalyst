@@ -56,8 +56,14 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp message(%{msg: %Message.User{}} = assigns) do
     ~H"""
-    <div data-message-role="user" data-turn="user" class="flex justify-end">
-      <div class="max-w-[82%] rounded-2xl bg-neutral-200/70 px-4 py-2.5 text-sm leading-6 text-neutral-900 dark:bg-white/10 dark:text-neutral-100">
+    <div data-message-role="user" data-turn="user" class="flex items-start gap-3">
+      <span
+        data-user-mark
+        class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-neutral-200/80 text-neutral-600 dark:bg-white/10 dark:text-neutral-300"
+      >
+        <.icon name="hero-user" class="size-3.5" />
+      </span>
+      <div class="min-w-0 text-sm leading-6 text-neutral-900 dark:text-neutral-100">
         <img
           :for={img <- user_images(@msg.content)}
           src={image_src(img)}

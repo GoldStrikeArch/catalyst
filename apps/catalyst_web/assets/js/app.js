@@ -386,7 +386,7 @@ const Hooks = {
           mark = document.createElement("div");
           mark.dataset.turnTick = "";
           mark.className =
-            "absolute right-0.5 h-px w-2 -translate-y-1/2 rounded-full bg-neutral-400/70 dark:bg-white/40";
+            "absolute right-1 h-0.5 w-2.5 -translate-y-1/2 rounded-sm bg-neutral-400 dark:bg-white/55";
           this.ticks.appendChild(mark);
         }
         mark.style.top = `${(this.contentTop(t) / total) * rail}px`;
@@ -399,8 +399,8 @@ const Hooks = {
       [...this.ticks.children].forEach((mark, k) => {
         mark.classList.toggle("bg-neutral-800", k === i);
         mark.classList.toggle("dark:bg-white", k === i);
-        mark.classList.toggle("bg-neutral-400/70", k !== i);
-        mark.classList.toggle("dark:bg-white/40", k !== i);
+        mark.classList.toggle("bg-neutral-400", k !== i);
+        mark.classList.toggle("dark:bg-white/55", k !== i);
       });
     },
     hover(e) {
