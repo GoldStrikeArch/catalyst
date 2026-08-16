@@ -104,6 +104,7 @@ defmodule CatalystWeb.ShellLiveTest do
   test "user and assistant turns are jump-by-turn targets", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
     assert has_element?(view, "#turn-jump-track")
+    assert has_element?(view, "#turn-jump-ticks")
     assert has_element?(view, "#turn-jump-card")
 
     submit_prompt(view, "list the files")
