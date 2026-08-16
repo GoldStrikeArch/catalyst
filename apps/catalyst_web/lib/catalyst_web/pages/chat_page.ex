@@ -19,7 +19,7 @@ defmodule CatalystWeb.Pages.ChatPage do
         data-quiet={@ui_prefs.quiet}
         class="flex-1 overflow-y-auto px-4 py-6 sm:px-6"
       >
-        <div class="mx-auto flex max-w-5xl flex-col gap-3">
+        <div class="flex max-w-3xl flex-col gap-3">
           <p
             :if={@message_count == 0 and is_nil(@streaming) and @queued == []}
             id="chat-empty-state"
@@ -138,7 +138,7 @@ defmodule CatalystWeb.Pages.ChatPage do
         id="turn-jump-track"
         phx-hook="JumpByTurn"
         phx-update="ignore"
-        class="pointer-events-none absolute inset-y-0 right-0 z-20 w-3"
+        class="pointer-events-none absolute inset-y-0 right-0 z-20 w-4"
       >
         <div id="turn-jump-ticks" class="absolute inset-0"></div>
         <div
