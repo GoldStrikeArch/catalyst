@@ -30,6 +30,7 @@ defmodule Catalyst.Session.Server do
   }
 
   alias Catalyst.Session.Server.State
+  alias Catalyst.Workflow.Registry, as: WorkflowRegistry
 
   # ---- public API -----------------------------------------------------------
 
@@ -785,37 +786,90 @@ defmodule Catalyst.Session.Server do
     end
   end
 
-  defp validate_workflow_change(%State{messages: []}, _changes), do: :ok
-
   defp validate_workflow_change(%State{} = state, changes) do
-    current = Keyword.get(state.opts, :workflow)
-
     case Keyword.get(changes, :opts, []) do
       opts when is_list(opts) ->
-        validate_selected_workflow(current, Keyword.fetch(opts, :workflow))
+        case Keyword.keyword?(opts) do
+          true -> validate_effective_workflow_change(state, opts)
+          false -> {:error, {:invalid_options, opts}}
+        end
 
       invalid ->
         {:error, {:invalid_options, invalid}}
     end
   end
 
-  defp validate_selected_workflow(_current, :error), do: :ok
+  defp validate_effective_workflow_change(state, changes) do
+    case workflow_identity_change?(changes) do
+      false ->
+        :ok
 
-  defp validate_selected_workflow(current, {:ok, selected}) do
-    case external_backend_switch?(current, selected) do
+      true ->
+        validate_workflow_transition(state, changes)
+    end
+  end
+
+  defp workflow_identity_change?(changes) do
+    Enum.any?(changes, fn {key, _value} -> key in [:workflow, :loop, :acp_agent] end)
+  end
+
+  defp validate_workflow_transition(%State{messages: [], run: nil}, _changes), do: :ok
+
+  defp validate_workflow_transition(state, changes) do
+    next_opts =
+      state.opts
+      |> merge_opts(changes)
+      |> normalize_session_opts()
+
+    with {:ok, current} <- workflow_backend(state.opts),
+         {:ok, selected} <- workflow_backend(next_opts) do
+      validate_backend_transition(current, selected)
+    end
+  end
+
+  defp workflow_backend(opts) do
+    with {:ok, selection} <- WorkflowRegistry.resolve(opts) do
+      {:ok, backend_identity(selection, opts)}
+    end
+  end
+
+  defp backend_identity(%{module: Catalyst.ClaudeCode.Workflow}, _opts),
+    do: {:external, :claude_code}
+
+  defp backend_identity(%{module: Catalyst.ACP.Workflow} = selection, opts),
+    do: {:external, :acp, acp_agent_identity(selection, opts)}
+
+  defp backend_identity(%{name: "claude-code"}, _opts), do: {:external, :claude_code}
+
+  defp backend_identity(%{name: "acp/" <> id}, _opts), do: {:external, :acp, id}
+
+  defp backend_identity(_selection, _opts), do: :internal
+
+  defp acp_agent_identity(selection, opts) do
+    case Keyword.fetch(opts, :acp_agent) do
+      {:ok, %Catalyst.ACP.Agent{id: id}} -> id
+      {:ok, %{id: id}} when is_binary(id) -> id
+      {:ok, %{"id" => id}} when is_binary(id) -> id
+      {:ok, configured} -> {:configured, configured}
+      :error -> selected_acp_agent(selection)
+    end
+  end
+
+  defp selected_acp_agent(%{name: "acp/" <> id}), do: id
+  defp selected_acp_agent(%{name: name}), do: {:workflow, name}
+
+  defp validate_backend_transition(backend, backend), do: :ok
+
+  defp validate_backend_transition(current, selected) do
+    case external_backend?(current) or external_backend?(selected) do
       true -> {:error, :backend_switch_requires_new_session}
       false -> :ok
     end
   end
 
-  defp external_backend_switch?(workflow, workflow), do: false
-
-  defp external_backend_switch?(current, selected),
-    do: external_workflow?(current) or external_workflow?(selected)
-
-  defp external_workflow?("claude-code"), do: true
-  defp external_workflow?("acp/" <> _agent_id), do: true
-  defp external_workflow?(_workflow), do: false
+  defp external_backend?({:external, _backend}), do: true
+  defp external_backend?({:external, _backend, _identity}), do: true
+  defp external_backend?(_backend), do: false
 
   defp validate_system_prompt(text) do
     case is_binary(text) and Catalyst.Prompt.Config.nonblank_text?(text) do

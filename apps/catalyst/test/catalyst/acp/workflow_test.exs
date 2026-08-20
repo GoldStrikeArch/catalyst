@@ -4,6 +4,7 @@ defmodule Catalyst.ACP.WorkflowTest do
   alias Catalyst.ACP.{Agent, Client}
   alias Catalyst.Agent.Event
   alias Catalyst.Content
+  alias Catalyst.Context.Transcript
   alias Catalyst.Message
   alias Catalyst.Session.{Manager, Server}
 
@@ -99,6 +100,67 @@ defmodule Catalyst.ACP.WorkflowTest do
     [{loaded_client, _value}] = Registry.lookup(Catalyst.ACP.Registry, {id, "fixture"})
     assert %{recovery: :load} = Client.info(loaded_client)
     assert File.read!(log_path) =~ ~s("method":"session/load")
+  end
+
+  test "groups concurrent tool calls with all results in one valid transcript unit", %{tmp: tmp} do
+    log_path = Path.join(tmp, "parallel.json")
+    agent = fixture_agent(log_path, [{"ACP_FIXTURE_PROMPT", "parallel"}])
+
+    {:ok, %{id: id, pid: pid}} = Manager.start_session(session_options(tmp, agent))
+    on_exit(fn -> Manager.stop(id) end)
+    :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+
+    assert :ok = Server.prompt(pid, "parallel")
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 3_000
+    _ = :sys.get_state(pid)
+
+    messages = Server.state(pid).messages
+    assert :ok = Transcript.validate_transcript(messages)
+
+    assistant_index =
+      Enum.find_index(messages, fn
+        %Message.Assistant{} = message -> length(Message.tool_calls(message)) == 2
+        _message -> false
+      end)
+
+    assert is_integer(assistant_index)
+
+    [
+      %Message.Assistant{} = assistant,
+      %Message.ToolResult{} = first,
+      %Message.ToolResult{} = second
+    ] =
+      Enum.slice(messages, assistant_index, 3)
+
+    assert Enum.map(Message.tool_calls(assistant), & &1.id) == ["tool-1", "tool-2"]
+    assert [first.tool_call_id, second.tool_call_id] == ["tool-1", "tool-2"]
+  end
+
+  test "marks a tool without a terminal update as failed", %{tmp: tmp} do
+    log_path = Path.join(tmp, "incomplete.json")
+    agent = fixture_agent(log_path, [{"ACP_FIXTURE_PROMPT", "incomplete"}])
+
+    {:ok, %{id: id, pid: pid}} = Manager.start_session(session_options(tmp, agent))
+    on_exit(fn -> Manager.stop(id) end)
+    :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+
+    assert :ok = Server.prompt(pid, "incomplete")
+
+    assert_receive {:agent_event, ^id,
+                    %Event.ToolExecutionEnd{
+                      call_id: "tool-incomplete",
+                      is_error: true
+                    }},
+                   3_000
+
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 3_000
+    _ = :sys.get_state(pid)
+
+    messages = Server.state(pid).messages
+    assert :ok = Transcript.validate_transcript(messages)
+
+    assert %Message.ToolResult{is_error: true} =
+             Enum.find(messages, &match?(%Message.ToolResult{}, &1))
   end
 
   defp assert_transcript(messages, turns) do

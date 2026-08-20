@@ -21,11 +21,11 @@ defmodule Catalyst.ClaudeCode.Command do
   def build(prompt, config, resume_id) when is_binary(prompt) and is_map(config) do
     with :ok <- nonblank(:prompt, prompt),
          {:ok, executable} <- executable(config.opts),
-         {:ok, prompt_args, prompt_dir} <- prompt_args(config),
          {:ok, permission_args} <- permission_args(config.opts),
          {:ok, resume_args} <- resume_args(resume_id),
          {:ok, safe_mode_args} <- safe_mode_args(config.opts),
-         {:ok, option_args} <- option_args(config.opts) do
+         {:ok, option_args} <- option_args(config.opts),
+         {:ok, prompt_args, prompt_dir} <- prompt_args(config) do
       # ponytail: the local macOS experiment passes the prompt in argv; use a
       # half-close-capable stdin helper if same-user process-list privacy matters.
       args =

@@ -1,5 +1,5 @@
 defmodule Catalyst.ClaudeCode.CommandTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Catalyst.ClaudeCode.Command
 
@@ -33,10 +33,34 @@ defmodule Catalyst.ClaudeCode.CommandTest do
     refute File.exists?(path)
   end
 
+  test "does not leave a prompt file when a later command option is invalid" do
+    before = prompt_directories()
+
+    config = %{
+      config("sensitive replacement")
+      | opts: [
+          claude_executable: System.find_executable("elixir"),
+          claude_permission_mode: :invalid
+        ]
+    }
+
+    assert {:error, {:invalid_claude_permission_mode, :invalid}} =
+             Command.build("hello", config, nil)
+
+    assert prompt_directories() == before
+  end
+
   defp config(prompt_override) do
     %{
       prompt_override: prompt_override,
       opts: [claude_executable: System.find_executable("elixir")]
     }
+  end
+
+  defp prompt_directories do
+    System.tmp_dir!()
+    |> Path.join("catalyst-claude-*")
+    |> Path.wildcard()
+    |> MapSet.new()
   end
 end

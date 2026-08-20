@@ -104,7 +104,9 @@ defmodule Catalyst.ACP.Workflow do
       open?: false,
       content: [],
       messages: [],
-      tools: %{}
+      tools: %{},
+      tool_order: [],
+      tool_results: %{}
     }
   end
 
@@ -143,10 +145,14 @@ defmodule Catalyst.ACP.Workflow do
     args = Map.get(update, "rawInput", %{})
     call = %ToolCall{id: id, name: name, arguments: valid_args(args)}
     state = %{state | content: [call | state.content]}
-    state = finalize_open(state, :tool_use, nil, nil)
 
     state.emit.(%Event.ToolExecutionStart{call_id: id, name: name, args: valid_args(args)})
-    %{state | tools: Map.put(state.tools, id, %{name: name, args: valid_args(args)})}
+
+    %{
+      state
+      | tools: Map.put(state.tools, id, %{name: name, args: valid_args(args)}),
+        tool_order: [id | state.tool_order]
+    }
   end
 
   defp start_tool(state, _invalid), do: state
@@ -163,26 +169,7 @@ defmodule Catalyst.ACP.Workflow do
   defp apply_tool_update(state, id, tool, %{"status" => status} = update)
        when status in ["completed", "failed"] do
     text = tool_content(update)
-    error? = status == "failed"
-
-    state.emit.(%Event.ToolExecutionEnd{
-      call_id: id,
-      name: tool.name,
-      result: %{content: Content.text(text), details: %{}},
-      is_error: error?
-    })
-
-    message = %Message.ToolResult{
-      tool_call_id: id,
-      tool_name: tool.name,
-      content: Content.text(text),
-      details: %{},
-      is_error: error?,
-      timestamp: Message.now()
-    }
-
-    state.emit.(%Event.MessageEnd{message: message})
-    %{state | messages: [message | state.messages], tools: Map.delete(state.tools, id)}
+    finish_tool(state, id, tool, text, status == "failed")
   end
 
   defp apply_tool_update(state, id, tool, update) do
@@ -217,31 +204,64 @@ defmodule Catalyst.ACP.Workflow do
 
   defp finish_prompt(result, _state), do: {:error, {:invalid_prompt_result, result}}
 
-  defp complete_open_tools(state, stop_reason) do
+  defp complete_open_tools(state, _stop_reason) do
     Enum.reduce(state.tools, state, fn {id, tool}, acc ->
-      error? = stop_reason != :stop
       text = "ACP prompt ended before the tool reported a terminal status."
 
-      acc.emit.(%Event.ToolExecutionEnd{
-        call_id: id,
-        name: tool.name,
-        result: %{content: Content.text(text), details: %{}},
-        is_error: error?
-      })
+      finish_tool(acc, id, tool, text, true)
+    end)
+    |> flush_tool_group()
+  end
 
-      message = %Message.ToolResult{
-        tool_call_id: id,
-        tool_name: tool.name,
-        content: Content.text(text),
-        details: %{},
-        is_error: error?,
-        timestamp: Message.now()
+  defp finish_tool(state, id, tool, text, error?) do
+    state.emit.(%Event.ToolExecutionEnd{
+      call_id: id,
+      name: tool.name,
+      result: %{content: Content.text(text), details: %{}},
+      is_error: error?
+    })
+
+    message = %Message.ToolResult{
+      tool_call_id: id,
+      tool_name: tool.name,
+      content: Content.text(text),
+      details: %{},
+      is_error: error?,
+      timestamp: Message.now()
+    }
+
+    state =
+      %{
+        state
+        | tools: Map.delete(state.tools, id),
+          tool_results: Map.put(state.tool_results, id, message)
       }
 
-      acc.emit.(%Event.MessageEnd{message: message})
-      %{acc | messages: [message | acc.messages]}
+    case map_size(state.tools) do
+      0 -> flush_tool_group(state)
+      _remaining -> state
+    end
+  end
+
+  defp flush_tool_group(%{tool_results: results} = state) when map_size(results) == 0,
+    do: state
+
+  defp flush_tool_group(state) do
+    results = state.tool_results
+    order = Enum.reverse(state.tool_order)
+    state = finalize_open(state, :tool_use, nil, nil)
+    state = %{state | tool_order: [], tool_results: %{}}
+
+    Enum.reduce(order, state, fn id, acc ->
+      case Map.fetch(results, id) do
+        {:ok, message} ->
+          acc.emit.(%Event.MessageEnd{message: message})
+          %{acc | messages: [message | acc.messages]}
+
+        :error ->
+          acc
+      end
     end)
-    |> Map.put(:tools, %{})
   end
 
   defp ensure_open(%{open?: true} = state), do: state

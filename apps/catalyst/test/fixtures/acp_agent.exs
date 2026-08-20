@@ -67,6 +67,8 @@ defmodule CatalystACPFixture do
   defp prompt(id) do
     case System.get_env("ACP_FIXTURE_PROMPT") do
       "hang" -> wait_for_cancel()
+      "parallel" -> parallel_prompt(id)
+      "incomplete" -> incomplete_prompt(id)
       _normal -> complete_prompt(id)
     end
   end
@@ -97,6 +99,38 @@ defmodule CatalystACPFixture do
 
     update(
       ~s({"sessionUpdate":"config_option_update","configOptions":[{"id":"mode","name":"Mode","type":"select","currentValue":"code","options":[{"value":"ask","name":"Ask"},{"value":"code","name":"Code"}]}]})
+    )
+
+    puts(~s({"jsonrpc":"2.0","id":#{id},"result":{"stopReason":"end_turn"}}))
+  end
+
+  defp parallel_prompt(id) do
+    update(
+      ~s({"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"First tool","kind":"execute","status":"pending","rawInput":{"command":"first"}})
+    )
+
+    update(
+      ~s({"sessionUpdate":"tool_call","toolCallId":"tool-2","title":"Second tool","kind":"execute","status":"pending","rawInput":{"command":"second"}})
+    )
+
+    update(
+      ~s({"sessionUpdate":"tool_call_update","toolCallId":"tool-2","status":"completed","content":[{"type":"content","content":{"type":"text","text":"second complete"}}]})
+    )
+
+    update(
+      ~s({"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"first complete"}}]})
+    )
+
+    update(
+      ~s({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"parallel answer"}})
+    )
+
+    puts(~s({"jsonrpc":"2.0","id":#{id},"result":{"stopReason":"end_turn"}}))
+  end
+
+  defp incomplete_prompt(id) do
+    update(
+      ~s({"sessionUpdate":"tool_call","toolCallId":"tool-incomplete","title":"Incomplete tool","kind":"execute","status":"pending","rawInput":{"command":"wait"}})
     )
 
     puts(~s({"jsonrpc":"2.0","id":#{id},"result":{"stopReason":"end_turn"}}))

@@ -125,8 +125,12 @@ defmodule Catalyst.ACP.Agent do
   defp normalize_env(env) when is_map(env), do: normalize_env(Map.to_list(env))
 
   defp normalize_env(env) when is_list(env) do
-    case Enum.all?(env, fn {key, value} ->
-           is_binary(key) and Regex.match?(@env_key, key) and is_binary(value)
+    case Enum.all?(env, fn
+           {key, value} ->
+             is_binary(key) and Regex.match?(@env_key, key) and is_binary(value)
+
+           _invalid ->
+             false
          end) do
       true -> {:ok, env}
       false -> {:error, {:invalid_agent_field, :env, env}}

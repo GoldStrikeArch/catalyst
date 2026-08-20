@@ -20,6 +20,9 @@ defmodule Catalyst.ACP.AgentTest do
     assert {:error, {:invalid_agent_field, :env, _env}} =
              Agent.new(id: "ok", name: "Bad env", command: "ok", env: %{"BAD-KEY" => "x"})
 
+    assert {:error, {:invalid_agent_field, :env, ["BAD"]}} =
+             Agent.new(id: "ok", name: "Malformed env", command: "ok", env: ["BAD"])
+
     assert {:error, {:invalid_agent_field, :adapter, "unknown"}} =
              Agent.new(id: "ok", name: "Bad adapter", command: "ok", adapter: "unknown")
   end

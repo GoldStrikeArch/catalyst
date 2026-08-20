@@ -418,7 +418,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   defp configure_workflow(socket, pid, workflow) do
     current = socket.assigns.workflow_prefs.workflow
 
-    case external_backend_switch?(current, workflow) and transcript_present?(pid) do
+    case external_backend_switch?(current, workflow) and backend_boundary_present?(pid) do
       true ->
         socket
         |> commit_workflow(workflow)
@@ -460,8 +460,9 @@ defmodule CatalystWeb.ShellLive.Settings do
   defp external_workflow?("acp/" <> _agent_id), do: true
   defp external_workflow?(_workflow), do: false
 
-  defp transcript_present?(pid) do
-    Server.state(pid).messages != []
+  defp backend_boundary_present?(pid) do
+    snapshot = Server.state(pid)
+    snapshot.running or snapshot.messages != []
   catch
     :exit, _reason -> false
   end
