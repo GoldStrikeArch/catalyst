@@ -32,11 +32,9 @@ defmodule CatalystWeb.CoreComponents do
       phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
       role="alert"
       class={[
-        "rounded-2xl border px-4 py-3 text-sm shadow-xl backdrop-blur transition",
-        @kind == :info &&
-          "border-sky-200 bg-sky-50/95 text-sky-950 shadow-sky-900/10 dark:border-sky-400/20 dark:bg-sky-950/90 dark:text-sky-100",
-        @kind == :error &&
-          "border-rose-200 bg-rose-50/95 text-rose-950 shadow-rose-900/10 dark:border-rose-400/20 dark:bg-rose-950/90 dark:text-rose-100"
+        "rounded-lg border px-4 py-3 text-sm shadow-lg backdrop-blur transition",
+        @kind == :info && "border-edge bg-surface text-ink",
+        @kind == :error && "border-danger/40 bg-surface text-danger"
       ]}
       {@rest}
     >
@@ -44,12 +42,12 @@ defmodule CatalystWeb.CoreComponents do
         <.icon
           :if={@kind == :info}
           name="hero-information-circle"
-          class="mt-0.5 size-5 shrink-0 text-sky-500"
+          class="mt-0.5 size-5 shrink-0 text-accent"
         />
         <.icon
           :if={@kind == :error}
           name="hero-exclamation-circle"
-          class="mt-0.5 size-5 shrink-0 text-rose-500"
+          class="mt-0.5 size-5 shrink-0 text-danger"
         />
         <div class="min-w-0 flex-1">
           <p :if={@title} class="font-semibold">{@title}</p>

@@ -31,18 +31,15 @@ defmodule CatalystWeb.ShellComponents do
       )
 
     ~H"""
-    <Layouts.app
-      flash={@flash}
-      class="min-h-screen bg-neutral-50 text-neutral-900 antialiased dark:bg-neutral-900 dark:text-neutral-100"
-    >
+    <Layouts.app flash={@flash} class="min-h-screen bg-bg text-ink antialiased">
       <div
         id="catalyst-shell"
         data-session-id={@session_id || ""}
-        class="flex h-screen flex-col bg-neutral-50 dark:bg-neutral-900"
+        class="flex h-screen flex-col bg-bg text-ink"
       >
         <header
           id="shell-header"
-          class="relative z-40 flex h-9 shrink-0 items-center gap-1.5 border-b border-neutral-200 bg-neutral-50 px-2 dark:border-white/10 dark:bg-neutral-900"
+          class="relative z-40 flex h-9 shrink-0 items-center gap-1.5 border-b border-edge bg-bg px-2"
         >
           <button
             id="sidebar-toggle"
@@ -51,15 +48,15 @@ defmodule CatalystWeb.ShellComponents do
             aria-pressed={to_string(@ui_prefs.sidebar)}
             aria-controls="shell-sidebar"
             title={if(@ui_prefs.sidebar, do: "Hide sidebar", else: "Show sidebar")}
-            class="flex size-7 shrink-0 items-center justify-center rounded-md text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
+            class="flex size-7 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-raised hover:text-ink"
           >
             <.icon name="hero-bars-3" class="size-3.5" />
           </button>
 
           <span :if={@running} class="flex items-center gap-0.5" aria-label="Agent running">
-            <span class="size-1 animate-pulse rounded-full bg-indigo-500"></span>
-            <span class="size-1 animate-pulse rounded-full bg-indigo-500 delay-150"></span>
-            <span class="size-1 animate-pulse rounded-full bg-indigo-500 delay-300"></span>
+            <span class="size-1 animate-pulse rounded-full bg-accent"></span>
+            <span class="size-1 animate-pulse rounded-full bg-accent delay-150"></span>
+            <span class="size-1 animate-pulse rounded-full bg-accent delay-300"></span>
           </span>
 
           <nav
@@ -73,10 +70,8 @@ defmodule CatalystWeb.ShellComponents do
               patch={~p"/#{page.path}"}
               class={[
                 "rounded-md px-2 py-0.5 text-[11px] font-medium transition",
-                @page == page.path &&
-                  "bg-neutral-200/70 text-neutral-900 dark:bg-white/10 dark:text-white",
-                @page != page.path &&
-                  "text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/5 dark:hover:text-white"
+                @page == page.path && "bg-raised text-ink",
+                @page != page.path && "text-muted hover:bg-raised hover:text-ink"
               ]}
             >
               {page.label}
@@ -86,7 +81,7 @@ defmodule CatalystWeb.ShellComponents do
           <.link
             navigate={~p"/compare"}
             id="comparison-nav"
-            class="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-neutral-500 transition hover:bg-neutral-200/50 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/5 dark:hover:text-white"
+            class="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-muted transition hover:bg-raised hover:text-ink"
           >
             <.icon name="hero-squares-2x2" class="size-3" /> Compare
           </.link>
@@ -99,7 +94,7 @@ defmodule CatalystWeb.ShellComponents do
             <%= if @logged_in do %>
               <button
                 id="logout-button"
-                class="rounded-full p-2 text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
+                class="rounded-full p-2 text-muted transition hover:bg-raised hover:text-ink"
                 phx-click="logout"
                 title={"Sign out of #{subscription_name(@selected_codex_entry)}"}
                 type="button"
@@ -110,7 +105,7 @@ defmodule CatalystWeb.ShellComponents do
               <button
                 :if={@login_state != :pending}
                 id="login-button"
-                class="rounded-md bg-neutral-900 px-2 py-1 text-[11px] font-semibold text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+                class="rounded-md bg-accent px-2 py-1 text-[11px] font-semibold text-white transition hover:bg-accent/90"
                 phx-click="login"
                 type="button"
               >
@@ -119,9 +114,9 @@ defmodule CatalystWeb.ShellComponents do
               <span
                 :if={@login_state == :pending}
                 id="login-pending"
-                class="flex items-center gap-2 text-xs text-neutral-500 dark:text-neutral-400"
+                class="flex items-center gap-2 text-xs text-muted"
               >
-                <span class="size-3 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-600 dark:border-white/20 dark:border-t-white">
+                <span class="size-3 animate-spin rounded-full border-2 border-edge border-t-muted">
                 </span>
                 finish in your browser…
               </span>
@@ -153,10 +148,11 @@ defmodule CatalystWeb.ShellComponents do
 
             <footer
               id="shell-footer"
-              class="relative z-30 shrink-0 border-t border-neutral-200 bg-neutral-50 dark:border-white/10 dark:bg-neutral-900"
+              class="relative z-30 shrink-0 border-t border-edge bg-bg"
             >
               <.run_bar
                 cwd={@cwd}
+                running={@running}
                 context_status={@context_status}
                 diagnostic_prompt={@diagnostic_prompt}
                 diagnostic_workflow={@diagnostic_workflow}
@@ -191,28 +187,44 @@ defmodule CatalystWeb.ShellComponents do
     <aside
       :if={@open?}
       id="shell-sidebar"
-      class="flex w-52 shrink-0 flex-col overflow-y-auto border-r border-neutral-200 bg-neutral-100/50 dark:border-white/10 dark:bg-neutral-950/40"
+      class="flex w-52 shrink-0 flex-col overflow-y-auto border-r border-edge bg-bg"
     >
       {PageRenderer.render_components(:sidebar, @root)}
 
       <section id="sidebar-projects" class="px-1.5 py-2">
-        <p class="mb-1 px-1.5 text-[10px] text-neutral-400 dark:text-neutral-500">
-          Projects
-        </p>
+        <div class="mb-1 flex items-center gap-1 px-1.5">
+          <p class="min-w-0 flex-1 truncate text-[10px] text-faint">Projects</p>
+          <button
+            id="sidebar-new-thread"
+            type="button"
+            phx-click="new_session"
+            title="New thread"
+            class="rounded p-0.5 text-faint transition hover:bg-raised hover:text-ink"
+          >
+            <.icon name="hero-plus" class="size-3" />
+          </button>
+        </div>
 
-        <p
-          :if={@sidebar.projects == []}
-          class="px-1.5 py-2 text-[11px] text-neutral-400 dark:text-neutral-500"
-        >
+        <p :if={@sidebar.projects == []} class="px-1.5 py-2 text-[11px] text-faint">
           No threads yet
         </p>
 
         <div :for={project <- @sidebar.projects} id={project.id} class="mb-0.5">
-          <div class="flex items-center gap-1 px-1.5 py-0.5">
-            <.icon name="hero-folder" class="size-3 shrink-0 text-neutral-400" />
-            <span class="min-w-0 flex-1 truncate text-[11px] font-medium text-neutral-600 dark:text-neutral-300">
+          <div class="group flex items-center gap-1 px-1.5 py-0.5">
+            <.icon name="hero-folder" class="size-3 shrink-0 text-faint" />
+            <span class="min-w-0 flex-1 truncate text-[11px] font-medium text-muted">
               {project.label}
             </span>
+            <button
+              id={"project-new-thread-#{project.id}"}
+              type="button"
+              phx-click="new_session_in"
+              phx-value-cwd={project.cwd}
+              title="New thread"
+              class="rounded p-0.5 text-faint opacity-0 transition hover:bg-raised hover:text-ink group-hover:opacity-100"
+            >
+              <.icon name="hero-plus" class="size-3" />
+            </button>
           </div>
 
           <div
@@ -220,8 +232,8 @@ defmodule CatalystWeb.ShellComponents do
             id={"thread-#{thread.id}"}
             class={[
               "group flex items-center gap-0.5 rounded-md py-px pl-5 pr-0.5",
-              thread.current? && "bg-neutral-200/80 dark:bg-white/10",
-              !thread.current? && "hover:bg-neutral-200/50 dark:hover:bg-white/5"
+              thread.current? && "bg-raised",
+              !thread.current? && "hover:bg-raised"
             ]}
           >
             <button
@@ -231,15 +243,14 @@ defmodule CatalystWeb.ShellComponents do
               phx-value-id={thread.id}
               class={[
                 "flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] transition",
-                thread.current? && "text-neutral-900 dark:text-white",
-                !thread.current? &&
-                  "text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200"
+                thread.current? && "text-ink",
+                !thread.current? && "text-muted hover:text-ink"
               ]}
             >
               <span class={[
                 "size-1 shrink-0 rounded-full",
-                thread.live? && "bg-emerald-500/80",
-                !thread.live? && "bg-neutral-300 dark:bg-neutral-600"
+                thread.live? && "bg-ok/80",
+                !thread.live? && "bg-edge-strong"
               ]}>
               </span>
               <span class="min-w-0 truncate">{thread.title}</span>
@@ -250,7 +261,7 @@ defmodule CatalystWeb.ShellComponents do
               phx-click="close_session"
               phx-value-id={thread.id}
               title="Close thread"
-              class="rounded p-0.5 text-neutral-400 opacity-0 transition hover:bg-neutral-300/70 hover:text-neutral-800 group-hover:opacity-100 dark:hover:bg-white/10 dark:hover:text-white"
+              class="rounded p-0.5 text-faint opacity-0 transition hover:bg-raised hover:text-ink group-hover:opacity-100"
             >
               <.icon name="hero-x-mark" class="size-2.5" />
             </button>
@@ -269,10 +280,10 @@ defmodule CatalystWeb.ShellComponents do
     <div
       :if={@file_search}
       id="file-search-results"
-      class="mb-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 dark:border-white/10 dark:bg-white/5"
+      class="mb-2 rounded-lg border border-edge bg-surface px-3 py-2"
     >
       <div>
-        <p class="text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+        <p class="text-[0.65rem] font-semibold uppercase tracking-wide text-faint">
           <%= if @file_search.results == [] do %>
             no files match “@{@file_search.query}”
           <% else %>
@@ -286,12 +297,12 @@ defmodule CatalystWeb.ShellComponents do
             phx-click="pick_file"
             phx-value-label={r.label}
             phx-value-path={r.path}
-            class="flex items-baseline gap-3 rounded-lg px-2 py-1 text-left text-xs transition hover:bg-neutral-200/50 dark:hover:bg-white/10"
+            class="flex items-baseline gap-3 rounded-lg px-2 py-1 text-left text-xs transition hover:bg-raised"
           >
-            <code class="shrink-0 font-mono font-semibold text-neutral-900 dark:text-neutral-100">
+            <code class="shrink-0 font-mono font-semibold text-ink">
               {r.label}
             </code>
-            <span class="truncate font-mono text-neutral-400 dark:text-neutral-500">{r.path}</span>
+            <span class="truncate font-mono text-faint">{r.path}</span>
           </button>
         </div>
       </div>
@@ -299,7 +310,13 @@ defmodule CatalystWeb.ShellComponents do
     """
   end
 
-  @doc "Inline transcript draft. Enter sends or queues; Shift+Enter is a newline."
+  @doc """
+  Inline transcript draft. Enter sends or queues; Shift+Enter is a newline.
+
+  Deliberately invisible (no box, no buttons): the draft is just the tail of
+  the transcript, Delta-style. Send is the Enter key (or `#run-send` in the
+  footer run bar); Stop lives in the run bar as `#run-stop`.
+  """
   def composer(assigns) do
     ~H"""
     <.form
@@ -310,40 +327,37 @@ defmodule CatalystWeb.ShellComponents do
       phx-hook="PasteImages"
       class="mt-2"
     >
-      <div
-        :if={@uploads.image.entries != []}
-        class="mb-2 flex flex-wrap items-center gap-2"
-      >
-        <div :for={entry <- @uploads.image.entries} class="relative" data-image-entry>
-          <.live_img_preview
-            entry={entry}
-            class="h-16 w-16 rounded-lg border border-neutral-200 object-cover dark:border-white/10"
-          />
-          <button
-            type="button"
-            phx-click="cancel_image"
-            phx-value-ref={entry.ref}
-            aria-label="remove image"
-            class="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full bg-neutral-950 text-xs text-white shadow dark:bg-white dark:text-neutral-950"
-          >
-            ×
-          </button>
-          <span
-            :if={not entry.done?}
-            class="absolute inset-x-0 bottom-0 rounded-b-lg bg-neutral-950/70 text-center text-[0.6rem] text-white"
-          >
-            {entry.progress}%
-          </span>
-          <p :for={err <- upload_errors(@uploads.image, entry)} class="text-xs text-red-500">
+      <div id="composer-shell">
+        <div :if={@uploads.image.entries != []} class="mb-2 flex flex-wrap items-center gap-2">
+          <div :for={entry <- @uploads.image.entries} class="relative" data-image-entry>
+            <.live_img_preview
+              entry={entry}
+              class="h-16 w-16 rounded-lg border border-edge object-cover"
+            />
+            <button
+              type="button"
+              phx-click="cancel_image"
+              phx-value-ref={entry.ref}
+              aria-label="remove image"
+              class="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full border border-edge bg-surface text-xs text-muted shadow transition hover:border-edge-strong hover:text-ink"
+            >
+              ×
+            </button>
+            <span
+              :if={not entry.done?}
+              class="absolute inset-x-0 bottom-0 rounded-b-lg bg-surface/80 text-center text-[0.6rem] text-ink"
+            >
+              {entry.progress}%
+            </span>
+            <p :for={err <- upload_errors(@uploads.image, entry)} class="text-xs text-danger">
+              {upload_error_label(err)}
+            </p>
+          </div>
+          <p :for={err <- upload_errors(@uploads.image)} class="text-xs text-danger">
             {upload_error_label(err)}
           </p>
         </div>
-        <p :for={err <- upload_errors(@uploads.image)} class="text-xs text-red-500">
-          {upload_error_label(err)}
-        </p>
-      </div>
 
-      <div class="flex items-end gap-1">
         <.input
           field={@chat_form[:message]}
           type="textarea"
@@ -353,30 +367,10 @@ defmodule CatalystWeb.ShellComponents do
           phx-hook="ChatSubmit"
           rows="1"
           placeholder="Ask Catalyst…"
-          container_class="m-0 min-w-0 flex-1"
-          class="w-full resize-none border-0 bg-transparent px-0 py-1 text-sm leading-6 text-neutral-900 outline-none placeholder:text-neutral-400 focus:ring-0 dark:text-white dark:placeholder:text-neutral-500"
+          container_class="m-0 min-w-0"
+          class="w-full resize-none border-0 bg-transparent px-0 py-1 text-sm leading-7 text-ink outline-none placeholder:text-faint focus:ring-0"
         />
         <.live_file_input upload={@uploads.image} class="hidden" />
-        <button
-          id="chat-send"
-          type="submit"
-          aria-label={if(@running, do: "Queue", else: "Send")}
-          title={if(@running, do: "Queue for after this run", else: "Send")}
-          class="flex size-7 shrink-0 items-center justify-center rounded-md text-neutral-400 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
-        >
-          <.icon name="hero-arrow-up" class="size-3.5" />
-        </button>
-        <button
-          :if={@running}
-          id="chat-stop"
-          type="button"
-          phx-click="abort"
-          aria-label="Stop"
-          title="Stop the run"
-          class="flex size-7 shrink-0 items-center justify-center rounded-md text-neutral-400 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
-        >
-          <.icon name="hero-stop-solid" class="size-3" />
-        </button>
       </div>
     </.form>
     """
@@ -386,17 +380,17 @@ defmodule CatalystWeb.ShellComponents do
     ~H"""
     <div id="shell-run-bar" class="flex w-full items-center gap-1 px-2 py-1">
       <div id="shell-header-status" class="flex min-w-0 items-center gap-1">
-        <.icon name="hero-folder" class="size-3 shrink-0 text-neutral-400" />
+        <.icon name="hero-folder" class="size-3 shrink-0 text-faint" />
         <span
           id="header-cwd"
-          class="min-w-0 truncate font-mono text-[11px] text-neutral-400 dark:text-neutral-500"
+          class="min-w-0 truncate font-mono text-[11px] text-faint"
           title={"#{@cwd} — change with /cd <path>"}
         >
           {short_cwd(@cwd)}
         </span>
         <button
           id="new-session-button"
-          class="flex size-6 items-center justify-center rounded-md text-neutral-400 transition hover:bg-neutral-200/60 hover:text-neutral-800 dark:hover:bg-white/10 dark:hover:text-white"
+          class="flex size-6 items-center justify-center rounded-md text-faint transition hover:bg-raised hover:text-ink"
           phx-click="new_session"
           type="button"
           title="New thread"
@@ -556,6 +550,32 @@ defmodule CatalystWeb.ShellComponents do
           preview={@prompt_preview}
           open={@diagnostics_open}
         />
+
+        <%!-- Run control, Delta-style: the composer has no buttons, so send
+          lives here (Enter still submits) and stop replaces it while a run
+          is active. SubmitChat's #run-send click submits #chat-form. --%>
+        <button
+          :if={@running}
+          id="run-stop"
+          type="button"
+          phx-click="abort"
+          aria-label="Stop"
+          title="Stop the run"
+          class="flex size-6 shrink-0 items-center justify-center rounded-md text-danger transition hover:bg-danger/10"
+        >
+          <.icon name="hero-stop-solid" class="size-3.5" />
+        </button>
+        <button
+          :if={!@running}
+          id="run-send"
+          type="button"
+          phx-hook="SubmitChat"
+          aria-label="Send"
+          title="Send (Enter)"
+          class="flex size-6 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-raised hover:text-accent"
+        >
+          <.icon name="hero-paper-airplane" class="size-3.5" />
+        </button>
       </div>
     </div>
     """
@@ -595,8 +615,8 @@ defmodule CatalystWeb.ShellComponents do
         aria-controls={"#{@id}-panel"}
         title={@title}
         class={[
-          "flex max-w-28 items-center truncate rounded-md px-1.5 py-1 text-[11px] text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white",
-          @open? && "bg-neutral-200/70 text-neutral-900 dark:bg-white/10 dark:text-white"
+          "flex max-w-28 items-center truncate rounded-md px-1.5 py-1 text-[11px] text-muted transition hover:bg-raised hover:text-ink",
+          @open? && "bg-raised text-ink"
         ]}
       >
         {@label}
@@ -615,7 +635,7 @@ defmodule CatalystWeb.ShellComponents do
         id={"#{@id}-panel"}
         phx-window-keydown="close_chrome_menu"
         phx-key="Escape"
-        class="absolute bottom-full right-0 z-50 mb-1 max-h-64 min-w-44 overflow-y-auto rounded-lg border border-neutral-200 bg-white py-1 shadow-lg shadow-neutral-950/10 dark:border-white/10 dark:bg-neutral-800 dark:shadow-black/40"
+        class="absolute bottom-full right-0 z-50 mb-1 max-h-64 min-w-44 overflow-y-auto rounded-lg border border-edge bg-surface py-1 shadow-lg"
       >
         {render_slot(@inner_block)}
       </div>
@@ -683,19 +703,16 @@ defmodule CatalystWeb.ShellComponents do
     ~H"""
     <div
       id="context-meter"
-      class="hidden shrink-0 items-center gap-1 whitespace-nowrap text-[10px] text-neutral-400 sm:flex dark:text-neutral-500"
+      class="hidden shrink-0 items-center gap-1 whitespace-nowrap text-[10px] text-faint sm:flex"
       title={"Context threshold source: #{@source_label}"}
     >
-      <.icon
-        name="hero-circle-stack-micro"
-        class="size-3.5 shrink-0 text-neutral-400 dark:text-neutral-500"
-      />
+      <.icon name="hero-circle-stack-micro" class="size-3.5 shrink-0 text-faint" />
       <progress
         :if={@threshold}
         id="context-progress"
         value={min(@used, @threshold)}
         max={@threshold}
-        class="hidden h-1.5 w-16 overflow-hidden rounded-full accent-indigo-500 xl:block"
+        class="hidden h-1.5 w-16 overflow-hidden rounded-full accent-accent xl:block"
       >
         {@used} / {@threshold}
       </progress>
@@ -705,19 +722,14 @@ defmodule CatalystWeb.ShellComponents do
       <span
         id="context-estimate-state"
         class={[
-          "rounded-full px-1.5 py-0.5 font-semibold",
-          @status[:anchored] &&
-            "bg-emerald-100 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-200",
-          !@status[:anchored] &&
-            "bg-amber-100 text-amber-700 dark:bg-amber-400/15 dark:text-amber-200"
+          "font-medium",
+          @status[:anchored] && "text-ok",
+          !@status[:anchored] && "text-muted"
         ]}
       >
         {@state_label}
       </span>
-      <span
-        id="context-threshold-source"
-        class="hidden max-w-24 truncate text-neutral-400 xl:inline dark:text-neutral-500"
-      >
+      <span id="context-threshold-source" class="hidden max-w-24 truncate text-faint xl:inline">
         {@source_label}
       </span>
     </div>
@@ -763,29 +775,29 @@ defmodule CatalystWeb.ShellComponents do
         id="run-diagnostics-panel"
         phx-window-keydown="close_diagnostics"
         phx-key="Escape"
-        class="fixed bottom-16 right-4 z-50 flex max-h-[min(70vh,36rem)] w-[min(38rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white text-xs shadow-xl shadow-neutral-950/10 dark:border-white/10 dark:bg-neutral-800 dark:shadow-black/40"
+        class="fixed bottom-16 right-4 z-50 flex max-h-[min(70vh,36rem)] w-[min(38rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-xl border border-edge bg-surface text-xs shadow-lg"
       >
-        <div class="shrink-0 border-b border-neutral-200/70 px-4 py-3 dark:border-white/10">
-          <p class="font-semibold text-neutral-900 dark:text-white">Run diagnostics</p>
-          <p class="mt-0.5 text-[0.65rem] leading-4 text-neutral-400 dark:text-neutral-500">
+        <div class="shrink-0 border-b border-edge px-4 py-3">
+          <p class="font-semibold text-ink">Run diagnostics</p>
+          <p class="mt-0.5 text-[0.65rem] leading-4 text-faint">
             Read-only resolution data; it is never reused as configuration.
           </p>
         </div>
 
         <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
           <section :if={@context} id="model-context-diagnostics">
-            <h3 class="font-semibold text-neutral-700 dark:text-neutral-200">Model context</h3>
+            <h3 class="font-semibold text-ink">Model context</h3>
             <dl class="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.7rem]">
-              <dt class="text-neutral-400">model</dt>
-              <dd class="break-all font-mono text-neutral-700 dark:text-neutral-300">
+              <dt class="text-faint">model</dt>
+              <dd class="break-all font-mono text-muted">
                 {@context[:model_id] || "—"}
               </dd>
-              <dt class="text-neutral-400">API</dt>
-              <dd class="break-all font-mono text-neutral-700 dark:text-neutral-300">
+              <dt class="text-faint">API</dt>
+              <dd class="break-all font-mono text-muted">
                 {@context[:api] || "—"}
               </dd>
-              <dt class="text-neutral-400">window</dt>
-              <dd class="break-all font-mono text-neutral-700 dark:text-neutral-300">
+              <dt class="text-faint">window</dt>
+              <dd class="break-all font-mono text-muted">
                 {format_threshold(@context[:context_window])} · {source_label(
                   @context[:context_window_source]
                 )}
@@ -794,30 +806,30 @@ defmodule CatalystWeb.ShellComponents do
           </section>
 
           <section :if={@workflow} id="workflow-diagnostics">
-            <h3 class="font-semibold text-neutral-700 dark:text-neutral-200">Workflow</h3>
-            <p class="mt-1 break-all font-mono text-[0.7rem] text-neutral-600 dark:text-neutral-300">
+            <h3 class="font-semibold text-ink">Workflow</h3>
+            <p class="mt-1 break-all font-mono text-[0.7rem] text-muted">
               {@workflow[:name]} · {inspect(@workflow[:module])}
             </p>
-            <p class="mt-1 break-all text-[0.65rem] text-neutral-400 dark:text-neutral-500">
+            <p class="mt-1 break-all text-[0.65rem] text-faint">
               {source_label(@workflow[:source])}
             </p>
           </section>
 
           <section :if={@prompt} id="prompt-diagnostics">
             <div class="flex flex-wrap items-baseline justify-between gap-2">
-              <h3 class="font-semibold text-neutral-700 dark:text-neutral-200">
+              <h3 class="font-semibold text-ink">
                 {@prompt.label}
               </h3>
-              <code id="prompt-digest" class="break-all font-mono text-[0.6rem] text-neutral-400">
+              <code id="prompt-digest" class="break-all font-mono text-[0.6rem] text-faint">
                 {@prompt.digest}
               </code>
             </div>
             <ol id="prompt-provenance" class="mt-2 space-y-1">
               <li
                 :for={{source, index} <- Enum.with_index(@prompt.sources, 1)}
-                class="flex gap-2 text-[0.65rem] text-neutral-500 dark:text-neutral-400"
+                class="flex gap-2 text-[0.65rem] text-muted"
               >
-                <span class="font-mono text-neutral-300 dark:text-neutral-600">{index}.</span>
+                <span class="font-mono text-faint">{index}.</span>
                 <code class="break-all font-mono">{source_label(source)}</code>
               </li>
             </ol>
@@ -825,7 +837,7 @@ defmodule CatalystWeb.ShellComponents do
               id="resolved-prompt-text"
               readonly
               rows="10"
-              class="mt-3 w-full resize-y whitespace-pre-wrap break-words rounded-xl border border-neutral-200 bg-neutral-50 p-3 font-mono text-[0.7rem] leading-5 text-neutral-700 outline-none dark:border-white/10 dark:bg-white/5 dark:text-neutral-300"
+              class="mt-3 w-full resize-y whitespace-pre-wrap break-words rounded-xl border border-edge bg-raised p-3 font-mono text-[0.7rem] leading-5 text-muted outline-none"
             >{@prompt.text}</textarea>
           </section>
 
@@ -895,21 +907,19 @@ defmodule CatalystWeb.ShellComponents do
   defp upload_error_label(other), do: to_string(other)
 
   defp codex_select_class do
-    "cursor-pointer rounded-full border border-neutral-200 bg-transparent px-2 py-1 text-xs " <>
-      "font-medium text-neutral-600 outline-none transition hover:border-neutral-300 " <>
-      "hover:text-neutral-900 focus:border-neutral-400 dark:border-white/10 " <>
-      "dark:text-neutral-300 dark:hover:border-white/20 dark:hover:text-white"
+    "cursor-pointer rounded-full border border-edge bg-transparent px-2 py-1 text-xs " <>
+      "font-medium text-muted outline-none transition hover:border-edge-strong " <>
+      "hover:text-ink focus:border-accent"
   end
 
   defp icon_btn_class(active?, kind \\ :default) do
     [
       "flex size-7 items-center justify-center rounded-md transition",
-      !active? &&
-        "text-neutral-400 hover:bg-neutral-200/60 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white",
-      active? && kind == :default &&
-        "bg-neutral-200/80 text-neutral-900 dark:bg-white/10 dark:text-white",
-      active? && kind == :warn &&
-        "bg-rose-500/10 text-rose-700 dark:bg-rose-400/10 dark:text-rose-300",
+      !active? && "text-muted hover:bg-raised hover:text-ink",
+      active? && kind == :default && "bg-raised text-ink",
+      active? && kind == :warn && "bg-danger/10 text-danger",
+      # Amber is the accepted second hue for "fast mode" — kept out of the token
+      # palette on purpose, so it stays a `dark:` pair.
       active? && kind == :fast &&
         "bg-amber-500/10 text-amber-700 dark:bg-amber-400/10 dark:text-amber-300"
     ]
@@ -918,9 +928,8 @@ defmodule CatalystWeb.ShellComponents do
   defp menu_item_class(selected?) do
     [
       "flex w-full px-3 py-1 text-left text-[11px] transition",
-      selected? && "bg-neutral-100 text-neutral-900 dark:bg-white/10 dark:text-white",
-      !selected? &&
-        "text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-white/5"
+      selected? && "bg-raised text-ink",
+      !selected? && "text-muted hover:bg-raised hover:text-ink"
     ]
   end
 end

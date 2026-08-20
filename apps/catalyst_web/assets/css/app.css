@@ -32,6 +32,70 @@
     }
 }
 
+/* ---- Design tokens ---------------------------------------------------------
+   Layer 1: raw custom properties. Light on :root; the dark values are written
+   twice — once for the explicit [data-theme=dark] choice, once for the OS
+   preference when no explicit choice was made — mirroring the dark variant
+   above. Keep the two dark blocks identical. */
+:root {
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --raised: #f2f3f5;
+    --edge: #e4e5e8;
+    --edge-strong: #d0d2d6;
+    --ink: #24262b;
+    --muted: #5c616b;
+    --faint: #9198a1;
+    --accent: #2e6ee6;
+    --danger: #d93036;
+    --ok: #218358;
+}
+html[data-theme="dark"] {
+    --bg: #1b1d21;
+    --surface: #23262b;
+    --raised: #2c3036;
+    --edge: #33373d;
+    --edge-strong: #43484f;
+    --ink: #dcdee2;
+    --muted: #9da3ab;
+    --faint: #6c727b;
+    --accent: #4f8ff7;
+    --danger: #e5484d;
+    --ok: #46a758;
+}
+@media (prefers-color-scheme: dark) {
+    html:not([data-theme="light"]) {
+        --bg: #1b1d21;
+        --surface: #23262b;
+        --raised: #2c3036;
+        --edge: #33373d;
+        --edge-strong: #43484f;
+        --ink: #dcdee2;
+        --muted: #9da3ab;
+        --faint: #6c727b;
+        --accent: #4f8ff7;
+        --danger: #e5484d;
+        --ok: #46a758;
+    }
+}
+
+/* Layer 2: map the tokens into Tailwind's color namespace. `inline` keeps the
+   var() references live, so bg-surface / text-ink / border-edge … follow the
+   theme with no `dark:` pairs. */
+@theme inline {
+    --color-bg: var(--bg);
+    --color-surface: var(--surface);
+    --color-raised: var(--raised);
+    --color-edge: var(--edge);
+    --color-edge-strong: var(--edge-strong);
+    --color-ink: var(--ink);
+    --color-muted: var(--muted);
+    --color-faint: var(--faint);
+    --color-accent: var(--accent);
+    --color-danger: var(--danger);
+    --color-ok: var(--ok);
+}
+
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session],
 [data-phx-teleported-src] {
@@ -52,6 +116,14 @@ html[data-theme="dark"] {
 body {
     min-height: 100vh;
     margin: 0;
+}
+
+/* The transcript keeps its native scrollbar (position feedback) alongside the
+   compact turn-tick rail. overscroll containment kills the macOS rubber-band
+   bounce inside the scroller — it visibly fought the streaming autoscroll
+   pin (rhythmic few-pixel jitter of the whole transcript while pinned). */
+#messages {
+    overscroll-behavior-y: none;
 }
 
 /* ---- Theme toggle active state ---------------------------------------------

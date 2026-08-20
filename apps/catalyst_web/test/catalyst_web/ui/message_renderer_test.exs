@@ -40,7 +40,7 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     msg = %Message.Assistant{
       content: [
         %Content.Text{text: "let me look"},
-        %Content.ToolCall{id: "c1", name: "ls", arguments: %{"path" => "."}}
+        %Content.ToolCall{id: "c1", name: "ls", arguments: %{"path" => "docs"}}
       ]
     }
 
@@ -48,14 +48,43 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     assert html =~ ~s(data-message-role="assistant")
     assert html =~ ~s(data-turn="assistant")
     assert html =~ "let me look"
-    assert html =~ "ls("
+
+    # The call collapses to CatalystWeb.UI.ToolSummary's humanized one-liner.
+    summary =
+      html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-block-kind="tool-call"] summary))
+      |> LazyHTML.text()
+
+    assert summary =~ "List"
+    assert summary =~ "docs"
+  end
+
+  test "a tool call keeps its full arguments in the disclosure body" do
+    msg = %Message.Assistant{
+      content: [%Content.ToolCall{id: "c1", name: "bash", arguments: %{"command" => "mix test"}}]
+    }
+
+    body =
+      msg
+      |> render_html()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-block-kind="tool-call"] pre))
+      |> LazyHTML.text()
+
+    assert body =~ "command"
+    assert body =~ "mix test"
   end
 
   test "a thinking block renders inside a collapsible disclosure" do
     msg = %Message.Assistant{content: [%Content.Thinking{thinking: "pondering"}]}
     html = render_html(msg)
+    doc = LazyHTML.from_fragment(html)
+
     assert html =~ "<details"
     assert html =~ "pondering"
+    assert doc |> LazyHTML.query("summary") |> LazyHTML.text() =~ "Thinking"
+    assert doc |> LazyHTML.query("details") |> LazyHTML.attribute("open") == []
   end
 
   # Quiet mode's CSS ([data-quiet] rules in app.css) targets these attributes.
@@ -134,7 +163,7 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     assert LazyHTML.text(doc) =~ "spoof"
   end
 
-  test "a successful tool result shows the tool name and output" do
+  test "a successful tool result shows the tool name and output, collapsed" do
     msg = %Message.ToolResult{
       tool_call_id: "c1",
       tool_name: "ls",
@@ -146,6 +175,12 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     assert html =~ ~s(data-tool-error="false")
     assert html =~ "ls"
     assert html =~ "a.txt"
+
+    doc = LazyHTML.from_fragment(html)
+
+    # Collapsed by default; the summary says how much is hidden.
+    assert doc |> LazyHTML.query("details") |> LazyHTML.attribute("open") == []
+    assert doc |> LazyHTML.query("summary") |> LazyHTML.text() =~ "2 lines"
   end
 
   test "a tool result renders image blocks with the stable block kind" do
@@ -230,6 +265,11 @@ defmodule CatalystWeb.UI.MessageRendererTest do
     assert html =~ "bash"
     assert html =~ "boom"
     assert html =~ "error"
+
+    # A failure is the one tool result that opens itself: the output is the
+    # reason it failed.
+    doc = LazyHTML.from_fragment(html)
+    assert doc |> LazyHTML.query("details") |> LazyHTML.attribute("open") != []
   end
 
   test "an extension renderer that raises at diff time falls back to built-in" do

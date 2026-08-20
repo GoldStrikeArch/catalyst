@@ -10,24 +10,24 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
     <main id="workflows-page" class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
       <div class="mx-auto grid max-w-7xl gap-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
         <aside class="space-y-4">
-          <header class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
+          <header class="rounded-2xl border border-edge bg-surface p-4 shadow-sm">
             <div class="flex items-center justify-between gap-3">
               <div>
-                <p class="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-500">
+                <p class="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
                   Library
                 </p>
-                <h1 class="mt-1 text-lg font-semibold text-neutral-950 dark:text-white">Workflows</h1>
+                <h1 class="mt-1 text-lg font-semibold text-ink">Workflows</h1>
               </div>
               <button
                 id="workflow-create"
                 phx-click="workflow_create"
-                class="rounded-full bg-neutral-900 p-2 text-white shadow-sm transition hover:-translate-y-px hover:bg-indigo-600 dark:bg-white dark:text-neutral-900"
+                class="rounded-full bg-accent p-2 text-white shadow-sm transition hover:-translate-y-px hover:bg-accent/90"
                 title="Create workflow"
               >
                 <.icon name="hero-plus" class="size-4" />
               </button>
             </div>
-            <p class="mt-2 text-xs leading-5 text-neutral-500">
+            <p class="mt-2 text-xs leading-5 text-muted">
               Compose reliable agent runs from connected, ordered stages.
             </p>
           </header>
@@ -35,20 +35,20 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
           <section
             :if={!@workflow_runs_empty?}
             id="workflow-run-list"
-            class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/5"
+            class="rounded-2xl border border-edge bg-surface p-4 shadow-sm"
           >
-            <p class="text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500">
+            <p class="text-xs font-semibold uppercase tracking-[0.18em] text-muted">
               Recent runs
             </p>
             <div id="workflow-runs" phx-update="stream" class="mt-3 space-y-2">
               <div
                 :for={{dom_id, run} <- @streams.workflow_runs}
                 id={dom_id}
-                class="flex items-center justify-between gap-3 rounded-xl bg-neutral-50 px-3 py-2 dark:bg-white/5"
+                class="flex items-center justify-between gap-3 rounded-xl bg-raised px-3 py-2"
               >
                 <div class="min-w-0">
                   <p class="truncate text-xs font-medium">{run["id"]}</p>
-                  <p class="mt-0.5 text-[0.65rem] uppercase tracking-wide text-neutral-500">
+                  <p class="mt-0.5 text-[0.65rem] uppercase tracking-wide text-muted">
                     {run["status"]} · stage {run["stage_index"] + 1}/{length(run["stages"])}
                   </p>
                 </div>
@@ -58,7 +58,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                   type="button"
                   phx-click="workflow_resume_run"
                   phx-value-id={run["id"]}
-                  class="rounded-full bg-indigo-600 px-3 py-1.5 text-[0.65rem] font-semibold text-white transition hover:bg-indigo-500"
+                  class="rounded-full bg-accent px-3 py-1.5 text-[0.65rem] font-semibold text-white transition hover:bg-accent/90"
                 >
                   Resume
                 </button>
@@ -84,21 +84,21 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
               class={[
                 "group w-full rounded-xl border px-3 py-3 text-left transition hover:-translate-y-px hover:shadow-sm",
                 selected?(@workflow_template, template) &&
-                  "border-indigo-300 bg-indigo-50/80 dark:border-indigo-400/30 dark:bg-indigo-400/10",
+                  "border-accent/40 bg-accent/10",
                 !selected?(@workflow_template, template) &&
-                  "border-neutral-200 bg-white hover:border-neutral-300 dark:border-white/10 dark:bg-white/5"
+                  "border-edge bg-surface hover:border-edge-strong"
               ]}
             >
               <span class="flex items-center justify-between gap-2">
                 <span class="truncate text-sm font-semibold">{template_name(template)}</span>
                 <span
                   :if={built_in?(template)}
-                  class="rounded-full bg-neutral-100 px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-neutral-500 dark:bg-white/10"
+                  class="rounded-full bg-raised px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-muted"
                 >
                   Built-in
                 </span>
               </span>
-              <span class="mt-1 block line-clamp-2 text-xs leading-5 text-neutral-500">
+              <span class="mt-1 block line-clamp-2 text-xs leading-5 text-muted">
                 {template_description(template)}
               </span>
             </button>
@@ -108,14 +108,14 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
         <section
           :if={@workflow_template == :none}
           id="workflow-empty"
-          class="grid min-h-[32rem] place-items-center rounded-3xl border border-dashed border-neutral-300 bg-white/50 p-8 text-center dark:border-white/15 dark:bg-white/[0.03]"
+          class="grid min-h-[32rem] place-items-center rounded-3xl border border-dashed border-edge-strong bg-surface/50 p-8 text-center"
         >
           <div class="max-w-sm">
-            <span class="mx-auto grid size-12 place-items-center rounded-2xl bg-indigo-50 text-indigo-600 dark:bg-indigo-400/10 dark:text-indigo-300">
+            <span class="mx-auto grid size-12 place-items-center rounded-2xl bg-accent/10 text-accent">
               <.icon name="hero-queue-list" class="size-6" />
             </span>
             <h2 class="mt-4 text-base font-semibold">Select a workflow to begin</h2>
-            <p class="mt-2 text-sm leading-6 text-neutral-500">
+            <p class="mt-2 text-sm leading-6 text-muted">
               Inspect a built-in template, clone it as a starting point, or create a blank workflow.
             </p>
           </div>
@@ -126,7 +126,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
             for={@workflow_form}
             id="workflow-template-form"
             phx-submit="workflow_save"
-            class="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/5"
+            class="rounded-2xl border border-edge bg-surface p-5 shadow-sm"
           >
             <div class="flex flex-wrap items-start justify-between gap-4">
               <div class="min-w-0 flex-1 space-y-3">
@@ -152,7 +152,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                   type="button"
                   phx-click="workflow_clone"
                   phx-value-id={template_id(@workflow_template)}
-                  class="rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:-translate-y-px hover:bg-indigo-500"
+                  class="rounded-full bg-accent px-4 py-2 text-xs font-semibold text-white transition hover:-translate-y-px hover:bg-accent/90"
                 >
                   Clone to edit
                 </button>
@@ -162,7 +162,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                   type="button"
                   phx-click="workflow_delete"
                   data-confirm="Delete this workflow template?"
-                  class="rounded-full px-3 py-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 dark:hover:bg-rose-400/10"
+                  class="rounded-full px-3 py-2 text-xs font-semibold text-danger transition hover:bg-danger/10"
                 >
                   Delete
                 </button>
@@ -170,7 +170,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                   :if={!built_in?(@workflow_template)}
                   id="workflow-save"
                   type="submit"
-                  class="rounded-full bg-neutral-900 px-4 py-2 text-xs font-semibold text-white transition hover:-translate-y-px hover:bg-indigo-600 dark:bg-white dark:text-neutral-900"
+                  class="rounded-full bg-accent px-4 py-2 text-xs font-semibold text-white transition hover:-translate-y-px hover:bg-accent/90"
                 >
                   Validate & save
                 </button>
@@ -181,16 +181,16 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
           <div
             :if={!built_in?(@workflow_template)}
             id="workflow-preset-palette"
-            class="flex flex-wrap items-center gap-2 rounded-2xl border border-neutral-200 bg-white p-3 shadow-sm dark:border-white/10 dark:bg-white/5"
+            class="flex flex-wrap items-center gap-2 rounded-2xl border border-edge bg-surface p-3 shadow-sm"
           >
-            <span class="mr-1 text-xs font-semibold text-neutral-500">Add stage</span>
+            <span class="mr-1 text-xs font-semibold text-muted">Add stage</span>
             <button
               :for={{label, preset} <- @workflow_presets}
               id={"workflow-add-#{preset}"}
               type="button"
               phx-click="workflow_add_stage"
               phx-value-preset={preset}
-              class="rounded-full border border-neutral-200 px-3 py-1.5 text-xs font-medium transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 dark:border-white/10 dark:hover:bg-indigo-400/10 dark:hover:text-indigo-200"
+              class="rounded-full border border-edge px-3 py-1.5 text-xs font-medium transition hover:border-accent/40 hover:bg-accent/10 hover:text-accent"
             >
               <.icon name="hero-plus-small" class="mr-1 inline size-3.5" />{label}
             </button>
@@ -202,25 +202,25 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
           >
             <section
               id="workflow-stage-map"
-              class="rounded-2xl border border-neutral-200 bg-neutral-50/80 p-4 shadow-sm dark:border-white/10 dark:bg-black/10"
+              class="rounded-2xl border border-edge bg-raised p-4 shadow-sm"
             >
               <header class="mb-4 flex items-center justify-between gap-3">
                 <div>
-                  <p class="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-500">
+                  <p class="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
                     Flow
                   </p>
-                  <p class="mt-1 text-xs text-neutral-500">Select a stage to inspect its settings.</p>
+                  <p class="mt-1 text-xs text-muted">Select a stage to inspect its settings.</p>
                 </div>
-                <span class="rounded-full bg-white px-2.5 py-1 text-[0.65rem] font-semibold text-neutral-500 shadow-sm ring-1 ring-neutral-200 dark:bg-white/5 dark:ring-white/10">
+                <span class="rounded-full bg-surface px-2.5 py-1 text-[0.65rem] font-semibold text-muted shadow-sm ring-1 ring-edge">
                   {length(template_stages(@workflow_template))} stages
                 </span>
               </header>
 
               <div class="mx-auto max-w-sm">
-                <div class="mx-auto flex h-10 w-36 items-center justify-center rounded-lg border border-sky-300/70 bg-sky-50 px-3 text-xs font-semibold text-sky-800 shadow-sm dark:border-sky-400/40 dark:bg-sky-400/10 dark:text-sky-200">
+                <div class="mx-auto flex h-10 w-36 items-center justify-center rounded-lg border border-accent/40 bg-accent/10 px-3 text-xs font-semibold text-accent shadow-sm">
                   User task
                 </div>
-                <div class="mx-auto h-4 w-px bg-neutral-300 dark:bg-white/15"></div>
+                <div class="mx-auto h-4 w-px bg-edge-strong"></div>
 
                 <div
                   id="workflow-stage-list"
@@ -229,14 +229,14 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                 >
                   <div
                     id="workflow-stage-empty"
-                    class="hidden only:block rounded-xl border border-dashed border-neutral-300 p-7 text-center text-xs text-neutral-500 dark:border-white/15"
+                    class="hidden only:block rounded-xl border border-dashed border-edge-strong p-7 text-center text-xs text-muted"
                   >
                     Add the first stage from the preset palette.
                   </div>
                   <article
                     :for={{dom_id, stage} <- @streams.workflow_stages}
                     id={dom_id}
-                    class="relative pt-4 first:pt-0 before:absolute before:left-1/2 before:top-0 before:h-4 before:w-px before:-translate-x-1/2 before:bg-neutral-300 first:before:hidden dark:before:bg-white/15"
+                    class="relative pt-4 first:pt-0 before:absolute before:left-1/2 before:top-0 before:h-4 before:w-px before:-translate-x-1/2 before:bg-edge-strong first:before:hidden"
                   >
                     <button
                       id={"workflow-stage-node-#{stage.id}"}
@@ -245,27 +245,27 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                       phx-value-id={stage.id}
                       aria-pressed={selected_stage?(@workflow_selected_stage, stage)}
                       class={[
-                        "group mx-auto flex min-h-12 w-full max-w-[15rem] items-center gap-3 rounded-lg border bg-white px-3 py-2 text-left shadow-sm transition duration-200 hover:-translate-y-px hover:border-indigo-300 hover:shadow-md dark:bg-white/5",
+                        "group mx-auto flex min-h-12 w-full max-w-[15rem] items-center gap-3 rounded-lg border bg-surface px-3 py-2 text-left shadow-sm transition duration-200 hover:-translate-y-px hover:border-accent/40 hover:shadow-md",
                         selected_stage?(@workflow_selected_stage, stage) &&
-                          "border-indigo-400 ring-2 ring-indigo-500/15 dark:border-indigo-400/70",
+                          "border-accent ring-2 ring-accent/20",
                         !selected_stage?(@workflow_selected_stage, stage) &&
-                          "border-neutral-200 dark:border-white/10"
+                          "border-edge"
                       ]}
                     >
                       <span class={[
                         "grid size-7 shrink-0 place-items-center rounded-md text-[0.65rem] font-bold transition",
                         selected_stage?(@workflow_selected_stage, stage) &&
-                          "bg-indigo-600 text-white",
+                          "bg-accent text-white",
                         !selected_stage?(@workflow_selected_stage, stage) &&
-                          "bg-neutral-100 text-neutral-500 group-hover:bg-indigo-50 group-hover:text-indigo-600 dark:bg-white/10 dark:text-neutral-300"
+                          "bg-raised text-muted group-hover:bg-accent/10 group-hover:text-accent"
                       ]}>
                         {stage.position}
                       </span>
                       <span class="min-w-0 flex-1">
-                        <span class="block truncate text-xs font-semibold text-neutral-900 dark:text-white">
+                        <span class="block truncate text-xs font-semibold text-ink">
                           {stage_name(stage)}
                         </span>
-                        <span class="mt-0.5 block truncate text-[0.65rem] capitalize text-neutral-500">
+                        <span class="mt-0.5 block truncate text-[0.65rem] capitalize text-muted">
                           {stage_profile(stage)} · {stage_effort(stage)} effort
                         </span>
                       </span>
@@ -274,9 +274,9 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                         class={[
                           "size-3.5 shrink-0 transition",
                           selected_stage?(@workflow_selected_stage, stage) &&
-                            "text-indigo-500",
+                            "text-accent",
                           !selected_stage?(@workflow_selected_stage, stage) &&
-                            "text-neutral-300 group-hover:text-indigo-400"
+                            "text-faint group-hover:text-accent"
                         ]}
                       />
                     </button>
@@ -285,12 +285,12 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
 
                 <div
                   :if={template_stages(@workflow_template) != []}
-                  class="mx-auto h-4 w-px bg-neutral-300 dark:bg-white/15"
+                  class="mx-auto h-4 w-px bg-edge-strong"
                 >
                 </div>
                 <div
                   :if={template_stages(@workflow_template) != []}
-                  class="mx-auto flex h-10 w-36 items-center justify-center rounded-lg border border-emerald-300/70 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 shadow-sm dark:border-emerald-400/40 dark:bg-emerald-400/10 dark:text-emerald-200"
+                  class="mx-auto flex h-10 w-36 items-center justify-center rounded-lg border border-ok/40 bg-ok/10 px-3 text-xs font-semibold text-ok shadow-sm"
                 >
                   Final result
                 </div>
@@ -300,14 +300,14 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
             <aside
               :if={@workflow_selected_stage == :none}
               id="workflow-stage-inspector-empty"
-              class="grid min-h-72 place-items-center rounded-2xl border border-dashed border-neutral-300 bg-white/40 p-8 text-center dark:border-white/15 dark:bg-white/[0.02] xl:sticky xl:top-4"
+              class="grid min-h-72 place-items-center rounded-2xl border border-dashed border-edge-strong bg-surface/40 p-8 text-center xl:sticky xl:top-4"
             >
               <div class="max-w-xs">
-                <span class="mx-auto grid size-11 place-items-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-400/10 dark:text-indigo-300">
+                <span class="mx-auto grid size-11 place-items-center rounded-xl bg-accent/10 text-accent">
                   <.icon name="hero-cursor-arrow-rays" class="size-5" />
                 </span>
                 <h3 class="mt-3 text-sm font-semibold">Choose a stage</h3>
-                <p class="mt-1.5 text-xs leading-5 text-neutral-500">
+                <p class="mt-1.5 text-xs leading-5 text-muted">
                   Stage metadata stays tucked away until you select a block in the flow.
                 </p>
               </div>
@@ -316,11 +316,11 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
             <aside
               :if={is_map(@workflow_selected_stage)}
               id="workflow-stage-inspector"
-              class="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/5 xl:sticky xl:top-4"
+              class="rounded-2xl border border-edge bg-surface p-5 shadow-sm xl:sticky xl:top-4"
             >
               <div class="mb-5 flex items-start justify-between gap-4">
                 <div class="min-w-0">
-                  <p class="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-500">
+                  <p class="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
                     Stage settings
                   </p>
                   <h3 class="mt-1 truncate text-base font-semibold">
@@ -334,7 +334,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                     phx-click="workflow_move_stage"
                     phx-value-id={@workflow_selected_stage.id}
                     phx-value-direction="up"
-                    class="rounded-lg p-2 text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
+                    class="rounded-lg p-2 text-faint transition hover:bg-raised hover:text-ink"
                     title="Move stage up"
                   >
                     <.icon name="hero-chevron-up" class="size-4" />
@@ -345,7 +345,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                     phx-click="workflow_move_stage"
                     phx-value-id={@workflow_selected_stage.id}
                     phx-value-direction="down"
-                    class="rounded-lg p-2 text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
+                    class="rounded-lg p-2 text-faint transition hover:bg-raised hover:text-ink"
                     title="Move stage down"
                   >
                     <.icon name="hero-chevron-down" class="size-4" />
@@ -355,7 +355,7 @@ defmodule CatalystWeb.Pages.WorkflowsPage do
                     type="button"
                     phx-click="workflow_delete_stage"
                     phx-value-id={@workflow_selected_stage.id}
-                    class="rounded-lg p-2 text-neutral-400 transition hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-400/10"
+                    class="rounded-lg p-2 text-faint transition hover:bg-danger/10 hover:text-danger"
                     title="Delete stage"
                   >
                     <.icon name="hero-trash" class="size-4" />

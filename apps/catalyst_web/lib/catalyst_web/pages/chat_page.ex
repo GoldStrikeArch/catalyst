@@ -19,11 +19,11 @@ defmodule CatalystWeb.Pages.ChatPage do
         data-quiet={@ui_prefs.quiet}
         class="flex-1 overflow-y-auto px-4 py-6 sm:px-6"
       >
-        <div class="flex max-w-3xl flex-col gap-3">
+        <div class="mx-auto flex w-full max-w-4xl flex-col gap-4">
           <p
             :if={@message_count == 0 and is_nil(@streaming) and @queued == []}
             id="chat-empty-state"
-            class="truncate text-xs text-neutral-400 dark:text-neutral-500"
+            class="truncate text-xs text-faint"
           >
             Ask Catalyst to inspect this project. <span class="font-mono">{@cwd}</span>
           </p>
@@ -50,17 +50,17 @@ defmodule CatalystWeb.Pages.ChatPage do
             data-turn="assistant"
             class="flex justify-start"
           >
-            <div class="w-full min-w-0 px-1 py-1 text-neutral-800 dark:text-neutral-200">
+            <div class="w-full min-w-0 px-1 py-1 text-ink">
               <%!-- phx-no-format: whitespace-pre-wrap + empty:hidden — formatter
                 whitespace inside would render as a blank line and defeat :empty. --%>
               <div
                 id="stream-thinking"
                 phx-update="ignore"
                 data-stream="thinking"
-                class="whitespace-pre-wrap text-xs italic text-neutral-400 empty:hidden dark:text-neutral-500"
+                class="whitespace-pre-wrap text-xs text-faint empty:hidden"
                 phx-no-format
               >{@streaming.thinking}</div>
-              <div id="stream-blocks" phx-update="stream" class="text-sm leading-6">
+              <div id="stream-blocks" phx-update="stream" class="text-sm leading-7">
                 <div
                   :for={{dom_id, %{block: block}} <- @streams.stream_blocks}
                   id={dom_id}
@@ -69,7 +69,7 @@ defmodule CatalystWeb.Pages.ChatPage do
                   {MessageRenderer.markdown_block(%{block: block})}
                 </div>
               </div>
-              <div id="stream-preview" phx-hook="Highlight" class="text-sm leading-6">
+              <div id="stream-preview" phx-hook="Highlight" class="text-sm leading-7">
                 <div :for={{block, index} <- Enum.with_index(@streaming.preview)} id={"sp-#{index}"}>
                   {MessageRenderer.markdown_block(%{block: block})}
                 </div>
@@ -79,22 +79,21 @@ defmodule CatalystWeb.Pages.ChatPage do
                 id="stream-tail"
                 phx-update="ignore"
                 data-stream="text"
-                class="whitespace-pre-wrap text-sm"
+                class="whitespace-pre-wrap text-sm leading-7"
                 phx-no-format
               >{@streaming.tail}</div>
               <div
                 id="stream-dots"
                 phx-update="ignore"
                 data-stream-dots
-                class="inline-flex items-center gap-1.5 text-neutral-500 dark:text-neutral-400"
+                class="inline-flex items-center gap-1.5 text-muted"
               >
                 <span class="sr-only">Assistant is working</span>
-                <span class="size-1.5 animate-bounce rounded-full bg-neutral-400 [animation-delay:-0.2s] dark:bg-neutral-500">
+                <span class="size-1.5 animate-bounce rounded-full bg-faint [animation-delay:-0.2s]">
                 </span>
-                <span class="size-1.5 animate-bounce rounded-full bg-neutral-400 [animation-delay:-0.1s] dark:bg-neutral-500">
+                <span class="size-1.5 animate-bounce rounded-full bg-faint [animation-delay:-0.1s]">
                 </span>
-                <span class="size-1.5 animate-bounce rounded-full bg-neutral-400 dark:bg-neutral-500">
-                </span>
+                <span class="size-1.5 animate-bounce rounded-full bg-faint"></span>
               </div>
             </div>
           </div>
@@ -104,8 +103,8 @@ defmodule CatalystWeb.Pages.ChatPage do
             id={"tool-indicator-#{call_id}"}
             class="flex flex-col items-start gap-1"
           >
-            <div class="inline-flex items-center gap-2 rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs font-medium text-neutral-600 dark:border-white/10 dark:bg-white/5 dark:text-neutral-300">
-              <span class="size-3 animate-spin rounded-full border-2 border-neutral-200 border-t-neutral-600 dark:border-white/15 dark:border-t-white">
+            <div class="flex items-center gap-1.5 text-xs text-muted">
+              <span class="size-3 animate-spin rounded-full border-[1.5px] border-edge border-t-muted">
               </span>
               running <code class="font-mono">{t.name}</code>…
             </div>
@@ -113,14 +112,14 @@ defmodule CatalystWeb.Pages.ChatPage do
             <pre
               :if={t[:partial]}
               data-tool-partial
-              class="max-w-[85%] overflow-x-auto whitespace-pre-wrap rounded-lg bg-neutral-100 px-2.5 py-1.5 font-mono text-[0.65rem] leading-relaxed text-neutral-500 dark:bg-white/5 dark:text-neutral-400"
+              class="max-w-[85%] overflow-x-auto whitespace-pre-wrap rounded-md bg-raised px-2.5 py-1.5 font-mono text-[0.65rem] leading-relaxed text-muted"
             >{t[:partial]}</pre>
           </div>
 
           <div
             :for={{text, index} <- Enum.with_index(@queued)}
             id={"queued-#{index}"}
-            class="text-sm leading-6 text-neutral-400 dark:text-neutral-500"
+            class="text-sm leading-7 text-faint"
           >
             <span class="mr-2 text-[10px] font-medium uppercase tracking-wide">Queued</span>
             {text}
@@ -131,27 +130,30 @@ defmodule CatalystWeb.Pages.ChatPage do
         </div>
       </main>
 
-      <%!-- Scrollbar tick rail: one mark per user/assistant turn. Hover the
-        gutter for a first-line preview; click jumps. Alt/⌥+wheel steps.
+      <%!-- Turn rail, Delta-style: a compact tick stack vertically centered on
+        the right edge (fixed spacing, not proportional to scroll height). The
+        tick for the turn currently in view stays highlighted as you scroll;
+        hovering a tick enlarges it and grows the preview card out of its
+        middle; click jumps; Alt/⌥+wheel steps. The native scrollbar stays
+        visible next to it — the rail is navigation, not a scroll indicator.
         Hook lives here so #messages can keep ScrollBottom (one hook / el). --%>
       <div
         id="turn-jump-track"
         phx-hook="JumpByTurn"
         phx-update="ignore"
-        class="pointer-events-none absolute inset-y-0 right-0 z-20 w-4"
+        class="pointer-events-none absolute inset-y-0 right-0 z-20 w-7 mr-2.5"
       >
         <div id="turn-jump-ticks" class="absolute inset-0"></div>
         <div
           id="turn-jump-card"
-          hidden
-          class="pointer-events-none absolute right-full mr-2 w-max max-w-xs rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs shadow-lg dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-100"
+          class="pointer-events-none absolute right-full mr-1.5 w-max max-w-xs origin-right scale-95 rounded-lg border border-edge bg-surface px-3 py-2 text-xs text-ink opacity-0 shadow-lg transition duration-150 ease-out"
         >
-          <div
-            data-turn-role
-            class="text-[10px] font-medium uppercase tracking-wide text-neutral-400 dark:text-neutral-500"
-          >
+          <div data-turn-role class="text-[10px] font-medium uppercase tracking-wide text-faint">
           </div>
-          <div data-turn-preview class="truncate"></div>
+          <div data-turn-preview class="mt-0.5 max-w-64 line-clamp-2 leading-5"></div>
+          <div class="mt-1.5 border-t border-edge pt-1 text-[10px] text-faint">
+            click to jump · ⌥ scroll by turn
+          </div>
         </div>
       </div>
 
@@ -168,7 +170,7 @@ defmodule CatalystWeb.Pages.ChatPage do
         <button
           id="jump-to-bottom"
           type="button"
-          class="pointer-events-auto hidden items-center gap-1.5 rounded-full bg-neutral-900 px-3.5 py-2 text-xs font-semibold text-white shadow-lg shadow-neutral-950/20 transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:shadow-black/40 dark:hover:bg-neutral-200"
+          class="pointer-events-auto hidden items-center gap-1.5 rounded-full border border-edge bg-surface px-3 py-1.5 text-xs font-medium text-muted shadow-sm transition hover:border-edge-strong hover:text-ink"
         >
           <.icon name="hero-arrow-down" class="size-3.5" /> Jump to latest
         </button>

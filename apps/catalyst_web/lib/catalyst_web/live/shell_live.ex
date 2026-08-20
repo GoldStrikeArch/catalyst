@@ -268,6 +268,10 @@ defmodule CatalystWeb.ShellLive do
     {:noreply, start_thread(socket, socket.assigns.cwd)}
   end
 
+  def handle_event("new_session_in", %{"cwd" => cwd}, socket) when is_binary(cwd) do
+    {:noreply, start_thread(socket, cwd)}
+  end
+
   def handle_event("close_session", %{"id" => id}, socket) when is_binary(id) do
     {:noreply, close_thread(socket, id)}
   end

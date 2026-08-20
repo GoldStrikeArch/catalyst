@@ -16,8 +16,7 @@ defmodule CatalystWeb.Layouts do
     doc: "the current [scope](https://hexdocs.pm/phoenix/scopes.html)"
 
   attr :class, :any,
-    default:
-      "min-h-screen bg-neutral-50 text-neutral-900 antialiased dark:bg-neutral-900 dark:text-neutral-100",
+    default: "min-h-screen bg-bg text-ink antialiased",
     doc: "classes for the layout wrapper"
 
   attr :flash_id, :string, default: "flash-group", doc: "DOM id namespace for flash messages"
@@ -92,7 +91,7 @@ defmodule CatalystWeb.Layouts do
     ~H"""
     <div
       id="theme-toggle"
-      class="grid grid-cols-3 rounded-full border border-neutral-200 p-0.5 dark:border-white/10"
+      class="grid grid-cols-3 rounded-full border border-edge p-0.5"
       title="Theme: system / light / dark"
     >
       <button
@@ -131,8 +130,7 @@ defmodule CatalystWeb.Layouts do
   # The pressed segment is styled from html[data-theme] by CSS in app.css —
   # the theme is client-owned, so no server assign can know it.
   defp theme_segment_class do
-    "flex items-center justify-center rounded-full p-1 text-neutral-400 transition " <>
-      "hover:text-neutral-900 dark:text-neutral-500 dark:hover:text-white"
+    "flex items-center justify-center rounded-full p-1 text-faint transition hover:text-ink"
   end
 
   defp flash_id("flash-group", id), do: id

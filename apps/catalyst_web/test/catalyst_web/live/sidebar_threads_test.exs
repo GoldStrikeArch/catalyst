@@ -5,6 +5,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
   import Phoenix.LiveViewTest
 
   alias Catalyst.Session.{Catalog, Manager}
+  alias CatalystWeb.ShellLive.Threads
 
   @ui_prefs_ptr {CatalystWeb.ShellLive, :ui_prefs}
 
@@ -44,6 +45,45 @@ defmodule CatalystWeb.SidebarThreadsTest do
     assert {:ok, _} = Manager.whereis(second)
     assert has_element?(view, "#thread-#{first}")
     assert has_element?(view, "#thread-#{second}")
+  end
+
+  test "the Projects header + starts a thread in the current directory", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    first = session_id(view)
+    assert {:ok, %{cwd: cwd}} = Catalog.lookup(first)
+
+    view |> element("#sidebar-new-thread") |> render_click()
+    second = session_id(view)
+
+    refute second == first
+    assert {:ok, %{cwd: ^cwd}} = Catalog.lookup(second)
+    assert has_element?(view, "#thread-#{first}")
+    assert has_element?(view, "#thread-#{second}")
+  end
+
+  test "a project's + starts a thread in that project's directory", %{conn: conn} do
+    other = Path.join(System.tmp_dir!(), "catalyst_project_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(other)
+    on_exit(fn -> File.rm_rf!(other) end)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    home = session_id(view)
+    assert {:ok, %{cwd: home_cwd}} = Catalog.lookup(home)
+
+    # /cd opens a sibling thread elsewhere, so the sidebar lists two projects
+    # and the shell's own cwd is no longer the first project's.
+    view |> form("#chat-form", %{"message" => "/cd #{other}"}) |> render_submit()
+    away = session_id(view)
+    refute away == home
+    assert {:ok, %{cwd: away_cwd}} = Catalog.lookup(away)
+    refute away_cwd == home_cwd
+
+    view |> element("#project-new-thread-#{project_id(home_cwd)}") |> render_click()
+    third = session_id(view)
+
+    refute third in [home, away]
+    assert {:ok, %{cwd: ^home_cwd}} = Catalog.lookup(third)
+    assert has_element?(view, "#thread-#{third}")
   end
 
   test "switching threads focuses the other session and leaves the first running", %{conn: conn} do
@@ -117,6 +157,18 @@ defmodule CatalystWeb.SidebarThreadsTest do
 
     view |> element("#sidebar-toggle") |> render_click()
     assert has_element?(view, "#shell-sidebar")
+  end
+
+  # The sidebar derives project DOM ids from the catalog, so ask the same
+  # projection the LiveView renders from rather than duplicating the hash.
+  defp project_id(cwd) do
+    {:ok, entries} = Catalog.entries()
+
+    entries
+    |> Threads.project(nil)
+    |> Map.fetch!(:projects)
+    |> Enum.find(&(&1.cwd == cwd))
+    |> Map.fetch!(:id)
   end
 
   defp restore_catalog(nil), do: Application.delete_env(:catalyst, :session_catalog_path)

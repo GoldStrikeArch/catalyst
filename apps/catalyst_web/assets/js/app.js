@@ -73,10 +73,15 @@ const Hooks = {
       }
     },
     scrollToBottom() {
-      this.el.scrollTop = this.el.scrollHeight;
+      const el = this.el;
+      // Already at the hard bottom: writing scrollTop again would only emit a
+      // redundant scroll event for the pin bookkeeping to chew on (and, mid
+      // rubber-band, fight the bounce — visible as streaming-time jitter).
+      if (el.scrollHeight - el.clientHeight - el.scrollTop < 1) return;
+      el.scrollTop = el.scrollHeight;
       // scrollTop clamps to the real max; remember where our scroll landed so
       // the resulting async scroll event is attributed to us, not the user.
-      this.programmaticTarget = this.el.scrollTop;
+      this.programmaticTarget = el.scrollTop;
     },
     // Deltas arrive 10-30+/s; coalesce to at most one scroll per frame, and
     // re-check the pin at fire time (an unpin may have landed in between).
@@ -280,33 +285,58 @@ const Hooks = {
     },
   },
 
-  // Scrollbar tick rail: one mark per user/assistant turn. Hover the right
-  // gutter for a first-line preview; click jumps. Alt/⌥+wheel steps turns.
+  // Turn rail, Delta-style: a compact tick stack vertically centered on the
+  // right edge — fixed spacing, NOT proportional to scroll height (the native
+  // scrollbar next to it owns "where am I in the document"). One tick per
+  // user/assistant turn plus a trailing accent tick for "jump to end". The
+  // tick of the turn currently at the top of the viewport stays highlighted
+  // while scrolling; hovering a tick enlarges it and grows the preview card
+  // out of its middle; click jumps; Alt/⌥+wheel steps turns.
   JumpByTurn: {
+    // All class fragments live in these literal tables so Tailwind's @source
+    // scan of assets/js emits them. Widths double as the tick length language:
+    // user turns are long, assistant turns short, hover longest.
+    TICK_BASE:
+      "absolute right-2.5 h-[3px] -translate-y-1/2 rounded-full transition-all duration-150",
+    TICK_W: {
+      user: "w-3.5",
+      userCurrent: "w-4",
+      assistant: "w-2",
+      assistantCurrent: "w-3",
+      end: "w-2.5",
+      hovered: "w-5",
+    },
+    TICK_C: {
+      idle: "bg-faint/50",
+      current: "bg-muted",
+      end: "bg-accent/70",
+      hovered: "bg-ink",
+    },
+    SPACING: 14,
+
     mounted() {
       this.scroller = document.getElementById("messages");
       this.card = document.getElementById("turn-jump-card");
       this.ticks = document.getElementById("turn-jump-ticks");
       this.roleEl = this.card?.querySelector("[data-turn-role]");
       this.prevEl = this.card?.querySelector("[data-turn-preview]");
-      this.current = null;
+      this.hovered = null; // tick index under the mouse, or null
+      this.currentIdx = -1; // tick index of the turn in view
+      this.tickYs = [];
       if (!this.scroller || !this.card || !this.ticks) return;
 
       this.onMove = (e) => this.hover(e);
       this.onLeave = () => this.hide();
       this.onClick = (e) => {
-        if (!this.nearGutter(e) || !this.current) return;
+        if (this.hovered === null) return;
         e.preventDefault();
-        this.jump(this.current);
+        this.jumpTo(this.hovered);
       };
       this.onWheel = (e) => {
-        if (!e.altKey) return;
-        const turns = this.turns();
-        if (turns.length === 0) return;
+        if (!e.altKey || this.tickCount() === 0) return;
         e.preventDefault();
         const dir = e.deltaY > 0 ? 1 : -1;
-        const next = turns[this.clamp(this.nearestIndex() + dir, turns.length)];
-        this.jump(next);
+        this.jumpTo(this.clamp(this.scrollIndex() + dir, this.tickCount()));
       };
       this.onPaint = () => {
         if (this.paintRaf) return;
@@ -315,11 +345,20 @@ const Hooks = {
           this.paintTicks();
         });
       };
+      // Scroll only moves the highlight, never the stack geometry.
+      this.onScroll = () => {
+        if (this.scrollRaf) return;
+        this.scrollRaf = requestAnimationFrame(() => {
+          this.scrollRaf = null;
+          this.syncCurrent();
+        });
+      };
 
       this.scroller.addEventListener("mousemove", this.onMove);
       this.scroller.addEventListener("mouseleave", this.onLeave);
       this.scroller.addEventListener("click", this.onClick);
       this.scroller.addEventListener("wheel", this.onWheel, { passive: false });
+      this.scroller.addEventListener("scroll", this.onScroll, { passive: true });
       window.addEventListener("catalyst:autoscroll", this.onPaint);
 
       this.resizeObs = new ResizeObserver(this.onPaint);
@@ -334,37 +373,34 @@ const Hooks = {
       this.scroller.removeEventListener("mouseleave", this.onLeave);
       this.scroller.removeEventListener("click", this.onClick);
       this.scroller.removeEventListener("wheel", this.onWheel);
+      this.scroller.removeEventListener("scroll", this.onScroll);
       window.removeEventListener("catalyst:autoscroll", this.onPaint);
       this.resizeObs?.disconnect();
       this.mutObs?.disconnect();
       if (this.paintRaf) cancelAnimationFrame(this.paintRaf);
+      if (this.scrollRaf) cancelAnimationFrame(this.scrollRaf);
     },
     turns() {
       return [...this.scroller.querySelectorAll("[data-turn]")];
+    },
+    // turns + the trailing "jump to end" tick (only when there are turns)
+    tickCount() {
+      const n = this.turns().length;
+      return n === 0 ? 0 : n + 1;
     },
     contentTop(el) {
       const s = this.scroller;
       return el.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop;
     },
-    nearGutter(e) {
-      const r = this.scroller.getBoundingClientRect();
-      const x = r.left + this.scroller.clientWidth;
-      return e.clientX >= x - 16 && e.clientX <= r.right;
-    },
-    turnAt(clientY) {
+    // Tick index for the current scroll position: last turn at/above the
+    // viewport top; the end tick when pinned to the hard bottom.
+    scrollIndex() {
       const s = this.scroller;
-      const r = s.getBoundingClientRect();
-      const y = ((clientY - r.top) / r.height) * s.scrollHeight;
-      let found = null;
-      for (const t of this.turns()) {
-        if (this.contentTop(t) <= y) found = t;
-        else break;
+      if (s.scrollHeight - s.clientHeight - s.scrollTop <= 1 && this.tickCount() > 0) {
+        return this.tickCount() - 1;
       }
-      return found;
-    },
-    nearestIndex() {
       const turns = this.turns();
-      const top = this.scroller.scrollTop + 8;
+      const top = s.scrollTop + 8;
       let i = 0;
       for (let k = 0; k < turns.length; k++) {
         if (this.contentTop(turns[k]) <= top) i = k;
@@ -375,56 +411,135 @@ const Hooks = {
     clamp(i, n) {
       return Math.max(0, Math.min(n - 1, i));
     },
+    // Lay the stack out centered on the rail with fixed spacing (squeezed
+    // only when a huge transcript would overflow the rail).
     paintTicks() {
+      const n = this.tickCount();
       const turns = this.turns();
-      const total = Math.max(this.scroller.scrollHeight, 1);
       const rail = this.el.clientHeight;
-      while (this.ticks.childElementCount > turns.length) this.ticks.lastChild.remove();
-      turns.forEach((t, i) => {
+      const spacing = n > 1 ? Math.min(this.SPACING, (rail - 48) / (n - 1)) : 0;
+      const first = rail / 2 - ((n - 1) * spacing) / 2;
+      while (this.ticks.childElementCount > n) this.ticks.lastChild.remove();
+      this.tickYs = [];
+      for (let i = 0; i < n; i++) {
         let mark = this.ticks.children[i];
         if (!mark) {
           mark = document.createElement("div");
           mark.dataset.turnTick = "";
-          mark.className =
-            "absolute right-1 h-0.5 w-2.5 -translate-y-1/2 rounded-sm bg-neutral-400 dark:bg-white/55";
           this.ticks.appendChild(mark);
         }
-        mark.style.top = `${(this.contentTop(t) / total) * rail}px`;
-      });
-      this.syncActiveTick();
+        mark.dataset.role = i === n - 1 ? "end" : turns[i].dataset.turn;
+        const y = first + i * spacing;
+        this.tickYs.push(y);
+        mark.style.top = `${y}px`;
+      }
+      this.syncCurrent();
     },
-    syncActiveTick() {
-      const turns = this.turns();
-      const i = this.current ? turns.indexOf(this.current) : -1;
+    syncCurrent() {
+      this.currentIdx = this.tickCount() === 0 ? -1 : this.scrollIndex();
+      this.styleTicks();
+    },
+    styleTicks() {
       [...this.ticks.children].forEach((mark, k) => {
-        mark.classList.toggle("bg-neutral-800", k === i);
-        mark.classList.toggle("dark:bg-white", k === i);
-        mark.classList.toggle("bg-neutral-400", k !== i);
-        mark.classList.toggle("dark:bg-white/55", k !== i);
+        const role = mark.dataset.role;
+        const hovered = k === this.hovered;
+        const current = k === this.currentIdx;
+        let w, c;
+        if (hovered) {
+          w = this.TICK_W.hovered;
+          c = this.TICK_C.hovered;
+        } else if (role === "end") {
+          w = this.TICK_W.end;
+          c = this.TICK_C.end;
+        } else if (current) {
+          w = role === "user" ? this.TICK_W.userCurrent : this.TICK_W.assistantCurrent;
+          c = this.TICK_C.current;
+        } else {
+          w = role === "user" ? this.TICK_W.user : this.TICK_W.assistant;
+          c = this.TICK_C.idle;
+        }
+        mark.className = `${this.TICK_BASE} ${w} ${c}`;
       });
     },
+    // Hit-test the compact stack: near the right edge AND vertically near a
+    // tick. Outside the stack the rail is inert, so the scrollbar and plain
+    // reading space stay unobstructed.
     hover(e) {
-      if (!this.nearGutter(e)) return this.hide();
-      const turn = this.turnAt(e.clientY);
-      if (!turn) return this.hide();
-      this.current = turn;
-      this.roleEl.textContent = turn.dataset.turn === "user" ? "You" : "Assistant";
-      this.prevEl.textContent = (turn.innerText || "").trim().split("\n")[0] || "";
-      this.card.hidden = false;
+      const r = this.scroller.getBoundingClientRect();
+      const n = this.tickCount();
+      if (n === 0 || e.clientX < r.right - 32) return this.hide();
       const track = this.el.getBoundingClientRect();
+      const y = e.clientY - track.top;
+      let best = -1;
+      let bestDist = Infinity;
+      this.tickYs.forEach((ty, i) => {
+        const d = Math.abs(ty - y);
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      });
+      if (best < 0 || bestDist > 16) return this.hide();
+      if (this.hovered !== best) {
+        this.hovered = best;
+        this.fillCard(best);
+        this.styleTicks();
+      }
+      // Grow the card out of the tick's middle (origin-right + scale/opacity
+      // transition on the card element).
       const h = this.card.offsetHeight;
-      const y = e.clientY - track.top - h / 2;
-      this.card.style.top = `${Math.max(8, Math.min(y, track.height - h - 8))}px`;
-      this.syncActiveTick();
+      const top = this.clamp2(this.tickYs[best] - h / 2, 8, track.height - h - 8);
+      this.card.style.top = `${top}px`;
+      this.showCard(true);
+    },
+    fillCard(i) {
+      const n = this.tickCount();
+      if (i === n - 1) {
+        this.roleEl.textContent = "End";
+        this.prevEl.textContent = "Jump to the latest message";
+        return;
+      }
+      const turn = this.turns()[i];
+      if (!turn) return;
+      this.roleEl.textContent = turn.dataset.turn === "user" ? "You" : "Assistant";
+      this.prevEl.textContent = (turn.innerText || "").trim().slice(0, 200);
+    },
+    showCard(shown) {
+      this.card.classList.toggle("opacity-0", !shown);
+      this.card.classList.toggle("scale-95", !shown);
+      this.card.classList.toggle("opacity-100", shown);
+      this.card.classList.toggle("scale-100", shown);
+    },
+    clamp2(v, lo, hi) {
+      return Math.max(lo, Math.min(v, hi));
     },
     hide() {
-      this.current = null;
-      this.card.hidden = true;
-      this.syncActiveTick();
+      if (this.hovered === null) return;
+      this.hovered = null;
+      this.showCard(false);
+      this.styleTicks();
     },
-    jump(el) {
-      if (!el) return;
-      el.scrollIntoView({ block: "start", behavior: "smooth" });
+    jumpTo(i) {
+      const n = this.tickCount();
+      if (n === 0) return;
+      if (i === n - 1) {
+        this.scroller.scrollTo({ top: this.scroller.scrollHeight, behavior: "smooth" });
+        return;
+      }
+      this.turns()[i]?.scrollIntoView({ block: "start", behavior: "smooth" });
+    },
+  },
+
+  // Footer send button (#run-send): the composer is buttonless, so this
+  // submits the chat form from the run bar. requestSubmit fires a real
+  // submit event, which LiveView's phx-submit binding intercepts.
+  SubmitChat: {
+    mounted() {
+      this.onClick = () => document.getElementById("chat-form")?.requestSubmit();
+      this.el.addEventListener("click", this.onClick);
+    },
+    destroyed() {
+      this.el.removeEventListener("click", this.onClick);
     },
   },
 };

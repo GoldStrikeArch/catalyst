@@ -166,8 +166,8 @@ defmodule CatalystWeb.ShellLiveTest do
     view |> form("#chat-form", %{"message" => "do this next"}) |> render_submit()
 
     assert has_element?(view, "#queued-0", "do this next")
-    assert has_element?(view, "#chat-stop")
-    assert has_element?(view, "#chat-send")
+    assert has_element?(view, "#run-stop")
+    refute has_element?(view, "#run-send")
   end
 
   test "streaming commits stable markdown blocks progressively through the real renderer",

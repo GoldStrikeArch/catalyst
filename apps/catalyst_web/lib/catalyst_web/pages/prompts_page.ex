@@ -33,16 +33,16 @@ defmodule CatalystWeb.Pages.PromptsPage do
     ~H"""
     <main id="prompts-page" class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
       <div class="mx-auto flex max-w-5xl flex-col gap-5">
-        <header class="rounded-2xl border border-neutral-200 bg-white px-5 py-4 shadow-sm dark:border-white/10 dark:bg-white/5">
+        <header class="rounded-2xl border border-edge bg-surface px-5 py-4 shadow-sm">
           <div class="flex items-start gap-3">
-            <span class="rounded-xl bg-indigo-50 p-2 text-indigo-600 dark:bg-indigo-400/10 dark:text-indigo-300">
+            <span class="rounded-xl bg-accent/10 p-2 text-accent">
               <.icon name="hero-document-text" class="size-5" />
             </span>
             <div>
-              <h1 class="text-base font-semibold text-neutral-950 dark:text-white">
+              <h1 class="text-base font-semibold text-ink">
                 Models & Prompts
               </h1>
-              <p class="mt-1 max-w-3xl text-sm leading-6 text-neutral-500 dark:text-neutral-400">
+              <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
                 Edit Catalyst's durable file-backed prompt layer. Saved changes apply to the next
                 run. Session overrides, extensions, and application configuration remain higher
                 priority and are visible in Run diagnostics.
@@ -54,17 +54,17 @@ defmodule CatalystWeb.Pages.PromptsPage do
         <section
           :if={match?({:ok, _}, @prompt_preview)}
           id="effective-prompt-preview"
-          class="rounded-2xl border border-neutral-200 bg-white px-5 py-4 shadow-sm dark:border-white/10 dark:bg-white/5"
+          class="rounded-2xl border border-edge bg-surface px-5 py-4 shadow-sm"
         >
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <h2 class="text-sm font-semibold text-neutral-900 dark:text-white">
+            <h2 class="text-sm font-semibold text-ink">
               Effective selected-model prompt
             </h2>
-            <code class="font-mono text-[0.65rem] text-neutral-400">
+            <code class="font-mono text-[0.65rem] text-faint">
               {digest_prefix(elem(@prompt_preview, 1).digest)}
             </code>
           </div>
-          <p class="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+          <p class="mt-1 text-xs text-muted">
             {elem(@prompt_preview, 1).model_id || "default"} · {source_summary(
               elem(@prompt_preview, 1).sources
             )}
@@ -76,36 +76,36 @@ defmodule CatalystWeb.Pages.PromptsPage do
             :for={{id, row} <- @streams.prompt_rows}
             id={id}
             class={[
-              "rounded-2xl border bg-white shadow-sm transition dark:bg-white/5",
+              "rounded-2xl border bg-surface shadow-sm transition",
               row.error &&
-                "border-rose-300 dark:border-rose-400/30",
+                "border-danger/40",
               !row.error &&
-                "border-neutral-200 hover:border-neutral-300 dark:border-white/10 dark:hover:border-white/20"
+                "border-edge hover:border-edge-strong"
             ]}
           >
-            <div class="flex flex-wrap items-start gap-3 border-b border-neutral-200/70 px-5 py-3 dark:border-white/10">
+            <div class="flex flex-wrap items-start gap-3 border-b border-edge px-5 py-3">
               <div class="min-w-0 flex-1">
-                <h2 class="text-sm font-semibold text-neutral-900 dark:text-white">{row.label}</h2>
-                <p class="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+                <h2 class="text-sm font-semibold text-ink">{row.label}</h2>
+                <p class="mt-0.5 text-xs text-muted">
                   {row.description}
                 </p>
-                <p class="mt-1 truncate font-mono text-[0.65rem] text-neutral-400 dark:text-neutral-500">
+                <p class="mt-1 truncate font-mono text-[0.65rem] text-faint">
                   {row.path}
                 </p>
               </div>
               <span class={[
                 "rounded-full px-2 py-0.5 text-[0.65rem] font-medium",
                 row.saved? &&
-                  "bg-emerald-50 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-200",
+                  "bg-ok/10 text-ok",
                 !row.saved? &&
-                  "bg-neutral-100 text-neutral-500 dark:bg-white/10 dark:text-neutral-400"
+                  "bg-raised text-muted"
               ]}>
                 {if(row.saved?, do: "custom", else: "inherited")}
               </span>
             </div>
 
             <div class="px-5 py-4">
-              <p :if={row.error} class="mb-3 text-xs text-rose-600 dark:text-rose-300">
+              <p :if={row.error} class="mb-3 text-xs text-danger">
                 Could not read this prompt: {inspect(row.error)}
               </p>
 
@@ -129,7 +129,7 @@ defmodule CatalystWeb.Pages.PromptsPage do
                   maxlength={64 * 1024}
                   placeholder="Enter a prompt to create this layer…"
                   container_class="m-0"
-                  class="min-h-44 w-full resize-y rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-800 shadow-inner outline-none transition placeholder:text-neutral-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20 dark:border-white/10 dark:bg-neutral-950/40 dark:text-neutral-200 dark:placeholder:text-neutral-600"
+                  class="min-h-44 w-full resize-y rounded-xl border border-edge bg-raised px-3 py-2.5 font-mono text-xs leading-5 text-ink shadow-inner outline-none transition placeholder:text-faint focus:border-accent focus:ring-2 focus:ring-accent/20"
                 />
                 <div class="flex items-center justify-end gap-2">
                   <button
@@ -139,14 +139,14 @@ defmodule CatalystWeb.Pages.PromptsPage do
                     phx-click="delete_prompt"
                     phx-value-target={row.target}
                     data-confirm="Delete this prompt file and restore inherited behavior?"
-                    class="rounded-full px-3 py-1.5 text-xs font-medium text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
+                    class="rounded-full px-3 py-1.5 text-xs font-medium text-muted transition hover:bg-raised hover:text-ink"
                   >
                     Reset
                   </button>
                   <button
                     id={"prompt-save-#{row.dom_id}"}
                     type="submit"
-                    class="rounded-full bg-neutral-900 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:-translate-y-px hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+                    class="rounded-full bg-accent px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:-translate-y-px hover:bg-accent/90"
                   >
                     Save
                   </button>

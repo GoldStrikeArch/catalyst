@@ -8,7 +8,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
   use CatalystWeb, :html
 
   alias Catalyst.{Content, Message}
-  alias CatalystWeb.UI.{ImageStore, Markdown, Registry, SafeRender}
+  alias CatalystWeb.UI.{ImageStore, Markdown, Registry, SafeRender, ToolSummary}
 
   @doc "Render a message: a registered `:message` renderer if one matches, else built-in."
   @spec render_message(map()) :: Phoenix.LiveView.Rendered.t() | Phoenix.HTML.safe()
@@ -59,11 +59,11 @@ defmodule CatalystWeb.UI.MessageRenderer do
     <div data-message-role="user" data-turn="user" class="flex items-start gap-3">
       <span
         data-user-mark
-        class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-neutral-200/80 text-neutral-600 dark:bg-white/10 dark:text-neutral-300"
+        class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-raised text-muted"
       >
         <.icon name="hero-user" class="size-3.5" />
       </span>
-      <div class="min-w-0 text-sm leading-6 text-neutral-900 dark:text-neutral-100">
+      <div class="min-w-0 text-sm leading-7 text-ink">
         <img
           :for={img <- user_images(@msg.content)}
           src={image_src(img)}
@@ -84,7 +84,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
       data-turn="assistant"
       class="flex justify-start"
     >
-      <div class="w-full min-w-0 px-1 py-1 text-sm leading-6 text-neutral-800 dark:text-neutral-200">
+      <div class="w-full min-w-0 px-1 py-1 text-sm leading-7 text-ink">
         <%= for b <- @msg.content do %>
           {render_block(%{block: b})}
         <% end %>
@@ -94,28 +94,36 @@ defmodule CatalystWeb.UI.MessageRenderer do
   end
 
   defp message(%{msg: %Message.ToolResult{}} = assigns) do
+    output = tool_output(assigns.msg)
+
+    assigns =
+      assigns
+      |> Map.put(:output, output)
+      |> Map.put(:lines, line_label(output))
+
     ~H"""
     <div data-message-role="tool-result" data-tool-error={to_string(@msg.is_error)} class="px-2">
-      <div class={[
-        "overflow-hidden rounded-xl border text-xs font-mono",
-        @msg.is_error &&
-          "border-rose-200 bg-rose-50 text-rose-950 dark:border-rose-400/20 dark:bg-rose-500/10 dark:text-rose-100",
-        !@msg.is_error &&
-          "border-neutral-200 bg-white text-neutral-600 dark:border-white/10 dark:bg-white/5 dark:text-neutral-300"
-      ]}>
-        <div class="flex items-center gap-2 border-b border-current/10 px-3 py-1.5 font-semibold">
-          <span>{@msg.tool_name}</span>
-          <span
-            :if={@msg.is_error}
-            class="rounded-full bg-rose-600 px-1.5 py-0.5 text-[0.65rem] uppercase tracking-wide text-white"
-          >
-            error
-          </span>
-        </div>
+      <%!-- Collapsed by default so a long transcript stays scannable; a failed
+        call opens itself, because the output is the reason it failed. --%>
+      <details open={@msg.is_error} class="group my-0.5">
+        <summary class={[
+          "flex cursor-pointer list-none items-center gap-1.5 text-xs",
+          "[&::-webkit-details-marker]:hidden",
+          @msg.is_error && "text-danger",
+          !@msg.is_error && "text-faint hover:text-muted"
+        ]}>
+          <.icon
+            name="hero-chevron-right-micro"
+            class="size-3 shrink-0 transition-transform group-open:rotate-90"
+          />
+          <span class="font-medium">{@msg.tool_name}</span>
+          <span :if={@msg.is_error} class="font-medium">error</span>
+          <span class="truncate">· {@lines}</span>
+        </summary>
         <div
           :if={user_images(@msg.content) != []}
           data-block-kind="tool-image"
-          class="border-b border-current/10 px-3 py-2"
+          class="mt-1"
         >
           <img
             :for={img <- user_images(@msg.content)}
@@ -124,8 +132,8 @@ defmodule CatalystWeb.UI.MessageRenderer do
             class="mb-2 max-h-64 max-w-full rounded-xl last:mb-0"
           />
         </div>
-        <pre class="max-h-60 overflow-y-auto whitespace-pre-wrap px-3 py-2">{tool_output(@msg)}</pre>
-      </div>
+        <pre class="mt-1 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-md bg-raised px-2.5 py-1.5 font-mono text-[0.7rem] leading-relaxed text-muted">{@output}</pre>
+      </details>
     </div>
     """
   end
@@ -138,10 +146,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :blocks, Markdown.parse(text))
 
     ~H"""
-    <div
-      data-block-kind="text"
-      class="space-y-2 text-sm leading-6 text-neutral-800 dark:text-neutral-200"
-    >
+    <div data-block-kind="text" class="space-y-2 text-sm leading-7 text-ink">
       <%= for block <- @blocks do %>
         <.formatted_block block={block} />
       <% end %>
@@ -151,29 +156,40 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp block(%{block: %Content.Thinking{}} = assigns) do
     ~H"""
-    <details
-      data-block-kind="thinking"
-      class="my-1 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs italic text-neutral-500 dark:border-white/10 dark:bg-white/5 dark:text-neutral-400"
-    >
-      <summary class="cursor-pointer font-medium not-italic text-neutral-500 dark:text-neutral-300">
-        thinking
+    <details data-block-kind="thinking" class="group my-1">
+      <summary class="flex cursor-pointer list-none items-center gap-1.5 text-xs text-faint hover:text-muted [&::-webkit-details-marker]:hidden">
+        <.icon
+          name="hero-chevron-right-micro"
+          class="size-3 shrink-0 transition-transform group-open:rotate-90"
+        /> Thinking
       </summary>
-      <div class="mt-2 whitespace-pre-wrap">{@block.thinking}</div>
+      <div class="mt-1 whitespace-pre-wrap border-l border-edge pl-3 text-xs leading-5 text-faint">
+        {@block.thinking}
+      </div>
     </details>
     """
   end
 
   defp block(%{block: %Content.ToolCall{}} = assigns) do
+    {label, detail} = ToolSummary.summarize(assigns.block.name, assigns.block.arguments)
+
+    assigns =
+      assigns
+      |> Map.put(:label, label)
+      |> Map.put(:detail, detail)
+
     ~H"""
-    <div
-      data-block-kind="tool-call"
-      class="my-1 inline-flex items-center gap-2 rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs text-neutral-600 dark:border-white/10 dark:bg-white/5 dark:text-neutral-300"
-    >
-      <span class="rounded-full bg-neutral-200/80 px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-600 dark:bg-white/10 dark:text-neutral-300">
-        tool
-      </span>
-      <code>{@block.name}({short_args(@block.arguments)})</code>
-    </div>
+    <details data-block-kind="tool-call" class="group my-0.5">
+      <summary class="flex cursor-pointer list-none items-baseline gap-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden">
+        <.icon
+          name="hero-chevron-right-micro"
+          class="size-3 shrink-0 self-center transition-transform group-open:rotate-90"
+        />
+        <span class="font-medium text-xs text-muted">{@label}</span>
+        <span class="min-w-0 truncate font-mono text-faint">{@detail}</span>
+      </summary>
+      <pre class="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-md bg-raised px-2.5 py-1.5 font-mono text-[0.7rem] leading-relaxed text-muted">{pretty_args(@block.arguments)}</pre>
+    </details>
     """
   end
 
@@ -198,10 +214,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
       |> Map.put(:inlines, inlines)
 
     ~H"""
-    <p class={[
-      "mt-4 first:mt-0 font-semibold text-neutral-950 dark:text-white",
-      heading_class(@level)
-    ]}>
+    <p class={["mt-4 first:mt-0 font-semibold text-ink", heading_class(@level)]}>
       <.formatted_inlines inlines={@inlines} />
     </p>
     """
@@ -211,7 +224,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :items, items)
 
     ~H"""
-    <ul class="my-2 ml-5 list-disc space-y-1 marker:text-neutral-400 dark:marker:text-neutral-500">
+    <ul class="my-2 ml-5 list-disc space-y-1 marker:text-faint">
       <li :for={item <- @items}>
         <.formatted_inlines inlines={item} />
       </li>
@@ -223,7 +236,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :items, items)
 
     ~H"""
-    <ol class="my-2 ml-5 list-decimal space-y-1 marker:text-neutral-400 dark:marker:text-neutral-500">
+    <ol class="my-2 ml-5 list-decimal space-y-1 marker:text-faint">
       <li :for={item <- @items}>
         <.formatted_inlines inlines={item} />
       </li>
@@ -235,7 +248,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :blocks, blocks)
 
     ~H"""
-    <blockquote class="my-3 border-l-2 border-neutral-300 pl-3 text-neutral-600 dark:border-white/20 dark:text-neutral-300">
+    <blockquote class="my-3 border-l-2 border-edge-strong pl-3 text-muted">
       <%= for block <- @blocks do %>
         <.formatted_block block={block} />
       <% end %>
@@ -250,7 +263,9 @@ defmodule CatalystWeb.UI.MessageRenderer do
       |> Map.put(:code, code)
 
     ~H"""
-    <div class="my-3 overflow-hidden rounded-xl border border-neutral-200 bg-neutral-950 text-neutral-100 dark:border-white/10 dark:bg-neutral-950">
+    <%!-- The fence keeps its dark shell in both themes on purpose: the hljs
+      theme loaded in app.css is a dark one (documented invariant). --%>
+    <div class="my-3 overflow-hidden rounded-xl border border-edge bg-neutral-950 text-neutral-100">
       <div
         :if={@lang}
         class="border-b border-white/10 px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-wide text-neutral-400"
@@ -264,7 +279,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
 
   defp formatted_block(%{block: :hr} = assigns) do
     ~H"""
-    <hr class="my-4 border-neutral-200 dark:border-white/10" />
+    <hr class="my-4 border-edge" />
     """
   end
 
@@ -294,7 +309,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :code, code)
 
     ~H"""
-    <code class="rounded-md bg-neutral-100 px-1 py-0.5 font-mono text-[0.85em] text-neutral-900 dark:bg-white/10 dark:text-neutral-100">
+    <code class="rounded-md bg-raised px-1 py-0.5 font-mono text-[0.85em] text-ink">
       {@code}
     </code>
     """
@@ -304,7 +319,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
     assigns = Map.put(assigns, :inlines, inlines)
 
     ~H"""
-    <strong class="font-semibold text-neutral-950 dark:text-white">
+    <strong class="font-semibold text-ink">
       <.formatted_inlines inlines={@inlines} />
     </strong>
     """
@@ -333,7 +348,7 @@ defmodule CatalystWeb.UI.MessageRenderer do
       href={@href}
       target="_blank"
       rel="noopener noreferrer"
-      class="font-medium text-indigo-600 underline decoration-indigo-300 underline-offset-2 transition hover:text-indigo-500 hover:decoration-indigo-500 dark:text-indigo-300 dark:decoration-indigo-400/50 dark:hover:text-indigo-200"
+      class="font-medium text-accent underline decoration-accent/40 underline-offset-2 transition hover:decoration-accent"
     >
       <.formatted_inlines inlines={@inlines} />
     </a>
@@ -362,9 +377,15 @@ defmodule CatalystWeb.UI.MessageRenderer do
     end
   end
 
-  defp short_args(args) when is_map(args) and map_size(args) == 0, do: ""
-  defp short_args(args) when is_map(args), do: args |> Jason.encode!() |> String.slice(0, 80)
-  defp short_args(_), do: ""
+  defp line_label(output) do
+    case output |> String.split("\n") |> length() do
+      1 -> "1 line"
+      n -> "#{n} lines"
+    end
+  end
+
+  defp pretty_args(args) when is_map(args) and map_size(args) == 0, do: "{}"
+  defp pretty_args(args) when is_map(args), do: Jason.encode!(args, pretty: true)
 
   defp user_images(content) when is_list(content),
     do: Enum.filter(content, &match?(%Content.Image{}, &1))

@@ -9,6 +9,9 @@ defmodule CatalystWeb.ChatLiveTest do
     refute has_element?(view, "#catalyst-shell", "Demo (offline)")
     assert has_element?(view, "#chat-empty-state")
     assert has_element?(view, "#chat-form")
+    assert has_element?(view, "#composer-shell #chat-input")
+    assert has_element?(view, "#run-send")
+    refute has_element?(view, "#run-stop")
   end
 
   test "sending a prompt streams a reply with a tool result (offline provider)", %{conn: conn} do

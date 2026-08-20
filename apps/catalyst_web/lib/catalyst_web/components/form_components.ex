@@ -55,7 +55,7 @@ defmodule CatalystWeb.FormComponents do
       <label for={@id} class="block">
         <span
           :if={@label}
-          class="mb-1 block text-sm font-medium text-neutral-700 dark:text-neutral-200"
+          class="mb-1 block text-sm font-medium text-muted"
         >
           {@label}
         </span>
@@ -84,7 +84,7 @@ defmodule CatalystWeb.FormComponents do
       <label for={@id} class="block">
         <span
           :if={@label}
-          class="mb-1 block text-sm font-medium text-neutral-700 dark:text-neutral-200"
+          class="mb-1 block text-sm font-medium text-muted"
         >
           {@label}
         </span>
@@ -109,7 +109,7 @@ defmodule CatalystWeb.FormComponents do
       <label for={@id} class="block">
         <span
           :if={@label}
-          class="mb-1 block text-sm font-medium text-neutral-700 dark:text-neutral-200"
+          class="mb-1 block text-sm font-medium text-muted"
         >
           {@label}
         </span>
@@ -142,7 +142,7 @@ defmodule CatalystWeb.FormComponents do
 
   defp error(assigns) do
     ~H"""
-    <p class="mt-1.5 flex items-center gap-2 text-sm text-rose-600 dark:text-rose-300">
+    <p class="mt-1.5 flex items-center gap-2 text-sm text-danger">
       <CoreComponents.icon name="hero-exclamation-circle" class="size-5" />
       {render_slot(@inner_block)}
     </p>
@@ -153,19 +153,17 @@ defmodule CatalystWeb.FormComponents do
   defp field_name(field, false), do: field.name
 
   defp select_class do
-    "w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-950 " <>
-      "shadow-sm outline-none transition focus:border-neutral-400 focus:ring-2 " <>
-      "focus:ring-neutral-400/20 dark:border-white/10 dark:bg-white/10 dark:text-white"
+    "w-full rounded-lg border border-edge bg-surface px-3 py-2 text-sm text-ink " <>
+      "outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
   end
 
   defp text_input_class do
-    "w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-950 " <>
-      "shadow-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-400 " <>
-      "focus:ring-2 focus:ring-neutral-400/20 dark:border-white/10 dark:bg-white/10 " <>
-      "dark:text-white dark:placeholder:text-neutral-500"
+    "w-full rounded-lg border border-edge bg-surface px-3 py-2 text-sm text-ink " <>
+      "outline-none transition placeholder:text-faint focus:border-accent " <>
+      "focus:ring-2 focus:ring-accent/20"
   end
 
   defp invalid_class do
-    "border-rose-300 focus:border-rose-400 focus:ring-rose-500/20 dark:border-rose-400/40"
+    "border-danger focus:border-danger focus:ring-danger/20"
   end
 end

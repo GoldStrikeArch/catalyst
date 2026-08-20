@@ -176,14 +176,14 @@ defmodule CatalystWeb.ComparisonLive do
     ~H"""
     <Layouts.app
       flash={@flash}
-      class="h-screen overflow-hidden bg-neutral-100 text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100"
+      class="h-screen overflow-hidden bg-bg text-ink antialiased"
     >
       <main id="comparison-view" class="flex h-screen min-h-0 flex-col">
-        <header class="flex h-12 shrink-0 items-center gap-3 border-b border-neutral-200 bg-white px-4 dark:border-white/10 dark:bg-neutral-900">
+        <header class="flex h-12 shrink-0 items-center gap-3 border-b border-edge bg-surface px-4">
           <.link
             navigate={~p"/"}
             id="comparison-back"
-            class="flex size-8 items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
+            class="flex size-8 items-center justify-center rounded-lg text-muted transition hover:bg-raised hover:text-ink"
             title="Back to Catalyst"
           >
             <.icon name="hero-arrow-left" class="size-4" />
@@ -192,7 +192,7 @@ defmodule CatalystWeb.ComparisonLive do
             <h1 class="truncate text-sm font-semibold">
               {if(@comparison, do: @comparison["title"], else: "Model comparison")}
             </h1>
-            <p :if={@comparison} class="truncate font-mono text-[10px] text-neutral-400">
+            <p :if={@comparison} class="truncate font-mono text-[10px] text-faint">
               {@comparison["source_root"]}
             </p>
           </div>
@@ -221,7 +221,7 @@ defmodule CatalystWeb.ComparisonLive do
 
               <aside
                 id="add-lane-card"
-                class="flex h-full min-h-80 items-center justify-center rounded-2xl border border-dashed border-neutral-300 bg-white/40 p-6 dark:border-white/15 dark:bg-white/[0.02]"
+                class="flex h-full min-h-80 items-center justify-center rounded-2xl border border-dashed border-edge-strong bg-surface/40 p-6"
               >
                 <.form
                   for={@add_form}
@@ -229,11 +229,11 @@ defmodule CatalystWeb.ComparisonLive do
                   phx-submit="add_lane"
                   class="w-full max-w-xs"
                 >
-                  <div class="mb-4 flex size-10 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-300">
+                  <div class="mb-4 flex size-10 items-center justify-center rounded-xl bg-accent/10 text-accent">
                     <.icon name="hero-plus" class="size-5" />
                   </div>
                   <h2 class="text-sm font-semibold">Add another model</h2>
-                  <p class="mt-1 text-xs leading-5 text-neutral-500 dark:text-neutral-400">
+                  <p class="mt-1 text-xs leading-5 text-muted">
                     Captures a fresh snapshot of the original project.
                   </p>
                   <.input
@@ -247,7 +247,7 @@ defmodule CatalystWeb.ComparisonLive do
                     id="add-lane-submit"
                     type="submit"
                     disabled={@adding?}
-                    class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-neutral-900 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-neutral-700 disabled:cursor-wait disabled:opacity-60 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+                    class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
                   >
                     <.icon
                       name={if(@adding?, do: "hero-arrow-path", else: "hero-plus")}
@@ -260,7 +260,7 @@ defmodule CatalystWeb.ComparisonLive do
             </div>
           </section>
 
-          <footer class="shrink-0 border-t border-neutral-200 bg-white px-3 py-2 dark:border-white/10 dark:bg-neutral-900">
+          <footer class="shrink-0 border-t border-edge bg-surface px-3 py-2">
             <.form
               for={@shared_form}
               id="shared-prompt-form"
@@ -268,12 +268,12 @@ defmodule CatalystWeb.ComparisonLive do
               class="mx-auto max-w-5xl"
             >
               <div class="mb-1.5 flex flex-wrap items-center gap-1.5">
-                <span class="mr-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+                <span class="mr-1 text-[10px] font-semibold uppercase tracking-wider text-faint">
                   Send to
                 </span>
                 <label
                   :for={lane <- @comparison["lanes"]}
-                  class="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-neutral-200 px-2 py-1 text-[10px] font-medium text-neutral-600 transition has-[:checked]:border-indigo-300 has-[:checked]:bg-indigo-50 has-[:checked]:text-indigo-700 dark:border-white/10 dark:text-neutral-400 dark:has-[:checked]:border-indigo-400/30 dark:has-[:checked]:bg-indigo-400/10 dark:has-[:checked]:text-indigo-200"
+                  class="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-edge px-2 py-1 text-[10px] font-medium text-muted transition has-[:checked]:border-accent/40 has-[:checked]:bg-accent/10 has-[:checked]:text-accent"
                 >
                   <input
                     id={"shared-lane-#{lane["id"]}"}
@@ -281,12 +281,12 @@ defmodule CatalystWeb.ComparisonLive do
                     name="shared[lanes][]"
                     value={lane["id"]}
                     checked
-                    class="size-3 rounded border-neutral-300 text-indigo-600 focus:ring-indigo-500"
+                    class="size-3 rounded border-edge-strong text-accent focus:ring-accent"
                   />
                   <span id={"shared-lane-label-#{lane["id"]}"}>{lane["model_id"]}</span>
                 </label>
               </div>
-              <div class="flex items-end gap-2 rounded-2xl border border-neutral-200 bg-neutral-50 px-3 py-2 shadow-sm focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-500/10 dark:border-white/10 dark:bg-neutral-950 dark:focus-within:border-indigo-400/40">
+              <div class="flex items-end gap-2 rounded-2xl border border-edge bg-raised px-3 py-2 shadow-sm focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
                 <.input
                   field={@shared_form[:message]}
                   type="textarea"
@@ -294,13 +294,13 @@ defmodule CatalystWeb.ComparisonLive do
                   rows="1"
                   placeholder="Ask every selected model…"
                   container_class="m-0 min-w-0 flex-1"
-                  class="w-full resize-none border-0 bg-transparent px-0 py-1 text-sm leading-6 text-neutral-900 outline-none placeholder:text-neutral-400 focus:ring-0 dark:text-white dark:placeholder:text-neutral-600"
+                  class="w-full resize-none border-0 bg-transparent px-0 py-1 text-sm leading-6 text-ink outline-none placeholder:text-faint focus:ring-0"
                 />
                 <button
                   id="shared-prompt-submit"
                   type="submit"
                   disabled={@dispatching?}
-                  class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-60"
+                  class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-accent text-white shadow-sm transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
                   aria-label="Send shared prompt"
                 >
                   <.icon
@@ -315,13 +315,13 @@ defmodule CatalystWeb.ComparisonLive do
           <section class="min-h-0 flex-1 overflow-y-auto px-5 py-10">
             <div class="mx-auto grid max-w-5xl gap-8 lg:grid-cols-[1.2fr_0.8fr]">
               <div>
-                <p class="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-600 dark:text-indigo-300">
+                <p class="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
                   Independent workspaces
                 </p>
                 <h2 class="mt-3 max-w-xl text-3xl font-semibold tracking-tight">
                   Compare models against the same project snapshot.
                 </h2>
-                <p class="mt-3 max-w-xl text-sm leading-6 text-neutral-500 dark:text-neutral-400">
+                <p class="mt-3 max-w-xl text-sm leading-6 text-muted">
                   Catalyst creates two private Git clones containing HEAD, tracked changes, and non-ignored untracked files.
                 </p>
 
@@ -330,18 +330,18 @@ defmodule CatalystWeb.ComparisonLive do
                     :for={comparison <- @comparisons}
                     navigate={~p"/compare/#{comparison["id"]}"}
                     id={"open-comparison-#{comparison["id"]}"}
-                    class="flex items-center gap-3 rounded-xl border border-neutral-200 bg-white p-3 transition hover:border-indigo-300 hover:shadow-sm dark:border-white/10 dark:bg-neutral-900 dark:hover:border-indigo-400/40"
+                    class="flex items-center gap-3 rounded-xl border border-edge bg-surface p-3 transition hover:border-accent/40 hover:shadow-sm"
                   >
-                    <div class="flex size-9 items-center justify-center rounded-lg bg-neutral-100 dark:bg-white/5">
-                      <.icon name="hero-squares-2x2" class="size-4 text-neutral-500" />
+                    <div class="flex size-9 items-center justify-center rounded-lg bg-raised">
+                      <.icon name="hero-squares-2x2" class="size-4 text-muted" />
                     </div>
                     <div class="min-w-0 flex-1">
                       <p class="truncate text-sm font-medium">{comparison["title"]}</p>
-                      <p class="truncate text-[10px] text-neutral-400">
+                      <p class="truncate text-[10px] text-faint">
                         {length(comparison["lanes"])} lanes · {comparison["updated_at"]}
                       </p>
                     </div>
-                    <.icon name="hero-chevron-right" class="size-4 text-neutral-300" />
+                    <.icon name="hero-chevron-right" class="size-4 text-faint" />
                   </.link>
                 </div>
               </div>
@@ -350,10 +350,10 @@ defmodule CatalystWeb.ComparisonLive do
                 for={@create_form}
                 id="create-comparison-form"
                 phx-submit="create"
-                class="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-neutral-900"
+                class="rounded-2xl border border-edge bg-surface p-5 shadow-sm"
               >
                 <h2 class="text-sm font-semibold">New comparison</h2>
-                <p class="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+                <p class="mt-1 text-xs text-muted">
                   The initial lanes share one frozen snapshot.
                 </p>
                 <.input
@@ -361,7 +361,7 @@ defmodule CatalystWeb.ComparisonLive do
                   id="comparison-source"
                   label="Project directory"
                   autocomplete="off"
-                  class="w-full rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-900 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 dark:border-white/10 dark:bg-neutral-950 dark:text-white"
+                  class="w-full rounded-xl border border-edge bg-raised px-3 py-2 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
                   container_class="mt-5"
                 />
                 <div class="grid grid-cols-2 gap-3">
@@ -389,14 +389,14 @@ defmodule CatalystWeb.ComparisonLive do
                   label="System prompt override"
                   rows="5"
                   placeholder="Blank inherits Catalyst's effective system prompt."
-                  class="w-full resize-y rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm leading-5 text-neutral-900 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 dark:border-white/10 dark:bg-neutral-950 dark:text-white"
+                  class="w-full resize-y rounded-xl border border-edge bg-raised px-3 py-2 text-sm leading-5 text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
                   container_class="mt-4"
                 />
                 <button
                   id="create-comparison-submit"
                   type="submit"
                   disabled={@creating?}
-                  class="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-60"
+                  class="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
                 >
                   <.icon
                     name={if(@creating?, do: "hero-arrow-path", else: "hero-squares-2x2")}

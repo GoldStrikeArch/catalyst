@@ -135,7 +135,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
 
     ~H"""
     <Layouts.app flash={@flash} flash_id={"flash-group-lane-#{@lane_id}"} class="contents">
-      <div class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+      <div class="rounded-2xl border border-danger/40 bg-danger/10 p-4 text-sm text-danger">
         Could not load lane: {@error}
       </div>
     </Layouts.app>
@@ -152,7 +152,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
       <article
         id={"comparison-lane-#{@lane["id"]}"}
         data-comparison-lane
-        class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm dark:border-white/10 dark:bg-neutral-900"
+        class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-edge bg-surface shadow-sm"
       >
         <div
           :if={not @session_ready?}
@@ -170,17 +170,17 @@ defmodule CatalystWeb.ComparisonLaneLive do
           </button>
         </div>
 
-        <header class="shrink-0 border-b border-neutral-200 px-3 py-2.5 dark:border-white/10">
+        <header class="shrink-0 border-b border-edge px-3 py-2.5">
           <div class="flex items-center gap-2">
             <span class={[
               "size-2 rounded-full",
-              @running && "animate-pulse bg-indigo-500",
-              !@running && "bg-emerald-500"
+              @running && "animate-pulse bg-accent",
+              !@running && "bg-ok"
             ]}>
             </span>
             <div class="min-w-0 flex-1">
               <h2 class="truncate text-xs font-semibold">{current_model(@config_form)}</h2>
-              <p class="truncate text-[9px] text-neutral-400">
+              <p class="truncate text-[9px] text-faint">
                 Snapshot {String.slice(@lane["snapshot_id"], 0, 8)}
               </p>
             </div>
@@ -189,7 +189,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
               id={"lane-abort-#{@lane["id"]}"}
               type="button"
               phx-click="abort"
-              class="flex size-7 items-center justify-center rounded-lg text-neutral-400 transition hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-400/10 dark:hover:text-rose-300"
+              class="flex size-7 items-center justify-center rounded-lg text-faint transition hover:bg-danger/10 hover:text-danger"
               title="Stop this lane"
             >
               <.icon name="hero-stop-solid" class="size-3.5" />
@@ -197,7 +197,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
           </div>
 
           <details class="mt-2">
-            <summary class="cursor-pointer select-none text-[10px] font-medium text-neutral-400 transition hover:text-neutral-700 dark:hover:text-neutral-200">
+            <summary class="cursor-pointer select-none text-[10px] font-medium text-faint transition hover:text-ink">
               Model and system prompt
             </summary>
             <.form
@@ -239,13 +239,13 @@ defmodule CatalystWeb.ComparisonLaneLive do
                 rows="5"
                 disabled={not @session_ready?}
                 container_class="m-0"
-                class="w-full resize-y rounded-xl border border-neutral-200 bg-neutral-50 px-2.5 py-2 font-mono text-[10px] leading-4 text-neutral-800 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 dark:border-white/10 dark:bg-neutral-950 dark:text-neutral-200"
+                class="w-full resize-y rounded-xl border border-edge bg-raised px-2.5 py-2 font-mono text-[10px] leading-4 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
               />
               <button
                 id={"lane-config-submit-#{@lane["id"]}"}
                 type="submit"
                 disabled={not @session_ready?}
-                class="justify-self-end rounded-lg bg-neutral-900 px-3 py-1.5 text-[10px] font-semibold text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900"
+                class="justify-self-end rounded-lg bg-accent px-3 py-1.5 text-[10px] font-semibold text-white transition hover:bg-accent/90"
               >
                 Apply
               </button>
@@ -260,7 +260,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
           <p
             :if={@message_count == 0 and @streaming_text == ""}
             id={"lane-empty-#{@lane["id"]}"}
-            class="text-xs leading-5 text-neutral-400"
+            class="text-xs leading-5 text-faint"
           >
             This model has an independent clone and conversation.
           </p>
@@ -278,33 +278,33 @@ defmodule CatalystWeb.ComparisonLaneLive do
           <div
             :if={@streaming_text != "" or @streaming_thinking != ""}
             id={"lane-streaming-#{@lane["id"]}"}
-            class="mt-3 rounded-xl bg-neutral-50 px-3 py-2 dark:bg-white/[0.03]"
+            class="mt-3 rounded-xl bg-raised px-3 py-2"
           >
-            <details :if={@streaming_thinking != ""} class="mb-2 text-[10px] text-neutral-400">
+            <details :if={@streaming_thinking != ""} class="mb-2 text-[10px] text-faint">
               <summary>Thinking</summary>
               <p class="mt-1 whitespace-pre-wrap italic">{@streaming_thinking}</p>
             </details>
             <p class="whitespace-pre-wrap text-sm leading-6">{@streaming_text}</p>
-            <span class="mt-2 inline-block size-1.5 animate-pulse rounded-full bg-indigo-500"></span>
+            <span class="mt-2 inline-block size-1.5 animate-pulse rounded-full bg-accent"></span>
           </div>
 
           <div
             :for={{call_id, tool} <- @tools}
             id={"lane-#{@lane["id"]}-tool-#{call_id}"}
-            class="mt-2 inline-flex items-center gap-2 rounded-full border border-neutral-200 px-2.5 py-1 text-[10px] text-neutral-500 dark:border-white/10"
+            class="mt-2 inline-flex items-center gap-2 rounded-full border border-edge px-2.5 py-1 text-[10px] text-muted"
           >
-            <span class="size-2.5 animate-spin rounded-full border border-neutral-300 border-t-indigo-500">
+            <span class="size-2.5 animate-spin rounded-full border border-edge-strong border-t-accent">
             </span>
             {tool.name}
           </div>
         </div>
 
-        <footer class="shrink-0 border-t border-neutral-200 p-2 dark:border-white/10">
+        <footer class="shrink-0 border-t border-edge p-2">
           <.form
             for={@prompt_form}
             id={"lane-prompt-form-#{@lane["id"]}"}
             phx-submit="send"
-            class="flex items-end gap-1 rounded-xl bg-neutral-50 px-2.5 py-1.5 focus-within:ring-2 focus-within:ring-indigo-500/10 dark:bg-neutral-950"
+            class="flex items-end gap-1 rounded-xl bg-raised px-2.5 py-1.5 focus-within:ring-2 focus-within:ring-accent/20"
           >
             <.input
               field={@prompt_form[:message]}
@@ -314,19 +314,19 @@ defmodule CatalystWeb.ComparisonLaneLive do
               disabled={not @session_ready?}
               placeholder={if(@running, do: "Queue for this model…", else: "Ask only this model…")}
               container_class="m-0 min-w-0 flex-1"
-              class="w-full resize-none border-0 bg-transparent px-0 py-1 text-xs leading-5 text-neutral-900 outline-none placeholder:text-neutral-400 focus:ring-0 dark:text-white"
+              class="w-full resize-none border-0 bg-transparent px-0 py-1 text-xs leading-5 text-ink outline-none placeholder:text-faint focus:ring-0"
             />
             <button
               id={"lane-prompt-submit-#{@lane["id"]}"}
               type="submit"
               disabled={not @session_ready?}
-              class="flex size-7 shrink-0 items-center justify-center rounded-lg text-neutral-400 transition hover:bg-neutral-200 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
+              class="flex size-7 shrink-0 items-center justify-center rounded-lg text-faint transition hover:bg-raised hover:text-ink"
               aria-label={if(@running, do: "Queue prompt", else: "Send prompt")}
             >
               <.icon name="hero-arrow-up" class="size-3.5" />
             </button>
           </.form>
-          <p class="mt-1 truncate px-1 font-mono text-[8px] text-neutral-300 dark:text-neutral-600">
+          <p class="mt-1 truncate px-1 font-mono text-[8px] text-faint">
             {@lane["cwd"]}
           </p>
         </footer>

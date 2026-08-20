@@ -46,7 +46,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         <.runtime_overlays panel={@ext_panel} />
         <.registries panel={@ext_panel} />
       </div>
-      <p :if={is_nil(@ext_panel)} class="mx-auto mt-24 max-w-md text-center text-sm text-neutral-500">
+      <p :if={is_nil(@ext_panel)} class="mx-auto mt-24 max-w-md text-center text-sm text-muted">
         Loading extension data…
       </p>
     </main>
@@ -60,17 +60,17 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     <div class={card_class()}>
       <div class="flex flex-wrap items-center gap-3 px-4 py-3">
         <div class="min-w-0 flex-1">
-          <h1 class="text-base font-semibold text-neutral-950 dark:text-white">Extensions</h1>
-          <p class="mt-0.5 truncate font-mono text-xs text-neutral-400 dark:text-neutral-500">
+          <h1 class="text-base font-semibold text-ink">Extensions</h1>
+          <p class="mt-0.5 truncate font-mono text-xs text-faint">
             {@panel.dir}
           </p>
         </div>
 
         <span
           :if={@action}
-          class="flex items-center gap-2 text-xs text-neutral-500 dark:text-neutral-300"
+          class="flex items-center gap-2 text-xs text-muted"
         >
-          <span class="size-3 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-600 dark:border-white/20 dark:border-t-white">
+          <span class="size-3 animate-spin rounded-full border-2 border-edge-strong border-t-muted">
           </span>
           {@action.label}…
         </span>
@@ -141,7 +141,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
 
       <div
         :if={@panel.loaded == []}
-        class="rounded-2xl border border-dashed border-neutral-300 px-4 py-6 text-center text-sm text-neutral-500 dark:border-white/15 dark:text-neutral-400"
+        class="rounded-2xl border border-dashed border-edge-strong px-4 py-6 text-center text-sm text-muted"
       >
         No extensions loaded — only built-ins are active. Ask the agent to build one
         (“develop a tool that…”), or drop an <code class="font-mono">.ex</code>
@@ -151,33 +151,33 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
 
       <div class="flex flex-col gap-3">
         <div :for={ext <- @panel.loaded} class={card_class()} data-ext-owner={ext.owner}>
-          <div class="flex flex-wrap items-center gap-2 border-b border-neutral-200/70 px-4 py-2.5 dark:border-white/10">
-            <span class="font-mono text-sm font-semibold text-neutral-950 dark:text-white">
+          <div class="flex flex-wrap items-center gap-2 border-b border-edge px-4 py-2.5">
+            <span class="font-mono text-sm font-semibold text-ink">
               {ext.owner}
             </span>
             <span
               :if={ext.path}
-              class="truncate font-mono text-xs text-neutral-400 dark:text-neutral-500"
+              class="truncate font-mono text-xs text-faint"
             >
               {Path.basename(ext.path)}
             </span>
             <span
               :if={is_nil(ext.path)}
-              class="rounded-full bg-neutral-100 px-2 py-0.5 text-xs text-neutral-500 dark:bg-white/10 dark:text-neutral-300"
+              class="rounded-full bg-raised px-2 py-0.5 text-xs text-muted"
               title="Registered at runtime without a source file (e.g. by another app); reload/disable need a file"
             >
               no source file
             </span>
             <span
               :if={ext.path && !ext.managed?}
-              class="rounded-full bg-neutral-100 px-2 py-0.5 text-xs text-neutral-500 dark:bg-white/10 dark:text-neutral-300"
+              class="rounded-full bg-raised px-2 py-0.5 text-xs text-muted"
               title="Loaded from outside the managed extensions directory; reload is available, but disable and rollback are not"
             >
               external source
             </span>
             <span
               :if={ext.status == :degraded}
-              class="rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700 dark:bg-rose-500/15 dark:text-rose-200"
+              class="rounded-full bg-danger/10 px-2 py-0.5 text-xs text-danger"
               title={degraded_note(ext.purge_failures)}
               data-degraded-owner={ext.owner}
             >
@@ -185,7 +185,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
             </span>
             <span
               :if={is_integer(ext.process_count) and ext.process_count > 0}
-              class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200"
+              class="rounded-full bg-ok/10 px-2 py-0.5 text-xs text-ok"
             >
               {ext.process_count} process(es)
             </span>
@@ -228,28 +228,28 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
           <div class="flex flex-col gap-1.5 px-4 py-2.5 text-xs">
             <p
               :if={is_binary(ext.metadata[:description])}
-              class="text-neutral-500 dark:text-neutral-400"
+              class="text-muted"
             >
               {ext.metadata[:description]}
             </p>
             <p
               :if={ext.status == :degraded}
-              class="text-rose-600 dark:text-rose-300"
+              class="text-danger"
             >
               {degraded_note(ext.purge_failures)}
             </p>
             <div :if={ext.tools != []} class="flex flex-wrap items-center gap-1.5">
-              <span class="text-neutral-400 dark:text-neutral-500">tools</span>
+              <span class="text-faint">tools</span>
               <code
                 :for={tool <- ext.tools}
-                class="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 font-mono text-indigo-700 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-200"
+                class="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 font-mono text-accent"
               >
                 {tool}
               </code>
             </div>
             <div :if={ext.modules != []} class="flex flex-wrap items-center gap-1.5">
-              <span class="text-neutral-400 dark:text-neutral-500">modules</span>
-              <code :for={mod <- ext.modules} class="font-mono text-neutral-600 dark:text-neutral-300">
+              <span class="text-faint">modules</span>
+              <code :for={mod <- ext.modules} class="font-mono text-muted">
                 {inspect(mod)}
               </code>
             </div>
@@ -276,13 +276,13 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
       <div class="flex flex-col gap-2">
         <div
           :for={ext <- @panel.disabled}
-          class="flex flex-wrap items-center gap-2 rounded-2xl border border-neutral-200 bg-neutral-50/80 px-4 py-2.5 opacity-80 dark:border-white/10 dark:bg-white/5"
+          class="flex flex-wrap items-center gap-2 rounded-2xl border border-edge bg-raised px-4 py-2.5 opacity-80"
           data-ext-owner={ext.owner}
         >
-          <span class="font-mono text-sm font-semibold text-neutral-500 line-through dark:text-neutral-400">
+          <span class="font-mono text-sm font-semibold text-muted line-through">
             {ext.owner}
           </span>
-          <span class="truncate font-mono text-xs text-neutral-400 dark:text-neutral-500">
+          <span class="truncate font-mono text-xs text-faint">
             {Path.basename(ext.path)}
           </span>
           <span class="flex-1"></span>
@@ -308,21 +308,21 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     <section id="effective-extension-diagnostics">
       <.section_title>Effective diagnostics</.section_title>
       <div class={card_class()}>
-        <div class="divide-y divide-neutral-100 dark:divide-white/5">
+        <div class="divide-y divide-edge">
           <div
             :for={row <- @panel.effective}
             class="grid gap-1 px-4 py-2.5 text-xs sm:grid-cols-[10rem_1fr]"
           >
-            <span class="font-medium text-neutral-500 dark:text-neutral-400">{row.label}</span>
+            <span class="font-medium text-muted">{row.label}</span>
             <div class="min-w-0">
               <code class={[
                 "break-all font-mono",
-                row.error? && "text-rose-600 dark:text-rose-300",
-                !row.error? && "text-neutral-700 dark:text-neutral-200"
+                row.error? && "text-danger",
+                !row.error? && "text-ink"
               ]}>
                 {display_value(row.value)}
               </code>
-              <p class="mt-0.5 break-all text-[0.65rem] text-neutral-400 dark:text-neutral-500">
+              <p class="mt-0.5 break-all text-[0.65rem] text-faint">
                 source: {display_value(row.source)}
               </p>
               <p
@@ -338,22 +338,22 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         <div
           :if={@prompt}
           id="effective-prompt-resolution"
-          class="border-t border-neutral-200/70 px-4 py-3 dark:border-white/10"
+          class="border-t border-edge px-4 py-3"
         >
           <div class="flex flex-wrap items-baseline justify-between gap-2">
-            <p class="text-xs font-semibold text-neutral-700 dark:text-neutral-200">
+            <p class="text-xs font-semibold text-ink">
               {@prompt.label}
             </p>
-            <code class="break-all font-mono text-[0.6rem] text-neutral-400">
+            <code class="break-all font-mono text-[0.6rem] text-faint">
               {@prompt.digest}
             </code>
           </div>
           <ol class="mt-2 space-y-1">
             <li
               :for={{source, index} <- Enum.with_index(@prompt.sources, 1)}
-              class="flex gap-2 text-[0.65rem] text-neutral-500 dark:text-neutral-400"
+              class="flex gap-2 text-[0.65rem] text-muted"
             >
-              <span class="font-mono text-neutral-300 dark:text-neutral-600">{index}.</span>
+              <span class="font-mono text-faint">{index}.</span>
               <code class="break-all font-mono">{display_value(source)}</code>
             </li>
           </ol>
@@ -361,7 +361,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
             id="extension-prompt-text"
             readonly
             rows="7"
-            class="mt-3 w-full resize-y rounded-xl border border-neutral-200 bg-neutral-50 p-3 font-mono text-[0.7rem] leading-5 text-neutral-700 outline-none dark:border-white/10 dark:bg-white/5 dark:text-neutral-300"
+            class="mt-3 w-full resize-y rounded-xl border border-edge bg-raised p-3 font-mono text-[0.7rem] leading-5 text-ink outline-none"
           >{@prompt.text}</textarea>
         </div>
       </div>
@@ -373,7 +373,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     ~H"""
     <section id="runtime-overlay-registries">
       <.section_title>Owned runtime overlays</.section_title>
-      <p class="mb-2 text-xs leading-5 text-neutral-500 dark:text-neutral-400">
+      <p class="mb-2 text-xs leading-5 text-muted">
         These rows contain only mutable runtime registrations. Effective fallback values are shown
         separately above.
       </p>
@@ -392,23 +392,23 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
   defp owned_registry_table(assigns) do
     ~H"""
     <details class={card_class()} data-runtime-registry={@label}>
-      <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-neutral-700 dark:text-neutral-200">
+      <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-ink">
         {@label}
-        <span class="ml-1 text-xs text-neutral-400 dark:text-neutral-500">({length(@rows)})</span>
+        <span class="ml-1 text-xs text-faint">({length(@rows)})</span>
       </summary>
-      <div class="border-t border-neutral-200/70 dark:border-white/10">
-        <p :if={@rows == []} class="px-4 py-2.5 text-xs text-neutral-400 dark:text-neutral-500">
+      <div class="border-t border-edge">
+        <p :if={@rows == []} class="px-4 py-2.5 text-xs text-faint">
           (no runtime overlays)
         </p>
         <div
           :for={row <- @rows}
-          class="grid gap-1 border-b border-neutral-100 px-4 py-2 text-xs last:border-b-0 sm:grid-cols-[minmax(8rem,1fr)_minmax(10rem,2fr)_auto] dark:border-white/5"
+          class="grid gap-1 border-b border-edge px-4 py-2 text-xs last:border-b-0 sm:grid-cols-[minmax(8rem,1fr)_minmax(10rem,2fr)_auto]"
         >
-          <code class="break-all font-mono font-semibold text-neutral-700 dark:text-neutral-200">
+          <code class="break-all font-mono font-semibold text-ink">
             {display_value(row.key)}
           </code>
           <code
-            class="break-all font-mono text-neutral-400 dark:text-neutral-500"
+            class="break-all font-mono text-faint"
             title={display_value(row.value, :full)}
           >
             {display_value(row.value)}
@@ -428,7 +428,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         <.registry_table label="Tools" rows={@panel.tools}>
           <:row :let={t}>
             <code class="font-mono font-semibold">{t.name}</code>
-            <span class="font-mono text-neutral-400 dark:text-neutral-500">{inspect(t.module)}</span>
+            <span class="font-mono text-faint">{inspect(t.module)}</span>
             <.owner_badge owner={t.owner} />
           </:row>
         </.registry_table>
@@ -436,15 +436,15 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         <.registry_table label="LLM providers" rows={@panel.providers}>
           <:row :let={p}>
             <code class="font-mono font-semibold">{p.api}</code>
-            <span class="font-mono text-neutral-400 dark:text-neutral-500">{inspect(p.module)}</span>
-            <span :if={p.name} class="text-neutral-500 dark:text-neutral-400">{p.name}</span>
+            <span class="font-mono text-faint">{inspect(p.module)}</span>
+            <span :if={p.name} class="text-muted">{p.name}</span>
           </:row>
         </.registry_table>
 
         <.registry_table label="Loop hooks" rows={@panel.hooks}>
           <:row :let={h}>
             <code class="font-mono font-semibold">{h.point}</code>
-            <span class="text-neutral-500 dark:text-neutral-400">{h.id} · priority {h.priority}</span>
+            <span class="text-muted">{h.id} · priority {h.priority}</span>
             <.owner_badge owner={h.owner} />
           </:row>
         </.registry_table>
@@ -452,8 +452,8 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         <.registry_table label="Pages" rows={@panel.pages}>
           <:row :let={p}>
             <code class="font-mono font-semibold">/{p.path}</code>
-            <span class="text-neutral-500 dark:text-neutral-400">{p.label}</span>
-            <span class="font-mono text-neutral-400 dark:text-neutral-500">{inspect(p.mod)}</span>
+            <span class="text-muted">{p.label}</span>
+            <span class="font-mono text-faint">{inspect(p.mod)}</span>
             <.owner_badge owner={p.owner} />
           </:row>
         </.registry_table>
@@ -475,7 +475,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         <.registry_table label="Commands" rows={@panel.commands}>
           <:row :let={c}>
             <code class="font-mono font-semibold">{c.name}</code>
-            <span class="text-neutral-500 dark:text-neutral-400">{c.label}</span>
+            <span class="text-muted">{c.label}</span>
             <.owner_badge owner={c.owner} />
           </:row>
         </.registry_table>
@@ -492,17 +492,17 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
   defp registry_table(assigns) do
     ~H"""
     <details class={card_class()}>
-      <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-neutral-700 dark:text-neutral-200">
+      <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-ink">
         {@label}
-        <span class="ml-1 text-xs text-neutral-400 dark:text-neutral-500">({length(@rows)})</span>
+        <span class="ml-1 text-xs text-faint">({length(@rows)})</span>
       </summary>
-      <div class="border-t border-neutral-200/70 dark:border-white/10">
-        <p :if={@rows == []} class="px-4 py-2.5 text-xs text-neutral-400 dark:text-neutral-500">
+      <div class="border-t border-edge">
+        <p :if={@rows == []} class="px-4 py-2.5 text-xs text-faint">
           (empty)
         </p>
         <div
           :for={row <- @rows}
-          class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-neutral-100 px-4 py-1.5 text-xs last:border-b-0 dark:border-white/5"
+          class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge px-4 py-1.5 text-xs last:border-b-0"
         >
           {render_slot(@row, row)}
         </div>
@@ -513,7 +513,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
 
   defp owner_badge(%{owner: nil} = assigns) do
     ~H"""
-    <span class="rounded-full bg-neutral-100 px-2 py-0.5 text-[0.65rem] uppercase tracking-wide text-neutral-500 dark:bg-white/10 dark:text-neutral-400">
+    <span class="rounded-full bg-raised px-2 py-0.5 text-[0.65rem] uppercase tracking-wide text-muted">
       built-in
     </span>
     """
@@ -521,7 +521,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
 
   defp owner_badge(assigns) do
     ~H"""
-    <span class="rounded-full bg-indigo-100 px-2 py-0.5 font-mono text-[0.65rem] text-indigo-700 dark:bg-indigo-400/15 dark:text-indigo-200">
+    <span class="rounded-full bg-accent/10 px-2 py-0.5 font-mono text-[0.65rem] text-accent">
       {@owner}
     </span>
     """
@@ -565,7 +565,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
 
   defp section_title(assigns) do
     ~H"""
-    <h2 class="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+    <h2 class="mb-2 text-xs font-semibold uppercase tracking-wide text-faint">
       {render_slot(@inner_block)}
     </h2>
     """
@@ -574,20 +574,18 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
   # ---- shared classes ----------------------------------------------------------------
 
   defp card_class do
-    "overflow-hidden rounded-xl border border-neutral-200 bg-white " <>
-      "dark:border-white/10 dark:bg-white/5"
+    "overflow-hidden rounded-xl border border-edge bg-surface"
   end
 
   defp pill_button_class do
-    "rounded-full px-3 py-1 text-xs font-medium text-neutral-600 transition hover:bg-neutral-100 " <>
-      "hover:text-neutral-950 disabled:cursor-not-allowed disabled:opacity-40 " <>
-      "dark:text-neutral-300 dark:hover:bg-white/10 dark:hover:text-white " <>
-      "border border-neutral-200 dark:border-white/10"
+    "rounded-full px-3 py-1 text-xs font-medium text-muted transition hover:bg-raised " <>
+      "hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 " <>
+      "border border-edge"
   end
 
   defp danger_pill_button_class do
-    "rounded-full px-3 py-1 text-xs font-medium text-rose-600 transition hover:bg-rose-50 " <>
-      "disabled:cursor-not-allowed disabled:opacity-40 dark:text-rose-300 " <>
-      "dark:hover:bg-rose-500/10 border border-rose-200 dark:border-rose-400/20"
+    "rounded-full px-3 py-1 text-xs font-medium text-danger transition hover:bg-danger/10 " <>
+      "disabled:cursor-not-allowed disabled:opacity-40 " <>
+      "border border-danger/40"
   end
 end

@@ -204,8 +204,8 @@ defmodule CatalystWeb.Pages.ComputerPage do
     <div class={card_class()}>
       <div class="flex flex-wrap items-center gap-3 px-4 py-3">
         <div class="min-w-0 flex-1">
-          <h1 class="text-base font-semibold text-neutral-950 dark:text-white">Computer use</h1>
-          <p class="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+          <h1 class="text-base font-semibold text-ink">Computer use</h1>
+          <p class="mt-0.5 text-xs text-muted">
             Let the agent see the screen and drive this machine the way you do.
           </p>
         </div>
@@ -229,7 +229,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
         </button>
       </div>
 
-      <p class="border-t border-neutral-200/70 px-4 py-2.5 text-xs leading-5 text-neutral-500 dark:border-white/10 dark:text-neutral-400">
+      <p class="border-t border-edge px-4 py-2.5 text-xs leading-5 text-muted">
         The grant applies to the session's next run and is never inherited by subagents. Turning it
         on advertises the computer-use tools; turning it off removes them entirely, so they cost no
         tokens while the toggle is off.
@@ -252,7 +252,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
           >
             {@backend.headline}
           </span>
-          <p class="min-w-0 flex-1 text-xs leading-5 text-neutral-500 dark:text-neutral-400">
+          <p class="min-w-0 flex-1 text-xs leading-5 text-muted">
             {@backend.detail}
           </p>
           <button
@@ -265,19 +265,16 @@ defmodule CatalystWeb.Pages.ComputerPage do
             Refresh
           </button>
         </div>
-        <div class="grid gap-1 border-t border-neutral-200/70 px-4 py-2.5 text-xs sm:grid-cols-[10rem_1fr] dark:border-white/10">
-          <span class="font-medium text-neutral-500 dark:text-neutral-400">helper binary</span>
-          <code
-            id="computer-helper-path"
-            class="break-all font-mono text-neutral-700 dark:text-neutral-200"
-          >
+        <div class="grid gap-1 border-t border-edge px-4 py-2.5 text-xs sm:grid-cols-[10rem_1fr]">
+          <span class="font-medium text-muted">helper binary</span>
+          <code id="computer-helper-path" class="break-all font-mono text-ink">
             {@backend.helper_path}
           </code>
-          <span class="font-medium text-neutral-500 dark:text-neutral-400">helper process</span>
+          <span class="font-medium text-muted">helper process</span>
           <span
             id="computer-helper-liveness"
             data-helper-port={Atom.to_string(@backend.helper_port)}
-            class="text-neutral-700 dark:text-neutral-200"
+            class="text-ink"
           >
             {helper_liveness_label(@backend.helper_port)}
           </span>
@@ -312,7 +309,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
           <% {:error, reason} -> %>
             <p
               id="computer-grants-error"
-              class="px-4 py-3 text-xs leading-5 text-neutral-500 dark:text-neutral-400"
+              class="px-4 py-3 text-xs leading-5 text-muted"
             >
               Permission state is unavailable: <code class="font-mono">{inspect(reason)}</code>.
               The helper answers for its own TCC grants, so it must be present and runnable.
@@ -320,12 +317,12 @@ defmodule CatalystWeb.Pages.ComputerPage do
           <% :pending -> %>
             <p
               id="computer-grants-pending"
-              class="px-4 py-3 text-xs leading-5 text-neutral-500 dark:text-neutral-400"
+              class="px-4 py-3 text-xs leading-5 text-muted"
             >
               Checking permission state…
             </p>
           <% _unavailable -> %>
-            <p class="px-4 py-3 text-xs leading-5 text-neutral-500 dark:text-neutral-400">
+            <p class="px-4 py-3 text-xs leading-5 text-muted">
               Permission state is reported once the backend is available.
             </p>
         <% end %>
@@ -341,7 +338,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
           <% {:error, reason} -> %>
             <p
               id="computer-capture-grant-error"
-              class="px-4 py-3 text-xs leading-5 text-neutral-500 dark:text-neutral-400"
+              class="px-4 py-3 text-xs leading-5 text-muted"
             >
               Screenshot readiness is unavailable: <code class="font-mono">{inspect(reason)}</code>.
             </p>
@@ -349,7 +346,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
             <%!-- The grants clause above already renders the card's pending /
                  unavailable copy; both fields resolve in the same fetch. --%>
         <% end %>
-        <p class="border-t border-neutral-200/70 px-4 py-2.5 text-xs leading-5 text-neutral-400 dark:border-white/10 dark:text-neutral-500">
+        <p class="border-t border-edge px-4 py-2.5 text-xs leading-5 text-faint">
           Input grants attach to the helper binary's code signature — rebuilding the helper changes
           its ad-hoc signature, which can silently invalidate a grant; remove and re-add the entry
           in System Settings when that happens. The Screen Recording grant belongs to the app that
@@ -371,11 +368,11 @@ defmodule CatalystWeb.Pages.ComputerPage do
     <div
       id={@id}
       data-granted={to_string(@granted)}
-      class="flex flex-wrap items-center gap-3 border-b border-neutral-200/70 px-4 py-3 last:border-b-0 dark:border-white/10"
+      class="flex flex-wrap items-center gap-3 border-b border-edge px-4 py-3 last:border-b-0"
     >
       <div class="min-w-0 flex-1">
-        <p class="text-sm font-medium text-neutral-900 dark:text-neutral-100">{@name}</p>
-        <p class="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">{@detail}</p>
+        <p class="text-sm font-medium text-ink">{@name}</p>
+        <p class="mt-0.5 text-xs text-muted">{@detail}</p>
       </div>
       <span class={permission_pill_class(@granted)}>
         {if @granted, do: "granted", else: "not granted"}
@@ -407,7 +404,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
               <p
                 :for={screen <- screens}
                 data-screen-id={screen.id}
-                class="font-mono text-neutral-700 dark:text-neutral-200"
+                class="font-mono text-ink"
               >
                 display {screen.index + 1}{if screen.main, do: " (main)", else: ""} — {trunc(
                   screen.bounds.width
@@ -415,37 +412,37 @@ defmodule CatalystWeb.Pages.ComputerPage do
               </p>
             </div>
           <% {:error, _reason} -> %>
-            <p class="px-4 py-2.5 text-xs text-neutral-500 dark:text-neutral-400">
+            <p class="px-4 py-2.5 text-xs text-muted">
               Displays: unavailable.
             </p>
           <% :pending -> %>
-            <p class="px-4 py-2.5 text-xs text-neutral-500 dark:text-neutral-400">
+            <p class="px-4 py-2.5 text-xs text-muted">
               Displays: loading…
             </p>
           <% _unavailable -> %>
-            <p class="px-4 py-2.5 text-xs text-neutral-500 dark:text-neutral-400">
+            <p class="px-4 py-2.5 text-xs text-muted">
               Displays: reported once the backend is available.
             </p>
         <% end %>
         <%= case @backend.windows do %>
           <% {:ok, windows} -> %>
-            <div class="border-t border-neutral-200/70 px-4 py-2.5 text-xs dark:border-white/10">
-              <p class="text-neutral-500 dark:text-neutral-400">
+            <div class="border-t border-edge px-4 py-2.5 text-xs">
+              <p class="text-muted">
                 {length(windows)} on-screen windows
               </p>
               <p
                 :for={window <- Enum.take(windows, 8)}
-                class="mt-1 truncate font-mono text-neutral-700 dark:text-neutral-200"
+                class="mt-1 truncate font-mono text-ink"
               >
                 #{window.id} {window.app} — {window.title}
               </p>
             </div>
           <% :pending -> %>
-            <p class="border-t border-neutral-200/70 px-4 py-2.5 text-xs text-neutral-500 dark:border-white/10 dark:text-neutral-400">
+            <p class="border-t border-edge px-4 py-2.5 text-xs text-muted">
               Windows: loading…
             </p>
           <% _error_or_unavailable -> %>
-            <p class="border-t border-neutral-200/70 px-4 py-2.5 text-xs text-neutral-500 dark:border-white/10 dark:text-neutral-400">
+            <p class="border-t border-edge px-4 py-2.5 text-xs text-muted">
               Windows: unavailable (Screen Recording is needed to read window titles).
             </p>
         <% end %>
@@ -487,9 +484,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
   defp helper_liveness_label(:closed), do: "not running — starts lazily on first use"
 
   defp permission_pill_class(true) do
-    "rounded-full border border-emerald-500/50 bg-emerald-500/10 px-2.5 py-1 text-xs " <>
-      "font-semibold text-emerald-700 dark:border-emerald-400/40 dark:bg-emerald-400/10 " <>
-      "dark:text-emerald-300"
+    "rounded-full border border-ok/40 bg-ok/10 px-2.5 py-1 text-xs font-semibold text-ok"
   end
 
   defp permission_pill_class(false) do
@@ -499,31 +494,27 @@ defmodule CatalystWeb.Pages.ComputerPage do
   end
 
   defp state_pill_class(true) do
-    "rounded-full border border-rose-500/50 bg-rose-500/10 px-2.5 py-1 text-xs font-semibold " <>
-      "text-rose-700 dark:border-rose-400/40 dark:bg-rose-400/10 dark:text-rose-300"
+    "rounded-full border border-danger/40 bg-danger/10 px-2.5 py-1 text-xs font-semibold text-danger"
   end
 
   defp state_pill_class(false) do
-    "rounded-full border border-neutral-200 px-2.5 py-1 text-xs font-semibold text-neutral-500 " <>
-      "dark:border-white/10 dark:text-neutral-400"
+    "rounded-full border border-edge px-2.5 py-1 text-xs font-semibold text-muted"
   end
 
   defp section_title(assigns) do
     ~H"""
-    <h2 class="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+    <h2 class="mb-2 text-xs font-semibold uppercase tracking-wide text-faint">
       {render_slot(@inner_block)}
     </h2>
     """
   end
 
   defp card_class do
-    "overflow-hidden rounded-xl border border-neutral-200 bg-white " <>
-      "dark:border-white/10 dark:bg-white/5"
+    "overflow-hidden rounded-xl border border-edge bg-surface"
   end
 
   defp pill_button_class do
-    "rounded-full px-3 py-1 text-xs font-medium text-neutral-600 transition hover:bg-neutral-100 " <>
-      "hover:text-neutral-950 dark:text-neutral-300 dark:hover:bg-white/10 dark:hover:text-white " <>
-      "border border-neutral-200 dark:border-white/10"
+    "rounded-full border border-edge px-3 py-1 text-xs font-medium text-muted transition " <>
+      "hover:bg-raised hover:text-ink"
   end
 end
