@@ -69,7 +69,7 @@ defmodule Catalyst.LLM.GrokSubscription.Request do
         [%{"type" => "text", "text" => text}]
 
       %Content.Image{data: data, mime_type: mime_type} ->
-        url = "data:#{mime_type};base64,#{Base.encode64(data)}"
+        url = "data:#{mime_type};base64,#{data}"
         [%{"type" => "image_url", "image_url" => %{"url" => url}}]
 
       _unsupported ->

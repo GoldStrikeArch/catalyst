@@ -21,10 +21,10 @@ defmodule Catalyst.Content do
   end
 
   defmodule Image do
-    @moduledoc "An inline image content block with binary data and MIME type."
+    @moduledoc "An inline image content block with base64-encoded data and MIME type."
     @enforce_keys [:data, :mime_type]
     defstruct [:data, :mime_type]
-    @type t :: %__MODULE__{data: binary(), mime_type: String.t()}
+    @type t :: %__MODULE__{data: String.t(), mime_type: String.t()}
   end
 
   defmodule ToolCall do

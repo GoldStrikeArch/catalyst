@@ -1,7 +1,7 @@
 defmodule Catalyst.Auth.XAIOAuthTest do
   use ExUnit.Case, async: false
 
-  alias Catalyst.Auth.XAIOAuth
+  alias Catalyst.Auth.{TokenStore, XAIOAuth}
 
   defmodule OAuthPlug do
     @moduledoc false
@@ -26,13 +26,9 @@ defmodule Catalyst.Auth.XAIOAuthTest do
 
     def call(%Plug.Conn{request_path: "/oauth2/token"} = conn, test_pid) do
       {:ok, body, conn} = read_body(conn)
-      send(test_pid, {:token_request, URI.decode_query(body), conn.req_headers})
-
-      json(conn, 200, %{
-        "access_token" => jwt(%{"sub" => "xai-user-42"}),
-        "refresh_token" => "refresh-secret",
-        "expires_in" => 3_600
-      })
+      form = URI.decode_query(body)
+      send(test_pid, {:token_request, form, conn.req_headers})
+      json(conn, 200, token_response(form))
     end
 
     defp json(conn, status, body) do
@@ -44,6 +40,21 @@ defmodule Catalyst.Auth.XAIOAuthTest do
     defp jwt(payload) do
       encoded = payload |> Jason.encode!() |> Base.url_encode64(padding: false)
       "header.#{encoded}.signature"
+    end
+
+    defp token_response(%{"grant_type" => "refresh_token"}) do
+      %{
+        "access_token" => jwt(%{"sub" => "xai-user-refreshed"}),
+        "expires_in" => 3_600
+      }
+    end
+
+    defp token_response(_device_grant) do
+      %{
+        "access_token" => jwt(%{"sub" => "xai-user-42"}),
+        "refresh_token" => "refresh-secret",
+        "expires_in" => 3_600
+      }
     end
   end
 
@@ -86,5 +97,47 @@ defmodule Catalyst.Auth.XAIOAuthTest do
     assert creds["account_id"] == "xai-user-42"
     assert creds["issuer"] == issuer
     assert creds["expires"] > System.system_time(:millisecond)
+  end
+
+  test "TokenStore dispatches expired xAI credentials and preserves an unrotated refresh token" do
+    server =
+      start_supervised!(
+        {Bandit, plug: {OAuthPlug, self()}, scheme: :http, ip: :loopback, port: 0}
+      )
+
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+    issuer = "http://127.0.0.1:#{port}"
+    provider = XAIOAuth.provider_id()
+
+    :ok =
+      TokenStore.put(provider, %{
+        access: "expired-access",
+        refresh: "original-refresh",
+        expires: 0,
+        account_id: "xai-user-old",
+        issuer: issuer
+      })
+
+    on_exit(fn -> TokenStore.delete(provider) end)
+
+    expected =
+      {:ok, %{access: jwt(%{"sub" => "xai-user-refreshed"}), account_id: "xai-user-refreshed"}}
+
+    assert ^expected = TokenStore.get_access_token(provider)
+
+    assert_receive {:token_request, first_form, _headers}
+    assert first_form["grant_type"] == "refresh_token"
+    assert first_form["refresh_token"] == "original-refresh"
+
+    :ok = TokenStore.invalidate(provider)
+    assert ^expected = TokenStore.get_access_token(provider)
+
+    assert_receive {:token_request, second_form, _headers}
+    assert second_form["refresh_token"] == "original-refresh"
+  end
+
+  defp jwt(payload) do
+    encoded = payload |> Jason.encode!() |> Base.url_encode64(padding: false)
+    "header.#{encoded}.signature"
   end
 end

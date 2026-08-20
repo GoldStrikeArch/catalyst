@@ -58,7 +58,7 @@ defmodule Catalyst.LLM.GrokSubscription do
 
   @doc "Build a Grok subscription model."
   @spec model(String.t(), keyword()) :: Model.t()
-  def model(id \\ @default_model, opts \\ []) do
+  def model(id \\ default_model_id(), opts \\ []) do
     entry = catalog_entry(id)
     explicit_window = Model.positive_int(Keyword.get(opts, :context_window))
 

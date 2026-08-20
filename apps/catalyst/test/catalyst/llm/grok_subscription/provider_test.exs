@@ -5,7 +5,7 @@ defmodule Catalyst.LLM.GrokSubscription.ProviderTest do
   alias Catalyst.Auth.{TokenStore, XAIOAuth}
   alias Catalyst.LLM.{Context, Event}
   alias Catalyst.LLM.GrokSubscription
-  alias Catalyst.LLM.GrokSubscription.Provider
+  alias Catalyst.LLM.GrokSubscription.{Provider, Request}
 
   defmodule GrokPlug do
     @moduledoc false
@@ -172,5 +172,52 @@ defmodule Catalyst.LLM.GrokSubscription.ProviderTest do
     assert assistant.stop_reason == :error
     assert assistant.error_message =~ "invalid arguments for tool bash"
     refute Enum.any?(assistant.content, &match?(%Content.ToolCall{}, &1))
+  end
+
+  test "preserves the base64 payload of image content" do
+    context = %Context{
+      messages: [
+        Message.user([
+          %Content.Text{text: "inspect this"},
+          %Content.Image{data: "QUJD", mime_type: "image/png"}
+        ])
+      ]
+    }
+
+    request = Request.build(GrokSubscription.model(), context, [])
+
+    assert get_in(request, [
+             "messages",
+             Access.at(0),
+             "content",
+             Access.at(1),
+             "image_url",
+             "url"
+           ]) == "data:image/png;base64,QUJD"
+  end
+
+  test "returns an error assistant when no model is configured" do
+    assert {:ok, assistant} = Provider.stream(nil, %Context{}, [], fn _event -> :ok end)
+
+    assert assistant.stop_reason == :error
+    assert assistant.error_message == "no Grok model is configured for this session"
+    assert assistant.api == "grok-subscription-chat-completions"
+    assert assistant.provider == "grok-subscription"
+    assert assistant.model == nil
+  end
+
+  test "model/0 honors the configured Grok default" do
+    previous = Application.get_env(:catalyst, :grok_model, :not_set)
+    Application.put_env(:catalyst, :grok_model, "configured-grok")
+
+    on_exit(fn ->
+      case previous do
+        :not_set -> Application.delete_env(:catalyst, :grok_model)
+        value -> Application.put_env(:catalyst, :grok_model, value)
+      end
+    end)
+
+    assert GrokSubscription.default_model_id() == "configured-grok"
+    assert GrokSubscription.model().id == "configured-grok"
   end
 end

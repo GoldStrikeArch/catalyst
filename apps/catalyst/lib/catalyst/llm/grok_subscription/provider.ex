@@ -19,11 +19,15 @@ defmodule Catalyst.LLM.GrokSubscription.Provider do
 
   @impl true
   @spec stream(
-          Catalyst.Model.t(),
+          Catalyst.Model.t() | nil,
           Catalyst.LLM.Context.t(),
           keyword(),
           Catalyst.LLM.Provider.sink()
         ) :: {:ok, Message.Assistant.t()} | {:error, term()}
+  def stream(nil, _context, _opts, _sink) do
+    {:ok, error_assistant(nil, "no Grok model is configured for this session")}
+  end
+
   def stream(model, context, opts, sink) do
     case credentials() do
       {:ok, token, account_id} ->
@@ -139,15 +143,22 @@ defmodule Catalyst.LLM.GrokSubscription.Provider do
   end
 
   defp error_assistant(model, message) do
+    {api, provider, model_id} = model_metadata(model)
+
     %Message.Assistant{
       content: [%Content.Text{text: message}],
-      api: model.api,
-      provider: model.provider,
-      model: model.id,
+      api: api,
+      provider: provider,
+      model: model_id,
       usage: %Usage{},
       stop_reason: :error,
       error_message: message,
       timestamp: Message.now()
     }
   end
+
+  defp model_metadata(nil),
+    do: {"grok-subscription-chat-completions", "grok-subscription", nil}
+
+  defp model_metadata(model), do: {model.api, model.provider, model.id}
 end
