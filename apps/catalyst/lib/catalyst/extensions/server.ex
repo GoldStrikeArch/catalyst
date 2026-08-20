@@ -297,8 +297,7 @@ defmodule Catalyst.Extensions.Server do
   def handle_call(:runtime_readiness, _from, state) do
     readiness =
       case {state.bootstrap, Hooks.capture_snapshot([])} do
-        {:complete, {:ok, %{generation: generation}}}
-        when generation == state.hook_generation ->
+        {:complete, {:ok, %{generation: generation}}} ->
           {:ready, generation}
 
         _recovering ->
