@@ -20,6 +20,8 @@ defmodule CatalystWeb.Layouts do
       "min-h-screen bg-neutral-50 text-neutral-900 antialiased dark:bg-neutral-900 dark:text-neutral-100",
     doc: "classes for the layout wrapper"
 
+  attr :flash_id, :string, default: "flash-group", doc: "DOM id namespace for flash messages"
+
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -28,7 +30,7 @@ defmodule CatalystWeb.Layouts do
       {render_slot(@inner_block)}
     </div>
 
-    <.flash_group flash={@flash} />
+    <.flash_group flash={@flash} id={@flash_id} />
     """
   end
 
@@ -39,6 +41,12 @@ defmodule CatalystWeb.Layouts do
   attr :id, :string, default: "flash-group", doc: "the optional id of flash container"
 
   def flash_group(assigns) do
+    assigns =
+      assign(assigns,
+        client_id: flash_id(assigns.id, "client-error"),
+        server_id: flash_id(assigns.id, "server-error")
+      )
+
     ~H"""
     <div
       id={@id}
@@ -49,11 +57,11 @@ defmodule CatalystWeb.Layouts do
       <.flash kind={:error} flash={@flash} />
 
       <.flash
-        id="client-error"
+        id={@client_id}
         kind={:error}
         title="We can't find the internet"
-        phx-disconnected={show(".phx-client-error #client-error") |> JS.remove_attribute("hidden")}
-        phx-connected={hide("#client-error")}
+        phx-disconnected={show(".phx-client-error ##{@client_id}") |> JS.remove_attribute("hidden")}
+        phx-connected={hide("##{@client_id}")}
         hidden
       >
         Attempting to reconnect
@@ -61,11 +69,11 @@ defmodule CatalystWeb.Layouts do
       </.flash>
 
       <.flash
-        id="server-error"
+        id={@server_id}
         kind={:error}
         title="Something went wrong!"
-        phx-disconnected={show(".phx-server-error #server-error") |> JS.remove_attribute("hidden")}
-        phx-connected={hide("#server-error")}
+        phx-disconnected={show(".phx-server-error ##{@server_id}") |> JS.remove_attribute("hidden")}
+        phx-connected={hide("##{@server_id}")}
         hidden
       >
         Attempting to reconnect
@@ -124,4 +132,7 @@ defmodule CatalystWeb.Layouts do
     "flex items-center justify-center rounded-full p-1 text-neutral-400 transition " <>
       "hover:text-neutral-900 dark:text-neutral-500 dark:hover:text-white"
   end
+
+  defp flash_id("flash-group", id), do: id
+  defp flash_id(namespace, id), do: "#{namespace}-#{id}"
 end
