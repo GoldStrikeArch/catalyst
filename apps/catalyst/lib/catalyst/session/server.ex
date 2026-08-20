@@ -62,6 +62,17 @@ defmodule Catalyst.Session.Server do
   @spec follow_up(GenServer.server(), input()) :: :ok
   def follow_up(server, input), do: GenServer.cast(server, {:follow_up, normalize(input)})
 
+  @doc """
+  Start a prompt when idle or atomically queue it as a follow-up when busy.
+
+  Returns whether the input was started or queued. This avoids the race in
+  callers that would otherwise inspect `state/1` before choosing between
+  `prompt/2` and `follow_up/2`.
+  """
+  @spec submit(GenServer.server(), input()) ::
+          {:ok, :started | :queued} | {:error, term()}
+  def submit(server, input), do: GenServer.call(server, {:submit, normalize(input)})
+
   @doc "Abort the active run."
   @spec abort(GenServer.server()) :: :ok
   def abort(server), do: GenServer.cast(server, :abort)
@@ -183,6 +194,20 @@ defmodule Catalyst.Session.Server do
   end
 
   def handle_call({:prompt, _msg}, _from, state), do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:submit, msg}, _from, %State{run: nil} = state) do
+    state = stop_prewarm(state)
+
+    case start_run(state, [msg]) do
+      {:ok, state} -> {:reply, {:ok, :started}, state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
+  def handle_call({:submit, msg}, _from, state) do
+    follow_up = :queue.in(msg, state.follow_up)
+    {:reply, {:ok, :queued}, %{state | follow_up: follow_up}}
+  end
 
   # Drains are scoped to the run that asked: a drain from a dead run (buffered
   # behind the abort that cleared run_ref) carries a stale ref and must reply []
@@ -331,8 +356,7 @@ defmodule Catalyst.Session.Server do
 
   def handle_info({ref, {:workflow_result, _result}}, %State{run: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
-    state = finish_successful_run(state)
-    {:noreply, %{state | run: nil, run_ref: nil}}
+    {:noreply, complete_successful_run(state)}
   end
 
   def handle_info(
@@ -818,6 +842,39 @@ defmodule Catalyst.Session.Server do
 
       false ->
         %{state | current_run_metadata: nil, run_resources: [], run_final_assistant: nil}
+    end
+  end
+
+  defp complete_successful_run(state) do
+    state =
+      state
+      |> finish_successful_run()
+      |> then(&%{&1 | run: nil, run_ref: nil})
+
+    start_late_follow_ups(state)
+  end
+
+  defp start_late_follow_ups(%State{} = state) do
+    prompts = :queue.to_list(state.follow_up)
+
+    case prompts do
+      [] ->
+        state
+
+      _queued ->
+        follow_up = state.follow_up
+
+        case start_run(%{state | follow_up: :queue.new()}, prompts) do
+          {:ok, state} ->
+            state
+
+          {:error, reason} ->
+            Logger.error(
+              "[session:#{state.id}] could not start late follow-ups: #{inspect(reason)}"
+            )
+
+            %{state | follow_up: follow_up}
+        end
     end
   end
 

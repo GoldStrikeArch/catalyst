@@ -83,6 +83,14 @@ defmodule CatalystWeb.ShellComponents do
             </.link>
           </nav>
 
+          <.link
+            navigate={~p"/compare"}
+            id="comparison-nav"
+            class="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-neutral-500 transition hover:bg-neutral-200/50 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/5 dark:hover:text-white"
+          >
+            <.icon name="hero-squares-2x2" class="size-3" /> Compare
+          </.link>
+
           {PageRenderer.render_components(:header_extra, assigns)}
 
           <div class="ml-auto flex shrink-0 items-center gap-1.5">

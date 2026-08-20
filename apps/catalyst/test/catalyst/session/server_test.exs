@@ -77,6 +77,18 @@ defmodule Catalyst.Session.ServerTest do
     assert :ok = Server.prompt(pid, "once more")
   end
 
+  test "submit starts when idle and atomically queues when busy", %{tmp: tmp, model: model} do
+    script = [{:tool, "bash", %{"command" => "sleep 1"}}, {:text, "done"}]
+    {_id, pid} = start(tmp, model, script)
+
+    assert {:ok, :started} = Server.submit(pid, "first")
+    assert {:ok, :queued} = Server.submit(pid, "second")
+    assert_receive {:agent_event, _, %Event.AgentEnd{}}, 5000
+
+    users = Enum.filter(Server.state(pid).messages, &match?(%Message.User{}, &1))
+    assert Enum.map(users, &Content.text_of(&1.content)) == ["first", "second"]
+  end
+
   test "a session restarted with the same id resumes its transcript", %{tmp: tmp, model: model} do
     script = [{:text, "first reply"}]
     {id, pid} = start(tmp, model, script)

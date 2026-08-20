@@ -243,6 +243,40 @@ defmodule Catalyst.Session.ServerRunBoundaryTest do
     assert settled.run_metadata.context.model_id == "model-a"
   end
 
+  test "a submission accepted after AgentEnd starts when task cleanup finishes", %{tmp: tmp} do
+    {id, pid} = start_session(tmp, workflow_mode: :assistant_error_after_end)
+    subscribe(id)
+
+    assert {:ok, :started} = Server.submit(pid, "first")
+    {first_worker, first_monitor} = await_held_worker(:assistant_error_after_end)
+    send(first_worker, :run_boundary_release)
+
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 1_000
+    assert_receive {:run_boundary_after_agent_end, ^first_worker}, 1_000
+    assert {:ok, :queued} = Server.submit(pid, "queued at completion")
+
+    :ok =
+      Server.configure(pid,
+        opts: [run_boundary_workflow_mode: :success]
+      )
+
+    send(first_worker, :run_boundary_finish)
+    assert_receive {:DOWN, ^first_monitor, :process, ^first_worker, :normal}, 1_000
+
+    {second_worker, second_monitor} = await_held_worker(:success)
+    send(second_worker, :run_boundary_release)
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 1_000
+    assert_receive {:DOWN, ^second_monitor, :process, ^second_worker, :normal}, 1_000
+    _ = :sys.get_state(pid)
+
+    users = Enum.filter(Server.state(pid).messages, &match?(%Message.User{}, &1))
+
+    assert Enum.map(users, &Catalyst.Content.text_of(&1.content)) == [
+             "first",
+             "queued at completion"
+           ]
+  end
+
   test "normalized guard failures balance observed lifecycle events", %{tmp: tmp} do
     owner = "failure-observer-#{System.unique_integer([:positive])}"
     test_pid = self()

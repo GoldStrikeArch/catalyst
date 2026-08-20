@@ -27,6 +27,8 @@ defmodule CatalystWeb.Router do
 
     # One LiveView for everything; the catch-all resolves runtime-registered
     # pages by path (e.g. /settings) with no router recompile per page.
+    live "/compare", ComparisonLive, :index
+    live "/compare/:id", ComparisonLive, :show
     live "/", ShellLive, :index
     live "/:page", ShellLive, :page
   end
