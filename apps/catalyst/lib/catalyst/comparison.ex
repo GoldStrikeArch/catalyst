@@ -47,6 +47,10 @@ defmodule Catalyst.Comparison do
   @spec list() :: [manifest()]
   defdelegate list(), to: Store
 
+  @doc false
+  @spec comparison_topic(String.t()) :: String.t()
+  def comparison_topic(id), do: "comparison:" <> id
+
   @doc "Add a lane from a fresh snapshot of the comparison's original source."
   @spec add_lane(String.t(), String.t()) :: {:ok, manifest()} | {:error, term()}
   def add_lane(id, model_id) when is_binary(model_id) do
@@ -72,7 +76,8 @@ defmodule Catalyst.Comparison do
                cwd: cwd,
                model: model,
                provider: model.api,
-               system_prompt: lane["system_prompt"]
+               system_prompt: lane["system_prompt"],
+               opts: lane_session_opts(lane)
              ) do
           {:ok, %{pid: pid}} -> {:ok, pid}
           {:error, reason} -> {:error, reason}
@@ -81,6 +86,17 @@ defmodule Catalyst.Comparison do
   end
 
   def ensure_session(lane), do: {:error, {:invalid_comparison_lane, lane}}
+
+  @doc "Persistently reconfigure one lane and return the updated comparison."
+  @spec configure_lane(String.t(), String.t(), keyword()) ::
+          {:ok, manifest()} | {:error, term()}
+  def configure_lane(id, lane_id, changes)
+      when is_binary(id) and is_binary(lane_id) and is_list(changes) do
+    locked(id, fn -> do_configure_lane(id, lane_id, changes) end)
+  end
+
+  def configure_lane(_id, _lane_id, changes),
+    do: {:error, {:invalid_lane_configuration, changes}}
 
   @doc "Submit one prompt concurrently to selected lanes."
   @spec dispatch(String.t(), [String.t()], String.t()) ::
@@ -91,19 +107,20 @@ defmodule Catalyst.Comparison do
     with true <- text != "" or {:error, :blank_prompt},
          {:ok, manifest} <- get(id),
          {:ok, lanes} <- selected_lanes(manifest["lanes"], lane_ids) do
-      outcomes =
+      results =
         Catalyst.TaskSupervisor
         |> Task.Supervisor.async_stream_nolink(
           lanes,
-          fn lane -> {lane["id"], submit(lane, text)} end,
-          ordered: false,
-          timeout: 5_000
+          &submit(&1, text),
+          ordered: true,
+          timeout: 5_000,
+          on_timeout: :kill_task
         )
-        |> Map.new(fn
-          {:ok, {lane_id, {:ok, outcome}}} -> {lane_id, outcome}
-          {:ok, {lane_id, {:error, reason}}} -> {lane_id, {:error, reason}}
-          {:exit, reason} -> {"unknown", {:error, reason}}
-        end)
+
+      outcomes =
+        lanes
+        |> Enum.zip(results)
+        |> Map.new(fn {lane, result} -> {lane["id"], dispatch_outcome(result)} end)
 
       {:ok, outcomes}
     end
@@ -178,6 +195,19 @@ defmodule Catalyst.Comparison do
     end
   end
 
+  defp do_configure_lane(id, lane_id, changes) do
+    with {:ok, manifest} <- get(id),
+         {:ok, lane} <- lane(manifest, lane_id),
+         {:ok, pid} <- ensure_session(lane),
+         :ok <- Server.configure(pid, changes),
+         {:ok, configured_lane} <- configured_lane(lane, Server.state(pid)),
+         updated = replace_lane(manifest, configured_lane),
+         :ok <- Store.persist(updated) do
+      broadcast_updated(updated)
+      {:ok, updated}
+    end
+  end
+
   defp add_captured_lane(manifest, source_root, snapshot, model_id) do
     case provision_lane(
            source_root,
@@ -243,7 +273,8 @@ defmodule Catalyst.Comparison do
            cwd: workspace.cwd,
            model: model,
            provider: model.api,
-           system_prompt: prompt
+           system_prompt: prompt,
+           opts: [reasoning_effort: "medium"]
          ) do
       {:ok, %{pid: _pid}} ->
         {:ok,
@@ -255,6 +286,8 @@ defmodule Catalyst.Comparison do
            "snapshot_id" => snapshot["id"],
            "model_id" => model_id,
            "system_prompt" => prompt,
+           "reasoning_effort" => "medium",
+           "workflow" => nil,
            "created_at" => now()
          }}
 
@@ -277,6 +310,10 @@ defmodule Catalyst.Comparison do
       Server.submit(pid, text)
     end
   end
+
+  defp dispatch_outcome({:ok, {:ok, outcome}}), do: outcome
+  defp dispatch_outcome({:ok, {:error, reason}}), do: {:error, reason}
+  defp dispatch_outcome({:exit, reason}), do: {:error, reason}
 
   defp selected_lanes(lanes, ids) when is_list(lanes) do
     selected = Enum.filter(lanes, &(&1["id"] in ids))
@@ -311,6 +348,49 @@ defmodule Catalyst.Comparison do
   defp cleanup_snapshot(comparison_id, snapshot, result) do
     Workspace.cleanup_snapshot(comparison_id, snapshot["id"])
     result
+  end
+
+  defp configured_lane(lane, snapshot) do
+    case snapshot.model do
+      %{id: model_id} when is_binary(model_id) ->
+        {:ok,
+         Map.merge(lane, %{
+           "model_id" => model_id,
+           "system_prompt" => snapshot.system_prompt,
+           "reasoning_effort" => Keyword.get(snapshot.opts, :reasoning_effort),
+           "workflow" => Keyword.get(snapshot.opts, :workflow)
+         })}
+
+      model ->
+        {:error, {:invalid_configured_model, model}}
+    end
+  end
+
+  defp replace_lane(manifest, configured_lane) do
+    manifest
+    |> Map.update!("lanes", fn lanes ->
+      Enum.map(lanes, &replace_matching_lane(&1, configured_lane))
+    end)
+    |> Map.put("updated_at", now())
+  end
+
+  defp replace_matching_lane(%{"id" => id}, %{"id" => id} = configured), do: configured
+  defp replace_matching_lane(lane, _configured), do: lane
+
+  defp broadcast_updated(manifest) do
+    Phoenix.PubSub.broadcast(
+      Catalyst.PubSub,
+      comparison_topic(manifest["id"]),
+      {:comparison_updated, manifest["id"], manifest}
+    )
+  end
+
+  defp lane_session_opts(lane) do
+    [
+      reasoning_effort: lane["reasoning_effort"],
+      workflow: lane["workflow"]
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()

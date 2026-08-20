@@ -26,6 +26,7 @@ defmodule CatalystWeb.ComparisonLive do
         model_options: options,
         creating?: false,
         adding?: false,
+        dispatching?: false,
         create_form:
           to_form(
             %{
@@ -40,7 +41,12 @@ defmodule CatalystWeb.ComparisonLive do
         shared_form: to_form(%{"message" => ""}, as: :shared)
       )
 
-    {:ok, load_comparison(socket, params)}
+    socket =
+      socket
+      |> load_comparison(params)
+      |> subscribe_comparison()
+
+    {:ok, socket}
   end
 
   @impl true
@@ -71,20 +77,24 @@ defmodule CatalystWeb.ComparisonLive do
      end)}
   end
 
+  def handle_event("send_shared", _params, %{assigns: %{dispatching?: true}} = socket) do
+    {:noreply, socket}
+  end
+
   def handle_event("send_shared", %{"shared" => params}, socket) do
     lane_ids = List.wrap(params["lanes"])
     text = params["message"] || ""
+    comparison_id = socket.assigns.comparison["id"]
 
-    case Comparison.dispatch(socket.assigns.comparison["id"], lane_ids, text) do
-      {:ok, outcomes} ->
-        {:noreply,
-         socket
-         |> assign(shared_form: to_form(%{"message" => ""}, as: :shared))
-         |> put_flash(:info, dispatch_message(outcomes))}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, comparison_error(reason))}
-    end
+    {:noreply,
+     socket
+     |> assign(
+       dispatching?: true,
+       shared_form: to_form(params, as: :shared)
+     )
+     |> start_async(:dispatch, fn ->
+       Comparison.dispatch(comparison_id, lane_ids, text)
+     end)}
   end
 
   @impl true
@@ -126,6 +136,40 @@ defmodule CatalystWeb.ComparisonLive do
      |> assign(adding?: false)
      |> put_flash(:error, "Adding the lane crashed: #{inspect(reason)}")}
   end
+
+  def handle_async(:dispatch, {:ok, {:ok, outcomes}}, socket) do
+    {:noreply,
+     socket
+     |> assign(
+       dispatching?: false,
+       shared_form: to_form(%{"message" => ""}, as: :shared)
+     )
+     |> put_flash(:info, dispatch_message(outcomes))}
+  end
+
+  def handle_async(:dispatch, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(dispatching?: false)
+     |> put_flash(:error, comparison_error(reason))}
+  end
+
+  def handle_async(:dispatch, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(dispatching?: false)
+     |> put_flash(:error, "Shared dispatch crashed: #{inspect(reason)}")}
+  end
+
+  @impl true
+  def handle_info(
+        {:comparison_updated, id, comparison},
+        %{assigns: %{comparison: %{"id" => id}}} = socket
+      ) do
+    {:noreply, assign(socket, comparison: comparison)}
+  end
+
+  def handle_info(_message, socket), do: {:noreply, socket}
 
   @impl true
   def render(assigns) do
@@ -239,7 +283,7 @@ defmodule CatalystWeb.ComparisonLive do
                     checked
                     class="size-3 rounded border-neutral-300 text-indigo-600 focus:ring-indigo-500"
                   />
-                  {lane["model_id"]}
+                  <span id={"shared-lane-label-#{lane["id"]}"}>{lane["model_id"]}</span>
                 </label>
               </div>
               <div class="flex items-end gap-2 rounded-2xl border border-neutral-200 bg-neutral-50 px-3 py-2 shadow-sm focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-500/10 dark:border-white/10 dark:bg-neutral-950 dark:focus-within:border-indigo-400/40">
@@ -255,10 +299,14 @@ defmodule CatalystWeb.ComparisonLive do
                 <button
                   id="shared-prompt-submit"
                   type="submit"
-                  class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm transition hover:bg-indigo-500"
+                  disabled={@dispatching?}
+                  class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-60"
                   aria-label="Send shared prompt"
                 >
-                  <.icon name="hero-arrow-up" class="size-4" />
+                  <.icon
+                    name={if(@dispatching?, do: "hero-arrow-path", else: "hero-arrow-up")}
+                    class={["size-4", @dispatching? && "animate-spin"]}
+                  />
                 </button>
               </div>
             </.form>
@@ -373,6 +421,19 @@ defmodule CatalystWeb.ComparisonLive do
   end
 
   defp load_comparison(socket, _params), do: socket
+
+  defp subscribe_comparison(%{assigns: %{comparison: %{"id" => id}}} = socket) do
+    case connected?(socket) do
+      true ->
+        Phoenix.PubSub.subscribe(Catalyst.PubSub, Comparison.comparison_topic(id))
+        socket
+
+      false ->
+        socket
+    end
+  end
+
+  defp subscribe_comparison(socket), do: socket
 
   defp default_cwd do
     case Catalyst.Paths.default_cwd() do

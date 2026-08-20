@@ -21,12 +21,15 @@ defmodule CatalystWeb.ComparisonLaneLive do
           lane: lane,
           session_pid: nil,
           session_ref: nil,
+          session_ready?: false,
+          subscribed?: false,
           running: false,
           streaming_text: "",
           streaming_thinking: "",
           tools: %{},
           message_count: 0,
           message_seq: 0,
+          replayed_tail: [],
           prompt_form: to_form(%{"message" => ""}, as: :prompt),
           config_form: config_form(lane),
           model_options: model_options(),
@@ -52,24 +55,33 @@ defmodule CatalystWeb.ComparisonLaneLive do
   def handle_event("send", %{"prompt" => %{"message" => text}}, socket) do
     text = String.trim(text)
 
-    case text do
-      "" ->
+    case {text, session_pid(socket)} do
+      {"", _session} ->
         {:noreply, socket}
 
-      _prompt ->
-        case Server.submit(socket.assigns.session_pid, text) do
+      {_prompt, {:ok, pid}} ->
+        case Server.submit(pid, text) do
           {:ok, _outcome} ->
             {:noreply, assign(socket, prompt_form: to_form(%{"message" => ""}, as: :prompt))}
 
           {:error, reason} ->
             {:noreply, put_flash(socket, :error, "Could not submit: #{inspect(reason)}")}
         end
+
+      {_prompt, :error} ->
+        {:noreply, unavailable(socket)}
     end
   end
 
   def handle_event("abort", _params, socket) do
-    Server.abort(socket.assigns.session_pid)
-    {:noreply, socket}
+    case session_pid(socket) do
+      {:ok, pid} ->
+        Server.abort(pid)
+        {:noreply, socket}
+
+      :error ->
+        {:noreply, unavailable(socket)}
+    end
   end
 
   def handle_event("configure", %{"config" => params}, socket) do
@@ -86,19 +98,16 @@ defmodule CatalystWeb.ComparisonLaneLive do
       ]
     ]
 
-    case Server.configure(socket.assigns.session_pid, changes) do
-      :ok ->
-        snapshot = Server.state(socket.assigns.session_pid)
+    case session_pid(socket) do
+      {:ok, _pid} ->
+        configure_lane(socket, changes)
 
-        {:noreply,
-         socket
-         |> assign(config_form: config_form(snapshot))
-         |> put_flash(:info, "Lane settings apply to the next run.")}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Could not configure lane: #{inspect(reason)}")}
+      :error ->
+        {:noreply, unavailable(socket)}
     end
   end
+
+  def handle_event("retry", _params, socket), do: {:noreply, attach(socket)}
 
   @impl true
   def handle_info({:agent_event, id, event}, socket) do
@@ -114,7 +123,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
       ) do
     {:noreply,
      socket
-     |> assign(session_pid: nil, session_ref: nil, running: false)
+     |> assign(session_pid: nil, session_ref: nil, session_ready?: false, running: false)
      |> put_flash(:error, "Lane session stopped: #{inspect(reason)}")}
   end
 
@@ -145,6 +154,22 @@ defmodule CatalystWeb.ComparisonLaneLive do
         data-comparison-lane
         class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm dark:border-white/10 dark:bg-neutral-900"
       >
+        <div
+          :if={not @session_ready?}
+          id={"lane-disconnected-#{@lane["id"]}"}
+          class="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-[10px] text-amber-800 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-200"
+        >
+          <span class="min-w-0 flex-1">The lane session is unavailable.</span>
+          <button
+            id={"lane-retry-#{@lane["id"]}"}
+            type="button"
+            phx-click="retry"
+            class="rounded-lg bg-amber-900 px-2.5 py-1 font-semibold text-white transition hover:bg-amber-700 dark:bg-amber-200 dark:text-amber-950"
+          >
+            Retry
+          </button>
+        </div>
+
         <header class="shrink-0 border-b border-neutral-200 px-3 py-2.5 dark:border-white/10">
           <div class="flex items-center gap-2">
             <span class={[
@@ -187,6 +212,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
                   type="select"
                   id={"lane-model-#{@lane["id"]}"}
                   options={@model_options}
+                  disabled={not @session_ready?}
                   container_class="m-0"
                 />
                 <.input
@@ -194,6 +220,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
                   type="select"
                   id={"lane-effort-#{@lane["id"]}"}
                   options={Enum.map(Catalyst.LLM.OpenAICodex.efforts(), &{String.capitalize(&1), &1})}
+                  disabled={not @session_ready?}
                   container_class="m-0"
                 />
               </div>
@@ -202,6 +229,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
                 type="select"
                 id={"lane-workflow-#{@lane["id"]}"}
                 options={@workflow_options}
+                disabled={not @session_ready?}
                 container_class="m-0"
               />
               <.input
@@ -209,12 +237,14 @@ defmodule CatalystWeb.ComparisonLaneLive do
                 type="textarea"
                 id={"lane-system-prompt-#{@lane["id"]}"}
                 rows="5"
+                disabled={not @session_ready?}
                 container_class="m-0"
                 class="w-full resize-y rounded-xl border border-neutral-200 bg-neutral-50 px-2.5 py-2 font-mono text-[10px] leading-4 text-neutral-800 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 dark:border-white/10 dark:bg-neutral-950 dark:text-neutral-200"
               />
               <button
                 id={"lane-config-submit-#{@lane["id"]}"}
                 type="submit"
+                disabled={not @session_ready?}
                 class="justify-self-end rounded-lg bg-neutral-900 px-3 py-1.5 text-[10px] font-semibold text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900"
               >
                 Apply
@@ -281,6 +311,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
               type="textarea"
               id={"lane-prompt-input-#{@lane["id"]}"}
               rows="1"
+              disabled={not @session_ready?}
               placeholder={if(@running, do: "Queue for this model…", else: "Ask only this model…")}
               container_class="m-0 min-w-0 flex-1"
               class="w-full resize-none border-0 bg-transparent px-0 py-1 text-xs leading-5 text-neutral-900 outline-none placeholder:text-neutral-400 focus:ring-0 dark:text-white"
@@ -288,6 +319,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
             <button
               id={"lane-prompt-submit-#{@lane["id"]}"}
               type="submit"
+              disabled={not @session_ready?}
               class="flex size-7 shrink-0 items-center justify-center rounded-lg text-neutral-400 transition hover:bg-neutral-200 hover:text-neutral-900 dark:hover:bg-white/10 dark:hover:text-white"
               aria-label={if(@running, do: "Queue prompt", else: "Send prompt")}
             >
@@ -305,28 +337,33 @@ defmodule CatalystWeb.ComparisonLaneLive do
 
   defp attach(socket) do
     lane = socket.assigns.lane
-    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(lane["session_id"]))
+    socket = subscribe_once(socket, lane["session_id"])
 
     case Comparison.ensure_session(lane) do
       {:ok, pid} ->
         snapshot = Server.state(pid)
+        flush_stale_updates(snapshot.id)
         items = message_items(snapshot.messages)
 
         socket
         |> assign(
           session_pid: pid,
-          session_ref: Process.monitor(pid),
+          session_ref: monitor_session(socket.assigns.session_ref, pid),
+          session_ready?: true,
           running: snapshot.running,
           streaming_text: streaming(snapshot.streaming_message, Content.Text, :text),
           streaming_thinking: streaming(snapshot.streaming_message, Content.Thinking, :thinking),
           message_count: length(items),
           message_seq: length(items),
+          replayed_tail: replayed_tail(snapshot.messages),
           config_form: config_form(snapshot)
         )
         |> stream(:messages, items, reset: true)
 
       {:error, reason} ->
-        put_flash(socket, :error, "Could not start lane: #{inspect(reason)}")
+        socket
+        |> assign(session_pid: nil, session_ref: nil, session_ready?: false, running: false)
+        |> put_flash(:error, "Could not start lane: #{inspect(reason)}")
     end
   end
 
@@ -343,16 +380,29 @@ defmodule CatalystWeb.ComparisonLaneLive do
   end
 
   defp apply_event(socket, %Event.MessageEnd{message: message}) do
-    sequence = socket.assigns.message_seq + 1
+    case split_replayed(socket.assigns.replayed_tail, message) do
+      {:duplicate, rest} ->
+        assign(socket, replayed_tail: rest)
+
+      :new ->
+        append_message(socket, message)
+    end
+  end
+
+  defp apply_event(socket, %Event.ContextCompacted{replacement: messages})
+       when is_list(messages) do
+    items = message_items(messages)
 
     socket
     |> assign(
-      message_seq: sequence,
-      message_count: sequence,
-      streaming_text: clear_stream(message, socket.assigns.streaming_text),
-      streaming_thinking: clear_stream(message, socket.assigns.streaming_thinking)
+      message_seq: length(items),
+      message_count: length(items),
+      replayed_tail: replayed_tail(messages),
+      streaming_text: "",
+      streaming_thinking: "",
+      tools: %{}
     )
-    |> stream_insert(:messages, %{id: sequence, msg: message})
+    |> stream(:messages, items, reset: true)
   end
 
   defp apply_event(socket, %Event.AgentStart{}), do: assign(socket, running: true)
@@ -374,6 +424,20 @@ defmodule CatalystWeb.ComparisonLaneLive do
   defp clear_stream(%Message.Assistant{}, _value), do: ""
   defp clear_stream(_message, value), do: value
 
+  defp append_message(socket, message) do
+    sequence = socket.assigns.message_seq + 1
+
+    socket
+    |> assign(
+      message_seq: sequence,
+      message_count: sequence,
+      replayed_tail: [],
+      streaming_text: clear_stream(message, socket.assigns.streaming_text),
+      streaming_thinking: clear_stream(message, socket.assigns.streaming_thinking)
+    )
+    |> stream_insert(:messages, %{id: sequence, msg: message})
+  end
+
   defp message_items(messages) do
     messages
     |> Enum.with_index(1)
@@ -388,9 +452,14 @@ defmodule CatalystWeb.ComparisonLaneLive do
     |> Enum.map_join("", &Map.fetch!(&1, field))
   end
 
-  defp config_form(%{"model_id" => model, "system_prompt" => prompt}) do
+  defp config_form(%{"model_id" => model, "system_prompt" => prompt} = lane) do
     to_form(
-      %{"model" => model, "system_prompt" => prompt, "effort" => "medium", "workflow" => ""},
+      %{
+        "model" => model,
+        "system_prompt" => prompt,
+        "effort" => Map.get(lane, "reasoning_effort") || "medium",
+        "workflow" => Map.get(lane, "workflow") || ""
+      },
       as: :config
     )
   end
@@ -424,6 +493,63 @@ defmodule CatalystWeb.ComparisonLaneLive do
   end
 
   defp current_model(form), do: form[:model].value
+
+  defp configure_lane(socket, changes) do
+    lane = socket.assigns.lane
+
+    case Comparison.configure_lane(socket.assigns.comparison_id, lane["id"], changes) do
+      {:ok, comparison} ->
+        {:ok, configured_lane} = Comparison.lane(comparison, lane["id"])
+
+        {:noreply,
+         socket
+         |> assign(lane: configured_lane, config_form: config_form(configured_lane))
+         |> put_flash(:info, "Lane settings apply to the next run.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not configure lane: #{inspect(reason)}")}
+    end
+  end
+
+  defp session_pid(%{assigns: %{session_ready?: true, session_pid: pid}}) when is_pid(pid),
+    do: {:ok, pid}
+
+  defp session_pid(_socket), do: :error
+
+  defp unavailable(socket), do: put_flash(socket, :error, "Retry the lane session first.")
+
+  defp subscribe_once(%{assigns: %{subscribed?: true}} = socket, _id), do: socket
+
+  defp subscribe_once(socket, id) do
+    Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+    assign(socket, subscribed?: true)
+  end
+
+  defp monitor_session(nil, pid), do: Process.monitor(pid)
+
+  defp monitor_session(ref, pid) do
+    Process.demonitor(ref, [:flush])
+    Process.monitor(pid)
+  end
+
+  defp flush_stale_updates(id) do
+    receive do
+      {:agent_event, ^id, %Event.MessageUpdate{}} -> flush_stale_updates(id)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp replayed_tail(messages), do: Enum.take(messages, -10)
+
+  defp split_replayed([], _message), do: :new
+
+  defp split_replayed(tail, message) do
+    case Enum.split_while(tail, &(&1 != message)) do
+      {_skipped, [^message | rest]} -> {:duplicate, rest}
+      _not_replayed -> :new
+    end
+  end
 
   defp blank_to_nil(value) when is_binary(value) do
     case String.trim(value) do

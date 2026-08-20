@@ -1,7 +1,11 @@
 defmodule Catalyst.ComparisonTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [wait_until: 1]
+  import ExUnit.CaptureLog, only: [capture_log: 1]
+
   alias Catalyst.Comparison
+  alias Catalyst.Comparison.Store
   alias Catalyst.Session.Manager
 
   setup do
@@ -114,6 +118,81 @@ defmodule Catalyst.ComparisonTest do
              Comparison.add_lane(comparison["id"], "gpt-5.6-luna")
 
     assert length(Path.wildcard(snapshots)) == 1
+  end
+
+  test "lane configuration updates the durable comparison manifest", %{source: source} do
+    assert {:ok, comparison} =
+             Comparison.create(source, ["gpt-5.6-sol", "gpt-5.6-terra"])
+
+    lane = hd(comparison["lanes"])
+    model = Catalyst.LLM.OpenAICodex.model("gpt-5.6-luna")
+    prompt = Comparison.system_prompt("Review only correctness.")
+
+    assert {:ok, updated} =
+             Comparison.configure_lane(
+               comparison["id"],
+               lane["id"],
+               model: model,
+               provider: model.api,
+               system_prompt: prompt,
+               opts: [reasoning_effort: "high", workflow: "review"]
+             )
+
+    assert {:ok, configured} = Comparison.lane(updated, lane["id"])
+    assert configured["model_id"] == "gpt-5.6-luna"
+    assert configured["system_prompt"] == prompt
+    assert configured["reasoning_effort"] == "high"
+    assert configured["workflow"] == "review"
+    assert {:ok, ^updated} = Comparison.get(comparison["id"])
+  end
+
+  test "invalid manifests are rejected and omitted from listings", %{comparisons: comparisons} do
+    id = "malformed"
+    directory = Path.join(comparisons, id)
+    File.mkdir_p!(directory)
+
+    File.write!(
+      Path.join(directory, "manifest.json"),
+      Jason.encode!(%{"version" => 1, "id" => id})
+    )
+
+    assert {:error, {:invalid_comparison_manifest, _manifest}} = Comparison.get(id)
+    assert Comparison.list() == []
+    assert {:error, {:invalid_comparison_manifest, _manifest}} = Store.persist(%{"id" => id})
+  end
+
+  test "a crashed dispatch remains attributable to its lane", %{source: source} do
+    assert {:ok, comparison} =
+             Comparison.create(source, ["gpt-5.6-sol", "gpt-5.6-terra"])
+
+    lane = hd(comparison["lanes"])
+    :ok = Manager.stop(lane["session_id"])
+    wait_until(fn -> Manager.whereis(lane["session_id"]) == :error end)
+    owner = self()
+
+    _stub =
+      start_supervised!({
+        Task,
+        fn ->
+          {:ok, _owner} = Registry.register(Catalyst.Session.Registry, lane["session_id"], nil)
+          send(owner, :lane_stub_ready)
+
+          receive do
+            {:"$gen_call", _from, {:submit, _message}} -> exit(:dispatch_crashed)
+          end
+        end
+      })
+
+    assert_receive :lane_stub_ready
+
+    capture_log(fn ->
+      assert {:ok, outcomes} =
+               Comparison.dispatch(comparison["id"], [lane["id"]], "Compare this")
+
+      lane_id = lane["id"]
+      assert %{^lane_id => {:error, _reason}} = outcomes
+      refute Map.has_key?(outcomes, "unknown")
+    end)
   end
 
   defp git!(cwd, args) do

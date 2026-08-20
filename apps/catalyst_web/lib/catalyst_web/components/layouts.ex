@@ -43,6 +43,8 @@ defmodule CatalystWeb.Layouts do
   def flash_group(assigns) do
     assigns =
       assign(assigns,
+        info_id: flash_id(assigns.id, "flash-info"),
+        error_id: flash_id(assigns.id, "flash-error"),
         client_id: flash_id(assigns.id, "client-error"),
         server_id: flash_id(assigns.id, "server-error")
       )
@@ -53,8 +55,8 @@ defmodule CatalystWeb.Layouts do
       class="fixed right-4 top-4 z-50 flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-3"
       aria-live="polite"
     >
-      <.flash kind={:info} flash={@flash} />
-      <.flash kind={:error} flash={@flash} />
+      <.flash id={@info_id} kind={:info} flash={@flash} />
+      <.flash id={@error_id} kind={:error} flash={@flash} />
 
       <.flash
         id={@client_id}

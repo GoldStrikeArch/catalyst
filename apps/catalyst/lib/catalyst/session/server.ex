@@ -356,8 +356,7 @@ defmodule Catalyst.Session.Server do
 
   def handle_info({ref, {:workflow_result, _result}}, %State{run: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
-    state = finish_successful_run(state)
-    {:noreply, %{state | run: nil, run_ref: nil}}
+    {:noreply, complete_successful_run(state)}
   end
 
   def handle_info(
@@ -843,6 +842,39 @@ defmodule Catalyst.Session.Server do
 
       false ->
         %{state | current_run_metadata: nil, run_resources: [], run_final_assistant: nil}
+    end
+  end
+
+  defp complete_successful_run(state) do
+    state =
+      state
+      |> finish_successful_run()
+      |> then(&%{&1 | run: nil, run_ref: nil})
+
+    start_late_follow_ups(state)
+  end
+
+  defp start_late_follow_ups(%State{} = state) do
+    prompts = :queue.to_list(state.follow_up)
+
+    case prompts do
+      [] ->
+        state
+
+      _queued ->
+        follow_up = state.follow_up
+
+        case start_run(%{state | follow_up: :queue.new()}, prompts) do
+          {:ok, state} ->
+            state
+
+          {:error, reason} ->
+            Logger.error(
+              "[session:#{state.id}] could not start late follow-ups: #{inspect(reason)}"
+            )
+
+            %{state | follow_up: follow_up}
+        end
     end
   end
 
