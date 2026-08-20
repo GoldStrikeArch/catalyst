@@ -30,6 +30,7 @@ defmodule Catalyst.Session.Server do
   }
 
   alias Catalyst.Session.Server.State
+  alias Catalyst.Workflow.Registry, as: WorkflowRegistry
 
   # ---- public API -----------------------------------------------------------
 
@@ -47,9 +48,10 @@ defmodule Catalyst.Session.Server do
   def topic(id), do: "session:" <> id
 
   @doc """
-  Queue a user prompt and start a run. Returns `:ok`, `{:error, :busy}`, or
-  `{:error, :no_provider | {:unknown_api, api}}` when the session has no
-  resolvable provider.
+  Queue a user prompt and start a run. Returns `:ok` or `{:error, :busy}`.
+
+  Workflow, prompt, and provider resolution happen inside the supervised run;
+  expected configuration failures are persisted as assistant errors.
   """
   @spec prompt(GenServer.server(), input()) :: :ok | {:error, term()}
   def prompt(server, input), do: GenServer.call(server, {:prompt, normalize(input)})
@@ -186,22 +188,14 @@ defmodule Catalyst.Session.Server do
   @impl true
   def handle_call({:prompt, msg}, _from, %State{run: nil} = state) do
     state = stop_prewarm(state)
-
-    case start_run(state, [msg]) do
-      {:ok, state} -> {:reply, :ok, state}
-      {:error, _reason} = err -> {:reply, err, state}
-    end
+    {:reply, :ok, start_run(state, [msg])}
   end
 
   def handle_call({:prompt, _msg}, _from, state), do: {:reply, {:error, :busy}, state}
 
   def handle_call({:submit, msg}, _from, %State{run: nil} = state) do
     state = stop_prewarm(state)
-
-    case start_run(state, [msg]) do
-      {:ok, state} -> {:reply, {:ok, :started}, state}
-      {:error, _reason} = error -> {:reply, error, state}
-    end
+    {:reply, {:ok, :started}, start_run(state, [msg])}
   end
 
   def handle_call({:submit, msg}, _from, state) do
@@ -276,7 +270,7 @@ defmodule Catalyst.Session.Server do
   end
 
   def handle_call({:configure, changes}, _from, %State{} = state) do
-    case validate_configure(changes) do
+    case validate_configure(state, changes) do
       :ok -> configure_session(state, changes)
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -420,22 +414,14 @@ defmodule Catalyst.Session.Server do
     server = self()
     run_ref = make_ref()
 
-    # Provider availability remains a synchronous host-owned preflight. Prompt,
-    # workflow, catalog, and extension policy code starts only inside the task.
-    case RunConfig.resolve_provider(state) do
-      {:ok, provider} ->
-        task = Tasks.async(fn -> run_task_body(state, server, run_ref, provider, prompts) end)
-        {:ok, reset_for_run(state, task, run_ref)}
-
-      {:error, _reason} = error ->
-        error
-    end
+    task = Tasks.async(fn -> run_task_body(state, server, run_ref, prompts) end)
+    reset_for_run(state, task, run_ref)
   end
 
-  defp run_task_body(state, server, run_ref, provider, prompts) do
+  defp run_task_body(state, server, run_ref, prompts) do
     emit = fn event -> GenServer.cast(server, {:agent_event, run_ref, event}) end
 
-    case RunContext.build(state, server, run_ref, provider) do
+    case RunContext.build(state, server, run_ref) do
       {:ok, run_context} ->
         GenServer.cast(server, {:run_metadata, run_ref, run_context.metadata})
 
@@ -444,6 +430,8 @@ defmodule Catalyst.Session.Server do
         |> classify_workflow_result()
 
       {:error, reason} ->
+        emit.(%Event.AgentStart{})
+        Enum.each(prompts, &emit.(%Event.MessageEnd{message: &1}))
         {:run_error, reason}
     end
   end
@@ -783,13 +771,105 @@ defmodule Catalyst.Session.Server do
 
   # An invalid override is rejected at the configure boundary: accepting it
   # would only surface later, failing the next run's prompt resolution.
-  defp validate_configure(changes) do
+  defp validate_configure(state, changes) do
+    with :ok <- validate_system_prompt_change(changes),
+         :ok <- validate_workflow_change(state, changes) do
+      :ok
+    end
+  end
+
+  defp validate_system_prompt_change(changes) do
     case Keyword.fetch(changes, :system_prompt) do
       :error -> :ok
       {:ok, nil} -> :ok
       {:ok, text} -> validate_system_prompt(text)
     end
   end
+
+  defp validate_workflow_change(%State{} = state, changes) do
+    case Keyword.get(changes, :opts, []) do
+      opts when is_list(opts) ->
+        case Keyword.keyword?(opts) do
+          true -> validate_effective_workflow_change(state, opts)
+          false -> {:error, {:invalid_options, opts}}
+        end
+
+      invalid ->
+        {:error, {:invalid_options, invalid}}
+    end
+  end
+
+  defp validate_effective_workflow_change(state, changes) do
+    case workflow_identity_change?(changes) do
+      false ->
+        :ok
+
+      true ->
+        validate_workflow_transition(state, changes)
+    end
+  end
+
+  defp workflow_identity_change?(changes) do
+    Enum.any?(changes, fn {key, _value} -> key in [:workflow, :loop, :acp_agent] end)
+  end
+
+  defp validate_workflow_transition(%State{messages: [], run: nil}, _changes), do: :ok
+
+  defp validate_workflow_transition(state, changes) do
+    next_opts =
+      state.opts
+      |> merge_opts(changes)
+      |> normalize_session_opts()
+
+    with {:ok, current} <- workflow_backend(state.opts),
+         {:ok, selected} <- workflow_backend(next_opts) do
+      validate_backend_transition(current, selected)
+    end
+  end
+
+  defp workflow_backend(opts) do
+    with {:ok, selection} <- WorkflowRegistry.resolve(opts) do
+      {:ok, backend_identity(selection, opts)}
+    end
+  end
+
+  defp backend_identity(%{module: Catalyst.ClaudeCode.Workflow}, _opts),
+    do: {:external, :claude_code}
+
+  defp backend_identity(%{module: Catalyst.ACP.Workflow} = selection, opts),
+    do: {:external, :acp, acp_agent_identity(selection, opts)}
+
+  defp backend_identity(%{name: "claude-code"}, _opts), do: {:external, :claude_code}
+
+  defp backend_identity(%{name: "acp/" <> id}, _opts), do: {:external, :acp, id}
+
+  defp backend_identity(_selection, _opts), do: :internal
+
+  defp acp_agent_identity(selection, opts) do
+    case Keyword.fetch(opts, :acp_agent) do
+      {:ok, %Catalyst.ACP.Agent{id: id}} -> id
+      {:ok, %{id: id}} when is_binary(id) -> id
+      {:ok, %{"id" => id}} when is_binary(id) -> id
+      {:ok, configured} -> {:configured, configured}
+      :error -> selected_acp_agent(selection)
+    end
+  end
+
+  defp selected_acp_agent(%{name: "acp/" <> id}), do: id
+  defp selected_acp_agent(%{name: name}), do: {:workflow, name}
+
+  defp validate_backend_transition(backend, backend), do: :ok
+
+  defp validate_backend_transition(current, selected) do
+    case external_backend?(current) or external_backend?(selected) do
+      true -> {:error, :backend_switch_requires_new_session}
+      false -> :ok
+    end
+  end
+
+  defp external_backend?({:external, _backend}), do: true
+  defp external_backend?({:external, _backend, _identity}), do: true
+  defp external_backend?(_backend), do: false
 
   defp validate_system_prompt(text) do
     case is_binary(text) and Catalyst.Prompt.Config.nonblank_text?(text) do
@@ -862,19 +942,7 @@ defmodule Catalyst.Session.Server do
         state
 
       _queued ->
-        follow_up = state.follow_up
-
-        case start_run(%{state | follow_up: :queue.new()}, prompts) do
-          {:ok, state} ->
-            state
-
-          {:error, reason} ->
-            Logger.error(
-              "[session:#{state.id}] could not start late follow-ups: #{inspect(reason)}"
-            )
-
-            %{state | follow_up: follow_up}
-        end
+        start_run(%{state | follow_up: :queue.new()}, prompts)
     end
   end
 

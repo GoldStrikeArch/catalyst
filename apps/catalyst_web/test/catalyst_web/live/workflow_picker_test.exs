@@ -46,6 +46,54 @@ defmodule CatalystWeb.WorkflowPickerTest do
     assert has_element?(view, "#workflow-select option[value='research']", "(template)")
     assert has_element?(view, "#workflow-select option[value='build-review']", "(template)")
     assert has_element?(view, "#workflow-select option[value='secure-build']", "(template)")
+    assert has_element?(view, "#workflow-select option[value='claude-code']")
+    assert has_element?(view, "#workflow-select option[value='acp/claude']")
+  end
+
+  test "switching backend with a transcript starts a fresh session", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/")
+    pid = session_pid(view)
+
+    assert :ok =
+             Server.append_recovered(pid, %Catalyst.Message.Assistant{
+               content: Catalyst.Content.text("existing"),
+               timestamp: Catalyst.Message.now()
+             })
+
+    view |> form("#workflow-form") |> render_change(%{"workflow" => "claude-code"})
+
+    new_pid = session_pid(view)
+    refute new_pid == pid
+    assert Server.state(new_pid).opts[:workflow] == "claude-code"
+    assert Server.state(new_pid).messages == []
+  end
+
+  test "switching backend during an active first run starts a fresh session", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/")
+    pid = session_pid(view)
+    ref = make_ref()
+
+    assert :ok =
+             Server.configure(pid,
+               opts: [
+                 loop: Catalyst.Test.BlockingWorkflow,
+                 blocking_test_pid: self(),
+                 blocking_ref: ref
+               ]
+             )
+
+    assert :ok = Server.prompt(pid, "first")
+    assert_receive {:blocking_workflow_started, ^ref, worker}, 1_000
+    assert %{running: true, messages: []} = Server.state(pid)
+
+    view |> form("#workflow-form") |> render_change(%{"workflow" => "claude-code"})
+
+    new_pid = session_pid(view)
+    refute new_pid == pid
+    assert Server.state(new_pid).opts[:workflow] == "claude-code"
+    assert Server.state(new_pid).messages == []
+
+    send(worker, {:release_blocking_workflow, ref})
   end
 
   test "selecting a workflow configures the live session and new sessions inherit it", %{

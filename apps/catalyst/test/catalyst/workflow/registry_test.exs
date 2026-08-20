@@ -47,6 +47,7 @@ defmodule Catalyst.Workflow.RegistryTest do
 
     previous = %{
       workflows: Application.fetch_env(:catalyst, :workflows),
+      acp_agents: Application.fetch_env(:catalyst, :acp_agents),
       agent_loop: Application.fetch_env(:catalyst, :agent_loop),
       workflow_template_store: Application.fetch_env(:catalyst, :workflow_template_store),
       workflow_registry_test_templates:
@@ -54,6 +55,7 @@ defmodule Catalyst.Workflow.RegistryTest do
     }
 
     Application.delete_env(:catalyst, :workflows)
+    Application.delete_env(:catalyst, :acp_agents)
     Application.delete_env(:catalyst, :agent_loop)
     Application.put_env(:catalyst, :workflow_template_store, TemplateStore)
     Application.put_env(:catalyst, :workflow_registry_test_templates, [])
@@ -66,6 +68,7 @@ defmodule Catalyst.Workflow.RegistryTest do
       end
 
       restore_env(:workflows, previous.workflows)
+      restore_env(:acp_agents, previous.acp_agents)
       restore_env(:agent_loop, previous.agent_loop)
       restore_env(:workflow_template_store, previous.workflow_template_store)
 
@@ -160,6 +163,30 @@ defmodule Catalyst.Workflow.RegistryTest do
 
     assert {:ok, %{name: :default, module: Catalyst.Agent.Loop, source: :builtin}} =
              Registry.resolve([])
+  end
+
+  test "configured ACP agents are live generic workflow entries" do
+    Application.put_env(:catalyst, :acp_agents, [
+      %{
+        "id" => "fixture",
+        "name" => "Fixture",
+        "command" => "fixture",
+        "args" => [],
+        "env" => %{}
+      }
+    ])
+
+    assert {:ok,
+            %{
+              name: "acp/fixture",
+              module: Catalyst.ACP.Workflow,
+              source: {:application, {:acp_agent, "fixture"}}
+            }} = Registry.resolve(workflow: "acp/fixture")
+
+    assert Enum.any?(Registry.list(), &(&1.name == "acp/fixture"))
+
+    Application.put_env(:catalyst, :acp_agents, [])
+    assert {:error, {:unknown_acp_agent, "fixture"}} = Registry.resolve(workflow: "acp/fixture")
   end
 
   test "persisted templates resolve through the generic runner with pinned data" do

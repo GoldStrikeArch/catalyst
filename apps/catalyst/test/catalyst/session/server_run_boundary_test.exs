@@ -55,7 +55,7 @@ defmodule Catalyst.Session.ServerRunBoundaryTest do
     refute snapshot.running
     assert snapshot.run_metadata == nil
 
-    assert [%Message.Assistant{stop_reason: :error} = error] = snapshot.messages
+    assert [%Message.User{}, %Message.Assistant{stop_reason: :error} = error] = snapshot.messages
     assert error.error_message =~ "{:prompt_resolution, :prompt_blocked}"
   end
 

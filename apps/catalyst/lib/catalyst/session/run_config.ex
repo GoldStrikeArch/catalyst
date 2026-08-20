@@ -21,7 +21,7 @@ defmodule Catalyst.Session.RunConfig do
   later turns without requiring a core struct upgrade.
   """
   @type t :: %{
-          required(:provider) => module(),
+          required(:provider) => module() | nil,
           required(:model) => Model.t() | nil,
           required(:cwd) => String.t(),
           required(:tools) => term(),
@@ -45,7 +45,7 @@ defmodule Catalyst.Session.RunConfig do
   workflow policy code. `Session.RunContext` calls this only after the
   supervised run task has started.
   """
-  @spec build_base(map(), pid(), reference(), module()) :: {:ok, t()}
+  @spec build_base(map(), pid(), reference(), module() | nil) :: {:ok, t()}
   def build_base(state, server, run_ref, provider) do
     opts = Keyword.put(state.opts || [], :session_id, state.id)
     source = Map.get(state, :tools, :extensions)

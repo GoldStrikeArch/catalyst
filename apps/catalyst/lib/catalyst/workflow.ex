@@ -24,10 +24,22 @@ defmodule Catalyst.Workflow do
   """
   @callback run([Message.t()], map(), map(), emitter()) :: result()
 
+  @doc "Return whether the workflow needs a resolved `Catalyst.LLM.Provider`."
+  @callback provider_required?() :: boolean()
+
   @doc "Return optional diagnostic metadata describing the workflow."
   @callback describe() :: term()
 
-  @optional_callbacks describe: 0
+  @optional_callbacks describe: 0, provider_required?: 0
+
+  @doc "Return whether `module` requires a provider, defaulting to `true`."
+  @spec provider_required?(module()) :: boolean()
+  def provider_required?(module) when is_atom(module) do
+    case function_exported?(module, :provider_required?, 0) do
+      true -> module.provider_required?()
+      false -> true
+    end
+  end
 
   @doc "Resolve the workflow selected by the supplied run options."
   @spec resolve(keyword() | map()) :: {:ok, Registry.selection()} | {:error, term()}

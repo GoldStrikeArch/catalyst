@@ -475,12 +475,103 @@ defmodule Catalyst.Session.ServerTest do
     refute Keyword.has_key?(Server.state(pid).opts, :service_tier)
   end
 
-  test "a session without a provider returns a tagged error instead of crashing", %{tmp: tmp} do
-    {:ok, %{pid: pid}} = Manager.start_session(cwd: tmp, provider: nil, model: nil)
+  test "a session without a provider persists a tagged run error instead of crashing", %{tmp: tmp} do
+    {:ok, %{id: id, pid: pid}} = Manager.start_session(cwd: tmp, provider: nil, model: nil)
+    :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
 
-    assert {:error, :no_provider} = Server.prompt(pid, "hello")
-    # The server survived the misconfiguration and stays usable.
-    assert Server.state(pid).messages == []
+    assert :ok = Server.prompt(pid, "hello")
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 1_000
+    _ = :sys.get_state(pid)
+
+    assert [%Message.User{}, %Message.Assistant{stop_reason: :error} = error] =
+             Server.state(pid).messages
+
+    assert error.error_message =~ ":no_provider"
+  end
+
+  test "a populated session rejects switching into an external backend", %{
+    tmp: tmp,
+    model: model
+  } do
+    {_id, pid} = start(tmp, model, [])
+
+    assert :ok =
+             Server.append_recovered(pid, %Message.Assistant{
+               content: Content.text("existing"),
+               timestamp: Message.now()
+             })
+
+    assert {:error, :backend_switch_requires_new_session} =
+             Server.configure(pid, opts: [workflow: "claude-code"])
+
+    assert {:error, :backend_switch_requires_new_session} =
+             Server.configure(pid, opts: [loop: Catalyst.ClaudeCode.Workflow])
+
+    assert {:error, :backend_switch_requires_new_session} =
+             Server.configure(pid,
+               opts: [
+                 loop: Catalyst.ACP.Workflow,
+                 acp_agent: %{id: "fixture"}
+               ]
+             )
+
+    refute Keyword.has_key?(Server.state(pid).opts, :workflow)
+    refute Keyword.has_key?(Server.state(pid).opts, :loop)
+  end
+
+  test "an active first run cannot switch backends before its prompt is persisted", %{tmp: tmp} do
+    ref = make_ref()
+
+    {:ok, %{id: id, pid: pid}} =
+      Manager.start_session(
+        cwd: tmp,
+        provider: nil,
+        model: nil,
+        opts: [
+          loop: Catalyst.Test.BlockingWorkflow,
+          blocking_test_pid: self(),
+          blocking_ref: ref
+        ]
+      )
+
+    on_exit(fn -> Manager.stop(id) end)
+    :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+
+    assert :ok = Server.prompt(pid, "first")
+    assert_receive {:blocking_workflow_started, ^ref, worker}, 1_000
+    assert %{running: true, messages: []} = Server.state(pid)
+
+    assert {:error, :backend_switch_requires_new_session} =
+             Server.configure(pid, opts: [loop: Catalyst.ClaudeCode.Workflow])
+
+    send(worker, {:release_blocking_workflow, ref})
+    assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 1_000
+  end
+
+  test "a populated ACP session rejects changing its explicit agent identity", %{tmp: tmp} do
+    {:ok, %{id: id, pid: pid}} =
+      Manager.start_session(
+        cwd: tmp,
+        provider: nil,
+        model: nil,
+        opts: [
+          loop: Catalyst.ACP.Workflow,
+          acp_agent: %{id: "first"}
+        ]
+      )
+
+    on_exit(fn -> Manager.stop(id) end)
+
+    assert :ok =
+             Server.append_recovered(pid, %Message.Assistant{
+               content: Content.text("existing"),
+               timestamp: Message.now()
+             })
+
+    assert {:error, :backend_switch_requires_new_session} =
+             Server.configure(pid, opts: [acp_agent: %{id: "second"}])
+
+    assert Server.state(pid).opts[:acp_agent] == %{id: "first"}
   end
 
   test "events from a dead run are dropped (abort race)", %{tmp: tmp, model: model} do
