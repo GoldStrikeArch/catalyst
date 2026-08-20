@@ -22,7 +22,8 @@ defmodule Catalyst.LLM.Registry do
 
   @builtin %{
     "faux" => Catalyst.LLM.Faux,
-    "openai-codex-responses" => Catalyst.LLM.OpenAICodex.Provider
+    "openai-codex-responses" => Catalyst.LLM.OpenAICodex.Provider,
+    "grok-subscription-chat-completions" => Catalyst.LLM.GrokSubscription.Provider
   }
 
   # ---- API ------------------------------------------------------------------

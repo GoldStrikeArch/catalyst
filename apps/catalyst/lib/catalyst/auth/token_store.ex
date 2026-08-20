@@ -12,7 +12,7 @@ defmodule Catalyst.Auth.TokenStore do
   require Logger
 
   alias Catalyst.Tasks
-  alias Catalyst.Auth.OpenAIOAuth
+  alias Catalyst.Auth.{OpenAIOAuth, XAIOAuth}
   alias Catalyst.Files.AtomicWrite
 
   @skew_ms 60_000
@@ -202,9 +202,7 @@ defmodule Catalyst.Auth.TokenStore do
         put_in(state.refreshing[provider], %{inflight | waiters: [from | waiters]})
 
       nil ->
-        refresh = refresh_fun()
-
-        task = Tasks.async(fn -> refresh.(creds["refresh"]) end)
+        task = Tasks.async(fn -> refresh(provider, creds) end)
 
         timer =
           Process.send_after(
@@ -217,9 +215,22 @@ defmodule Catalyst.Auth.TokenStore do
     end
   end
 
-  # Injectable for tests; defaults to the real OAuth refresh.
-  defp refresh_fun,
-    do: Application.get_env(:catalyst, :oauth_refresh_fun, &OpenAIOAuth.refresh/1)
+  # The legacy global override remains the first choice so extensions and tests
+  # keep their existing contract. Built-in providers otherwise dispatch to the
+  # OAuth flow that issued their stored credentials.
+  defp refresh(provider, creds) do
+    case Application.get_env(:catalyst, :oauth_refresh_fun) do
+      fun when is_function(fun, 1) -> fun.(creds["refresh"])
+      nil -> refresh_provider(provider, creds)
+    end
+  end
+
+  defp refresh_provider(provider, creds) do
+    case provider == XAIOAuth.provider_id() do
+      true -> XAIOAuth.refresh(creds)
+      false -> OpenAIOAuth.refresh(creds["refresh"])
+    end
+  end
 
   # A fresh login (`put/2`) during an in-flight refresh supersedes it: waiters
   # get the new credentials now, and dropping the entry makes `pop_refresh/2`
