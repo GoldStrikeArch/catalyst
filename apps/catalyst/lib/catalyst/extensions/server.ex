@@ -294,6 +294,20 @@ defmodule Catalyst.Extensions.Server do
     {:reply, snapshot, state}
   end
 
+  def handle_call(:runtime_readiness, _from, state) do
+    readiness =
+      case {state.bootstrap, Hooks.capture_snapshot([])} do
+        {:complete, {:ok, %{generation: generation}}}
+        when generation == state.hook_generation ->
+          {:ready, generation}
+
+        _recovering ->
+          :recovering
+      end
+
+    {:reply, readiness, state}
+  end
+
   defp owner_snapshot(owner, state) do
     tools =
       state.contrib

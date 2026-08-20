@@ -36,6 +36,16 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
 
+      - name: Install the Linux desktop test runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libwxgtk3.2-1t64 \
+            libwxgtk-gl3.2-1t64 \
+            libwxgtk-webview3.2-1t64 \
+            xauth \
+            xvfb
+
       - name: Restore the test build cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -48,7 +58,7 @@ jobs:
         run: mix deps.get
 
       - name: Run the project precommit checks
-        run: mix precommit
+        run: xvfb-run --auto-servernum mix precommit
 
       - name: Ensure checks did not rewrite tracked files
         run: git diff --exit-code
@@ -119,7 +129,7 @@ jobs:
 
   production-build:
     name: macOS production compile and assets
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       MIX_ENV: prod
@@ -173,7 +183,7 @@ jobs:
           - name: Linux
             os: ubuntu-24.04
           - name: macOS
-            os: macos-14
+            os: macos-15
           - name: Windows
             os: windows-2022
     env:

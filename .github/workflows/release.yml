@@ -21,7 +21,7 @@ env:
 jobs:
   desktop:
     name: Package Apple silicon desktop app
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}

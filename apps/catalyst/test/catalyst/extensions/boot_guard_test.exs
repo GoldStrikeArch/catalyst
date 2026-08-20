@@ -151,6 +151,19 @@ defmodule Catalyst.Extensions.BootGuardTest do
     end
   end
 
+  test "await_ready requires a responsive current coordinator" do
+    pid = Process.whereis(Extensions)
+    :ok = :sys.suspend(pid)
+
+    try do
+      assert {:error, :timeout} = Extensions.await_ready(20)
+    after
+      :ok = :sys.resume(pid)
+    end
+
+    assert :ok = Extensions.await_ready()
+  end
+
   # Release any setup notifications from loads that were already in flight
   # before bootstrap/0 is probed (unrelated to what this test asserts).
   defp drain_stray_setups do

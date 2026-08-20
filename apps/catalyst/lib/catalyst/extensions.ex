@@ -374,25 +374,68 @@ defmodule Catalyst.Extensions do
   def boot_status, do: :persistent_term.get({__MODULE__, :boot_status}, :ok)
 
   defp await_ready_until(deadline) do
-    cond do
-      Hooks.runtime_ready?() ->
-        :ok
-
-      System.monotonic_time(:millisecond) >= deadline ->
+    case remaining_time(deadline) do
+      0 ->
         {:error, :timeout}
 
-      true ->
+      remaining ->
+        await_current_coordinator(deadline, remaining)
+    end
+  end
+
+  defp await_current_coordinator(deadline, remaining) do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        case coordinator_ready?(pid, remaining) do
+          true -> :ok
+          false -> wait_for_runtime(deadline)
+        end
+
+      nil ->
         wait_for_runtime(deadline)
     end
   end
 
-  defp wait_for_runtime(deadline) do
-    remaining = deadline - System.monotonic_time(:millisecond)
+  defp coordinator_ready?(pid, timeout) do
+    monitor = Process.monitor(pid)
 
+    try do
+      case GenServer.call(pid, :runtime_readiness, timeout) do
+        {:ready, _generation} -> current_coordinator?(pid, monitor)
+        :recovering -> false
+      end
+    catch
+      :exit, _reason -> false
+    after
+      Process.demonitor(monitor, [:flush])
+    end
+  end
+
+  defp current_coordinator?(pid, monitor) do
+    case Process.whereis(__MODULE__) do
+      ^pid ->
+        receive do
+          {:DOWN, ^monitor, :process, ^pid, _reason} -> false
+        after
+          0 -> Process.alive?(pid)
+        end
+
+      _missing_or_replacement ->
+        false
+    end
+  end
+
+  defp wait_for_runtime(deadline) do
     receive do
     after
-      min(@ready_poll_ms, max(remaining, 0)) -> await_ready_until(deadline)
+      min(@ready_poll_ms, remaining_time(deadline)) -> await_ready_until(deadline)
     end
+  end
+
+  defp remaining_time(deadline) do
+    deadline
+    |> Kernel.-(System.monotonic_time(:millisecond))
+    |> max(0)
   end
 
   @doc """
