@@ -692,6 +692,65 @@ sovereign workflow: use `Workflow.Support` and the `Catalyst.Hooks` APIs, or del
 between lifecycle events, so balance is guaranteed for normal execution, not untrappable
 cancellation.
 
+### Experimental external-agent workflows
+
+Two providerless workflows delegate the complete model/tool loop to externally installed agents:
+
+- `claude-code` launches one official `claude -p` process per prompt and resumes later prompts with
+  the Claude session id persisted in the assistant `response_id`.
+- `acp/<id>` uses one persistent ACP v1 stdio process per Catalyst session. The built-in
+  `acp/claude` descriptor expects `claude-agent-acp` on `PATH`. Every valid descriptor in
+  `config :catalyst, :acp_agents` is automatically exposed as an `acp/<id>` workflow.
+
+Direct Claude keeps Claude Code's default system prompt when the Catalyst session has no explicit
+override. A session override replaces it through a mode-`0600` `--system-prompt-file`; set
+`opts[:claude_prompt_mode]` to `:append` to use `--append-system-prompt-file` instead. The local
+experimental defaults are `--safe-mode` and `--dangerously-skip-permissions`. Runtime options are:
+
+- `:claude_executable` — executable name or absolute path, default `"claude"`;
+- `:claude_permission_mode` — `:bypass` or a documented Claude permission-mode string;
+- `:claude_safe_mode` — boolean, default `true`;
+- `:claude_prompt_mode` — `:replace` or `:append`, default `:replace`;
+- `:claude_model`, `:claude_effort`, `:claude_tools`, and `:claude_timeout`.
+
+ACP descriptors contain string-keyed `id`, `name`, `command`, `args`, `env`, and optional `adapter`
+fields. The built-in Claude descriptor uses `adapter: "claude"`. With no explicit Catalyst system
+prompt, that adapter omits `_meta.systemPrompt` and preserves the Claude Code preset. An explicit
+override replaces the preset by default; set `opts[:acp_claude_prompt_mode]` to `:append` to send the
+documented preset-append shape. `opts[:acp_claude_setting_sources]` accepts a unique subset of
+`"user"`, `"project"`, and `"local"` and defaults to `[]`. Generic agent-specific metadata can be
+supplied through `opts[:acp_session_meta]`.
+
+The ACP client advertises no filesystem, terminal, MCP, or elicitation services and automatically
+selects `allow_always`, then `allow_once`, from permission requests. Catalyst `before_tool_call`
+hooks do not gate either external agent in this bypass mode: replace/re-register the workflow or
+change its runtime options when a stricter policy is required. `opts[:acp_prompt_timeout]` bounds a
+turn and `opts[:acp_cancel_timeout]` bounds the wait after cancellation.
+
+ACP capabilities and current modes, config options, commands, session information, usage, and plan
+metadata are retained by the session-owned client and available through
+`Catalyst.ACP.Client.info/1`. If that process or Catalyst restarts, the workflow uses the latest
+matching assistant `response_id`, preferring advertised `session/resume` and falling back to
+`session/load`. Replayed load history is suppressed because it is already persisted by Catalyst.
+Recovery fails instead of silently creating unrelated hidden context when neither method is
+advertised. Advertised `session/close` is sent during normal teardown.
+
+Changing into or out of an external workflow with a non-empty transcript requires a new Catalyst
+session so one backend's visible messages are never attached to another backend's hidden context.
+
+Ordinary tests use fixture executables and stay offline. Explicit live smoke tests are available:
+
+```text
+CATALYST_CLAUDE_LIVE=1 mix test --only live_wire \
+  apps/catalyst/test/catalyst/claude_code/live_wire_test.exs
+
+CATALYST_CLAUDE_ACP_LIVE=1 mix test --only live_wire \
+  apps/catalyst/test/catalyst/acp/live_wire_test.exs
+```
+
+The direct test refuses non-first-party Claude subscription routing. The ACP test also requires an
+externally installed `claude-agent-acp`; Catalyst never downloads it.
+
 ### File-backed child agents
 
 `list_agents` discovers definitions fresh from `~/.catalyst/agents/<name>.md`; names are 1–64

@@ -36,6 +36,23 @@ config :catalyst,
   shell_session_idle_ms: 15 * 60 * 1000,
   shell_session_max: 4
 
+# Local external-agent experiments. Both workflows are providerless; ACP agents
+# are externally installed executables and are never downloaded by Catalyst.
+config :catalyst,
+  workflows: %{
+    "claude-code" => Catalyst.ClaudeCode.Workflow
+  },
+  acp_agents: [
+    %{
+      "id" => "claude",
+      "name" => "Claude ACP",
+      "command" => "claude-agent-acp",
+      "args" => [],
+      "env" => %{},
+      "adapter" => "claude"
+    }
+  ]
+
 # Configures the endpoint
 config :catalyst_web, CatalystWeb.Endpoint,
   # Always serve: the desktop shell boots via `mix run`/`mix release` (not

@@ -30,6 +30,7 @@ defmodule Catalyst.Workflow.Registry do
 
   alias Catalyst.ExtensionAPI
   alias Catalyst.Extensions.Owner
+  alias Catalyst.ACP.Agent, as: ACPAgent
   alias Catalyst.Workflow.Template
 
   @table :catalyst_workflows
@@ -42,7 +43,7 @@ defmodule Catalyst.Workflow.Registry do
   @type source ::
           {:session, :loop}
           | {:runtime, term(), key()}
-          | {:application, {:workflows, name()} | :agent_loop}
+          | {:application, {:workflows, name()} | {:acp_agent, String.t()} | :agent_loop}
           | {:template, map()}
           | :builtin
   @type selection ::
@@ -204,12 +205,23 @@ defmodule Catalyst.Workflow.Registry do
   end
 
   defp application_names do
+    configured_workflow_names() ++ configured_acp_names()
+  end
+
+  defp configured_workflow_names do
     case Application.fetch_env(:catalyst, :workflows) do
       {:ok, workflows} when is_map(workflows) ->
         for {name, _module} <- workflows, valid_named_workflow?(name), do: name
 
       _missing_or_malformed ->
         []
+    end
+  end
+
+  defp configured_acp_names do
+    case ACPAgent.list() do
+      {:ok, agents} -> Enum.map(agents, &"acp/#{&1.id}")
+      {:error, _reason} -> []
     end
   end
 
@@ -292,6 +304,16 @@ defmodule Catalyst.Workflow.Registry do
     case Map.fetch(workflows, name) do
       {:ok, module} -> validate_application_module({:workflows, name}, module)
       :error -> missing_application_workflow(name, required?)
+    end
+  end
+
+  defp missing_application_workflow("acp/" <> id, :required) when id != "" do
+    case ACPAgent.fetch(id) do
+      {:ok, _agent} ->
+        validate_application_module({:acp_agent, id}, Catalyst.ACP.Workflow)
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

@@ -27,6 +27,7 @@ defmodule Catalyst.Application do
       # Supervises the loop/tool Tasks spawned per run (and token refreshes),
       # so it must start before TokenStore.
       {Task.Supervisor, name: Catalyst.TaskSupervisor},
+      Catalyst.ACP.Supervisor,
       # Observer entries are passed by value, so delivery has no lifecycle
       # dependency on the extension registries. Keeping the dispatcher outside
       # their rest-for-one group preserves admitted queues during registry

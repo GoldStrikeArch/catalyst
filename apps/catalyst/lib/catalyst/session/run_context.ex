@@ -21,9 +21,23 @@ defmodule Catalyst.Session.RunContext do
   @doc "Resolve one run from an immutable session-state snapshot."
   @spec build(map(), pid(), reference(), module()) :: {:ok, t()} | {:error, term()}
   def build(state, server, run_ref, provider) do
+    with {:ok, workflow} <- Workflow.resolve(state.opts || []) do
+      build_with(state, server, run_ref, provider, workflow)
+    end
+  end
+
+  @doc "Resolve one run, including conditional provider resolution, inside its worker."
+  @spec build(map(), pid(), reference()) :: {:ok, t()} | {:error, term()}
+  def build(state, server, run_ref) do
+    with {:ok, workflow} <- Workflow.resolve(state.opts || []),
+         {:ok, provider} <- resolve_provider(state, workflow) do
+      build_with(state, server, run_ref, provider, workflow)
+    end
+  end
+
+  defp build_with(state, server, run_ref, provider, workflow) do
     with {:ok, base} <- RunConfig.build_base(state, server, run_ref, provider),
          {:ok, model, catalog} <- resolve_model(state.model),
-         {:ok, workflow} <- Workflow.resolve(state.opts || []),
          {:ok, prompt} <- resolve_prompt(state, model) do
       config =
         base
@@ -54,6 +68,13 @@ defmodule Catalyst.Session.RunContext do
          config: config,
          metadata: metadata
        }}
+    end
+  end
+
+  defp resolve_provider(state, workflow) do
+    case Workflow.provider_required?(workflow.module) do
+      true -> RunConfig.resolve_provider(state)
+      false -> {:ok, nil}
     end
   end
 

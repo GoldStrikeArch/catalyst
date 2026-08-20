@@ -15,6 +15,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   alias Catalyst.LLM.{GrokSubscription, OpenAICodex}
   alias Catalyst.Session.Server
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
+  alias CatalystWeb.ShellLive.SessionLifecycle
 
   @codex_prefs_ptr {CatalystWeb.ShellLive, :codex_prefs}
   @ui_prefs_ptr {CatalystWeb.ShellLive, :ui_prefs}
@@ -415,6 +416,20 @@ defmodule CatalystWeb.ShellLive.Settings do
   end
 
   defp configure_workflow(socket, pid, workflow) do
+    current = socket.assigns.workflow_prefs.workflow
+
+    case external_backend_switch?(current, workflow) and transcript_present?(pid) do
+      true ->
+        socket
+        |> commit_workflow(workflow)
+        |> SessionLifecycle.start()
+
+      false ->
+        configure_current_workflow(socket, pid, workflow)
+    end
+  end
+
+  defp configure_current_workflow(socket, pid, workflow) do
     opts = [workflow: workflow]
 
     try do
@@ -434,6 +449,21 @@ defmodule CatalystWeb.ShellLive.Settings do
       # reattach and reconcile the preference from its authoritative options.
       :exit, _reason -> put_flash(socket, :error, "Session is restarting — try again.")
     end
+  end
+
+  defp external_backend_switch?(workflow, workflow), do: false
+
+  defp external_backend_switch?(current, selected),
+    do: external_workflow?(current) or external_workflow?(selected)
+
+  defp external_workflow?("claude-code"), do: true
+  defp external_workflow?("acp/" <> _agent_id), do: true
+  defp external_workflow?(_workflow), do: false
+
+  defp transcript_present?(pid) do
+    Server.state(pid).messages != []
+  catch
+    :exit, _reason -> false
   end
 
   defp commit_workflow(socket, workflow) do
