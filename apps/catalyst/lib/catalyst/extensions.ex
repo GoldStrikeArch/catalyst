@@ -65,6 +65,8 @@ defmodule Catalyst.Extensions do
 
   @table :catalyst_tools
   @host_roles [:application, :registry]
+  @ready_poll_ms 10
+  @ready_timeout 30_000
 
   @runtime_generation_key {__MODULE__, :runtime_generation}
 
@@ -198,6 +200,23 @@ defmodule Catalyst.Extensions do
     case Process.whereis(__MODULE__) do
       nil -> {:skipped, :extension_runtime_unavailable}
       _pid -> GenServer.call(__MODULE__, :bootstrap)
+    end
+  end
+
+  @doc """
+  Wait for extension bootstrap or recovery to publish a stable runtime generation.
+
+  Returns `:ok` when tools, hooks, providers, and the other extension registries
+  are ready for a run. Returns `{:error, :extension_runtime_unavailable}` when
+  the extension coordinator is not running, or `{:error, :timeout}` when it
+  does not become ready within `timeout` milliseconds.
+  """
+  @spec await_ready(non_neg_integer()) ::
+          :ok | {:error, :extension_runtime_unavailable | :timeout}
+  def await_ready(timeout \\ @ready_timeout) when is_integer(timeout) and timeout >= 0 do
+    case Process.whereis(__MODULE__) do
+      nil -> {:error, :extension_runtime_unavailable}
+      _pid -> await_ready_until(System.monotonic_time(:millisecond) + timeout)
     end
   end
 
@@ -353,6 +372,28 @@ defmodule Catalyst.Extensions do
           | {:safe_mode, :env | :crash_detected}
           | {:load_failed, term()}
   def boot_status, do: :persistent_term.get({__MODULE__, :boot_status}, :ok)
+
+  defp await_ready_until(deadline) do
+    cond do
+      Hooks.runtime_ready?() ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:error, :timeout}
+
+      true ->
+        wait_for_runtime(deadline)
+    end
+  end
+
+  defp wait_for_runtime(deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    receive do
+    after
+      min(@ready_poll_ms, max(remaining, 0)) -> await_ready_until(deadline)
+    end
+  end
 
   @doc """
   Record that this boot is ending by user intent, not a crash.

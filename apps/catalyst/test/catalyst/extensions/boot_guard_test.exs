@@ -138,6 +138,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
 
         state = :sys.get_state(Extensions)
         assert state.bootstrap in [:running, :complete]
+        assert :ok = Extensions.await_ready()
         wait_until(fn -> match?(%{bootstrap: :complete}, :sys.get_state(Extensions)) end)
         assert Catalyst.Hooks.runtime_ready?()
 
@@ -146,6 +147,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
         # specification; the core-only branch is exercised by this app's own
         # test task and by the CLI release.
         assert Extensions.host_ready?(:web)
+        assert :ok = Extensions.await_ready()
     end
   end
 

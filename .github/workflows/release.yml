@@ -1,0 +1,152 @@
+name: macOS Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ELIXIR_VERSION: "1.20"
+  OTP_VERSION: "28"
+  MIX_ENV: prod
+
+jobs:
+  desktop:
+    name: Package Apple silicon desktop app
+    runs-on: macos-14
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Erlang and Elixir
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Restore the production build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            deps
+            _build/prod
+            _build/esbuild-*
+            _build/tailwind-*
+          key: ${{ runner.os }}-otp-${{ env.OTP_VERSION }}-elixir-${{ env.ELIXIR_VERSION }}-desktop-release-${{ hashFiles('mix.lock') }}
+
+      - name: Install bundled fast tools
+        run: brew install ripgrep fd sd ast-grep
+
+      - name: Fetch production dependencies
+        run: mix deps.get --only prod
+
+      - name: Install asset toolchains
+        run: mix assets.setup
+
+      - name: Build minified production assets
+        run: mix assets.deploy
+
+      - name: Resolve and validate the release version
+        id: version
+        run: |
+          app_version="$(sed -n 's/.*version: "\([^"]*\)".*/\1/p' mix.exs | sed -n '1p')"
+          test -n "${app_version}"
+
+          if test "${GITHUB_REF_TYPE}" = "tag"; then
+            test "${GITHUB_REF_NAME}" = "v${app_version}"
+          fi
+
+          echo "version=${app_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build the desktop release
+        run: mix release catalyst_desktop --overwrite
+
+      - name: Verify the packaged application
+        run: |
+          app="_build/prod/Catalyst.app"
+          launcher="${app}/Contents/MacOS/Catalyst"
+
+          test -d "${app}"
+          test -x "${launcher}"
+          file "${launcher}" | grep -q "Mach-O 64-bit executable arm64"
+          test "$(plutil -extract CFBundleExecutable raw "${app}/Contents/Info.plist")" = "Catalyst"
+
+          for tool in rg fd sd ast-grep; do
+            bundled="$(find "${app}" -type f -path "*/lib/catalyst-*/priv/bin/${tool}" -print -quit)"
+            test -n "${bundled}"
+            test -x "${bundled}"
+          done
+
+          test -n "$(find "${app}" -type f -path "*/lib/catalyst_web-*/priv/asset_build/bin/esbuild" -print -quit)"
+          test -n "$(find "${app}" -type f -path "*/lib/catalyst_web-*/priv/asset_build/bin/tailwind" -print -quit)"
+          test -n "$(find "${app}" -type f -path "*/lib/catalyst_web-*/priv/static/assets/css/app.css" -print -quit)"
+          test -n "$(find "${app}" -type f -path "*/lib/catalyst_web-*/priv/static/assets/js/app.js" -print -quit)"
+          test -n "$(find "${app}" -type f -path "*/lib/catalyst-*/priv/guide.md" -print -quit)"
+
+      - name: Prepare distributable artifacts
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "_build/prod/Catalyst.app" \
+            "dist/Catalyst-${{ steps.version.outputs.version }}-macos-arm64.app.zip"
+
+          shopt -s nullglob
+          installers=( _build/prod/Catalyst-*.dmg _build/prod/Catalyst-*.pkg )
+          test "${#installers[@]}" -gt 0
+          cp "${installers[@]}" dist/
+
+          (
+            cd dist
+            shasum -a 256 ./* > SHA256SUMS
+          )
+
+      - name: Upload the workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Catalyst-${{ steps.version.outputs.version }}-macos-arm64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: desktop
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the verified desktop artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: Catalyst-${{ needs.desktop.outputs.version }}-macos-arm64
+          path: dist
+
+      - name: Publish the tagged GitHub release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Catalyst ${GITHUB_REF_NAME}"
+          fi
