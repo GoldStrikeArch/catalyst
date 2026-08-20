@@ -1,22 +1,21 @@
 defmodule Catalyst.Auth do
   @moduledoc """
-  Authentication facade. `login_openai_codex/0` runs the ChatGPT (Codex
-  subscription) browser OAuth flow end to end and stores the credentials.
+  Authentication facade for subscription-backed model providers.
+
+  `login_openai_codex/0` runs ChatGPT's browser PKCE flow;
+  `login_grok/0` runs xAI's device authorization flow for SuperGrok.
   """
 
   require Logger
-  alias Catalyst.Auth.{CallbackServer, OpenAIOAuth, PKCE, TokenStore}
+  alias Catalyst.Auth.{CallbackServer, OpenAIOAuth, PKCE, TokenStore, XAIOAuth}
 
-  # TokenStore key for the Codex credentials (single source).
-  @provider Catalyst.Auth.OpenAIOAuth.provider_id()
+  @doc "Whether the selected subscription provider has stored credentials."
+  @spec logged_in?(String.t()) :: boolean()
+  def logged_in?(provider \\ OpenAIOAuth.provider_id()), do: TokenStore.logged_in?(provider)
 
-  @doc "Whether we have Codex credentials."
-  @spec logged_in?() :: boolean()
-  def logged_in?, do: TokenStore.logged_in?(@provider)
-
-  @doc "Forget the stored Codex credentials."
-  @spec logout() :: :ok
-  def logout, do: TokenStore.delete(@provider)
+  @doc "Forget the selected subscription provider's credentials."
+  @spec logout(String.t()) :: :ok | {:error, term()}
+  def logout(provider \\ OpenAIOAuth.provider_id()), do: TokenStore.delete(provider)
 
   @doc """
   Run the ChatGPT OAuth PKCE flow: open the browser, capture the redirect on
@@ -40,7 +39,34 @@ defmodule Catalyst.Auth do
 
       with {:ok, code} <- CallbackServer.await(callback),
            {:ok, creds} <- OpenAIOAuth.exchange_code(code, verifier),
-           :ok <- TokenStore.put(@provider, creds) do
+           :ok <- TokenStore.put(OpenAIOAuth.provider_id(), creds) do
+        {:ok, creds["account_id"]}
+      end
+    end
+  end
+
+  @doc """
+  Run xAI's device OAuth flow and store credentials for the SuperGrok-backed
+  provider. The browser opens xAI's verification page while this call polls
+  until the user approves, rejects, or the code expires.
+  """
+  @spec login_grok(keyword()) :: {:ok, String.t() | nil} | {:error, term()}
+  def login_grok(opts \\ []) do
+    with {:ok, device} <- XAIOAuth.request_device_code(opts) do
+      url = device.verification_uri_complete || device.verification_uri
+      maybe_open_browser(url, opts)
+
+      IO.puts("""
+      Opening your browser to sign in to SuperGrok.
+      If it doesn't open automatically, visit:
+
+        #{device.verification_uri}
+
+      and enter code: #{device.user_code}
+      """)
+
+      with {:ok, creds} <- XAIOAuth.await_device_code(device, opts),
+           :ok <- TokenStore.put(XAIOAuth.provider_id(), creds) do
         {:ok, creds["account_id"]}
       end
     end

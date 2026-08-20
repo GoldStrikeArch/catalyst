@@ -32,19 +32,22 @@ defmodule CatalystWeb.ShellLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    codex_prefs = Settings.load_codex()
+
     socket =
       socket
       |> assign(
         page: "chat",
         chat_form: ChatInput.form(""),
-        logged_in: Catalyst.Auth.logged_in?(),
+        logged_in: Catalyst.Auth.logged_in?(Settings.auth_provider(codex_prefs)),
         login_state: :idle,
         login_ref: nil,
+        login_provider: nil,
         boot_status: Catalyst.Extensions.boot_status(),
         ext_panel: nil,
         computer_panel: nil,
         ext_action: nil,
-        codex_prefs: Settings.load_codex(),
+        codex_prefs: codex_prefs,
         ui_prefs: Settings.load_ui(),
         machine_prefs: Settings.load_machine(),
         workflow_prefs: Settings.load_workflow(),
@@ -104,7 +107,7 @@ defmodule CatalystWeb.ShellLive do
   # session swaps), so they are resolved into assigns there instead of on
   # every render — render/1 runs many times per second while streaming.
   defp refresh_shell_chrome(socket) do
-    catalog = Catalyst.LLM.OpenAICodex.catalog_snapshot(socket.assigns.codex_prefs.model)
+    catalog = Settings.catalog_snapshot(socket.assigns.codex_prefs)
 
     assign(socket,
       codex_catalog: catalog.models,
@@ -288,17 +291,22 @@ defmodule CatalystWeb.ShellLive do
   end
 
   def handle_event("login", _params, socket) do
-    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, login_fun())
-    {:noreply, assign(socket, login_state: :pending, login_ref: task.ref)}
+    provider = Settings.auth_provider(socket.assigns.codex_prefs)
+    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, login_fun(provider))
+
+    {:noreply,
+     assign(socket, login_state: :pending, login_ref: task.ref, login_provider: provider)}
   end
 
   def handle_event("logout", _params, socket) do
-    Catalyst.Auth.logout()
+    provider = Settings.auth_provider(socket.assigns.codex_prefs)
+    label = Settings.auth_label(socket.assigns.codex_prefs)
+    Catalyst.Auth.logout(provider)
 
     {:noreply,
      socket
      |> assign(logged_in: false)
-     |> put_flash(:info, "Signed out.")}
+     |> put_flash(:info, "Signed out of #{label}.")}
   end
 
   def handle_event("codex_opts", params, socket) do
@@ -532,20 +540,34 @@ defmodule CatalystWeb.ShellLive do
 
   def handle_info({ref, result}, %{assigns: %{login_ref: ref}} = socket) do
     Process.demonitor(ref, [:flush])
+    completed_provider = socket.assigns.login_provider
+    label = auth_label(completed_provider)
+    selected_provider = Settings.auth_provider(socket.assigns.codex_prefs)
 
     case result do
       {:ok, _account_id} ->
+        logged_in =
+          case completed_provider == selected_provider do
+            true -> true
+            false -> Catalyst.Auth.logged_in?(selected_provider)
+          end
+
         {:noreply,
          socket
-         |> assign(logged_in: true, login_state: :idle, login_ref: nil)
-         |> put_flash(:info, "Signed in to ChatGPT.")}
+         |> assign(
+           logged_in: logged_in,
+           login_state: :idle,
+           login_ref: nil,
+           login_provider: nil
+         )
+         |> put_flash(:info, "Signed in to #{label}.")}
 
       {:error, reason} ->
         message = format_error(reason)
 
         {:noreply,
          socket
-         |> assign(login_state: {:error, message}, login_ref: nil)
+         |> assign(login_state: {:error, message}, login_ref: nil, login_provider: nil)
          |> put_flash(:error, "Sign-in failed: #{message}")}
     end
   end
@@ -553,7 +575,11 @@ defmodule CatalystWeb.ShellLive do
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{assigns: %{login_ref: ref}} = socket) do
     {:noreply,
      socket
-     |> assign(login_state: {:error, inspect(reason)}, login_ref: nil)
+     |> assign(
+       login_state: {:error, inspect(reason)},
+       login_ref: nil,
+       login_provider: nil
+     )
      |> put_flash(:error, "Sign-in crashed.")}
   end
 
@@ -760,8 +786,18 @@ defmodule CatalystWeb.ShellLive do
   defp toggle_menu(current, menu) when current == menu, do: nil
   defp toggle_menu(_current, menu), do: menu
 
-  defp login_fun do
-    Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)
+  defp login_fun(provider) do
+    case provider == Catalyst.Auth.XAIOAuth.provider_id() do
+      true -> Application.get_env(:catalyst_web, :grok_login_fun, &Catalyst.Auth.login_grok/0)
+      false -> Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)
+    end
+  end
+
+  defp auth_label(provider) do
+    case provider == Catalyst.Auth.XAIOAuth.provider_id() do
+      true -> "SuperGrok"
+      false -> "ChatGPT"
+    end
   end
 
   # Config-injectable like :login_fun, so tests never open System Settings.

@@ -93,7 +93,7 @@ defmodule CatalystWeb.ShellComponents do
                 id="logout-button"
                 class="rounded-full p-2 text-neutral-500 transition hover:bg-neutral-200/60 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white"
                 phx-click="logout"
-                title="Sign out of ChatGPT"
+                title={"Sign out of #{subscription_name(@selected_codex_entry)}"}
                 type="button"
               >
                 <.icon name="hero-arrow-right-start-on-rectangle" class="size-4" />
@@ -106,7 +106,7 @@ defmodule CatalystWeb.ShellComponents do
                 phx-click="login"
                 type="button"
               >
-                Sign in to ChatGPT
+                Sign in to {subscription_name(@selected_codex_entry)}
               </button>
               <span
                 :if={@login_state == :pending}
@@ -470,7 +470,7 @@ defmodule CatalystWeb.ShellComponents do
               options={Enum.map(@codex_catalog, &{&1.name, &1.id})}
               container_class="m-0"
               class={codex_select_class()}
-              title="Codex model"
+              title="Model"
             />
             <.input
               field={@codex_form[:effort]}
@@ -560,6 +560,9 @@ defmodule CatalystWeb.ShellComponents do
       "transport" => prefs.transport
     })
   end
+
+  defp subscription_name(%{provider: "grok-subscription"}), do: "SuperGrok"
+  defp subscription_name(_entry), do: "ChatGPT"
 
   defp workflow_form(prefs) do
     to_form(%{"workflow" => prefs.workflow || ""})

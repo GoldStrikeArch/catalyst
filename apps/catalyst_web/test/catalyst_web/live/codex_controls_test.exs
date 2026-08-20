@@ -154,6 +154,41 @@ defmodule CatalystWeb.CodexControlsTest do
     refute has_element?(view, "#codex-fast-toggle")
   end
 
+  test "Grok 4.6 selects the direct subscription provider and SuperGrok auth", %{conn: conn} do
+    parent = self()
+
+    Application.put_env(:catalyst_web, :grok_login_fun, fn ->
+      send(parent, :grok_login_called)
+      {:ok, "xai-user"}
+    end)
+
+    on_exit(fn -> Application.delete_env(:catalyst_web, :grok_login_fun) end)
+
+    {:ok, view, _html} = live(conn, "/")
+    pid = session_pid(view)
+
+    assert has_element?(view, "#codex-opts option[value='grok-4.6']", "Grok 4.6")
+
+    view
+    |> form("#codex-opts")
+    |> render_change(%{"model" => "grok-4.6", "effort" => "xhigh"})
+
+    snapshot = Server.state(pid)
+    assert snapshot.model.id == "grok-4.6"
+    assert snapshot.model.api == "grok-subscription-chat-completions"
+    assert snapshot.model.provider == "grok-subscription"
+    assert snapshot.model.context_window == 500_000
+    assert snapshot.opts[:reasoning_effort] == "xhigh"
+    refute Keyword.has_key?(snapshot.opts, :service_tier)
+    refute Keyword.has_key?(snapshot.opts, :transport)
+    refute has_element?(view, "#codex-fast-toggle")
+    assert has_element?(view, "#login-button", "Sign in to SuperGrok")
+
+    view |> element("#login-button") |> render_click()
+    assert_receive :grok_login_called, 1_000
+    assert has_element?(view, ~s(#logout-button[title="Sign out of SuperGrok"]))
+  end
+
   test "a Luna selection reaches the provider request for a newly created chat", %{conn: conn} do
     {:ok, previous_provider} = Registry.fetch_config(@codex_api)
     Application.put_env(:catalyst_web, @capture_pid_env, self())

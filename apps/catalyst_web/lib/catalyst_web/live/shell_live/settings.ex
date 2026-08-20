@@ -1,6 +1,6 @@
 defmodule CatalystWeb.ShellLive.Settings do
   @moduledoc """
-  Loads, persists, and applies shell-level Codex and display preferences.
+  Loads, persists, and applies shell-level model and display preferences.
 
   Preferences intentionally use the historical `ShellLive` persistent-term keys
   so remounts and existing cleanup code keep the same behavior. Codex settings
@@ -11,7 +11,8 @@ defmodule CatalystWeb.ShellLive.Settings do
   import Phoenix.Component, only: [assign: 2]
   import Phoenix.LiveView, only: [put_flash: 3]
 
-  alias Catalyst.LLM.OpenAICodex
+  alias Catalyst.Auth.{OpenAIOAuth, XAIOAuth}
+  alias Catalyst.LLM.{GrokSubscription, OpenAICodex}
   alias Catalyst.Session.Server
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
 
@@ -28,6 +29,7 @@ defmodule CatalystWeb.ShellLive.Settings do
 
   @type codex_prefs :: %{
           model: String.t(),
+          provider: String.t(),
           effort: String.t(),
           fast: boolean(),
           transport: String.t()
@@ -47,6 +49,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   def load_codex do
     defaults = %{
       model: OpenAICodex.default_model_id(),
+      provider: "openai-codex",
       effort: OpenAICodex.default_effort(),
       fast: false,
       transport: "auto"
@@ -147,8 +150,10 @@ defmodule CatalystWeb.ShellLive.Settings do
   def update_codex(prefs, params) do
     prefs
     |> put_if_present(:model, params["model"])
+    |> infer_provider()
     |> put_if_present(:effort, params["effort"])
     |> put_if_present(:transport, params["transport"])
+    |> clamp_effort()
     |> clamp_fast()
   end
 
@@ -160,7 +165,12 @@ defmodule CatalystWeb.ShellLive.Settings do
   @spec apply_codex(socket(), codex_prefs()) :: socket()
   def apply_codex(socket, prefs) do
     persist(@codex_prefs_ptr, prefs)
-    socket = assign(socket, codex_prefs: prefs)
+
+    socket =
+      assign(socket,
+        codex_prefs: prefs,
+        logged_in: Catalyst.Auth.logged_in?(auth_provider(prefs))
+      )
 
     case socket.assigns.session_pid do
       pid when is_pid(pid) -> configure_session(socket, pid, prefs)
@@ -240,6 +250,23 @@ defmodule CatalystWeb.ShellLive.Settings do
     assign(socket, ui_prefs: prefs)
   end
 
+  @doc "One combined model-catalog snapshot with the selected entry."
+  @spec catalog_snapshot(codex_prefs()) :: %{models: [map()], selected: map()}
+  def catalog_snapshot(prefs) do
+    models =
+      Enum.map(OpenAICodex.list_models(), &Map.put(&1, :provider, "openai-codex")) ++
+        GrokSubscription.list_models()
+
+    case Enum.find(models, &(&1.id == prefs.model)) do
+      nil ->
+        selected = unknown_entry(prefs)
+        %{models: models ++ [selected], selected: selected}
+
+      selected ->
+        %{models: models, selected: selected}
+    end
+  end
+
   @doc """
   Builds the registry-resolved model used to start a session.
 
@@ -247,10 +274,17 @@ defmodule CatalystWeb.ShellLive.Settings do
   entry, so no provider is returned here.
   """
   @spec provider_config(codex_prefs()) :: Catalyst.Model.t()
+  def provider_config(%{provider: "grok-subscription"} = prefs),
+    do: GrokSubscription.model(prefs.model)
+
   def provider_config(prefs), do: OpenAICodex.model(prefs.model)
 
-  @doc "Converts Codex controls into session run options."
+  @doc "Converts the selected provider's controls into session run options."
   @spec run_opts(codex_prefs()) :: keyword()
+  def run_opts(%{provider: "grok-subscription"} = prefs) do
+    [reasoning_effort: prefs.effort, service_tier: nil, transport: nil]
+  end
+
   def run_opts(prefs) do
     service_tier =
       case prefs.fast do
@@ -264,6 +298,16 @@ defmodule CatalystWeb.ShellLive.Settings do
       transport: prefs.transport
     ]
   end
+
+  @doc "Token-store provider for the selected model."
+  @spec auth_provider(codex_prefs()) :: String.t()
+  def auth_provider(%{provider: "grok-subscription"}), do: XAIOAuth.provider_id()
+  def auth_provider(_prefs), do: OpenAIOAuth.provider_id()
+
+  @doc "Human-facing subscription name for the selected model."
+  @spec auth_label(codex_prefs()) :: String.t()
+  def auth_label(%{provider: "grok-subscription"}), do: "SuperGrok"
+  def auth_label(_prefs), do: "ChatGPT"
 
   @doc """
   Synchronizes controls from an attached session, which is the source of truth.
@@ -280,13 +324,15 @@ defmodule CatalystWeb.ShellLive.Settings do
   """
   @spec sync_from_session(socket()) :: socket()
   def sync_from_session(socket) do
-    model = socket.assigns.session_model || OpenAICodex.model(socket.assigns.codex_prefs.model)
+    model = socket.assigns.session_model || provider_config(socket.assigns.codex_prefs)
     opts = socket.assigns.session_opts || []
+    provider = provider_from_model(model)
 
     prefs =
       clamp_fast(%{
         model: model.id,
-        effort: opts[:reasoning_effort] || OpenAICodex.default_effort(),
+        provider: provider,
+        effort: opts[:reasoning_effort] || default_effort(provider),
         fast: opts[:service_tier] == "priority",
         transport: to_string(opts[:transport] || "auto")
       })
@@ -294,7 +340,10 @@ defmodule CatalystWeb.ShellLive.Settings do
     persist(@codex_prefs_ptr, prefs)
 
     socket
-    |> assign(codex_prefs: prefs)
+    |> assign(
+      codex_prefs: prefs,
+      logged_in: Catalyst.Auth.logged_in?(auth_provider(prefs))
+    )
     |> sync_machine_from_opts(opts)
     |> sync_workflow_from_opts(opts)
   end
@@ -329,7 +378,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   end
 
   defp configure_session(socket, pid, prefs) do
-    model = OpenAICodex.model(prefs.model)
+    model = provider_config(prefs)
     opts = run_opts(prefs)
 
     try do
@@ -338,7 +387,7 @@ defmodule CatalystWeb.ShellLive.Settings do
       # set by another control must not disappear from the UI's own view.
       assign(socket,
         session_model: model,
-        session_opts: Keyword.merge(socket.assigns.session_opts || [], opts)
+        session_opts: merge_local_opts(socket.assigns.session_opts || [], opts)
       )
     catch
       # The session can die during a control change. The monitor callback will
@@ -413,11 +462,41 @@ defmodule CatalystWeb.ShellLive.Settings do
   defp put_if_present(prefs, key, value), do: Map.put(prefs, key, value)
 
   defp clamp_fast(prefs) do
-    case OpenAICodex.catalog_entry(prefs.model).fast? do
+    case catalog_snapshot(prefs).selected.fast? do
       true -> prefs
       false -> %{prefs | fast: false}
     end
   end
+
+  defp clamp_effort(prefs) do
+    selected = catalog_snapshot(prefs).selected
+
+    case prefs.effort in selected.efforts do
+      true -> prefs
+      false -> %{prefs | effort: selected.default_effort}
+    end
+  end
+
+  defp infer_provider(prefs) do
+    case Enum.any?(GrokSubscription.list_models(), &(&1.id == prefs.model)) do
+      true -> Map.put(prefs, :provider, "grok-subscription")
+      false -> Map.put(prefs, :provider, "openai-codex")
+    end
+  end
+
+  defp provider_from_model(%{api: "grok-subscription-chat-completions"}),
+    do: "grok-subscription"
+
+  defp provider_from_model(_model), do: "openai-codex"
+
+  defp default_effort("grok-subscription"), do: GrokSubscription.default_effort()
+  defp default_effort(_provider), do: OpenAICodex.default_effort()
+
+  defp unknown_entry(%{provider: "grok-subscription", model: model}),
+    do: GrokSubscription.catalog_entry(model)
+
+  defp unknown_entry(%{model: model}),
+    do: model |> OpenAICodex.catalog_entry() |> Map.put(:provider, "openai-codex")
 
   defp persist(key, prefs), do: :persistent_term.put(key, prefs)
 end
