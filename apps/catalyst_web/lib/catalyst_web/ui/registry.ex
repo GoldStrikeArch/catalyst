@@ -25,6 +25,11 @@ defmodule CatalystWeb.UI.Registry do
   @type target :: module() | {module(), atom()}
   @type render_fun :: (map() -> Phoenix.LiveView.Rendered.t())
 
+  defguardp valid_page_target(target)
+            when is_atom(target) or
+                   (is_tuple(target) and tuple_size(target) == 2 and
+                      is_atom(elem(target, 0)) and is_atom(elem(target, 1)))
+
   # ---- API ------------------------------------------------------------------
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -414,7 +419,7 @@ defmodule CatalystWeb.UI.Registry do
         },
         _opts
       )
-      when is_binary(path) and is_list(page_opts),
+      when is_binary(path) and valid_page_target(target) and is_list(page_opts),
       do: register_extension_page(api, path, target, page_opts)
 
   def activate_page_contribution(_api, contribution, _opts),

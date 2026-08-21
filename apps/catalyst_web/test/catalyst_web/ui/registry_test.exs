@@ -66,6 +66,16 @@ defmodule CatalystWeb.UI.RegistryTest do
       assert :error = Registry.fetch_page("scratch")
     end
 
+    test "generic page contributions reject malformed targets with a tagged error" do
+      api = ExtensionAPI.new(@owner)
+      payload = %{path: "probe", target: "not-a-module", opts: []}
+
+      assert {:error, {:invalid_contribution, "ui.page", ^payload}} =
+               ExtensionAPI.contribute(api, "ui.page", payload)
+
+      assert :error = Registry.fetch_page("probe")
+    end
+
     test "extension facades force the real owner over a spoofed :owner option" do
       api = ExtensionAPI.new(@owner)
 
