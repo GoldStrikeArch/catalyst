@@ -65,6 +65,8 @@ defmodule Catalyst.Extensions do
 
   @table :catalyst_tools
   @host_roles [:application, :registry]
+  @ready_poll_ms 10
+  @ready_timeout 30_000
 
   @runtime_generation_key {__MODULE__, :runtime_generation}
 
@@ -198,6 +200,23 @@ defmodule Catalyst.Extensions do
     case Process.whereis(__MODULE__) do
       nil -> {:skipped, :extension_runtime_unavailable}
       _pid -> GenServer.call(__MODULE__, :bootstrap)
+    end
+  end
+
+  @doc """
+  Wait for extension bootstrap or recovery to publish a stable runtime generation.
+
+  Returns `:ok` when tools, hooks, providers, and the other extension registries
+  are ready for a run. Returns `{:error, :extension_runtime_unavailable}` when
+  the extension coordinator is not running, or `{:error, :timeout}` when it
+  does not become ready within `timeout` milliseconds.
+  """
+  @spec await_ready(non_neg_integer()) ::
+          :ok | {:error, :extension_runtime_unavailable | :timeout}
+  def await_ready(timeout \\ @ready_timeout) when is_integer(timeout) and timeout >= 0 do
+    case Process.whereis(__MODULE__) do
+      nil -> {:error, :extension_runtime_unavailable}
+      _pid -> await_ready_until(System.monotonic_time(:millisecond) + timeout)
     end
   end
 
@@ -353,6 +372,71 @@ defmodule Catalyst.Extensions do
           | {:safe_mode, :env | :crash_detected}
           | {:load_failed, term()}
   def boot_status, do: :persistent_term.get({__MODULE__, :boot_status}, :ok)
+
+  defp await_ready_until(deadline) do
+    case remaining_time(deadline) do
+      0 ->
+        {:error, :timeout}
+
+      remaining ->
+        await_current_coordinator(deadline, remaining)
+    end
+  end
+
+  defp await_current_coordinator(deadline, remaining) do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        case coordinator_ready?(pid, remaining) do
+          true -> :ok
+          false -> wait_for_runtime(deadline)
+        end
+
+      nil ->
+        wait_for_runtime(deadline)
+    end
+  end
+
+  defp coordinator_ready?(pid, timeout) do
+    monitor = Process.monitor(pid)
+
+    try do
+      case GenServer.call(pid, :runtime_readiness, timeout) do
+        {:ready, _generation} -> current_coordinator?(pid, monitor)
+        :recovering -> false
+      end
+    catch
+      :exit, _reason -> false
+    after
+      Process.demonitor(monitor, [:flush])
+    end
+  end
+
+  defp current_coordinator?(pid, monitor) do
+    case Process.whereis(__MODULE__) do
+      ^pid ->
+        receive do
+          {:DOWN, ^monitor, :process, ^pid, _reason} -> false
+        after
+          0 -> Process.alive?(pid)
+        end
+
+      _missing_or_replacement ->
+        false
+    end
+  end
+
+  defp wait_for_runtime(deadline) do
+    receive do
+    after
+      min(@ready_poll_ms, remaining_time(deadline)) -> await_ready_until(deadline)
+    end
+  end
+
+  defp remaining_time(deadline) do
+    deadline
+    |> Kernel.-(System.monotonic_time(:millisecond))
+    |> max(0)
+  end
 
   @doc """
   Record that this boot is ending by user intent, not a crash.

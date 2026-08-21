@@ -138,6 +138,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
 
         state = :sys.get_state(Extensions)
         assert state.bootstrap in [:running, :complete]
+        assert :ok = Extensions.await_ready()
         wait_until(fn -> match?(%{bootstrap: :complete}, :sys.get_state(Extensions)) end)
         assert Catalyst.Hooks.runtime_ready?()
 
@@ -146,7 +147,21 @@ defmodule Catalyst.Extensions.BootGuardTest do
         # specification; the core-only branch is exercised by this app's own
         # test task and by the CLI release.
         assert Extensions.host_ready?(:web)
+        assert :ok = Extensions.await_ready()
     end
+  end
+
+  test "await_ready requires a responsive current coordinator" do
+    pid = Process.whereis(Extensions)
+    :ok = :sys.suspend(pid)
+
+    try do
+      assert {:error, :timeout} = Extensions.await_ready(20)
+    after
+      :ok = :sys.resume(pid)
+    end
+
+    assert :ok = Extensions.await_ready()
   end
 
   # Release any setup notifications from loads that were already in flight
