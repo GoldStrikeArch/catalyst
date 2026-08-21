@@ -1,11 +1,15 @@
 defmodule Catalyst.Session.RunContextBoundaryTest do
   use ExUnit.Case, async: false
 
-  import Catalyst.EnvCase, only: [restore_env: 2, restore_runtime_policy: 2, runtime_policy: 1]
+  import Catalyst.EnvCase,
+    only: [restore_env: 2, restore_runtime_policy: 2, runtime_policy: 1, wait_until: 1]
 
+  alias Catalyst.Contracts.RunEngine.V1
+  alias Catalyst.Extension.Manifest
   alias Catalyst.Model
   alias Catalyst.LLM.OpenAICodex.Catalog
   alias Catalyst.Prompt.Registry, as: PromptRegistry
+  alias Catalyst.Runtime.{GenerationStore, Generations, Leases, ServiceKey}
   alias Catalyst.Session.RunContext
   alias Catalyst.Workflow.Template
 
@@ -105,6 +109,79 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
     assert run.config.run_engine_resolution.claim.implementation == Catalyst.Workflow.Runner
     assert run.metadata.run_engine.service == "agent.run_engine/named:pinned-template"
     assert run.metadata.run_engine.binding == {:pin, :run}
+  end
+
+  test "managed run contexts hold and explicitly release a run lease" do
+    install_managed_run_engine()
+
+    on_exit(&Generations.clear/0)
+
+    state =
+      model("managed-context", "managed-provider")
+      |> build_state()
+      |> Map.update!(:opts, &Keyword.delete(&1, :loop))
+
+    assert {:ok, run} = RunContext.build(state, self(), make_ref(), Catalyst.LLM.Faux)
+    assert run.run_engine_handle.generation == Generations.active().id
+    assert Generations.active().lease_count == 1
+
+    assert :ok = RunContext.release(run)
+    assert Generations.active().lease_count == 0
+  end
+
+  test "run-context construction releases a managed lease when prompt resolution fails" do
+    install_managed_run_engine()
+
+    on_exit(&Generations.clear/0)
+
+    opts = [
+      run_boundary_test_pid: self(),
+      run_boundary_prompt_mode: {:error, :managed_prompt_rejected}
+    ]
+
+    state = %{build_state(model("managed-failure", "managed-provider")) | opts: opts}
+
+    assert {:error, {:prompt_resolution, :managed_prompt_rejected}} =
+             RunContext.build(state, self(), make_ref(), Catalyst.LLM.Faux)
+
+    assert Generations.active().lease_count == 0
+    assert Leases.list() == []
+  end
+
+  test "run-context construction retries one stale resolve-to-pin transition" do
+    install_managed_run_engine()
+    on_exit(&Generations.clear/0)
+
+    state =
+      model("managed-retry", "managed-provider")
+      |> build_state()
+      |> Map.update!(:opts, &Keyword.delete(&1, :loop))
+
+    active = GenerationStore.active_id()
+    :ok = :sys.suspend(Generations)
+
+    task =
+      Task.async(fn ->
+        RunContext.build(state, self(), make_ref(), Catalyst.LLM.Faux)
+      end)
+
+    try do
+      wait_until(fn ->
+        case Process.info(Process.whereis(Generations), :message_queue_len) do
+          {:message_queue_len, count} -> count > 0
+          nil -> false
+        end
+      end)
+
+      :ok = GenerationStore.deactivate(active, :test_stale_pin)
+    after
+      :ok = :sys.resume(Generations)
+    end
+
+    assert {:ok, run} = Task.await(task, 5_000)
+    assert run.run_engine_handle.generation == nil
+    assert run.run_engine_handle.lease == nil
+    assert Leases.list() == []
   end
 
   test "worker prompt failures are normalized at the supervised task boundary" do
@@ -412,6 +489,25 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
       root_session_id: "run-context-epoch",
       agent_depth: 0
     }
+  end
+
+  defp install_managed_run_engine do
+    manifest =
+      Manifest.new!(%{
+        id: "test.run-context-managed-engine",
+        version: "1.0.0",
+        services: [
+          %{
+            key: ServiceKey.new!("agent", "run_engine"),
+            contract: V1.ref(),
+            implementation: Catalyst.Test.RunBoundaryWorkflow,
+            priority: 900
+          }
+        ]
+      })
+
+    assert {:ok, _generation} =
+             Generations.install("run_context_managed_engine_source", [manifest])
   end
 
   defp model(id, provider),

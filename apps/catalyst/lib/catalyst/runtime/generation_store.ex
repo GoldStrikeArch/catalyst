@@ -55,6 +55,12 @@ defmodule Catalyst.Runtime.GenerationStore do
     |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
   end
 
+  @doc "Fetch one retained generation by identity."
+  @spec fetch(GenerationId.t()) :: {:ok, Generation.t()} | :error
+  def fetch(%GenerationId{} = id) do
+    Map.fetch(state().generations, GenerationId.to_wire(id))
+  end
+
   @doc false
   @spec publish(Candidate.t(), map()) :: {:ok, Generation.t(), Generation.t() | nil}
   def publish(%Candidate{} = candidate, owners) when is_map(owners) do
@@ -62,7 +68,7 @@ defmodule Catalyst.Runtime.GenerationStore do
       current = state()
       now = DateTime.utc_now()
       previous = active_generation(current)
-      generations = retire_active(current.generations, previous, now)
+      generations = begin_retirement(current.generations, previous, now)
       candidate = ready_candidate(candidate)
 
       generation = %Generation{
@@ -105,11 +111,8 @@ defmodule Catalyst.Runtime.GenerationStore do
         reason: reason
       }
 
-      next = %{
-        current
-        | generations:
-            Map.put(current.generations, GenerationId.to_wire(candidate.id), generation)
-      }
+      generations = put_rejected(current.generations, generation)
+      next = %{current | generations: generations}
 
       :persistent_term.put(@state_key, next)
       :ok
@@ -122,6 +125,16 @@ defmodule Catalyst.Runtime.GenerationStore do
     :global.trans(@state_lock, fn ->
       current = state()
       deactivate_expected(current, expected_id, reason)
+      :ok
+    end)
+  end
+
+  @doc false
+  @spec retire(GenerationId.t(), term()) :: :ok
+  def retire(%GenerationId{} = id, reason) do
+    :global.trans(@state_lock, fn ->
+      current = state()
+      retire_expected(current, id, reason)
       :ok
     end)
   end
@@ -145,11 +158,20 @@ defmodule Catalyst.Runtime.GenerationStore do
   defp active_generation(%{active: id, generations: generations}),
     do: Map.get(generations, GenerationId.to_wire(id))
 
-  defp retire_active(generations, nil, _now), do: generations
+  defp begin_retirement(generations, nil, _now), do: generations
 
-  defp retire_active(generations, generation, now) do
-    retired = %{generation | status: :retired, retired_at: now}
-    Map.put(generations, GenerationId.to_wire(generation.id), retired)
+  defp begin_retirement(generations, generation, now) do
+    retiring = %{generation | status: :retiring, retiring_at: now}
+    Map.put(generations, GenerationId.to_wire(generation.id), retiring)
+  end
+
+  defp put_rejected(generations, generation) do
+    key = GenerationId.to_wire(generation.id)
+
+    case Map.get(generations, key) do
+      %Generation{status: status} when status in [:active, :retiring] -> generations
+      _replaceable -> Map.put(generations, key, generation)
+    end
   end
 
   defp deactivate_expected(%{active: expected_id} = current, expected_id, reason) do
@@ -178,6 +200,28 @@ defmodule Catalyst.Runtime.GenerationStore do
   end
 
   defp deactivate_expected(_current, _expected_id, _reason), do: :ok
+
+  defp retire_expected(current, id, reason) do
+    key = GenerationId.to_wire(id)
+
+    case Map.get(current.generations, key) do
+      %Generation{status: :retiring} = generation ->
+        retired = %{
+          generation
+          | status: :retired,
+            retired_at: DateTime.utc_now(),
+            reason: reason
+        }
+
+        :persistent_term.put(
+          @state_key,
+          %{current | generations: Map.put(current.generations, key, retired)}
+        )
+
+      _not_retiring ->
+        :ok
+    end
+  end
 
   defp ready_candidate(candidate) do
     generation = GenerationId.to_wire(candidate.id)

@@ -2,8 +2,9 @@ defmodule Catalyst.Runtime.Resolution do
   @moduledoc """
   Selected runtime claim and its explanation.
 
-  This phase-one value is not a lease. It pins logical selection data for a
-  binding boundary, but does not yet delay extension module purge.
+  This value pins logical selection data for a binding boundary. Callers that
+  execute managed services acquire a `Catalyst.Runtime.Handle`; explanation and
+  preview callers may inspect a resolution without retaining its generation.
   """
 
   alias Catalyst.Runtime.{Claim, ContractRef, Explanation, ServiceKey}

@@ -307,6 +307,26 @@ defmodule Catalyst.ExtensionsLoadTest do
     end)
   end
 
+  test "load_all purges a renamed owner before committing its replacement" do
+    original = write_ext("renamed_original", ephemeral_source())
+    renamed = Path.join(Extensions.dir(), "renamed_replacement.ex")
+
+    on_exit(fn ->
+      Extensions.uninstall("renamed_original")
+      Extensions.uninstall("renamed_replacement")
+    end)
+
+    assert {:ok, %{failed: []}} = Extensions.load_all()
+    assert {:ok, Catalyst.Ext.EphemeralTool} = Extensions.fetch("ephemeral_tool")
+
+    File.rename!(original, renamed)
+
+    assert {:ok, %{loaded: loaded, failed: []}} = Extensions.load_all()
+    assert Enum.any?(loaded, &(&1.owner == "renamed_replacement"))
+    refute Enum.any?(Extensions.list_loaded(), &(&1.owner == "renamed_original"))
+    assert {:ok, Catalyst.Ext.EphemeralTool} = Extensions.fetch("ephemeral_tool")
+  end
+
   test "reloading a v2 extension as v1 removes its managed manifests" do
     path =
       write_ext(
@@ -538,13 +558,68 @@ defmodule Catalyst.ExtensionsLoadTest do
     legacy_path = write_ext("legacy_uninstall", ephemeral_source())
 
     assert {:ok, _summary} = Extensions.load_file(managed_path)
-    assert {:ok, _summary} = Extensions.load_file(legacy_path)
+    assert {:ok, legacy_summary} = Extensions.load_file(legacy_path)
+    refute Map.has_key?(legacy_summary, :activation)
+    refute Map.has_key?(legacy_summary, :generation)
 
     :persistent_term.put({__MODULE__, :managed_health}, :broken)
 
     assert :ok = Extensions.uninstall("legacy_uninstall")
     refute Enum.any?(Extensions.list_loaded(), &(&1.owner == "legacy_uninstall"))
     assert Map.has_key?(GenerationStore.owners(), "stable_managed")
+  end
+
+  test "failed managed removal preserves every active owner" do
+    :persistent_term.put({__MODULE__, :removal_health}, :ready)
+
+    on_exit(fn ->
+      :persistent_term.put({__MODULE__, :removal_health}, :ready)
+      Extensions.uninstall("removal_guard")
+      Extensions.uninstall("removal_target")
+      :persistent_term.erase({__MODULE__, :removal_health})
+    end)
+
+    guard_path = write_ext("removal_guard", removal_guard_source())
+    target_path = write_ext("removal_target", managed_manifest_source("test.removal-target"))
+
+    assert {:ok, _summary} = Extensions.load_file(guard_path)
+    assert {:ok, _summary} = Extensions.load_file(target_path)
+    active_id = GenerationStore.active_id()
+    :persistent_term.put({__MODULE__, :removal_health}, :broken)
+
+    assert {:error, {:health_check_failed, "removal-health", :broken}} =
+             Extensions.uninstall("removal_target")
+
+    assert GenerationStore.active_id() == active_id
+    assert Map.has_key?(GenerationStore.owners(), "removal_guard")
+    assert Map.has_key?(GenerationStore.owners(), "removal_target")
+    assert Enum.any?(Extensions.list_loaded(), &(&1.owner == "removal_target"))
+  end
+
+  test "failed disable restores the enabled source filename" do
+    :persistent_term.put({__MODULE__, :removal_health}, :ready)
+
+    on_exit(fn ->
+      :persistent_term.put({__MODULE__, :removal_health}, :ready)
+      Extensions.uninstall("disable_guard")
+      Extensions.uninstall("disable_target")
+      :persistent_term.erase({__MODULE__, :removal_health})
+    end)
+
+    guard_path = write_ext("disable_guard", removal_guard_source())
+    target_path = write_ext("disable_target", managed_manifest_source("test.disable-target"))
+
+    assert {:ok, _summary} = Extensions.load_file(guard_path)
+    assert {:ok, _summary} = Extensions.load_file(target_path)
+    :persistent_term.put({__MODULE__, :removal_health}, :broken)
+
+    assert {:error, {:health_check_failed, "removal-health", :broken}} =
+             Extensions.disable("disable_target")
+
+    assert File.exists?(target_path)
+    refute File.exists?(target_path <> ".disabled")
+    assert Map.has_key?(GenerationStore.owners(), "disable_target")
+    assert Enum.any?(Extensions.list_loaded(), &(&1.owner == "disable_target"))
   end
 
   test "redefining another owner's module is warned about and surfaced in the summary" do
@@ -723,5 +798,48 @@ defmodule Catalyst.ExtensionsLoadTest do
 
     assert {:ok, _} = Extensions.load_file(hanging)
     assert Enum.find(Extensions.list_loaded(), &(&1.owner == "hanging_metadata")).metadata == %{}
+  end
+
+  defp removal_guard_source do
+    """
+    defmodule Catalyst.Ext.RemovalGuardHealth do
+      def check do
+        case :persistent_term.get({#{inspect(__MODULE__)}, :removal_health}) do
+          :ready -> :ok
+          status -> {:error, status}
+        end
+      end
+    end
+
+    defmodule Catalyst.Ext.RemovalGuard do
+      use Catalyst.Extension, api: 2
+
+      manifest %{
+        id: "test.removal-guard",
+        version: "1.0.0",
+        health_checks: [
+          %{
+            id: "removal-health",
+            module: Catalyst.Ext.RemovalGuardHealth,
+            function: :check,
+            timeout: 100
+          }
+        ]
+      }
+    end
+    """
+  end
+
+  defp managed_manifest_source(id) do
+    """
+    defmodule Catalyst.Ext.ManagedRemovalTarget do
+      use Catalyst.Extension, api: 2
+
+      manifest %{
+        id: #{inspect(id)},
+        version: "1.0.0"
+      }
+    end
+    """
   end
 end

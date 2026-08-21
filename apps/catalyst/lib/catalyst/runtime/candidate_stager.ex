@@ -11,8 +11,11 @@ defmodule Catalyst.Runtime.CandidateStager do
     Candidate,
     CandidateProcesses,
     ExtensionPoints,
+    Generation,
     GenerationId,
+    GenerationStore,
     HealthChecks,
+    Leases,
     RunEngine
   }
 
@@ -44,13 +47,45 @@ defmodule Catalyst.Runtime.CandidateStager do
   end
 
   defp stage_candidate(candidate) do
-    case CandidateProcesses.alive?(candidate.id) do
+    with :ok <- ensure_stageable(candidate.id),
+         :ok <- stop_existing(candidate.id) do
+      start_and_check(candidate)
+    else
+      {:error, {:generation_instance_retained, _id, _status, _lease_count} = reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason, candidate}
+    end
+  end
+
+  defp ensure_stageable(id) do
+    case GenerationStore.fetch(id) do
+      {:ok, %Generation{} = generation} ->
+        lease_count = Leases.count(id)
+
+        case generation.status in [:active, :retiring] or lease_count > 0 do
+          true ->
+            {:error,
+             {:generation_instance_retained, GenerationId.to_wire(id), generation.status,
+              lease_count}}
+
+          false ->
+            :ok
+        end
+
+      :error ->
+        :ok
+    end
+  end
+
+  defp stop_existing(id) do
+    case CandidateProcesses.alive?(id) do
       true ->
-        CandidateProcesses.stop(candidate.id)
-        start_and_check(candidate)
+        CandidateProcesses.stop(id)
 
       false ->
-        start_and_check(candidate)
+        :ok
     end
   end
 
@@ -70,7 +105,7 @@ defmodule Catalyst.Runtime.CandidateStager do
         {:ok, candidate, supervisor, :staged}
 
       {:error, reason} ->
-        CandidateProcesses.stop(supervisor)
+        _result = CandidateProcesses.stop(supervisor)
         {:error, reason, candidate}
     end
   end

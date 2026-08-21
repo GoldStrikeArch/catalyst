@@ -15,23 +15,28 @@ defmodule Catalyst.Session.RunContext do
   @type t :: %{
           context: map(),
           config: RunConfig.t(),
-          metadata: map()
+          metadata: map(),
+          run_engine_handle: Catalyst.Runtime.Handle.t()
         }
 
   @doc "Resolve one run from an immutable session-state snapshot."
   @spec build(map(), pid(), reference(), module()) :: {:ok, t()} | {:error, term()}
   def build(state, server, run_ref, provider) do
-    with {:ok, run_engine} <- resolve_run_engine(state, run_ref) do
-      build_with(state, server, run_ref, provider, run_engine)
+    with {:ok, run_engine} <- resolve_and_pin_run_engine(state, run_ref) do
+      finish_build(build_with(state, server, run_ref, provider, run_engine), run_engine)
     end
   end
 
   @doc "Resolve one run, including conditional provider resolution, inside its worker."
   @spec build(map(), pid(), reference()) :: {:ok, t()} | {:error, term()}
   def build(state, server, run_ref) do
-    with {:ok, run_engine} <- resolve_run_engine(state, run_ref),
-         {:ok, provider} <- resolve_provider(state, run_engine.selection) do
-      build_with(state, server, run_ref, provider, run_engine)
+    with {:ok, run_engine} <- resolve_and_pin_run_engine(state, run_ref) do
+      result =
+        with {:ok, provider} <- resolve_provider(state, run_engine.selection) do
+          build_with(state, server, run_ref, provider, run_engine)
+        end
+
+      finish_build(result, run_engine)
     end
   end
 
@@ -70,9 +75,21 @@ defmodule Catalyst.Session.RunContext do
        %{
          context: %{system_prompt: prompt.text, messages: Enum.reverse(state.messages)},
          config: config,
-         metadata: metadata
+         metadata: metadata,
+         run_engine_handle: run_engine.handle
        }}
     end
+  end
+
+  @doc "Release resources pinned while constructing a run context."
+  @spec release(t()) :: :ok
+  def release(%{run_engine_handle: handle}), do: Catalyst.Runtime.Handle.release(handle)
+
+  defp finish_build({:ok, _run_context} = success, _run_engine), do: success
+
+  defp finish_build({:error, _reason} = error, run_engine) do
+    :ok = Catalyst.Runtime.RunEngine.release(run_engine)
+    error
   end
 
   defp resolve_run_engine(state, run_ref) do
@@ -80,6 +97,18 @@ defmodule Catalyst.Session.RunContext do
       session_id: state.id,
       run_id: inspect(run_ref)
     )
+  end
+
+  defp resolve_and_pin_run_engine(state, run_ref, retries \\ 1) do
+    with {:ok, run_engine} <- resolve_run_engine(state, run_ref) do
+      case Catalyst.Runtime.RunEngine.pin(run_engine) do
+        {:error, {:stale_runtime_generation, _requested, _active}} when retries > 0 ->
+          resolve_and_pin_run_engine(state, run_ref, retries - 1)
+
+        result ->
+          result
+      end
+    end
   end
 
   defp resolve_provider(state, workflow) do

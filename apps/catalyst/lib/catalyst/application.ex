@@ -177,6 +177,10 @@ defmodule Catalyst.Application do
         DynamicSupervisor,
         name: Catalyst.Runtime.CandidateProcessSupervisor, strategy: :one_for_one
       },
+      # Monitors run-bound generation leases independently from the lifecycle
+      # coordinator. A lease-server crash restarts the coordinator and extension
+      # loader after it, rebuilding a fail-closed managed runtime.
+      Catalyst.Runtime.Leases,
       Catalyst.Runtime.Generations,
       # Live tool registry: built-ins + runtime-loaded extensions. Last: its
       # boot load_all runs extension setup/1 functions that register into all

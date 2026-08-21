@@ -1,6 +1,6 @@
 defmodule Catalyst.Runtime.Generation do
   @moduledoc """
-  Lifecycle record for one planned, active, rejected, or retired candidate.
+  Lifecycle record for one active, retiring, retired, rejected, or failed candidate.
 
   Generation records are diagnostic data. The immutable active candidate in
   `Catalyst.Runtime.GenerationStore` is the authority used by runtime readers.
@@ -13,12 +13,14 @@ defmodule Catalyst.Runtime.Generation do
               [
                 parent: nil,
                 activated_at: nil,
+                retiring_at: nil,
                 retired_at: nil,
                 rejected_at: nil,
+                lease_count: 0,
                 reason: nil
               ]
 
-  @type status :: :active | :retired | :rejected | :failed
+  @type status :: :active | :retiring | :retired | :rejected | :failed
 
   @type t :: %__MODULE__{
           id: GenerationId.t(),
@@ -28,8 +30,10 @@ defmodule Catalyst.Runtime.Generation do
           inserted_at: DateTime.t(),
           parent: GenerationId.t() | nil,
           activated_at: DateTime.t() | nil,
+          retiring_at: DateTime.t() | nil,
           retired_at: DateTime.t() | nil,
           rejected_at: DateTime.t() | nil,
+          lease_count: non_neg_integer() | :unknown,
           reason: term()
         }
 end

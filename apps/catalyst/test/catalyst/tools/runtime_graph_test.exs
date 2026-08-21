@@ -20,8 +20,12 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
     assert [%Content.Text{text: text}] = result.content
     assert text =~ "agent.run_engine/default"
     assert text =~ "agent.tool/\"runtime_graph\""
+    assert text =~ "Generations:"
+    assert text =~ "Leases:"
     assert result.details.claim_count > 0
     assert result.details.contribution_count > 0
+    assert is_integer(result.details.generation_count)
+    assert is_integer(result.details.lease_count)
     assert byte_size(result.details.snapshot_id) == 64
   end
 
@@ -54,6 +58,20 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
   test "invalid service keys raise a bounded tool error" do
     assert_raise ArgumentError, ~r/runtime graph query failed/, fn ->
       RuntimeGraph.execute(%{"service" => "not-a-service-key"}, context())
+    end
+  end
+
+  test "reports unavailable lease introspection without crashing" do
+    server = Process.whereis(Catalyst.Runtime.Leases)
+    assert Process.unregister(Catalyst.Runtime.Leases)
+
+    try do
+      result = RuntimeGraph.execute(%{}, context())
+      assert [%Content.Text{text: text}] = result.content
+      assert text =~ "Leases:\n  unavailable:"
+      assert result.details.lease_count == :unknown
+    after
+      assert Process.register(server, Catalyst.Runtime.Leases)
     end
   end
 

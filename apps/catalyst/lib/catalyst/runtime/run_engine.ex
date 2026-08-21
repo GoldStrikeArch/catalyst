@@ -15,6 +15,8 @@ defmodule Catalyst.Runtime.RunEngine do
     Context,
     ContractRef,
     ExtensionPoints,
+    Generations,
+    Handle,
     Resolution,
     Resolver,
     Scope,
@@ -23,7 +25,11 @@ defmodule Catalyst.Runtime.RunEngine do
 
   alias Catalyst.Workflow.Registry
 
-  @type resolved :: %{selection: Registry.selection(), resolution: Resolution.t()}
+  @type resolved :: %{
+          optional(:handle) => Handle.t(),
+          selection: Registry.selection(),
+          resolution: Resolution.t()
+        }
 
   @doc "Resolve and logically pin the effective run engine for one run."
   @spec resolve(keyword() | map(), Context.t() | map() | keyword()) ::
@@ -40,6 +46,26 @@ defmodule Catalyst.Runtime.RunEngine do
       {:error, _reason} = error -> error
     end
   end
+
+  @doc "Acquire the managed-generation lease for a resolved run engine."
+  @spec pin(resolved(), pid()) :: {:ok, resolved()} | {:error, term()}
+  def pin(%{resolution: %Resolution{} = resolution} = resolved, owner \\ self())
+      when is_pid(owner) do
+    case Map.get(resolution.claim.metadata, :runtime_generation) do
+      nil ->
+        {:ok, put_handle(resolved, resolution, nil)}
+
+      _generation ->
+        with {:ok, lease} <- Generations.acquire_lease(resolution, owner) do
+          {:ok, put_handle(resolved, resolution, lease)}
+        end
+    end
+  end
+
+  @doc "Release a previously pinned run engine."
+  @spec release(resolved()) :: :ok
+  def release(%{handle: %Handle{} = handle}), do: Handle.release(handle)
+  def release(_unmanaged_or_unpinned), do: :ok
 
   @doc "Explain the effective run-engine selection without starting a run."
   @spec explain(keyword() | map(), Context.t() | map() | keyword()) ::
@@ -248,6 +274,9 @@ defmodule Catalyst.Runtime.RunEngine do
 
   defp selection_opts(%{name: :default}), do: []
   defp selection_opts(%{name: name}), do: [workflow: name]
+
+  defp put_handle(resolved, resolution, lease),
+    do: Map.put(resolved, :handle, Handle.new(resolution, lease))
 
   defp named_slot(name), do: "named:" <> name
 end

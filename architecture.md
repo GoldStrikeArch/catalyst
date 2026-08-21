@@ -716,10 +716,14 @@ the agent.
 
 The first execution pilot is `agent.run_engine`: `Session.RunContext` resolves it at the run
 boundary and records service/owner/provenance/snapshot metadata. Workflow explanations include the
-valid runtime → application/ACP → template → configured-loop → built-in chain. Phase-one
-resolutions are logical pins, **not code leases**: generation-scoped physical modules, drain
-counters, candidate activation, and state handoff remain future work. Raw trusted BEAM overrides
-also remain opaque and cannot promise complete graph introspection.
+valid runtime → application/ACP → template → configured-loop → built-in chain. Resolution remains
+process-free for previews and explanation; an executing managed run upgrades it to a monitored
+`Runtime.Handle` with a `:run` lease. Activating a replacement marks the old generation
+`:retiring`; its candidate process subtree remains alive until the final lease is released, while
+all new runs resolve the new active generation. `runtime_graph` reports active/retiring/retired
+generations and their leases. These are lifecycle leases, **not exact-code retention**:
+generation-scoped physical modules, drain deadlines, and state handoff remain future work. Raw
+trusted BEAM overrides also remain opaque and cannot promise complete graph introspection.
 
 The extension ontology is no longer closed in `Catalyst.ExtensionAPI`. Host subsystems declare
 schema-aware `Runtime.ExtensionPoint` values with stable `{module, function}` activation handlers,

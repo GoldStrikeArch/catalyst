@@ -41,8 +41,10 @@ old managed points, claims, and contributions or the complete new set, never a
 partially published managed candidate.
 
 The previous candidate process subtree remains alive until publication
-completes. It is then stopped. A rejected candidate's subtree is stopped before
-the error is returned.
+completes. This ADR originally stopped it immediately afterward. ADR-0004
+supersedes that lifecycle rule: a leased superseded generation now retires only
+after its final handle is released. A rejected candidate's subtree is stopped
+before the error is returned.
 
 The first execution consumer is `agent.run_engine`. New run resolution combines
 active generation claims with existing workflow layers and returns generation
@@ -79,8 +81,8 @@ It does not provide atomic VM code replacement:
 
 - source compilation still loads BEAM modules before candidate publication;
 - identical module names are not generation-scoped;
-- active operations do not hold code leases;
-- the previous generation is not retained for draining;
+- active operations did not yet hold lifecycle leases when this ADR was adopted;
+- the previous generation was not yet retained for draining;
 - candidate processes may perform side effects while staged;
 - health checks are trusted in-process callbacks whose arbitrary side effects
   are not rolled back; checks must be bounded and idempotent;
@@ -92,7 +94,8 @@ transactionality claim.
 ## Deferred Work
 
 - generation-scoped physical module names;
-- handles, leases, drain deadlines, and delayed purge;
+- drain deadlines, forced retirement, and delayed module purge beyond the
+  lifecycle leases introduced by ADR-0004;
 - post-activation rollback to a retained process generation;
 - state capsules, migrations, and session handoff;
 - isolated compilation and staging on a peer node or external worker;

@@ -67,8 +67,9 @@ defmodule Catalyst.Extensions.Load do
   @spec uninstall(String.t()) :: :ok | {:error, term()}
   def uninstall(owner) do
     Transaction.run(fn ->
-      :ok = remove_managed_owner(owner)
-      server_call({:uninstall, owner})
+      with :ok <- remove_managed_owner(owner) do
+        server_call({:uninstall, owner})
+      end
     end)
   end
 
@@ -147,10 +148,27 @@ defmodule Catalyst.Extensions.Load do
 
     with :ok <- Sources.ensure_managed(path),
          :ok <- File.rename(path, disabled) do
-      :ok = remove_managed_owner(owner)
-      :ok = server_call({:uninstall, owner})
-      commit_lifecycle_change([path, disabled], "disable #{owner}")
-      {:ok, disabled}
+      case disable_owner(owner) do
+        :ok ->
+          commit_lifecycle_change([path, disabled], "disable #{owner}")
+          {:ok, disabled}
+
+        {:error, reason} ->
+          restore_enabled_file(path, disabled, reason)
+      end
+    end
+  end
+
+  defp disable_owner(owner) do
+    with :ok <- remove_managed_owner(owner) do
+      server_call({:uninstall, owner})
+    end
+  end
+
+  defp restore_enabled_file(path, disabled, reason) do
+    case File.rename(disabled, path) do
+      :ok -> {:error, reason}
+      {:error, rollback_reason} -> {:error, {:disable_failed, reason, rollback_reason}}
     end
   end
 
@@ -198,10 +216,11 @@ defmodule Catalyst.Extensions.Load do
     live_owners = MapSet.new(paths, &Sources.owner/1)
     previous_owners = GenerationStore.owners()
     retained_owners = Map.take(previous_owners, MapSet.to_list(live_owners))
+    :ok = server_call({:purge_gone, live_owners})
 
     {plans, failed} = compile_paths(paths)
     desired_owners = apply_manifest_plans(retained_owners, plans)
-    finish_bulk_activation(plans, failed, previous_owners, desired_owners, live_owners)
+    finish_bulk_activation(plans, failed, previous_owners, desired_owners)
   end
 
   defp compile_paths(paths) do
@@ -228,10 +247,9 @@ defmodule Catalyst.Extensions.Load do
     end)
   end
 
-  defp finish_bulk_activation(plans, failed, previous_owners, desired_owners, live_owners) do
+  defp finish_bulk_activation(plans, failed, previous_owners, desired_owners) do
     case Generations.replace_all(desired_owners) do
       {:ok, generation} ->
-        :ok = server_call({:purge_gone, live_owners})
         loaded = Enum.map(plans, &finish_plan(&1, generation))
         {:ok, %{loaded: loaded, failed: failed}}
 
@@ -366,6 +384,13 @@ defmodule Catalyst.Extensions.Load do
     end
   end
 
+  defp activate_manifests(owner, []) do
+    case Map.has_key?(GenerationStore.owners(), owner) do
+      true -> Generations.install(owner, [])
+      false -> {:ok, nil}
+    end
+  end
+
   defp activate_manifests(owner, manifests), do: Generations.install(owner, manifests)
 
   defp annotate_generation(summary, nil), do: summary
@@ -487,12 +512,12 @@ defmodule Catalyst.Extensions.Load do
         :ok
 
       {:error, reason} ->
-        Logger.error(
-          "[extensions] could not restage managed composition while removing #{owner}; " <>
-            "clearing managed generations: #{inspect(reason)}"
+        Logger.warning(
+          "[extensions] could not restage managed composition while removing #{owner}: " <>
+            inspect(reason)
         )
 
-        Generations.clear()
+        {:error, reason}
     end
   end
 

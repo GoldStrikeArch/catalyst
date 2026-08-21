@@ -423,11 +423,15 @@ defmodule Catalyst.Session.Server do
 
     case RunContext.build(state, server, run_ref) do
       {:ok, run_context} ->
-        GenServer.cast(server, {:run_metadata, run_ref, run_context.metadata})
+        try do
+          GenServer.cast(server, {:run_metadata, run_ref, run_context.metadata})
 
-        prompts
-        |> run_context.config.loop.run(run_context.context, run_context.config, emit)
-        |> classify_workflow_result()
+          prompts
+          |> run_context.config.loop.run(run_context.context, run_context.config, emit)
+          |> classify_workflow_result()
+        after
+          RunContext.release(run_context)
+        end
 
       {:error, reason} ->
         emit.(%Event.AgentStart{})

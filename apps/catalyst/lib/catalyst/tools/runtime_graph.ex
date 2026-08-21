@@ -9,7 +9,18 @@ defmodule Catalyst.Tools.RuntimeGraph do
   use Catalyst.Tools.Tool
 
   alias Catalyst.Runtime
-  alias Catalyst.Runtime.{Claim, Contribution, Resolver, ServiceKey}
+
+  alias Catalyst.Runtime.{
+    Claim,
+    Contribution,
+    Generation,
+    Generations,
+    Lease,
+    Leases,
+    Resolver,
+    ServiceKey
+  }
+
   alias Catalyst.Tools.Truncate
 
   @impl true
@@ -44,8 +55,10 @@ defmodule Catalyst.Tools.RuntimeGraph do
   def execute(args, ctx) do
     context = runtime_context(ctx)
     graph = Runtime.snapshot(context)
+    lease_snapshot = Leases.snapshot()
+    generations = Generations.list(lease_snapshot)
 
-    case render(args, graph) do
+    case render(args, graph, generations, lease_snapshot) do
       {:ok, body} ->
         {text, truncation} = Truncate.head_notice(body)
 
@@ -53,6 +66,8 @@ defmodule Catalyst.Tools.RuntimeGraph do
           snapshot_id: graph.snapshot_id,
           claim_count: length(graph.claims),
           contribution_count: length(graph.contributions),
+          generation_count: length(generations),
+          lease_count: lease_count(lease_snapshot),
           truncation: truncation
         })
 
@@ -61,22 +76,23 @@ defmodule Catalyst.Tools.RuntimeGraph do
     end
   end
 
-  defp render(%{"service" => service} = args, graph) when is_binary(service) and service != "" do
+  defp render(%{"service" => service} = args, graph, generations, lease_snapshot)
+       when is_binary(service) and service != "" do
     with {:ok, key} <- ServiceKey.parse(service) do
       claims = Enum.filter(graph.claims, &owner_match?(&1.owner, Map.get(args, "owner")))
       explanation = Resolver.explain(claims, key, graph.context)
-      {:ok, render_explanation(graph, explanation)}
+      {:ok, render_explanation(graph, explanation, generations, lease_snapshot)}
     end
   end
 
-  defp render(args, graph) do
+  defp render(args, graph, generations, lease_snapshot) do
     owner = Map.get(args, "owner")
     claims = Enum.filter(graph.claims, &owner_match?(&1.owner, owner))
     contributions = Enum.filter(graph.contributions, &owner_match?(&1.owner, owner))
 
     {:ok,
      [
-       graph_header(graph),
+       graph_header(graph, generations, lease_snapshot),
        "\nServices:\n",
        render_rows(claims, &claim_line/1),
        "\nContributions:\n",
@@ -85,9 +101,9 @@ defmodule Catalyst.Tools.RuntimeGraph do
      |> IO.iodata_to_binary()}
   end
 
-  defp render_explanation(graph, explanation) do
+  defp render_explanation(graph, explanation, generations, lease_snapshot) do
     [
-      graph_header(graph),
+      graph_header(graph, generations, lease_snapshot),
       "\nResolution: ",
       inspect(explanation.status),
       "\nSelected:\n",
@@ -100,14 +116,18 @@ defmodule Catalyst.Tools.RuntimeGraph do
     |> IO.iodata_to_binary()
   end
 
-  defp graph_header(graph) do
+  defp graph_header(graph, generations, lease_snapshot) do
     [
       "Runtime graph ",
       graph.snapshot_id,
       "\nSources: ",
       inspect(graph.source_status, pretty: true),
       "\nCoverage: ",
-      inspect(graph.source_metadata, pretty: true)
+      inspect(graph.source_metadata, pretty: true),
+      "\nGenerations:\n",
+      render_rows(generations, &generation_line/1),
+      "\nLeases:\n",
+      render_lease_snapshot(lease_snapshot)
     ]
   end
 
@@ -140,6 +160,27 @@ defmodule Catalyst.Tools.RuntimeGraph do
       "owner=#{inspect(contribution.owner)} value=#{value_summary(contribution.value)} " <>
       "provenance=#{inspect(contribution.provenance)}\n"
   end
+
+  defp generation_line(%Generation{} = generation) do
+    "  - #{Catalyst.Runtime.GenerationId.to_wire(generation.id)} " <>
+      "status=#{generation.status} leases=#{generation.lease_count} " <>
+      "parent=#{generation_parent(generation.parent)} reason=#{inspect(generation.reason)}\n"
+  end
+
+  defp generation_parent(nil), do: "none"
+  defp generation_parent(parent), do: Catalyst.Runtime.GenerationId.to_wire(parent)
+
+  defp lease_line(%Lease{} = lease) do
+    "  - #{Catalyst.Runtime.GenerationId.to_wire(lease.generation)} " <>
+      "binding=#{lease.binding} owner=#{inspect(lease.owner)} " <>
+      "acquired_at=#{DateTime.to_iso8601(lease.acquired_at)}\n"
+  end
+
+  defp render_lease_snapshot({:ok, leases}), do: render_rows(leases, &lease_line/1)
+  defp render_lease_snapshot({:error, reason}), do: "  unavailable: #{inspect(reason)}\n"
+
+  defp lease_count({:ok, leases}), do: length(leases)
+  defp lease_count({:error, _reason}), do: :unknown
 
   defp value_summary(value) when is_binary(value), do: "<binary #{byte_size(value)} bytes>"
 

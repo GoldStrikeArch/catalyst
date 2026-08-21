@@ -13,6 +13,7 @@ defmodule Catalyst.Runtime.GenerationsTest do
     ExtensionPoints,
     GenerationStore,
     Generations,
+    Leases,
     ServiceKey
   }
 
@@ -105,6 +106,66 @@ defmodule Catalyst.Runtime.GenerationsTest do
     assert same_generation.id == generation.id
     assert CandidateProcesses.list(generation.id) == [worker]
     assert %{} = :sys.get_state(worker)
+  end
+
+  test "a leased superseded generation retires only after its final release" do
+    first = healthy_manifest("test.generation.leased")
+
+    assert {:ok, first_generation} = Generations.install("leased_source", [first])
+    assert {:ok, lease} = Leases.acquire(first_generation.id, self(), :run)
+
+    second = healthy_manifest("test.generation.replacement")
+    assert {:ok, second_generation} = Generations.install("leased_source", [second])
+
+    assert first_generation.id != second_generation.id
+    assert CandidateProcesses.alive?(first_generation.id)
+
+    assert %{
+             status: :retiring,
+             lease_count: 1,
+             retiring_at: %DateTime{},
+             retired_at: nil
+           } = Enum.find(Generations.list(), &(&1.id == first_generation.id))
+
+    assert %{status: :active, lease_count: 0} =
+             Enum.find(Generations.list(), &(&1.id == second_generation.id))
+
+    assert :ok = Leases.release(lease)
+
+    wait_until(fn ->
+      Enum.any?(Generations.list(), fn generation ->
+        generation.id == first_generation.id and generation.status == :retired
+      end)
+    end)
+
+    wait_until(fn -> not CandidateProcesses.alive?(first_generation.id) end)
+
+    assert %{status: :retired, lease_count: 0, reason: :drained} =
+             Enum.find(Generations.list(), &(&1.id == first_generation.id))
+  end
+
+  test "a deterministic candidate id cannot replace a leased retiring instance" do
+    first = healthy_manifest("test.generation.retained-instance")
+    assert {:ok, first_generation} = Generations.install("retained_source", [first])
+    assert {:ok, lease} = Leases.acquire(first_generation.id, self(), :run)
+
+    second = healthy_manifest("test.generation.failed-successor")
+    assert {:ok, second_generation} = Generations.install("retained_source", [second])
+    assert :ok = CandidateProcesses.stop(second_generation.id)
+    wait_until(fn -> GenerationStore.active_id() == nil end)
+
+    assert {:error, {:generation_instance_retained, retained_id, :retiring, 1}} =
+             Generations.install("retained_source", [first])
+
+    assert retained_id == Catalyst.Runtime.GenerationId.to_wire(first_generation.id)
+    assert CandidateProcesses.alive?(first_generation.id)
+    assert Leases.count(first_generation.id) == 1
+
+    assert %{status: :retiring} =
+             Enum.find(Generations.list(), &(&1.id == first_generation.id))
+
+    assert :ok = Leases.release(lease)
+    wait_until(fn -> not CandidateProcesses.alive?(first_generation.id) end)
   end
 
   test "fails closed when the active candidate process subtree exits" do
@@ -261,6 +322,29 @@ defmodule Catalyst.Runtime.GenerationsTest do
     end)
   end
 
+  test "clear revokes leases and stops active and retiring process subtrees" do
+    first = healthy_manifest("test.generation.clear-leased")
+    assert {:ok, first_generation} = Generations.install("clear_source", [first])
+    assert {:ok, _lease} = Leases.acquire(first_generation.id, self(), :run)
+
+    second = healthy_manifest("test.generation.clear-active")
+    assert {:ok, second_generation} = Generations.install("clear_source", [second])
+
+    assert CandidateProcesses.alive?(first_generation.id)
+    assert CandidateProcesses.alive?(second_generation.id)
+    assert Leases.count(first_generation.id) == 1
+
+    assert :ok = Generations.clear()
+    assert GenerationStore.active_id() == nil
+    assert GenerationStore.owners() == %{}
+    assert Leases.list() == []
+
+    wait_until(fn ->
+      not CandidateProcesses.alive?(first_generation.id) and
+        not CandidateProcesses.alive?(second_generation.id)
+    end)
+  end
+
   test "removing an owner atomically exposes the remaining composition" do
     first = healthy_manifest("test.generation.one")
     second = manifest("test.generation.two", contributions: [widget("two")])
@@ -294,6 +378,66 @@ defmodule Catalyst.Runtime.GenerationsTest do
 
     assert resolved.selection.source ==
              {:generation, Catalyst.Runtime.GenerationId.to_wire(generation.id), run_engine.id}
+
+    assert {:ok, pinned} = Catalyst.Runtime.RunEngine.pin(resolved)
+    assert pinned.handle.generation == generation.id
+    assert pinned.handle.lease.binding == :run
+    assert Generations.active().lease_count == 1
+
+    assert :ok = Catalyst.Runtime.RunEngine.release(pinned)
+    assert Generations.active().lease_count == 0
+  end
+
+  test "an unmanaged run engine pins without calling the generation coordinator" do
+    assert {:ok, resolved} = Runtime.resolve_run_engine([], %{})
+    assert Map.get(resolved.resolution.claim.metadata, :runtime_generation) == nil
+    :ok = :sys.suspend(Generations)
+
+    try do
+      assert {:ok, pinned} = Catalyst.Runtime.RunEngine.pin(resolved)
+      assert pinned.handle.lease == nil
+      assert pinned.handle.generation == nil
+    after
+      :ok = :sys.resume(Generations)
+    end
+  end
+
+  test "pinning a resolution after its generation is replaced fails as stale" do
+    first =
+      manifest("test.generation.stale-run-engine",
+        services: [
+          %{
+            key: ServiceKey.new!("agent", "run_engine"),
+            contract: V1.ref(),
+            implementation: __MODULE__.FirstEngine,
+            priority: 900
+          }
+        ]
+      )
+
+    assert {:ok, _generation} = Generations.install("stale_run_engine_source", [first])
+    assert {:ok, resolved} = Runtime.resolve_run_engine([], %{})
+
+    second =
+      manifest("test.generation.current-run-engine",
+        services: [
+          %{
+            key: ServiceKey.new!("agent", "run_engine"),
+            contract: V1.ref(),
+            implementation: __MODULE__.SecondEngine,
+            priority: 900
+          }
+        ]
+      )
+
+    assert {:ok, current} = Generations.install("stale_run_engine_source", [second])
+
+    assert {:error, {:stale_runtime_generation, requested, active}} =
+             Catalyst.Runtime.RunEngine.pin(resolved)
+
+    assert requested != active
+    assert active == Catalyst.Runtime.GenerationId.to_wire(current.id)
+    assert Leases.list() == []
   end
 
   test "rejects a managed run-engine claim tied with an imperative workflow" do
