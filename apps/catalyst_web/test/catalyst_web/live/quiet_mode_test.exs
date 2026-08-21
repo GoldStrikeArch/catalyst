@@ -9,7 +9,9 @@ defmodule CatalystWeb.QuietModeTest do
   alias Catalyst.Session.{Manager, Server}
 
   setup do
-    on_exit(fn -> :persistent_term.erase({CatalystWeb.ShellLive, :ui_prefs}) end)
+    key = {CatalystWeb.ShellLive, :ui_prefs}
+    :persistent_term.erase(key)
+    on_exit(fn -> :persistent_term.erase(key) end)
     :ok
   end
 

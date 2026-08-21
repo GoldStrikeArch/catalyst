@@ -424,6 +424,10 @@ defmodule Catalyst.Workflow.RegistryTest do
     assert {:ok, WorkflowA} = Registry.fetch("review")
     assert {:ok, %{module: WorkflowB}} = Registry.resolve([])
 
+    extensions = Process.whereis(Catalyst.Extensions)
+    assert is_pid(extensions)
+    extensions_ref = Process.monitor(extensions)
+
     # Writes do not self-heal a sabotaged table (the registry owns its table
     # in init, like its sibling registries): the write crashes the process and
     # supervision restarts it with a fresh table, keeping the shared test VM
@@ -433,24 +437,35 @@ defmodule Catalyst.Workflow.RegistryTest do
     assert catch_exit(Registry.unregister_owner(owner))
     assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
 
-    new_pid = wait_for_restart(pid)
+    new_pid = wait_for_restart(Registry, pid)
     _ = :sys.get_state(new_pid)
     assert is_reference(:ets.whereis(Registry.table()))
+    assert_receive {:DOWN, ^extensions_ref, :process, ^extensions, _reason}
+    assert_extension_runtime_ready(extensions)
   end
 
   # Sanctioned poll: a supervisor restart re-registers the name with no
   # observable message to the test process.
-  defp wait_for_restart(old_pid) do
+  defp wait_for_restart(name, old_pid) do
     Catalyst.EnvCase.wait_until(
       fn ->
-        case Process.whereis(Registry) do
+        case Process.whereis(name) do
           pid when is_pid(pid) and pid != old_pid -> {:ok, pid}
           _missing_or_old -> false
         end
       end,
       2_000,
-      "workflow registry did not restart after the sabotaged write"
+      "#{inspect(name)} did not restart after the sabotaged write"
     )
+  end
+
+  # Registry is in a :rest_for_one runtime. Seeing its replacement process is
+  # not enough: downstream registries are still stopping and restarting, and
+  # test teardown must not race that recovery or leak it into the next test.
+  defp assert_extension_runtime_ready(old_pid) do
+    _replacement = wait_for_restart(Catalyst.Extensions, old_pid)
+
+    assert :ok = Catalyst.Extensions.await_ready(5_000)
   end
 
   defp ensure_registry_started do
