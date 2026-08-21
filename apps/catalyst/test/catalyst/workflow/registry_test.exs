@@ -1,7 +1,7 @@
 defmodule Catalyst.Workflow.RegistryTest do
   use ExUnit.Case, async: false
 
-  import Catalyst.EnvCase, only: [restore_env: 2]
+  import Catalyst.EnvCase, only: [restore_env: 2, wait_until: 3]
 
   alias Catalyst.Workflow.{Registry, Template}
 
@@ -436,6 +436,7 @@ defmodule Catalyst.Workflow.RegistryTest do
     new_pid = wait_for_restart(pid)
     _ = :sys.get_state(new_pid)
     assert is_reference(:ets.whereis(Registry.table()))
+    assert_extension_runtime_ready()
   end
 
   # Sanctioned poll: a supervisor restart re-registers the name with no
@@ -450,6 +451,22 @@ defmodule Catalyst.Workflow.RegistryTest do
       end,
       2_000,
       "workflow registry did not restart after the sabotaged write"
+    )
+  end
+
+  # Registry is in a :rest_for_one runtime. Seeing its replacement process is
+  # not enough: downstream registries are still stopping and restarting, and
+  # test teardown must not race that recovery or leak it into the next test.
+  defp assert_extension_runtime_ready do
+    wait_until(
+      fn ->
+        case Catalyst.Hooks.capture_snapshot() do
+          {:ok, snapshot} -> {:ok, snapshot}
+          {:error, :extension_runtime_recovering} -> false
+        end
+      end,
+      5_000,
+      "extension runtime did not recover after workflow registry restart"
     )
   end
 

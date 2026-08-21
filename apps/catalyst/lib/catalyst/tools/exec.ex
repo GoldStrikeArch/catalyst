@@ -4,10 +4,10 @@ defmodule Catalyst.Tools.Exec do
 
     * `collect/3` — run a binary to completion via a `Port`, capture stdout
       (stderr merged), parse after exit. Used by ripgrep/fd/sd/ast-grep.
-    * `bash/2` — run a shell command under the muontrap wrapper binary so a
-      timeout or an aborted run kills the whole child process tree, not just
-      the shell. Shares `collect/3`'s bounded loop, so bash output is capped
-      instead of accumulating unbounded. Used by bash.
+    * `bash/2` — on Unix, run a shell command under the muontrap wrapper binary
+      so a timeout or an aborted run kills the whole child process tree, not
+      just the shell. Shares `collect/3`'s bounded loop, so bash output is
+      capped instead of accumulating unbounded. Used by bash.
   """
 
   @default_timeout 120_000
@@ -91,40 +91,52 @@ defmodule Catalyst.Tools.Exec do
   cap killed the command early — or `{:error, {:timeout, partial_out}}`, so
   partial output is preserved on timeout.
 
-  The command runs under the muontrap wrapper so that hitting the timeout or
-  the output cap kills the whole child process tree: closing the wrapper's
-  port makes it SIGTERM (then SIGKILL) its child, which a plain port close
-  would leave running. A dedicated supervised task owns the linked port;
+  On Unix, the command runs under the muontrap wrapper so that hitting the
+  timeout or output cap kills the whole child process tree: closing the
+  wrapper's port makes it SIGTERM (then SIGKILL) its child, which a plain port
+  close would leave running. A dedicated supervised task owns the linked port;
   chunk callbacks and accumulation stay in the caller, and caller-side
   failures always stop the owner before returning `{:error, exception}`.
+
+  Windows returns `{:error, {:unsupported_platform, os_type}}`; MuonTrap
+  requires POSIX process-group APIs, and a direct-port fallback would violate
+  the process-tree cancellation guarantee.
   """
   @spec bash(String.t(), keyword()) :: collect_result() | {:error, {:timeout, String.t()}}
   def bash(command, opts \\ []) do
-    # The tool is named "bash", but on Debian-family systems `sh` is dash and
-    # bashisms would fail — resolve real bash when present. A per-call
-    # find_executable is a cheap PATH scan.
+    opts = Keyword.put_new(opts, :max_output_bytes, @bash_max_output_bytes)
+
+    with {:ok, path, args, mode} <- bash_invocation(command) do
+      try do
+        run(path, args, opts, mode)
+      rescue
+        # narrow exception handling: only rescue ArgumentError from port boundary
+        # (e.g. malformed PORT in env passing through to System.cmd internally)
+        e in ArgumentError -> {:error, e}
+      end
+    end
+  end
+
+  defp bash_invocation(command) do
+    case :os.type() do
+      {:unix, _name} -> {:ok, muontrap_path(), muontrap_args(command), :muontrap}
+      os_type -> {:error, {:unsupported_platform, os_type}}
+    end
+  end
+
+  # The tool is named "bash", but on Debian-family systems `sh` is dash and
+  # bashisms would fail — resolve real bash when present.
+  defp muontrap_args(command) do
     shell = System.find_executable("bash") || "sh"
 
     # Wrapper CLI (deps/muontrap/c_src/muontrap.c): `[flags] -- program args`.
-    # --capture-output forwards the child's stdout through the port (it is
-    # sent to /dev/null otherwise); --capture-stderr additionally merges the
-    # child's stderr into that stream. The wrapper flow-controls the stream:
-    # it forwards at most a 10KB window and waits for ack bytes on its stdin
-    # (collect_loop acks in :muontrap mode). MuonTrap.cmd/3 itself always
-    # execs this same wrapper on every platform — the binary is compiled when
-    # the dep builds, so no fallback path is needed.
-    args = ["--capture-output", "--capture-stderr", "--", shell, "-c", command]
-
-    opts = Keyword.put_new(opts, :max_output_bytes, @bash_max_output_bytes)
-
-    try do
-      run(MuonTrap.muontrap_path(), args, opts, :muontrap)
-    rescue
-      # narrow exception handling: only rescue ArgumentError from port boundary
-      # (e.g. malformed PORT in env passing through to System.cmd internally)
-      e in ArgumentError -> {:error, e}
-    end
+    # Capture both streams; the wrapper flow-controls output until acked.
+    ["--capture-output", "--capture-stderr", "--", shell, "-c", command]
   end
+
+  # Dynamic dispatch keeps Windows compilation independent of a module that is
+  # deliberately absent there. platform_deps/0 includes it on every Unix build.
+  defp muontrap_path, do: apply(Module.concat(["MuonTrap"]), :muontrap_path, [])
 
   defp run(path, args, opts, mode) do
     with :ok <- validate_options(opts) do
@@ -431,7 +443,10 @@ defmodule Catalyst.Tools.Exec do
   # report_bytes_handled/2 writes the wrapper's ack encoding to the port and
   # ignores the port-already-closed race.
   defp ack(_port, _count, :direct), do: :ok
-  defp ack(port, count, :muontrap), do: MuonTrap.Port.report_bytes_handled(port, count)
+
+  defp ack(port, count, :muontrap) do
+    apply(Module.concat(["MuonTrap", "Port"]), :report_bytes_handled, [port, count])
+  end
 
   # :direct mode runs the target binary itself, so SIGKILL its pid.
   # Note: `kill -KILL os_pid` only kills the direct child, not its
