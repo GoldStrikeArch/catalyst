@@ -17,7 +17,7 @@ defmodule Catalyst.Runtime.ReadModel do
 
   @sources_key {__MODULE__, :sources}
   @sources_lock {__MODULE__, :sources_lock}
-  @default_source_timeout 1_000
+  @default_source_timeout 11_000
 
   @type source_id :: atom()
   @type source :: {module(), atom()}

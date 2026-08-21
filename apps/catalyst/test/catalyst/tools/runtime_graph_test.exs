@@ -39,6 +39,16 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
     filtered = RuntimeGraph.execute(%{"owner" => "builtin"}, context())
     assert [%Content.Text{text: owner_view}] = filtered.content
     assert owner_view =~ "owner=:builtin"
+
+    combined =
+      RuntimeGraph.execute(
+        %{"service" => "agent.run_engine/default", "owner" => "missing-owner"},
+        context()
+      )
+
+    assert [%Content.Text{text: combined_view}] = combined.content
+    assert combined_view =~ "Resolution: {:error, :no_matching_claim}"
+    refute combined_view =~ "Catalyst.Agent.Loop"
   end
 
   test "invalid service keys raise a bounded tool error" do

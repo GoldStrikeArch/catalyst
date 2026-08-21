@@ -61,9 +61,10 @@ defmodule Catalyst.Tools.RuntimeGraph do
     end
   end
 
-  defp render(%{"service" => service}, graph) when is_binary(service) and service != "" do
+  defp render(%{"service" => service} = args, graph) when is_binary(service) and service != "" do
     with {:ok, key} <- ServiceKey.parse(service) do
-      explanation = Resolver.explain(graph.claims, key, graph.context)
+      claims = Enum.filter(graph.claims, &owner_match?(&1.owner, Map.get(args, "owner")))
+      explanation = Resolver.explain(claims, key, graph.context)
       {:ok, render_explanation(graph, explanation)}
     end
   end

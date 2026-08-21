@@ -74,7 +74,32 @@ defmodule Catalyst.Runtime.RunEngine do
   def key(%{name: name}), do: key(name)
   def key(:default), do: ServiceKey.new!("agent", "run_engine", "default")
   def key(:loop), do: ServiceKey.new!("agent", "run_engine", "direct")
-  def key(name) when is_binary(name), do: ServiceKey.new!("agent", "run_engine", name)
+  def key(name) when is_binary(name), do: ServiceKey.new!("agent", "run_engine", named_slot(name))
+
+  @doc "Build the run-engine service key accepted by the extension workflow API."
+  @spec service_key(String.t() | :default) :: {:ok, ServiceKey.t()} | {:error, term()}
+  def service_key(:default), do: ServiceKey.new("agent", "run_engine", "default")
+
+  def service_key(name) when is_binary(name) and byte_size(name) > 0,
+    do: ServiceKey.new("agent", "run_engine", named_slot(name))
+
+  def service_key(name), do: {:error, {:invalid_workflow_name, name}}
+
+  @doc false
+  @spec workflow_name(ServiceKey.t()) :: {:ok, String.t() | :default} | {:error, term()}
+  def workflow_name(%ServiceKey{namespace: "agent", name: "run_engine", slot: "default"}),
+    do: {:ok, :default}
+
+  def workflow_name(%ServiceKey{
+        namespace: "agent",
+        name: "run_engine",
+        slot: "named:" <> name
+      })
+      when byte_size(name) > 0,
+      do: {:ok, name}
+
+  def workflow_name(%ServiceKey{} = key),
+    do: {:error, {:invalid_run_engine_service_key, ServiceKey.to_wire(key)}}
 
   @doc "Project a phase-one resolution into serializable run diagnostics."
   @spec metadata(Resolution.t()) :: map()
@@ -139,4 +164,6 @@ defmodule Catalyst.Runtime.RunEngine do
 
   defp selection_opts(%{name: :default}), do: []
   defp selection_opts(%{name: name}), do: [workflow: name]
+
+  defp named_slot(name), do: "named:" <> name
 end

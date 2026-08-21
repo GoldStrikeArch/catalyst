@@ -375,8 +375,12 @@ defmodule CatalystWeb.UI.Registry do
           value: %{kind: kind, match: match, function: function}
         },
         _opts
-      ),
+      )
+      when is_atom(kind) and is_function(match, 1) and is_function(function),
       do: register_extension_renderer(api, kind, match, function)
+
+  def activate_renderer_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
 
   @doc false
   @spec activate_component_contribution(
@@ -390,8 +394,12 @@ defmodule CatalystWeb.UI.Registry do
           value: %{slot: slot, function: function, opts: component_opts}
         },
         _opts
-      ),
+      )
+      when is_atom(slot) and is_function(function) and is_list(component_opts),
       do: register_extension_component(api, slot, function, component_opts)
+
+  def activate_component_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
 
   @doc false
   @spec activate_page_contribution(
@@ -405,8 +413,12 @@ defmodule CatalystWeb.UI.Registry do
           value: %{path: path, target: target, opts: page_opts}
         },
         _opts
-      ),
+      )
+      when is_binary(path) and is_list(page_opts),
       do: register_extension_page(api, path, target, page_opts)
+
+  def activate_page_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
 
   @doc false
   @spec activate_command_contribution(
@@ -418,8 +430,18 @@ defmodule CatalystWeb.UI.Registry do
         api,
         %Catalyst.Runtime.Contribution{value: %{name: name, opts: command_opts}},
         _opts
-      ),
+      )
+      when is_binary(name) and is_list(command_opts),
       do: register_extension_command(api, name, command_opts)
+
+  def activate_command_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
+
+  defp invalid_contribution(%Catalyst.Runtime.Contribution{} = contribution),
+    do: {:error, {:invalid_contribution, contribution.point, contribution.value}}
+
+  defp invalid_contribution(contribution),
+    do: {:error, {:invalid_contribution, :ui, contribution}}
 
   defp wire do
     :ok =

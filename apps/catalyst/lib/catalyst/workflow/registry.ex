@@ -595,8 +595,11 @@ defmodule Catalyst.Workflow.Registry do
         opts
       )
       when map_size(constraints) == 0 do
-    name = if slot == "default", do: :default, else: slot
-    register_extension_workflow(api, name, module, opts)
+    key = Catalyst.Runtime.ServiceKey.new!("agent", "run_engine", slot)
+
+    with {:ok, name} <- Catalyst.Runtime.RunEngine.workflow_name(key) do
+      register_extension_workflow(api, name, module, opts)
+    end
   end
 
   def activate_run_engine_claim(_api, claim, _opts),

@@ -51,8 +51,8 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   @spec contribute(ExtensionAPI.t(), String.t(), term(), keyword()) :: term()
   def contribute(%ExtensionAPI{} = api, point_id, value, opts) when is_list(opts) do
     with {:ok, point} <- fetch(point_id),
-         {:ok, contribution} <- build_contribution(api, point, value, opts),
-         :ok <- validate_payload(point, value) do
+         {:ok, value} <- normalize_payload(point, value),
+         {:ok, contribution} <- build_contribution(api, point, value, opts) do
       activate_contribution(api, point, contribution, opts)
     end
   end
@@ -138,21 +138,50 @@ defmodule Catalyst.Runtime.ExtensionPoints do
 
   defp put_point(%ExtensionPoint{} = point) do
     update_result(fn current ->
-      case Map.fetch(current.points, point.id) do
-        :error ->
-          {:ok, %{current | points: Map.put(current.points, point.id, point)}}
-
-        {:ok, %ExtensionPoint{owner: owner}} when owner == point.owner ->
-          {:ok, %{current | points: Map.put(current.points, point.id, point)}}
-
-        {:ok, existing} ->
-          error =
-            {:owner_collision, :extension_point, point.id, existing.owner, point.owner}
-
-          {{:error, error}, current}
+      with :ok <- validate_point_owner(current.points, point),
+           :ok <- validate_service_identity(current.points, point) do
+        {:ok, %{current | points: Map.put(current.points, point.id, point)}}
+      else
+        {:error, reason} -> {{:error, reason}, current}
       end
     end)
   end
+
+  defp validate_point_owner(points, point) do
+    case Map.fetch(points, point.id) do
+      :error ->
+        :ok
+
+      {:ok, %ExtensionPoint{owner: owner}} when owner == point.owner ->
+        :ok
+
+      {:ok, existing} ->
+        {:error, {:owner_collision, :extension_point, point.id, existing.owner, point.owner}}
+    end
+  end
+
+  defp validate_service_identity(points, point) do
+    collision =
+      points
+      |> Map.values()
+      |> Enum.find(fn existing ->
+        existing.id != point.id and service_identity(existing) == service_identity(point) and
+          not is_nil(service_identity(point))
+      end)
+
+    case collision do
+      nil ->
+        :ok
+
+      existing ->
+        {:error, {:service_point_collision, point.service, point.contract, existing.id, point.id}}
+    end
+  end
+
+  defp service_identity(%ExtensionPoint{service: nil}), do: nil
+
+  defp service_identity(%ExtensionPoint{service: service, contract: %ContractRef{} = contract}),
+    do: {service, contract.id, contract.version}
 
   defp service_point(%ServiceKey{} = key, requested_contract) do
     points =
@@ -320,23 +349,46 @@ defmodule Catalyst.Runtime.ExtensionPoints do
     update(fn current -> put_in(current.claims[claim_key(claim)], claim) end)
   end
 
-  defp validate_payload(%ExtensionPoint{schema: nil}, _value), do: :ok
+  defp normalize_payload(%ExtensionPoint{schema: nil}, value), do: {:ok, value}
 
-  defp validate_payload(%ExtensionPoint{schema: schema, id: id}, value) do
-    resolved =
-      schema
-      |> Jason.encode!()
-      |> Jason.decode!()
-      |> ExJsonSchema.Schema.resolve()
+  defp normalize_payload(%ExtensionPoint{id: id} = point, value) do
+    with {:ok, normalized} <- json_value(value, id),
+         :ok <- validate_payload(point, normalized) do
+      {:ok, normalized}
+    end
+  end
 
-    case ExJsonSchema.Validator.validate(resolved, value) do
+  defp validate_payload(%ExtensionPoint{id: id} = point, value) do
+    case ExJsonSchema.Validator.validate(resolved_schema(point), value) do
       :ok -> :ok
       {:error, errors} -> {:error, {:invalid_contribution, id, errors}}
     end
+  end
+
+  defp resolved_schema(%ExtensionPoint{} = point) do
+    case Map.get(point, :resolved_schema) do
+      nil ->
+        point.schema
+        |> Jason.encode!()
+        |> Jason.decode!()
+        |> ExJsonSchema.Schema.resolve()
+
+      resolved ->
+        resolved
+    end
+  end
+
+  defp json_value(value, id) do
+    normalized =
+      value
+      |> Jason.encode!()
+      |> Jason.decode!()
+
+    {:ok, normalized}
   rescue
-    exception -> {:error, {:invalid_extension_point_schema, id, exception}}
+    exception -> {:error, {:invalid_contribution, id, {:non_json_payload, exception}}}
   catch
-    kind, reason -> {:error, {:invalid_extension_point_schema, id, {kind, reason}}}
+    kind, reason -> {:error, {:invalid_contribution, id, {:non_json_payload, {kind, reason}}}}
   end
 
   defp point_contributions(points) do
@@ -356,10 +408,16 @@ defmodule Catalyst.Runtime.ExtensionPoints do
     end)
   end
 
-  defp active_contribution?(contribution, points) do
+  defp active_contribution(contribution, points) do
     case Map.fetch(points, contribution.point) do
-      {:ok, point} -> valid_payload?(point, contribution.value)
-      :error -> false
+      {:ok, point} ->
+        case normalize_payload(point, contribution.value) do
+          {:ok, value} -> [%{contribution | value: value}]
+          {:error, _reason} -> []
+        end
+
+      :error ->
+        []
     end
   end
 
@@ -370,12 +428,10 @@ defmodule Catalyst.Runtime.ExtensionPoints do
     end)
   end
 
-  defp valid_payload?(point, value), do: validate_payload(point, value) == :ok
-
   defp active_contributions(current) do
     current.contributions
     |> Map.values()
-    |> Enum.filter(&active_contribution?(&1, current.points))
+    |> Enum.flat_map(&active_contribution(&1, current.points))
     |> Enum.sort_by(&Contribution.stable_key/1)
   end
 
@@ -394,8 +450,14 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   defp contribution_key(contribution),
     do: {contribution.point, contribution.id, contribution.scope.constraints}
 
-  defp claim_key(claim),
-    do: {ServiceKey.to_wire(claim.key), claim.owner, claim.scope.constraints}
+  defp claim_key(claim) do
+    {
+      ServiceKey.to_wire(claim.key),
+      {claim.contract.id, claim.contract.version},
+      claim.owner,
+      claim.scope.constraints
+    }
+  end
 
   defp update(fun) do
     :global.trans(@state_lock, fn ->

@@ -295,8 +295,18 @@ defmodule Catalyst.Context.Registry do
           value: %{model_key: model_key, value: value, opts: threshold_opts}
         },
         _opts
-      ),
+      )
+      when (is_binary(model_key) or model_key == :default) and is_list(threshold_opts),
       do: register_extension_threshold(api, model_key, value, threshold_opts)
+
+  def activate_threshold_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
+
+  defp invalid_contribution(%Catalyst.Runtime.Contribution{} = contribution),
+    do: {:error, {:invalid_contribution, contribution.point, contribution.value}}
+
+  defp invalid_contribution(contribution),
+    do: {:error, {:invalid_contribution, "agent.context_threshold", contribution}}
 
   defp wire do
     :ok =

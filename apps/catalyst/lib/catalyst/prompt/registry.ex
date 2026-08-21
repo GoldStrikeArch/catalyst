@@ -248,8 +248,13 @@ defmodule Catalyst.Prompt.Registry do
           value: %{model_key: model_key, text: text, opts: prompt_opts}
         },
         _opts
-      ),
+      )
+      when (is_binary(model_key) or model_key == :default) and is_binary(text) and
+             is_list(prompt_opts),
       do: register_extension_prompt(api, model_key, text, prompt_opts)
+
+  def activate_prompt_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
 
   @doc false
   @spec activate_prompt_policy_claim(ExtensionAPI.t(), Catalyst.Runtime.Claim.t(), keyword()) ::
@@ -269,6 +274,12 @@ defmodule Catalyst.Prompt.Registry do
 
   def activate_prompt_policy_claim(_api, claim, _opts),
     do: {:error, {:unsupported_prompt_policy_claim, claim}}
+
+  defp invalid_contribution(%Catalyst.Runtime.Contribution{} = contribution),
+    do: {:error, {:invalid_contribution, contribution.point, contribution.value}}
+
+  defp invalid_contribution(contribution),
+    do: {:error, {:invalid_contribution, "agent.prompt", contribution}}
 
   defp wire_extension_api do
     :ok =

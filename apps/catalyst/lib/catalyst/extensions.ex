@@ -502,8 +502,12 @@ defmodule Catalyst.Extensions do
         api,
         %Catalyst.Runtime.Contribution{value: %{module: module}},
         _opts
-      ),
+      )
+      when is_atom(module),
       do: register_extension_tool(api, module)
+
+  def activate_tool_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
 
   @doc false
   @spec activate_hook_contribution(
@@ -517,8 +521,12 @@ defmodule Catalyst.Extensions do
           value: %{point: point, function: function, opts: hook_opts}
         },
         _opts
-      ),
+      )
+      when is_atom(point) and is_function(function) and is_list(hook_opts),
       do: register_extension_hook(api, point, function, hook_opts)
+
+  def activate_hook_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
 
   @doc false
   @spec activate_observer_contribution(
@@ -530,8 +538,12 @@ defmodule Catalyst.Extensions do
         api,
         %Catalyst.Runtime.Contribution{value: %{function: function, opts: observer_opts}},
         _opts
-      ),
+      )
+      when is_function(function) and is_list(observer_opts),
       do: register_extension_observer(api, function, observer_opts)
+
+  def activate_observer_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
 
   @doc false
   @spec activate_process_contribution(
@@ -543,8 +555,33 @@ defmodule Catalyst.Extensions do
         api,
         %Catalyst.Runtime.Contribution{value: %{child_spec: child_spec}},
         _opts
-      ),
-      do: start_extension_process(api, child_spec)
+      ) do
+    case valid_child_spec?(child_spec) do
+      true -> start_extension_process(api, child_spec)
+      false -> invalid_contribution(%{point: "runtime.process", value: %{child_spec: child_spec}})
+    end
+  end
+
+  def activate_process_contribution(_api, contribution, _opts),
+    do: invalid_contribution(contribution)
+
+  defp valid_child_spec?(child_spec) do
+    _child_spec = Supervisor.child_spec(child_spec, [])
+    true
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp invalid_contribution(%Catalyst.Runtime.Contribution{} = contribution),
+    do: {:error, {:invalid_contribution, contribution.point, contribution.value}}
+
+  defp invalid_contribution(%{point: point, value: value}),
+    do: {:error, {:invalid_contribution, point, value}}
+
+  defp invalid_contribution(contribution),
+    do: {:error, {:invalid_contribution, :unknown, contribution}}
 
   @doc false
   @spec inject_boot_result(term()) :: :ok

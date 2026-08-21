@@ -4,6 +4,7 @@ defmodule Catalyst.Runtime.RunEngineTest do
   import Catalyst.EnvCase, only: [restore_env: 2]
 
   alias Catalyst.Runtime.RunEngine
+  alias Catalyst.ExtensionAPI
   alias Catalyst.Workflow.Registry
 
   defmodule RuntimeWorkflow do
@@ -88,5 +89,27 @@ defmodule Catalyst.Runtime.RunEngineTest do
     assert resolution.key.slot == "direct"
     assert resolution.claim.owner == {:session, "session-1"}
     assert resolution.claim.scope.constraints == %{session_id: "session-1"}
+  end
+
+  test "the named workflow \"default\" remains distinct from the runtime default", %{owner: owner} do
+    api = ExtensionAPI.new(owner)
+
+    assert :ok = ExtensionAPI.register_workflow(api, :default, RuntimeWorkflow)
+    assert :ok = ExtensionAPI.register_workflow(api, "default", Catalyst.Agent.Loop)
+
+    assert {:ok, %{name: :default, module: RuntimeWorkflow}} = Registry.resolve([])
+
+    assert {:ok, %{name: "default", module: Catalyst.Agent.Loop}} =
+             Registry.resolve(workflow: "default")
+
+    assert RunEngine.key(:default).slot == "default"
+    assert RunEngine.key("default").slot == "named:default"
+  end
+
+  test "invalid extension workflow names return tagged errors instead of raising", %{owner: owner} do
+    assert {:error, {:invalid_workflow_name, ""}} =
+             owner
+             |> ExtensionAPI.new()
+             |> ExtensionAPI.register_workflow("", RuntimeWorkflow)
   end
 end

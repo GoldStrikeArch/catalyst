@@ -177,13 +177,14 @@ defmodule Catalyst.ExtensionAPI do
 
   @doc "Register an LLM provider under `name`."
   @spec register_provider(t(), String.t(), term()) :: term()
-  def register_provider(api, name, config),
-    do:
-      claim(
-        api,
-        Catalyst.Runtime.ServiceKey.new!("llm", "provider", name),
-        config
-      )
+  def register_provider(api, name, config) do
+    claim_built_key(
+      api,
+      fn -> Catalyst.Runtime.ServiceKey.new("llm", "provider", name) end,
+      config,
+      contract: Catalyst.Runtime.ContractRef.new!("catalyst.llm-provider", 1)
+    )
+  end
 
   @doc "Register purpose-aware prompt text for an exact model key."
   @spec register_prompt(t(), String.t() | :default, String.t(), keyword()) :: term()
@@ -200,20 +201,22 @@ defmodule Catalyst.ExtensionAPI do
       api,
       Catalyst.Runtime.ServiceKey.new!("agent", "prompt_policy"),
       module,
-      opts
+      Keyword.put(
+        opts,
+        :contract,
+        Catalyst.Runtime.ContractRef.new!("catalyst.prompt-policy", 1)
+      )
     )
   end
 
   @doc "Register a named workflow (use `:default` for the runtime default)."
   @spec register_workflow(t(), String.t() | :default, module(), keyword()) :: term()
   def register_workflow(api, name, module, opts \\ []) do
-    slot = if name == :default, do: "default", else: name
-
-    claim(
+    claim_built_key(
       api,
-      Catalyst.Runtime.ServiceKey.new!("agent", "run_engine", slot),
+      fn -> Catalyst.Runtime.RunEngine.service_key(name) end,
       module,
-      opts
+      Keyword.put(opts, :contract, Catalyst.Contracts.RunEngine.V1.ref())
     )
   end
 
@@ -224,7 +227,11 @@ defmodule Catalyst.ExtensionAPI do
       api,
       Catalyst.Runtime.ServiceKey.new!("agent", "context_policy"),
       module,
-      opts
+      Keyword.put(
+        opts,
+        :contract,
+        Catalyst.Runtime.ContractRef.new!("catalyst.context-policy", 1)
+      )
     )
   end
 
@@ -303,6 +310,17 @@ defmodule Catalyst.ExtensionAPI do
           {:error, :stale_extension_generation}
       end
     end)
+  end
+
+  defp claim_built_key(api, build_key, implementation, opts) do
+    result =
+      dispatch_generic(api, fn ->
+        with {:ok, key} <- build_key.() do
+          Catalyst.Runtime.ExtensionPoints.claim(api, key, implementation, opts)
+        end
+      end)
+
+    remember_owner_collision(api, result)
   end
 
   defp dispatch(%__MODULE__{} = api, kind, args) do

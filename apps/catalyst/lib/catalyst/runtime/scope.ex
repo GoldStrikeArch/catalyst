@@ -21,8 +21,9 @@ defmodule Catalyst.Runtime.Scope do
   def global, do: %__MODULE__{constraints: %{}}
 
   @doc "Build a validated scope from identity constraints."
-  @spec new(:global | map() | keyword()) :: {:ok, t()} | {:error, term()}
+  @spec new(:global | t() | map() | keyword()) :: {:ok, t()} | {:error, term()}
   def new(:global), do: {:ok, global()}
+  def new(%__MODULE__{} = scope), do: {:ok, scope}
   def new(constraints) when is_list(constraints), do: constraints |> Map.new() |> new()
 
   def new(constraints) when is_map(constraints) do
@@ -35,7 +36,7 @@ defmodule Catalyst.Runtime.Scope do
   def new(scope), do: {:error, {:invalid_scope, scope}}
 
   @doc "Build a scope, raising `ArgumentError` when invalid."
-  @spec new!(:global | map() | keyword()) :: t()
+  @spec new!(:global | t() | map() | keyword()) :: t()
   def new!(scope) do
     case new(scope) do
       {:ok, value} -> value

@@ -17,6 +17,7 @@ defmodule Catalyst.Runtime.ExtensionPoint do
                 service: nil,
                 default_binding: :live,
                 schema: nil,
+                resolved_schema: nil,
                 handler: nil,
                 metadata: %{}
               ]
@@ -34,6 +35,7 @@ defmodule Catalyst.Runtime.ExtensionPoint do
           service: service_identity() | nil,
           default_binding: Catalyst.Runtime.Claim.binding(),
           schema: map() | nil,
+          resolved_schema: term(),
           handler: handler() | nil,
           metadata: map()
         }
@@ -49,7 +51,7 @@ defmodule Catalyst.Runtime.ExtensionPoint do
          :ok <- validate_contract(spec[:contract]),
          :ok <- validate_service(spec[:service], spec[:contract]),
          :ok <- validate_binding(spec[:default_binding]),
-         :ok <- validate_schema(spec[:schema]),
+         {:ok, resolved_schema} <- resolve_schema(spec[:schema]),
          :ok <- validate_handler(handler),
          :ok <- validate_metadata(spec[:metadata]) do
       {:ok,
@@ -62,6 +64,7 @@ defmodule Catalyst.Runtime.ExtensionPoint do
          service: spec.service,
          default_binding: spec.default_binding,
          schema: spec.schema,
+         resolved_schema: resolved_schema,
          handler: handler,
          metadata: spec.metadata
        }}
@@ -128,22 +131,23 @@ defmodule Catalyst.Runtime.ExtensionPoint do
   defp validate_binding({:pin, lifetime}) when is_atom(lifetime), do: :ok
   defp validate_binding(binding), do: {:error, {:invalid_extension_point_binding, binding}}
 
-  defp validate_schema(nil), do: :ok
+  defp resolve_schema(nil), do: {:ok, nil}
 
-  defp validate_schema(schema) when is_map(schema) do
-    schema
-    |> Jason.encode!()
-    |> Jason.decode!()
-    |> ExJsonSchema.Schema.resolve()
+  defp resolve_schema(schema) when is_map(schema) do
+    resolved =
+      schema
+      |> Jason.encode!()
+      |> Jason.decode!()
+      |> ExJsonSchema.Schema.resolve()
 
-    :ok
+    {:ok, resolved}
   rescue
     exception -> {:error, {:invalid_extension_point_schema, exception}}
   catch
     kind, reason -> {:error, {:invalid_extension_point_schema, {kind, reason}}}
   end
 
-  defp validate_schema(schema), do: {:error, {:invalid_extension_point_schema, schema}}
+  defp resolve_schema(schema), do: {:error, {:invalid_extension_point_schema, schema}}
 
   defp validate_handler(nil), do: :ok
 
