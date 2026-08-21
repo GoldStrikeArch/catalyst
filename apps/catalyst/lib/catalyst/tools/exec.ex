@@ -106,7 +106,7 @@ defmodule Catalyst.Tools.Exec do
   def bash(command, opts \\ []) do
     opts = Keyword.put_new(opts, :max_output_bytes, @bash_max_output_bytes)
 
-    with {:ok, path, args, mode} <- bash_invocation(command) do
+    with {:ok, path, args, mode} <- bash_invocation(command, :os.type()) do
       try do
         run(path, args, opts, mode)
       rescue
@@ -117,12 +117,14 @@ defmodule Catalyst.Tools.Exec do
     end
   end
 
-  defp bash_invocation(command) do
-    case :os.type() do
-      {:unix, _name} -> {:ok, muontrap_path(), muontrap_args(command), :muontrap}
-      os_type -> {:error, {:unsupported_platform, os_type}}
-    end
-  end
+  @doc false
+  @spec bash_invocation(String.t(), {:unix | :win32, atom()}) ::
+          {:ok, String.t(), [String.t()], :muontrap}
+          | {:error, {:unsupported_platform, {:unix | :win32, atom()}}}
+  def bash_invocation(command, {:unix, _name}),
+    do: {:ok, muontrap_path(), muontrap_args(command), :muontrap}
+
+  def bash_invocation(_command, os_type), do: {:error, {:unsupported_platform, os_type}}
 
   # The tool is named "bash", but on Debian-family systems `sh` is dash and
   # bashisms would fail — resolve real bash when present.

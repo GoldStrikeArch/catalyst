@@ -57,6 +57,11 @@ defmodule Catalyst.Tools.ExecTest do
     refute Enum.any?(links, &is_port/1)
   end
 
+  test "bash rejects Windows without weakening process-tree cancellation" do
+    assert {:error, {:unsupported_platform, {:win32, :nt}}} =
+             Exec.bash_invocation("echo unsupported", {:win32, :nt})
+  end
+
   test "bash caps runaway output instead of buffering it until the timeout" do
     assert {:ok, %{out: out, status: 0, truncated: true}} =
              Exec.bash("while true; do echo spam; done",

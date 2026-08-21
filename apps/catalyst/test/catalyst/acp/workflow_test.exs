@@ -30,7 +30,7 @@ defmodule Catalyst.ACP.WorkflowTest do
     {:ok, %{id: id, pid: pid}} =
       Manager.start_session(session_options(tmp, agent))
 
-    on_exit(fn -> Manager.stop(id) end)
+    on_exit(fn -> stop_session(id) end)
     :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
 
     assert :ok = Server.prompt(pid, "first")
@@ -78,7 +78,7 @@ defmodule Catalyst.ACP.WorkflowTest do
     agent = fixture_agent(log_path, [{"ACP_FIXTURE_RECOVERY", "load"}])
 
     {:ok, %{id: id, pid: pid}} = Manager.start_session(session_options(tmp, agent))
-    on_exit(fn -> Manager.stop(id) end)
+    on_exit(fn -> stop_session(id) end)
     :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
 
     assert :ok = Server.prompt(pid, "first")
@@ -107,7 +107,7 @@ defmodule Catalyst.ACP.WorkflowTest do
     agent = fixture_agent(log_path, [{"ACP_FIXTURE_PROMPT", "parallel"}])
 
     {:ok, %{id: id, pid: pid}} = Manager.start_session(session_options(tmp, agent))
-    on_exit(fn -> Manager.stop(id) end)
+    on_exit(fn -> stop_session(id) end)
     :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
 
     assert :ok = Server.prompt(pid, "parallel")
@@ -141,7 +141,7 @@ defmodule Catalyst.ACP.WorkflowTest do
     agent = fixture_agent(log_path, [{"ACP_FIXTURE_PROMPT", "incomplete"}])
 
     {:ok, %{id: id, pid: pid}} = Manager.start_session(session_options(tmp, agent))
-    on_exit(fn -> Manager.stop(id) end)
+    on_exit(fn -> stop_session(id) end)
     :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
 
     assert :ok = Server.prompt(pid, "incomplete")
@@ -171,6 +171,19 @@ defmodule Catalyst.ACP.WorkflowTest do
     assert %Message.Assistant{api: "acp", provider: "fixture"} = final
     assert final.response_id == "fixture-session"
     assert Content.text_of(final.content) == "fixture answer"
+  end
+
+  defp stop_session(id) do
+    client_monitors =
+      for {client, _value} <- Registry.lookup(Catalyst.ACP.Registry, {id, "fixture"}) do
+        {client, Process.monitor(client)}
+      end
+
+    assert :ok = Manager.stop(id)
+
+    Enum.each(client_monitors, fn {client, monitor} ->
+      assert_receive {:DOWN, ^monitor, :process, ^client, _reason}, 2_000
+    end)
   end
 
   defp fixture_agent(log_path, extra_env \\ []) do
