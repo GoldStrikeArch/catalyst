@@ -112,4 +112,13 @@ defmodule Catalyst.Runtime.RunEngineTest do
              |> ExtensionAPI.new()
              |> ExtensionAPI.register_workflow("", RuntimeWorkflow)
   end
+
+  test "invalid workflow options retain the legacy tagged error" do
+    assert {:error, {:invalid_configuration, {:option, :workflow}, ""}} =
+             RunEngine.resolve(workflow: "")
+  end
+
+  test "the direct service slot maps to the loop selection name" do
+    assert {:ok, :loop} = RunEngine.workflow_name(RunEngine.key(:loop))
+  end
 end

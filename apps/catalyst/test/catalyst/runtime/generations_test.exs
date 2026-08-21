@@ -32,6 +32,10 @@ defmodule Catalyst.Runtime.GenerationsTest do
     def start_link(_opts), do: {:error, :worker_rejected_start}
   end
 
+  defmodule IgnoredWorker do
+    def start_link(_opts), do: :ignore
+  end
+
   defmodule Health do
     def check(:ok), do: :ok
     def check(:error), do: {:error, :unhealthy}
@@ -91,6 +95,18 @@ defmodule Catalyst.Runtime.GenerationsTest do
     assert %{} = :sys.get_state(worker)
   end
 
+  test "reinstalling an unchanged owner keeps the active candidate alive" do
+    manifest = healthy_manifest("test.generation.one")
+
+    assert {:ok, generation} = Generations.install("source_one", [manifest])
+    assert [worker] = CandidateProcesses.list(generation.id)
+
+    assert {:ok, same_generation} = Generations.install("source_one", [manifest])
+    assert same_generation.id == generation.id
+    assert CandidateProcesses.list(generation.id) == [worker]
+    assert %{} = :sys.get_state(worker)
+  end
+
   test "fails closed when the active candidate process subtree exits" do
     manifest = healthy_manifest("test.generation.one")
 
@@ -104,6 +120,7 @@ defmodule Catalyst.Runtime.GenerationsTest do
     failed = Enum.find(Generations.list(), &(&1.id == generation.id))
     assert failed.status == :failed
     assert {:candidate_process_exit, _reason} = failed.reason
+    assert GenerationStore.owners() == %{}
   end
 
   test "a failed health check leaves the prior generation active" do
@@ -172,6 +189,32 @@ defmodule Catalyst.Runtime.GenerationsTest do
     refute Enum.any?(ExtensionPoints.list_claims(), &(&1.owner == "test.generation.bad-process"))
   end
 
+  test "an ignored process start rejects and cleans up the candidate" do
+    ignored =
+      manifest("test.generation.ignored-process",
+        processes: [
+          %{
+            id: "ignored-worker",
+            child_spec: %{
+              id: IgnoredWorker,
+              start: {IgnoredWorker, :start_link, [[]]}
+            }
+          }
+        ]
+      )
+
+    assert {:error, {:candidate_process_ignored, "ignored-worker"}} =
+             Generations.install("ignored_source", [ignored])
+
+    rejected = Enum.find(Generations.list(), &(&1.status == :rejected))
+    assert CandidateProcesses.list(rejected.id) == []
+
+    assert {:error, {:candidate_process_ignored, "ignored-worker"}} =
+             Generations.install("ignored_source", [ignored])
+
+    assert CandidateProcesses.list(rejected.id) == []
+  end
+
   test "concurrent activation attempts are rejected while staging is in progress" do
     :persistent_term.put({Health, :test}, self())
 
@@ -193,6 +236,29 @@ defmodule Catalyst.Runtime.GenerationsTest do
 
     send(health_check, :release)
     assert {:ok, _generation} = Task.await(task, 5_000)
+  end
+
+  test "clear cancels staging and prevents stale publication" do
+    :persistent_term.put({Health, :test}, self())
+
+    blocking =
+      manifest("test.generation.clear",
+        health_checks: [
+          %{id: "blocking", module: Health, function: :check, args: [:block], timeout: 5_000}
+        ]
+      )
+
+    task = Task.async(fn -> Generations.install("blocking_source", [blocking]) end)
+    assert_receive {:health_check_blocked, _health_check}, 1_000
+
+    assert :ok = Generations.clear()
+    assert {:error, :generation_activation_cancelled} = Task.await(task, 5_000)
+    assert GenerationStore.active_id() == nil
+    assert GenerationStore.owners() == %{}
+
+    wait_until(fn ->
+      DynamicSupervisor.which_children(Catalyst.Runtime.CandidateProcessSupervisor) == []
+    end)
   end
 
   test "removing an owner atomically exposes the remaining composition" do
@@ -228,6 +294,62 @@ defmodule Catalyst.Runtime.GenerationsTest do
 
     assert resolved.selection.source ==
              {:generation, Catalyst.Runtime.GenerationId.to_wire(generation.id), run_engine.id}
+  end
+
+  test "rejects a managed run-engine claim tied with an imperative workflow" do
+    owner = "generation_imperative_workflow"
+
+    on_exit(fn -> Catalyst.Workflow.Registry.unregister_owner(owner) end)
+
+    assert :ok =
+             Catalyst.Workflow.Registry.register_workflow(
+               :default,
+               Catalyst.Agent.Loop,
+               owner: owner
+             )
+
+    run_engine =
+      manifest("test.generation.run-engine-tie",
+        services: [
+          %{
+            key: ServiceKey.new!("agent", "run_engine"),
+            contract: V1.ref(),
+            implementation: __MODULE__.Engine,
+            priority: 800
+          }
+        ]
+      )
+
+    assert {:error, {:existing_claim_conflicts, [_identity]}} =
+             Generations.install("run_engine_tie_source", [run_engine])
+  end
+
+  test "managed claims retain primary and fallback priorities for one owner" do
+    manifest =
+      manifest("test.generation.priority-chain",
+        services: [
+          %{
+            key: ServiceKey.new!("test", "generation_engine"),
+            contract: @contract,
+            implementation: __MODULE__.PrimaryEngine
+          },
+          %{
+            key: ServiceKey.new!("test", "generation_engine"),
+            contract: @contract,
+            implementation: __MODULE__.FallbackEngine,
+            priority: 800
+          }
+        ]
+      )
+
+    assert {:ok, _generation} = Generations.install("priority_source", [manifest])
+
+    priorities =
+      ExtensionPoints.list_claims()
+      |> Enum.filter(&(&1.owner == manifest.id))
+      |> Enum.map(& &1.priority)
+
+    assert priorities == [800, 900]
   end
 
   def unused_handler(_api, _entry, _opts), do: :ok

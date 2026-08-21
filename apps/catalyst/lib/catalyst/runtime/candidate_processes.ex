@@ -144,6 +144,9 @@ defmodule Catalyst.Runtime.CandidateProcesses do
       {:ok, {:ok, pid, _info}} ->
         {:ok, pid}
 
+      {:ok, :ignore} ->
+        {:error, {:candidate_process_ignored, declaration.id}}
+
       {:ok, {:error, reason}} ->
         {:error, {:candidate_process_start_failed, declaration.id, reason}}
 

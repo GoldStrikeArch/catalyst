@@ -32,8 +32,9 @@ defmodule Catalyst.Runtime.RunEngine do
     context = Context.new(context)
 
     with {:ok, key, claims} <- resolution_claims(opts, context),
-         {:ok, resolution} <- Resolver.resolve(claims, key, context, contract: V1.ref()) do
-      {:ok, %{selection: selection(resolution.claim, key), resolution: resolution}}
+         {:ok, resolution} <- Resolver.resolve(claims, key, context, contract: V1.ref()),
+         {:ok, selection} <- selection(resolution.claim, key) do
+      {:ok, %{selection: selection, resolution: resolution}}
     else
       {:error, %{status: {:error, reason}}} -> {:error, {:run_engine_resolution, reason}}
       {:error, _reason} = error -> error
@@ -78,6 +79,14 @@ defmodule Catalyst.Runtime.RunEngine do
     |> Enum.uniq_by(&Claim.stable_key/1)
   end
 
+  @doc false
+  @spec unmanaged_claims(Context.t() | map() | keyword()) :: [Claim.t()]
+  def unmanaged_claims(context \\ %{}) do
+    context
+    |> all_claims()
+    |> Enum.reject(&match?({:manifest, _id, _version, _declaration}, &1.provenance))
+  end
+
   @doc "Return the run-engine service key for a selection slot."
   @spec key(Registry.selection() | String.t() | :default | :loop) :: ServiceKey.t()
   def key(%{name: name}), do: key(name)
@@ -98,6 +107,9 @@ defmodule Catalyst.Runtime.RunEngine do
   @spec workflow_name(ServiceKey.t()) :: {:ok, String.t() | :default} | {:error, term()}
   def workflow_name(%ServiceKey{namespace: "agent", name: "run_engine", slot: "default"}),
     do: {:ok, :default}
+
+  def workflow_name(%ServiceKey{namespace: "agent", name: "run_engine", slot: "direct"}),
+    do: {:ok, :loop}
 
   def workflow_name(%ServiceKey{
         namespace: "agent",
@@ -195,19 +207,21 @@ defmodule Catalyst.Runtime.RunEngine do
     do: service_key(workflow)
 
   defp requested_key(_loop, workflow),
-    do: {:error, {:invalid_configuration, {:workflow, :name}, workflow}}
+    do: {:error, {:invalid_configuration, {:option, :workflow}, workflow}}
 
-  defp selection(%Claim{metadata: %{selection: selection}}, _key), do: selection
+  defp selection(%Claim{metadata: %{selection: selection}}, _key), do: {:ok, selection}
 
   defp selection(%Claim{} = claim, key) do
-    {:ok, name} = workflow_name(key)
-    generation = Map.get(claim.metadata, :runtime_generation, "legacy")
+    with {:ok, name} <- workflow_name(key) do
+      generation = Map.get(claim.metadata, :runtime_generation, "legacy")
 
-    %{
-      name: name,
-      module: claim.implementation,
-      source: {:generation, generation, claim.owner}
-    }
+      {:ok,
+       %{
+         name: name,
+         module: claim.implementation,
+         source: {:generation, generation, claim.owner}
+       }}
+    end
   end
 
   defp owner({:session, :loop}, %Context{session_id: session_id}),

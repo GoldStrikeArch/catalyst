@@ -12,14 +12,15 @@ defmodule Catalyst.Runtime.CandidateStager do
     CandidateProcesses,
     ExtensionPoints,
     GenerationId,
-    HealthChecks
+    HealthChecks,
+    RunEngine
   }
 
   alias Catalyst.Runtime.Candidate.Builder
 
   @doc false
   @spec stage(map(), GenerationId.t() | nil) ::
-          {:ok, Candidate.t(), pid(), :staged | :already_staged}
+          {:ok, Candidate.t(), pid(), :staged}
           | {:error, term()}
           | {:error, term(), Candidate.t()}
   def stage(owners, parent) when is_map(owners) do
@@ -28,7 +29,7 @@ defmodule Catalyst.Runtime.CandidateStager do
     with {:ok, candidate} <-
            Builder.build(manifests,
              extension_points: ExtensionPoints.base_points(),
-             existing_claims: ExtensionPoints.base_claims(),
+             existing_claims: existing_claims(),
              existing_contributions: ExtensionPoints.base_contributions(),
              parent: parent
            ) do
@@ -36,10 +37,17 @@ defmodule Catalyst.Runtime.CandidateStager do
     end
   end
 
+  defp existing_claims do
+    ExtensionPoints.base_claims()
+    |> Kernel.++(RunEngine.unmanaged_claims())
+    |> Enum.uniq_by(&Catalyst.Runtime.Claim.stable_key/1)
+  end
+
   defp stage_candidate(candidate) do
     case CandidateProcesses.alive?(candidate.id) do
       true ->
-        {:ok, candidate, candidate_process(candidate.id), :already_staged}
+        CandidateProcesses.stop(candidate.id)
+        start_and_check(candidate)
 
       false ->
         start_and_check(candidate)
@@ -64,16 +72,6 @@ defmodule Catalyst.Runtime.CandidateStager do
       {:error, reason} ->
         CandidateProcesses.stop(supervisor)
         {:error, reason, candidate}
-    end
-  end
-
-  defp candidate_process(id) do
-    case Registry.lookup(
-           Catalyst.Runtime.CandidateProcessRegistry,
-           GenerationId.to_wire(id)
-         ) do
-      [{pid, _value}] -> pid
-      [] -> raise "candidate process registry lost a live candidate"
     end
   end
 end

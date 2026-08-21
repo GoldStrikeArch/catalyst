@@ -35,6 +35,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
   @process_fields [:id, :child_spec, :metadata]
   @health_check_fields [:id, :module, :function, :args, :timeout, :metadata]
   @migration_fields [:id, :from, :to, :module, :function, :metadata]
+  @managed_default_priority 900
   @max_health_timeout 60_000
 
   @doc """
@@ -268,7 +269,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
          {:ok, point} <- service_point(points, key, contract),
          {:ok, implementation} <- required_durable(declaration, :implementation),
          {:ok, scope} <- Scope.new(Map.get(declaration, :scope, :global)),
-         :ok <- validate_priority(Map.get(declaration, :priority, 800)),
+         :ok <- validate_priority(Map.get(declaration, :priority, @managed_default_priority)),
          :ok <- validate_binding(Map.get(declaration, :binding, point.default_binding)),
          {:ok, metadata} <- metadata(Map.get(declaration, :metadata, %{})) do
       {:ok,
@@ -278,7 +279,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
          implementation: implementation,
          owner: manifest.id,
          scope: scope,
-         priority: Map.get(declaration, :priority, 800),
+         priority: Map.get(declaration, :priority, @managed_default_priority),
          binding: Map.get(declaration, :binding, point.default_binding),
          provenance: manifest_provenance(manifest, :service, index),
          health: :starting,

@@ -38,6 +38,12 @@ defmodule Catalyst.Runtime.Generations do
     GenServer.call(__MODULE__, {:install, owner, manifests}, call_timeout())
   end
 
+  @doc "Replace the complete managed owner composition in one activation."
+  @spec replace_all(owner_manifests()) :: {:ok, Generation.t() | nil} | {:error, term()}
+  def replace_all(owners) when is_map(owners) do
+    GenServer.call(__MODULE__, {:replace_all, owners}, call_timeout())
+  end
+
   @doc "Remove one source owner from the managed composition."
   @spec remove_owner(String.t()) :: :ok | {:error, term()}
   def remove_owner(owner) when is_binary(owner) do
@@ -76,13 +82,18 @@ defmodule Catalyst.Runtime.Generations do
   end
 
   @impl true
+  def handle_call(:clear, _from, state) do
+    state = cancel_operation(state)
+    state = demonitor_active(state)
+    CandidateProcesses.stop_all()
+    GenerationStore.clear()
+    {:reply, :ok, state}
+  end
+
   def handle_call(request, from, %{operation: nil} = state) do
     case proposed_owners(request, GenerationStore.owners()) do
-      {:clear, _owners} ->
-        state = demonitor_active(state)
-        CandidateProcesses.stop_all()
-        GenerationStore.clear()
-        {:reply, :ok, state}
+      :noop ->
+        {:reply, {:ok, GenerationStore.active()}, state}
 
       {:ok, owners} ->
         start_operation(from, owners, state)
@@ -122,17 +133,37 @@ defmodule Catalyst.Runtime.Generations do
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp proposed_owners({:install, owner, []}, owners), do: {:ok, Map.delete(owners, owner)}
+  defp proposed_owners({:install, owner, []}, owners) do
+    case Map.has_key?(owners, owner) do
+      true -> {:ok, Map.delete(owners, owner)}
+      false -> :noop
+    end
+  end
 
-  defp proposed_owners({:install, owner, manifests}, owners),
-    do: {:ok, Map.put(owners, owner, manifests)}
+  defp proposed_owners({:install, owner, manifests}, owners) do
+    case Map.get(owners, owner) == manifests do
+      true -> :noop
+      false -> {:ok, Map.put(owners, owner, manifests)}
+    end
+  end
 
-  defp proposed_owners({:remove_owner, owner}, owners), do: {:ok, Map.delete(owners, owner)}
+  defp proposed_owners({:remove_owner, owner}, owners) do
+    case Map.has_key?(owners, owner) do
+      true -> {:ok, Map.delete(owners, owner)}
+      false -> :noop
+    end
+  end
 
-  defp proposed_owners({:reconcile, live_owners}, owners),
-    do: {:ok, Map.take(owners, MapSet.to_list(live_owners))}
+  defp proposed_owners({:replace_all, owners}, current) do
+    case owners == current do
+      true -> :noop
+      false -> {:ok, owners}
+    end
+  end
 
-  defp proposed_owners(:clear, _owners), do: {:clear, %{}}
+  defp proposed_owners({:reconcile, live_owners}, owners) do
+    proposed_owners({:replace_all, Map.take(owners, MapSet.to_list(live_owners))}, owners)
+  end
 
   defp start_operation(from, owners, state) do
     parent = GenerationStore.active_id()
@@ -152,7 +183,10 @@ defmodule Catalyst.Runtime.Generations do
         state
 
       {true, false} ->
-        GenServer.reply(operation.from, {:error, :candidate_processes_exited_before_activation})
+        reason = :candidate_processes_exited_before_activation
+        CandidateProcesses.stop(supervisor)
+        GenerationStore.reject(candidate, operation.owners, reason)
+        GenServer.reply(operation.from, {:error, reason})
         state
     end
   end
@@ -178,7 +212,6 @@ defmodule Catalyst.Runtime.Generations do
   end
 
   defp stop_superseded(nil, _new_id, _supervisor, _mode), do: :ok
-  defp stop_superseded(id, id, _supervisor, :already_staged), do: :ok
 
   defp stop_superseded(old_id, new_id, _supervisor, _mode) do
     case old_id == new_id do
@@ -198,6 +231,15 @@ defmodule Catalyst.Runtime.Generations do
   defp demonitor_active(%{active_monitor: %{ref: reference}} = state) do
     Process.demonitor(reference, [:flush])
     %{state | active_monitor: nil}
+  end
+
+  defp cancel_operation(%{operation: nil} = state), do: state
+
+  defp cancel_operation(%{operation: operation} = state) do
+    Task.shutdown(operation.task, :brutal_kill)
+    Process.demonitor(operation.task.ref, [:flush])
+    GenServer.reply(operation.from, {:error, :generation_activation_cancelled})
+    %{state | operation: nil}
   end
 
   defp call_timeout do

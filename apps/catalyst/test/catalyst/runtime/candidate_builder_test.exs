@@ -57,6 +57,18 @@ defmodule Catalyst.Runtime.Candidate.BuilderTest do
              )
   end
 
+  test "managed claims default above the imperative runtime priority" do
+    declaration = Map.delete(service(), :priority)
+
+    assert {:ok, %Candidate{claims: [claim]}} =
+             Builder.build(
+               [manifest("test.default-priority", services: [declaration])],
+               extension_points: [run_engine_point()]
+             )
+
+    assert claim.priority == 900
+  end
+
   test "rejects missing dependencies and duplicate claims" do
     dependent = manifest("test.dependent", requires: [{"test.missing", "~> 1.0"}])
 

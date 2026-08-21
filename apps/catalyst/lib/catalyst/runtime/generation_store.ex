@@ -153,11 +153,28 @@ defmodule Catalyst.Runtime.GenerationStore do
   end
 
   defp deactivate_expected(%{active: expected_id} = current, expected_id, reason) do
-    now = DateTime.utc_now()
-    generation = active_generation(current)
-    failed = %{generation | status: :failed, retired_at: now, reason: reason}
-    generations = Map.put(current.generations, GenerationId.to_wire(expected_id), failed)
-    :persistent_term.put(@state_key, %{current | active: nil, generations: generations})
+    generations =
+      case active_generation(current) do
+        %Generation{} = generation ->
+          failed = %{
+            generation
+            | status: :failed,
+              retired_at: DateTime.utc_now(),
+              reason: reason
+          }
+
+          Map.put(current.generations, GenerationId.to_wire(expected_id), failed)
+
+        nil ->
+          current.generations
+      end
+
+    :persistent_term.put(@state_key, %{
+      current
+      | active: nil,
+        owners: %{},
+        generations: generations
+    })
   end
 
   defp deactivate_expected(_current, _expected_id, _reason), do: :ok

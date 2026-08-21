@@ -9,6 +9,7 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   """
 
   alias Catalyst.ExtensionAPI
+  alias Catalyst.Extension.Manifest
 
   alias Catalyst.Runtime.{
     Claim,
@@ -53,7 +54,8 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   def contribute(%ExtensionAPI{} = api, point_id, value, opts) when is_list(opts) do
     with {:ok, point} <- fetch(point_id),
          {:ok, value} <- ExtensionPoint.normalize_payload(point, value),
-         {:ok, contribution} <- build_contribution(api, point, value, opts) do
+         {:ok, contribution} <- build_contribution(api, point, value, opts),
+         :ok <- validate_managed_contribution(point, contribution) do
       activate_contribution(api, point, contribution, opts)
     end
   end
@@ -63,7 +65,8 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   def claim(%ExtensionAPI{} = api, %ServiceKey{} = key, implementation, opts)
       when is_list(opts) do
     with {:ok, point} <- service_point(key, Keyword.get(opts, :contract)),
-         {:ok, claim} <- build_claim(api, point, key, implementation, opts) do
+         {:ok, claim} <- build_claim(api, point, key, implementation, opts),
+         :ok <- validate_managed_claim(claim) do
       activate_claim(api, point, claim, opts)
     end
   end
@@ -163,8 +166,10 @@ defmodule Catalyst.Runtime.ExtensionPoints do
 
   defp put_point(%ExtensionPoint{} = point) do
     update_result(fn current ->
-      with :ok <- validate_point_owner(current.points, point),
-           :ok <- validate_service_identity(current.points, point) do
+      validation_points = put_managed_points(current.points, managed_points())
+
+      with :ok <- validate_point_owner(validation_points, point),
+           :ok <- validate_service_identity(validation_points, point) do
         {:ok, %{current | points: Map.put(current.points, point.id, point)}}
       else
         {:error, reason} -> {{:error, reason}, current}
@@ -177,11 +182,14 @@ defmodule Catalyst.Runtime.ExtensionPoints do
       :error ->
         :ok
 
-      {:ok, %ExtensionPoint{owner: owner}} when owner == point.owner ->
-        :ok
-
       {:ok, existing} ->
-        {:error, {:owner_collision, :extension_point, point.id, existing.owner, point.owner}}
+        case same_lifecycle_owner?(existing.owner, point.owner) do
+          true ->
+            :ok
+
+          false ->
+            {:error, {:owner_collision, :extension_point, point.id, existing.owner, point.owner}}
+        end
     end
   end
 
@@ -199,7 +207,14 @@ defmodule Catalyst.Runtime.ExtensionPoints do
         :ok
 
       existing ->
-        {:error, {:service_point_collision, point.service, point.contract, existing.id, point.id}}
+        case same_lifecycle_owner?(existing.owner, point.owner) do
+          true ->
+            :ok
+
+          false ->
+            {:error,
+             {:service_point_collision, point.service, point.contract, existing.id, point.id}}
+        end
     end
   end
 
@@ -374,6 +389,100 @@ defmodule Catalyst.Runtime.ExtensionPoints do
     update(fn current -> put_in(current.claims[claim_key(claim)], claim) end)
   end
 
+  defp validate_managed_contribution(point, contribution) do
+    collision =
+      managed_contributions()
+      |> Enum.find(
+        &(contribution_identity(&1, point.cardinality) ==
+            contribution_identity(contribution, point.cardinality))
+      )
+
+    case collision do
+      nil ->
+        :ok
+
+      existing ->
+        case same_lifecycle_owner?(existing.owner, contribution.owner) do
+          true ->
+            :ok
+
+          false ->
+            {:error,
+             {:owner_collision, :contribution, {point.id, contribution.id}, existing.owner,
+              contribution.owner}}
+        end
+    end
+  end
+
+  defp validate_managed_claim(claim) do
+    collision =
+      managed_claims()
+      |> Enum.find(&(claim_collision_identity(&1) == claim_collision_identity(claim)))
+
+    case collision do
+      nil ->
+        :ok
+
+      existing ->
+        case same_lifecycle_owner?(existing.owner, claim.owner) do
+          true ->
+            :ok
+
+          false ->
+            {:error,
+             {:owner_collision, :service_claim, ServiceKey.to_wire(claim.key), existing.owner,
+              claim.owner}}
+        end
+    end
+  end
+
+  defp contribution_identity(contribution, :one),
+    do: {contribution.point, contribution.scope.constraints}
+
+  defp contribution_identity(contribution, :many),
+    do: {contribution.point, contribution.id, contribution.scope.constraints}
+
+  defp claim_collision_identity(claim) do
+    {
+      ServiceKey.to_wire(claim.key),
+      claim.contract.id,
+      claim.contract.version,
+      claim.scope.constraints,
+      claim.priority
+    }
+  end
+
+  defp managed_points do
+    case GenerationStore.active_candidate() do
+      nil -> []
+      candidate -> candidate.extension_points
+    end
+  end
+
+  defp managed_contributions do
+    case GenerationStore.active_candidate() do
+      nil -> []
+      candidate -> candidate.contributions
+    end
+  end
+
+  defp managed_claims do
+    case GenerationStore.active_candidate() do
+      nil -> []
+      candidate -> candidate.claims
+    end
+  end
+
+  defp same_lifecycle_owner?(owner, owner), do: true
+
+  defp same_lifecycle_owner?(managed_owner, source_owner) do
+    GenerationStore.owners()
+    |> Enum.any?(fn {owner, manifests} ->
+      owner == source_owner and
+        Enum.any?(manifests, &match?(%Manifest{id: ^managed_owner}, &1))
+    end)
+  end
+
   defp point_contributions(points) do
     points
     |> Map.values()
@@ -438,7 +547,8 @@ defmodule Catalyst.Runtime.ExtensionPoints do
       ServiceKey.to_wire(claim.key),
       {claim.contract.id, claim.contract.version},
       claim.owner,
-      claim.scope.constraints
+      claim.scope.constraints,
+      claim.priority
     }
   end
 

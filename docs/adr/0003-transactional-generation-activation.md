@@ -82,6 +82,8 @@ It does not provide atomic VM code replacement:
 - active operations do not hold code leases;
 - the previous generation is not retained for draining;
 - candidate processes may perform side effects while staged;
+- health checks are trusted in-process callbacks whose arbitrary side effects
+  are not rolled back; checks must be bounded and idempotent;
 - API-v1 registry handlers remain imperative and independently visible.
 
 Those limitations are explicit rather than hidden behind a stronger

@@ -10,6 +10,7 @@ defmodule Catalyst.ExtensionsLoadTest do
   alias Catalyst.Agent.Loop
   alias Catalyst.Extensions
   alias Catalyst.ExtensionsFixtures.SetupOnlyTool
+  alias Catalyst.Runtime.GenerationStore
   alias Catalyst.Tools.DevelopTool
 
   setup do
@@ -304,6 +305,246 @@ defmodule Catalyst.ExtensionsLoadTest do
       assert Enum.any?(loaded, &(&1.owner == "goodfile"))
       assert Extensions.format_error(reason) =~ "badfile.ex"
     end)
+  end
+
+  test "reloading a v2 extension as v1 removes its managed manifests" do
+    path =
+      write_ext(
+        "manifest_removed",
+        """
+        defmodule Catalyst.Ext.ManifestRemoved do
+          use Catalyst.Extension, api: 2
+
+          manifest %{
+            id: "test.manifest-removed",
+            version: "1.0.0"
+          }
+
+          def marker, do: :managed
+        end
+        """
+      )
+
+    on_exit(fn -> Extensions.uninstall("manifest_removed") end)
+
+    assert {:ok, _summary} = Extensions.load_file(path)
+    assert Map.has_key?(GenerationStore.owners(), "manifest_removed")
+
+    write_ext(
+      "manifest_removed",
+      """
+      defmodule Catalyst.Ext.ManifestRemoved do
+        use Catalyst.Extension
+
+        def setup(_api), do: :ok
+        def marker, do: :imperative
+      end
+      """
+    )
+
+    assert {:ok, _summary} = Extensions.load_file(path)
+    refute Map.has_key?(GenerationStore.owners(), "manifest_removed")
+    assert apply(Catalyst.Ext.ManifestRemoved, :marker, []) == :imperative
+  end
+
+  test "load_all activates interdependent manifests independently of file order" do
+    write_ext(
+      "a_dependent",
+      """
+      defmodule Catalyst.Ext.OrderedDependent do
+        use Catalyst.Extension, api: 2
+
+        manifest %{
+          id: "test.ordered-dependent",
+          version: "1.0.0",
+          requires: [{"test.ordered-base", "~> 1.0"}]
+        }
+      end
+      """
+    )
+
+    write_ext(
+      "z_base",
+      """
+      defmodule Catalyst.Ext.OrderedBase do
+        use Catalyst.Extension, api: 2
+
+        manifest %{
+          id: "test.ordered-base",
+          version: "1.0.0"
+        }
+      end
+      """
+    )
+
+    on_exit(fn ->
+      Extensions.uninstall("a_dependent")
+      Extensions.uninstall("z_base")
+    end)
+
+    assert {:ok, %{loaded: loaded, failed: []}} = Extensions.load_all()
+    assert Enum.map(loaded, & &1.owner) == ["a_dependent", "z_base"]
+    assert Map.has_key?(GenerationStore.owners(), "a_dependent")
+    assert Map.has_key?(GenerationStore.owners(), "z_base")
+  end
+
+  test "a rejected managed composition does not block an unrelated v1 load" do
+    write_ext("legacy_survivor", ephemeral_source())
+
+    rejected_path =
+      write_ext(
+        "managed_rejected",
+        """
+        defmodule Catalyst.Ext.ManagedRejectedHealth do
+          def check, do: {:error, :not_ready}
+        end
+
+        defmodule Catalyst.Ext.ManagedRejected do
+          use Catalyst.Extension, api: 2
+
+          manifest %{
+            id: "test.managed-rejected",
+            version: "1.0.0",
+            health_checks: [
+              %{
+                id: "not-ready",
+                module: Catalyst.Ext.ManagedRejectedHealth,
+                function: :check,
+                timeout: 100
+              }
+            ]
+          }
+        end
+        """
+      )
+
+    on_exit(fn ->
+      Extensions.uninstall("legacy_survivor")
+      Extensions.uninstall("managed_rejected")
+    end)
+
+    assert {:ok, %{loaded: loaded, failed: [{^rejected_path, reason}]}} =
+             Extensions.load_all()
+
+    assert Enum.any?(loaded, &(&1.owner == "legacy_survivor"))
+
+    assert reason ==
+             {:candidate_activation_failed, {:health_check_failed, "not-ready", :not_ready}}
+
+    assert Enum.any?(Extensions.list_loaded(), &(&1.owner == "legacy_survivor"))
+    refute Enum.any?(Extensions.list_loaded(), &(&1.owner == "managed_rejected"))
+  end
+
+  test "a rejected replacement restores the prior accepted module and manifest" do
+    path =
+      write_ext(
+        "managed_restore",
+        """
+        defmodule Catalyst.Ext.ManagedRestore do
+          use Catalyst.Extension, api: 2
+
+          manifest %{
+            id: "test.managed-restore",
+            version: "1.0.0"
+          }
+
+          def marker, do: :old
+        end
+        """
+      )
+
+    on_exit(fn -> Extensions.uninstall("managed_restore") end)
+
+    assert {:ok, _summary} = Extensions.load_file(path)
+
+    write_ext(
+      "managed_restore",
+      """
+      defmodule Catalyst.Ext.ManagedRestoreHealth do
+        def check, do: {:error, :replacement_rejected}
+      end
+
+      defmodule Catalyst.Ext.ManagedRestore do
+        use Catalyst.Extension, api: 2
+
+        manifest %{
+          id: "test.managed-restore",
+          version: "2.0.0",
+          health_checks: [
+            %{
+              id: "replacement-health",
+              module: Catalyst.Ext.ManagedRestoreHealth,
+              function: :check,
+              timeout: 100
+            }
+          ]
+        }
+
+        def marker, do: :new
+      end
+      """
+    )
+
+    assert {:error,
+            {:candidate_activation_failed,
+             {:health_check_failed, "replacement-health", :replacement_rejected}}} =
+             Extensions.load_file(path)
+
+    assert apply(Catalyst.Ext.ManagedRestore, :marker, []) == :old
+    assert [%{version: "1.0.0"}] = GenerationStore.owners()["managed_restore"]
+  end
+
+  test "uninstalling a v1 extension does not restage unrelated managed owners" do
+    :persistent_term.put({__MODULE__, :managed_health}, :ready)
+
+    on_exit(fn ->
+      :persistent_term.erase({__MODULE__, :managed_health})
+      Extensions.uninstall("stable_managed")
+      Extensions.uninstall("legacy_uninstall")
+    end)
+
+    managed_path =
+      write_ext(
+        "stable_managed",
+        """
+        defmodule Catalyst.Ext.StableManagedHealth do
+          def check do
+            case :persistent_term.get({#{inspect(__MODULE__)}, :managed_health}) do
+              :ready -> :ok
+              status -> {:error, status}
+            end
+          end
+        end
+
+        defmodule Catalyst.Ext.StableManaged do
+          use Catalyst.Extension, api: 2
+
+          manifest %{
+            id: "test.stable-managed",
+            version: "1.0.0",
+            health_checks: [
+              %{
+                id: "stable-health",
+                module: Catalyst.Ext.StableManagedHealth,
+                function: :check,
+                timeout: 100
+              }
+            ]
+          }
+        end
+        """
+      )
+
+    legacy_path = write_ext("legacy_uninstall", ephemeral_source())
+
+    assert {:ok, _summary} = Extensions.load_file(managed_path)
+    assert {:ok, _summary} = Extensions.load_file(legacy_path)
+
+    :persistent_term.put({__MODULE__, :managed_health}, :broken)
+
+    assert :ok = Extensions.uninstall("legacy_uninstall")
+    refute Enum.any?(Extensions.list_loaded(), &(&1.owner == "legacy_uninstall"))
+    assert Map.has_key?(GenerationStore.owners(), "stable_managed")
   end
 
   test "redefining another owner's module is warned about and surfaced in the summary" do

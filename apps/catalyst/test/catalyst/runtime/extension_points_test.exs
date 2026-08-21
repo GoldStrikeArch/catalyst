@@ -4,10 +4,12 @@ defmodule Catalyst.Runtime.ExtensionPointsTest do
   import Catalyst.ExtensionsFixtures, only: [setup_extensions_dir: 0, write_ext: 2]
 
   alias Catalyst.{ExtensionAPI, Runtime}
+  alias Catalyst.Extension.Manifest
 
   alias Catalyst.Runtime.{
     ContractRef,
     ExtensionPoints,
+    Generations,
     Resolver,
     Scope,
     ServiceKey
@@ -331,6 +333,97 @@ defmodule Catalyst.Runtime.ExtensionPointsTest do
                contributor,
                "contract-routed",
                Catalyst.Agent.Loop
+             )
+  end
+
+  test "imperative point declarations reject active managed collisions" do
+    on_exit(&Generations.clear/0)
+
+    manifest =
+      Manifest.new!(%{
+        id: "test.managed-point-owner",
+        version: "1.0.0",
+        extension_points: [%{id: "test.managed_point", cardinality: :many}]
+      })
+
+    assert {:ok, _generation} = Generations.install("managed_point_source", [manifest])
+
+    assert {:error,
+            {:owner_collision, :extension_point, "test.managed_point", "test.managed-point-owner",
+             @other_owner}} =
+             ExtensionAPI.define_extension_point(ExtensionAPI.new(@other_owner), %{
+               id: "test.managed_point",
+               cardinality: :one
+             })
+  end
+
+  test "imperative contributions reject active managed collisions" do
+    on_exit(&Generations.clear/0)
+    host = ExtensionAPI.new(@point_owner)
+
+    assert :ok =
+             ExtensionAPI.define_extension_point(host, %{
+               id: "test.managed_contribution",
+               cardinality: :many
+             })
+
+    manifest =
+      Manifest.new!(%{
+        id: "test.managed-contribution-owner",
+        version: "1.0.0",
+        contributions: [
+          %{point: "test.managed_contribution", id: "entry", value: %{managed: true}}
+        ]
+      })
+
+    assert {:ok, _generation} =
+             Generations.install("managed_contribution_source", [manifest])
+
+    assert {:error,
+            {:owner_collision, :contribution, {"test.managed_contribution", "entry"},
+             "test.managed-contribution-owner", @other_owner}} =
+             ExtensionAPI.contribute(
+               ExtensionAPI.new(@other_owner),
+               "test.managed_contribution",
+               %{managed: false},
+               id: "entry"
+             )
+  end
+
+  test "imperative claims reject equal-ranked active managed claims" do
+    on_exit(&Generations.clear/0)
+    host = ExtensionAPI.new(@point_owner)
+    key = ServiceKey.new!("test", "managed_claim")
+    contract = ContractRef.new!("test.managed-claim", 1)
+
+    assert :ok =
+             ExtensionAPI.define_extension_point(host, %{
+               id: "test.managed_claim",
+               contract: contract,
+               service: {"test", "managed_claim"}
+             })
+
+    manifest =
+      Manifest.new!(%{
+        id: "test.managed-claim-owner",
+        version: "1.0.0",
+        services: [
+          %{
+            key: key,
+            contract: contract,
+            implementation: ManagedEngine,
+            priority: 800
+          }
+        ]
+      })
+
+    assert {:ok, _generation} = Generations.install("managed_claim_source", [manifest])
+
+    assert {:error,
+            {:owner_collision, :service_claim, "test.managed_claim/default",
+             "test.managed-claim-owner", @other_owner}} =
+             ExtensionAPI.claim(ExtensionAPI.new(@other_owner), key, ImperativeEngine,
+               priority: 800
              )
   end
 
