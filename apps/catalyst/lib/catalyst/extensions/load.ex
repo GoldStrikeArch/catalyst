@@ -21,6 +21,8 @@ defmodule Catalyst.Extensions.Load do
     Versioning
   }
 
+  alias Catalyst.Runtime.{GenerationId, Generations}
+
   @server Catalyst.Extensions
   @default_server_call_timeout 30_000
 
@@ -62,9 +64,13 @@ defmodule Catalyst.Extensions.Load do
   end
 
   @doc false
-  @spec uninstall(String.t()) :: :ok
+  @spec uninstall(String.t()) :: :ok | {:error, term()}
   def uninstall(owner) do
-    Transaction.run(fn -> server_call({:uninstall, owner}) end)
+    Transaction.run(fn ->
+      with :ok <- Generations.remove_owner(owner) do
+        server_call({:uninstall, owner})
+      end
+    end)
   end
 
   @doc false
@@ -142,9 +148,22 @@ defmodule Catalyst.Extensions.Load do
 
     with :ok <- Sources.ensure_managed(path),
          :ok <- File.rename(path, disabled) do
-      :ok = server_call({:uninstall, owner})
-      commit_lifecycle_change([path, disabled], "disable #{owner}")
-      {:ok, disabled}
+      case Generations.remove_owner(owner) do
+        :ok ->
+          :ok = server_call({:uninstall, owner})
+          commit_lifecycle_change([path, disabled], "disable #{owner}")
+          {:ok, disabled}
+
+        {:error, reason} ->
+          restore_enabled_file(path, disabled, reason)
+      end
+    end
+  end
+
+  defp restore_enabled_file(path, disabled, reason) do
+    case File.rename(disabled, path) do
+      :ok -> {:error, reason}
+      {:error, rollback_reason} -> {:error, {:disable_failed, reason, rollback_reason}}
     end
   end
 
@@ -190,21 +209,23 @@ defmodule Catalyst.Extensions.Load do
 
   defp load_paths(paths) do
     live_owners = MapSet.new(paths, &Sources.owner/1)
-    :ok = server_call({:purge_gone, live_owners})
 
-    {loaded, failed} =
-      Enum.reduce(paths, {[], []}, fn path, {ok, bad} ->
-        case compile_and_load(path, Sources.owner(path)) do
-          {:ok, summary} ->
-            {[summary | ok], bad}
+    with :ok <- Generations.reconcile(live_owners),
+         :ok <- server_call({:purge_gone, live_owners}) do
+      {loaded, failed} =
+        Enum.reduce(paths, {[], []}, fn path, {ok, bad} ->
+          case compile_and_load(path, Sources.owner(path)) do
+            {:ok, summary} ->
+              {[summary | ok], bad}
 
-          {:error, reason} ->
-            Logger.warning("[extensions] failed to load #{path}: #{inspect(reason)}")
-            {ok, [{path, reason} | bad]}
-        end
-      end)
+            {:error, reason} ->
+              Logger.warning("[extensions] failed to load #{path}: #{inspect(reason)}")
+              {ok, [{path, reason} | bad]}
+          end
+        end)
 
-    {:ok, %{loaded: Enum.reverse(loaded), failed: Enum.reverse(failed)}}
+      {:ok, %{loaded: Enum.reverse(loaded), failed: Enum.reverse(failed)}}
+    end
   end
 
   defp do_load_file(path) do
@@ -258,13 +279,39 @@ defmodule Catalyst.Extensions.Load do
 
     case List.first(recorded_collisions) || ownership_collision(setup_status) do
       nil ->
-        {:ok, annotate_setup_status(summary, setup_status)}
+        finish_activation(owner, contribution, summary, setup_status, prior)
 
       collision ->
         :ok = server_call({:uninstall, owner})
         restore_prior_version(owner, prior)
         {:error, collision}
     end
+  end
+
+  defp finish_activation(owner, contribution, summary, setup_status, prior) do
+    case activate_manifests(owner, contribution.manifests) do
+      {:ok, generation} ->
+        {:ok,
+         summary
+         |> annotate_setup_status(setup_status)
+         |> annotate_generation(generation)}
+
+      {:error, reason} ->
+        :ok = server_call({:uninstall, owner})
+        restore_prior_version(owner, prior)
+        {:error, {:candidate_activation_failed, reason}}
+    end
+  end
+
+  defp activate_manifests(_owner, []), do: {:ok, nil}
+  defp activate_manifests(owner, manifests), do: Generations.install(owner, manifests)
+
+  defp annotate_generation(summary, nil), do: summary
+
+  defp annotate_generation(summary, generation) do
+    summary
+    |> Map.put(:activation, :active)
+    |> Map.put(:generation, GenerationId.to_wire(generation.id))
   end
 
   defp ensure_distinct_owners(paths) do
@@ -329,6 +376,10 @@ defmodule Catalyst.Extensions.Load do
       modules: snapshot.modules,
       beams: snapshot.beams,
       ext_mods: Enum.filter(snapshot.modules, &Catalyst.Extension.extension_module?/1),
+      manifests:
+        snapshot.modules
+        |> Enum.filter(&Catalyst.Extension.extension_module?/1)
+        |> Catalyst.Extension.manifests_of(),
       tool_mods: snapshot.tool_mods,
       tool_names: snapshot.tool_names,
       metadata: snapshot.metadata
@@ -340,8 +391,10 @@ defmodule Catalyst.Extensions.Load do
     :ok = server_call({:begin_setup, load_ref})
     setup_status = Loader.run_setups(contribution.ext_mods, ExtensionAPI.new(owner, load_ref))
     collisions = server_call({:take_setup_collisions, load_ref})
+    activation_status = activate_manifests(owner, contribution.manifests)
 
-    case List.first(collisions) || setup_restore_failure(setup_status) do
+    case List.first(collisions) || setup_restore_failure(setup_status) ||
+           activation_restore_failure(activation_status) do
       nil ->
         Logger.info("[extensions] restored prior accepted version of #{owner}")
         :ok
@@ -354,6 +407,11 @@ defmodule Catalyst.Extensions.Load do
 
   defp setup_restore_failure(:ok), do: nil
   defp setup_restore_failure({:error, reason}), do: reason
+
+  defp activation_restore_failure({:ok, _generation}), do: nil
+
+  defp activation_restore_failure({:error, reason}),
+    do: {:activation_restore_failed, reason}
 
   defp log_failed_restore(owner, reason) do
     Logger.warning("[extensions] could not restore prior version of #{owner}: #{inspect(reason)}")

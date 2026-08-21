@@ -9,7 +9,18 @@ defmodule Catalyst.Runtime.RunEngine do
   """
 
   alias Catalyst.Contracts.RunEngine.V1
-  alias Catalyst.Runtime.{Claim, Context, Resolution, Resolver, Scope, ServiceKey}
+
+  alias Catalyst.Runtime.{
+    Claim,
+    Context,
+    ContractRef,
+    ExtensionPoints,
+    Resolution,
+    Resolver,
+    Scope,
+    ServiceKey
+  }
+
   alias Catalyst.Workflow.Registry
 
   @type resolved :: %{selection: Registry.selection(), resolution: Resolution.t()}
@@ -20,11 +31,9 @@ defmodule Catalyst.Runtime.RunEngine do
   def resolve(opts, context \\ %{}) do
     context = Context.new(context)
 
-    with {:ok, selection} <- Registry.resolve(opts),
-         claims = execution_claims(selection, context),
-         key = key(selection),
+    with {:ok, key, claims} <- resolution_claims(opts, context),
          {:ok, resolution} <- Resolver.resolve(claims, key, context, contract: V1.ref()) do
-      {:ok, %{selection: selection, resolution: resolution}}
+      {:ok, %{selection: selection(resolution.claim, key), resolution: resolution}}
     else
       {:error, %{status: {:error, reason}}} -> {:error, {:run_engine_resolution, reason}}
       {:error, _reason} = error -> error
@@ -37,9 +46,8 @@ defmodule Catalyst.Runtime.RunEngine do
   def explain(opts, context \\ %{}) do
     context = Context.new(context)
 
-    with {:ok, selection, layers} <- Registry.resolve_with_layers(opts) do
-      claims = Enum.map(layers, &claim(&1, context))
-      {:ok, Resolver.explain(claims, key(selection), context, contract: V1.ref())}
+    with {:ok, key, claims} <- resolution_claims(opts, context) do
+      {:ok, Resolver.explain(claims, key, context, contract: V1.ref())}
     end
   end
 
@@ -49,8 +57,8 @@ defmodule Catalyst.Runtime.RunEngine do
   def claims(opts, context \\ %{}) do
     context = Context.new(context)
 
-    with {:ok, _selection, layers} <- Registry.resolve_with_layers(opts) do
-      {:ok, Enum.map(layers, &claim(&1, context))}
+    with {:ok, _key, claims} <- resolution_claims(opts, context) do
+      {:ok, claims}
     end
   end
 
@@ -66,6 +74,7 @@ defmodule Catalyst.Runtime.RunEngine do
         {:error, _reason} -> []
       end
     end)
+    |> Kernel.++(managed_claims())
     |> Enum.uniq_by(&Claim.stable_key/1)
   end
 
@@ -106,7 +115,7 @@ defmodule Catalyst.Runtime.RunEngine do
   def metadata(%Resolution{} = resolution) do
     claim = resolution.claim
 
-    %{
+    metadata = %{
       service: ServiceKey.to_wire(resolution.key),
       contract: %{id: resolution.contract.id, version: resolution.contract.version},
       snapshot_id: resolution.snapshot_id,
@@ -116,6 +125,11 @@ defmodule Catalyst.Runtime.RunEngine do
       provenance: claim.provenance,
       implementation: claim.implementation
     }
+
+    case Map.get(claim.metadata, :runtime_generation) do
+      nil -> metadata
+      generation -> Map.put(metadata, :generation, generation)
+    end
   end
 
   defp claim(selection, context) do
@@ -132,19 +146,75 @@ defmodule Catalyst.Runtime.RunEngine do
     }
   end
 
-  defp execution_claims(%{name: :default, source: source} = selection, context)
-       when source != :builtin,
-       do: [claim(selection, context), claim(builtin_selection(), context)]
+  defp resolution_claims(opts, context) do
+    with {:ok, key} <- requested_key(opts),
+         managed = managed_claims(key),
+         {:ok, legacy} <- legacy_claims(opts, context, managed) do
+      {:ok, key, managed ++ legacy}
+    end
+  end
 
-  defp execution_claims(selection, context), do: [claim(selection, context)]
+  defp legacy_claims(opts, context, managed) do
+    case Registry.resolve_with_layers(opts) do
+      {:ok, _selection, layers} ->
+        {:ok, Enum.map(layers, &claim(&1, context))}
 
-  defp builtin_selection,
-    do: %{name: :default, module: Catalyst.Agent.Loop, source: :builtin}
+      {:error, {:unknown_workflow, _name}} when managed != [] ->
+        {:ok, []}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp managed_claims do
+    ExtensionPoints.list_claims()
+    |> Enum.filter(&ContractRef.compatible?(&1.contract, V1.ref()))
+  end
+
+  defp managed_claims(key) do
+    managed_claims()
+    |> Enum.filter(&(&1.key == key))
+  end
+
+  defp requested_key(opts) when is_list(opts) do
+    requested_key(Keyword.get(opts, :loop), Keyword.get(opts, :workflow))
+  end
+
+  defp requested_key(opts) when is_map(opts) do
+    requested_key(Map.get(opts, :loop), Map.get(opts, :workflow))
+  end
+
+  defp requested_key(opts),
+    do: {:error, {:invalid_configuration, :workflow_options, opts}}
+
+  defp requested_key(loop, _workflow) when not is_nil(loop), do: {:ok, key(:loop)}
+  defp requested_key(_loop, workflow) when workflow in [nil, :default], do: {:ok, key(:default)}
+
+  defp requested_key(_loop, workflow) when is_binary(workflow) and byte_size(workflow) > 0,
+    do: service_key(workflow)
+
+  defp requested_key(_loop, workflow),
+    do: {:error, {:invalid_configuration, {:workflow, :name}, workflow}}
+
+  defp selection(%Claim{metadata: %{selection: selection}}, _key), do: selection
+
+  defp selection(%Claim{} = claim, key) do
+    {:ok, name} = workflow_name(key)
+    generation = Map.get(claim.metadata, :runtime_generation, "legacy")
+
+    %{
+      name: name,
+      module: claim.implementation,
+      source: {:generation, generation, claim.owner}
+    }
+  end
 
   defp owner({:session, :loop}, %Context{session_id: session_id}),
     do: {:session, session_id || :unknown}
 
   defp owner({:runtime, owner, _key}, _context), do: owner
+  defp owner({:generation, _generation, owner}, _context), do: owner
   defp owner({:application, _source}, _context), do: :application
   defp owner({:template, _metadata}, _context), do: :workflow_store
   defp owner(:builtin, _context), do: :builtin

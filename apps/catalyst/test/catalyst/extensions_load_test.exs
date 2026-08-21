@@ -33,6 +33,86 @@ defmodule Catalyst.ExtensionsLoadTest do
     assert info.metadata[:description] =~ "metadata/0"
   end
 
+  test "API-v2 manifests are activated without invoking setup callbacks" do
+    path =
+      write_ext(
+        "declarative_probe",
+        """
+        defmodule Catalyst.Ext.DeclarativeProbe do
+          use Catalyst.Extension, api: 2
+
+          manifest %{
+            id: "test.declarative-probe",
+            version: "1.0.0",
+            metadata: %{name: "Declarative Probe"}
+          }
+
+          def setup(_api), do: raise("API-v2 setup must not execute")
+          def metadata, do: raise("API-v2 metadata must come from the manifest")
+        end
+        """
+      )
+
+    on_exit(fn -> Extensions.uninstall("declarative_probe") end)
+
+    assert {:ok, summary} = Extensions.load_file(path)
+    assert summary.activation == :active
+    assert summary.manifests == ["test.declarative-probe"]
+    assert is_binary(summary.generation)
+    assert summary.extensions == [Catalyst.Ext.DeclarativeProbe]
+    refute Map.has_key?(summary, :warning)
+
+    assert {:ok, manifest} = Catalyst.Extension.manifest_of(Catalyst.Ext.DeclarativeProbe)
+    assert manifest.id == "test.declarative-probe"
+
+    info = Enum.find(Extensions.list_loaded(), &(&1.owner == "declarative_probe"))
+    assert info.metadata == %{name: "Declarative Probe"}
+  end
+
+  test "a rejected API-v2 candidate does not replace the active generation" do
+    active_id = Catalyst.Runtime.GenerationStore.active_id()
+
+    path =
+      write_ext(
+        "rejected_declarative_probe",
+        """
+        defmodule Catalyst.Ext.RejectedDeclarativeHealth do
+          def check, do: {:error, :not_ready}
+        end
+
+        defmodule Catalyst.Ext.RejectedDeclarativeProbe do
+          use Catalyst.Extension, api: 2
+
+          manifest %{
+            id: "test.rejected-declarative-probe",
+            version: "1.0.0",
+            health_checks: [
+              %{
+                id: "not-ready",
+                module: Catalyst.Ext.RejectedDeclarativeHealth,
+                function: :check,
+                timeout: 100
+              }
+            ]
+          }
+        end
+        """
+      )
+
+    on_exit(fn -> Extensions.uninstall("rejected_declarative_probe") end)
+
+    assert {:error,
+            {:candidate_activation_failed, {:health_check_failed, "not-ready", :not_ready}}} =
+             Extensions.load_file(path)
+
+    assert Catalyst.Runtime.GenerationStore.active_id() == active_id
+
+    refute Enum.any?(
+             Extensions.list_loaded(),
+             &(&1.owner == "rejected_declarative_probe")
+           )
+  end
+
   test "the load lock mutually excludes different processes" do
     parent = self()
 

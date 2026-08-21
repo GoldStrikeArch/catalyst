@@ -11,6 +11,8 @@ defmodule Catalyst.Runtime do
   alias Catalyst.Runtime.{
     Context,
     Explanation,
+    Generation,
+    Generations,
     Graph,
     ReadModel,
     Resolution,
@@ -59,4 +61,12 @@ defmodule Catalyst.Runtime do
   @spec explain_run_engine(keyword() | map(), Context.t() | map() | keyword()) ::
           {:ok, Explanation.t()} | {:error, term()}
   defdelegate explain_run_engine(opts, context \\ %{}), to: RunEngine, as: :explain
+
+  @doc "Return the active managed runtime generation."
+  @spec active_generation() :: Generation.t() | nil
+  defdelegate active_generation(), to: Generations, as: :active
+
+  @doc "List retained managed generation lifecycle records."
+  @spec generations() :: [Generation.t()]
+  defdelegate generations(), to: Generations, as: :list
 end

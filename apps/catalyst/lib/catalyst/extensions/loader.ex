@@ -74,6 +74,7 @@ defmodule Catalyst.Extensions.Loader do
   def run_setups([], _api), do: :ok
 
   def run_setups(modules, api) do
+    modules = Enum.filter(modules, &Extension.imperative_module?/1)
     task = Tasks.async(fn -> Enum.map(modules, &run_setup(&1, api)) end)
 
     case Tasks.await(task, setup_timeout()) do
@@ -92,7 +93,8 @@ defmodule Catalyst.Extensions.Loader do
       {extension_modules, tool_modules} = classify(modules)
 
       with {:ok, definitions} <- tool_definitions(tool_modules) do
-        {:ok, contribution(compiled, extension_modules, tool_modules, definitions)}
+        manifests = Extension.manifests_of(extension_modules)
+        {:ok, contribution(compiled, extension_modules, manifests, tool_modules, definitions)}
       end
     rescue
       error -> {:error, {:compile, Exception.message(error)}}
@@ -103,11 +105,12 @@ defmodule Catalyst.Extensions.Loader do
     end
   end
 
-  defp contribution(compiled, extension_modules, tool_modules, definitions) do
+  defp contribution(compiled, extension_modules, manifests, tool_modules, definitions) do
     %Contribution{
       modules: Enum.map(compiled, &elem(&1, 0)),
       beams: Map.new(compiled),
       ext_mods: extension_modules,
+      manifests: manifests,
       tool_mods: tool_modules,
       tool_names: Enum.map(definitions, & &1.name),
       metadata: Extension.metadata_of(extension_modules)

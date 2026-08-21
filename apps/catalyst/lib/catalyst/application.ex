@@ -168,6 +168,16 @@ defmodule Catalyst.Application do
       # an extension can terminate its whole process subtree.
       {Registry, keys: :unique, name: Catalyst.Extensions.ProcessRegistry},
       {DynamicSupervisor, name: Catalyst.Extensions.ProcessSupervisor, strategy: :one_for_one},
+      # Candidate-owned process trees are staged before their generation is
+      # published. The coordinator is ordered after this infrastructure and
+      # before Extensions, whose boot load reconstructs API-v2 compositions
+      # after any rest-for-one recovery.
+      {Registry, keys: :unique, name: Catalyst.Runtime.CandidateProcessRegistry},
+      {
+        DynamicSupervisor,
+        name: Catalyst.Runtime.CandidateProcessSupervisor, strategy: :one_for_one
+      },
+      Catalyst.Runtime.Generations,
       # Live tool registry: built-ins + runtime-loaded extensions. Last: its
       # boot load_all runs extension setup/1 functions that register into all
       # of the above.

@@ -74,6 +74,9 @@ defmodule Catalyst.Extensions do
           required(:tools) => [String.t()],
           required(:extensions) => [module()],
           optional(:conflicts) => [{String.t(), [module()]}],
+          optional(:activation) => :planning_only | :active,
+          optional(:manifests) => [String.t()],
+          optional(:generation) => String.t(),
           optional(:warning) => String.t()
         }
 
@@ -230,7 +233,7 @@ defmodule Catalyst.Extensions do
   defdelegate reload_after_wiring(), to: Load
 
   @doc "Remove every contribution made by `owner` (tools here + hooks/providers/UI)."
-  @spec uninstall(String.t()) :: :ok
+  @spec uninstall(String.t()) :: :ok | {:error, term()}
   defdelegate uninstall(owner), to: Load
 
   @doc false

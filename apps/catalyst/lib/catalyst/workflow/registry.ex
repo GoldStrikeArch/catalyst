@@ -43,6 +43,7 @@ defmodule Catalyst.Workflow.Registry do
   @type source ::
           {:session, :loop}
           | {:runtime, term(), key()}
+          | {:generation, String.t(), term()}
           | {:application, {:workflows, name()} | {:acp_agent, String.t()} | :agent_loop}
           | {:template, map()}
           | :builtin

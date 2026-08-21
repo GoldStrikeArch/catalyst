@@ -74,6 +74,7 @@ defmodule Catalyst.Extensions.Server do
   end
 
   defp safe_boot(state, status) do
+    :ok = Catalyst.Runtime.Generations.clear()
     put_boot_status(status)
     log_safe_mode(status)
 
@@ -548,7 +549,7 @@ defmodule Catalyst.Extensions.Server do
         :ets.insert(@table, {name, module})
       end)
 
-      result = build_summary(owner, contribution.tool_names, contribution.ext_mods, conflicts)
+      result = build_summary(owner, contribution, conflicts)
       {{:ok, result}, State.record_purge_result(committed, owner, purge_result)}
     rescue
       error -> {{:error, {:register, Exception.message(error)}}, committed}
@@ -557,16 +558,28 @@ defmodule Catalyst.Extensions.Server do
     end
   end
 
-  defp build_summary(owner, tool_names, extension_modules, []),
-    do: %{owner: owner, tools: tool_names, extensions: extension_modules}
-
-  defp build_summary(owner, tool_names, extension_modules, conflicts),
-    do: %{
+  defp build_summary(owner, contribution, conflicts) do
+    summary = %{
       owner: owner,
-      tools: tool_names,
-      extensions: extension_modules,
-      conflicts: conflicts
+      tools: contribution.tool_names,
+      extensions: contribution.ext_mods
     }
+
+    summary
+    |> add_conflicts(conflicts)
+    |> add_manifest_plan(contribution.manifests)
+  end
+
+  defp add_conflicts(summary, []), do: summary
+  defp add_conflicts(summary, conflicts), do: Map.put(summary, :conflicts, conflicts)
+
+  defp add_manifest_plan(summary, []), do: summary
+
+  defp add_manifest_plan(summary, manifests) do
+    summary
+    |> Map.put(:activation, :planning_only)
+    |> Map.put(:manifests, Enum.map(manifests, & &1.id))
+  end
 
   defp log_conflicts(_owner, []), do: :ok
 

@@ -5,13 +5,14 @@ defmodule Catalyst.Extensions.Contribution do
   Produced by `Catalyst.Extensions.Loader.compile/1` and consumed by
   `Catalyst.Extensions` when committing a load: the modules the file defined
   (with their exact accepted BEAM binaries), the extension/tool classification,
-  and the merged optional `metadata/0`.
+  API-v2 manifests, and merged metadata.
   """
 
   @enforce_keys [:modules, :beams, :ext_mods, :tool_mods, :tool_names, :metadata]
   defstruct modules: [],
             beams: %{},
             ext_mods: [],
+            manifests: [],
             tool_mods: [],
             tool_names: [],
             metadata: %{}
@@ -20,6 +21,7 @@ defmodule Catalyst.Extensions.Contribution do
           modules: [module()],
           beams: %{module() => binary()},
           ext_mods: [module()],
+          manifests: [Catalyst.Extension.Manifest.t()],
           tool_mods: [module()],
           tool_names: [String.t()],
           metadata: map()

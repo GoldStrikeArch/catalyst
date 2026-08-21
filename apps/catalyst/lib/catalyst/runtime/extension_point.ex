@@ -81,6 +81,23 @@ defmodule Catalyst.Runtime.ExtensionPoint do
 
   def service?(%__MODULE__{}, %Catalyst.Runtime.ServiceKey{}), do: false
 
+  @doc """
+  Normalize and validate one payload against this point's JSON schema.
+
+  Schema-less host points preserve their Elixir payload because modules,
+  functions, and child specifications are validated by their typed handlers.
+  Schema-bound declarative points store JSON-normalized values.
+  """
+  @spec normalize_payload(t(), term()) :: {:ok, term()} | {:error, term()}
+  def normalize_payload(%__MODULE__{schema: nil}, value), do: {:ok, value}
+
+  def normalize_payload(%__MODULE__{id: id} = point, value) do
+    with {:ok, normalized} <- json_value(value, id),
+         :ok <- validate_payload(point, normalized) do
+      {:ok, normalized}
+    end
+  end
+
   defp normalize_spec(spec) when is_list(spec), do: spec |> Map.new() |> normalize_spec()
 
   defp normalize_spec(spec) when is_map(spec) do
@@ -148,6 +165,39 @@ defmodule Catalyst.Runtime.ExtensionPoint do
   end
 
   defp resolve_schema(schema), do: {:error, {:invalid_extension_point_schema, schema}}
+
+  defp validate_payload(%__MODULE__{id: id} = point, value) do
+    case ExJsonSchema.Validator.validate(resolved_schema(point), value) do
+      :ok -> :ok
+      {:error, errors} -> {:error, {:invalid_contribution, id, errors}}
+    end
+  end
+
+  defp resolved_schema(%__MODULE__{} = point) do
+    case Map.get(point, :resolved_schema) do
+      nil ->
+        point.schema
+        |> Jason.encode!()
+        |> Jason.decode!()
+        |> ExJsonSchema.Schema.resolve()
+
+      resolved ->
+        resolved
+    end
+  end
+
+  defp json_value(value, id) do
+    normalized =
+      value
+      |> Jason.encode!()
+      |> Jason.decode!()
+
+    {:ok, normalized}
+  rescue
+    exception -> {:error, {:invalid_contribution, id, {:non_json_payload, exception}}}
+  catch
+    kind, reason -> {:error, {:invalid_contribution, id, {:non_json_payload, {kind, reason}}}}
+  end
 
   defp validate_handler(nil), do: :ok
 

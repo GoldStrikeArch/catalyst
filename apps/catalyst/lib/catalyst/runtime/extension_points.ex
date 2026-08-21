@@ -16,6 +16,7 @@ defmodule Catalyst.Runtime.ExtensionPoints do
     ContractRef,
     Contribution,
     ExtensionPoint,
+    GenerationStore,
     Scope,
     ServiceKey
   }
@@ -51,7 +52,7 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   @spec contribute(ExtensionAPI.t(), String.t(), term(), keyword()) :: term()
   def contribute(%ExtensionAPI{} = api, point_id, value, opts) when is_list(opts) do
     with {:ok, point} <- fetch(point_id),
-         {:ok, value} <- normalize_payload(point, value),
+         {:ok, value} <- ExtensionPoint.normalize_payload(point, value),
          {:ok, contribution} <- build_contribution(api, point, value, opts) do
       activate_contribution(api, point, contribution, opts)
     end
@@ -70,7 +71,7 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   @doc "Fetch one currently declared extension point."
   @spec fetch(String.t()) :: {:ok, ExtensionPoint.t()} | {:error, term()}
   def fetch(id) when is_binary(id) do
-    case Map.fetch(state().points, id) do
+    case Map.fetch(combined_state().points, id) do
       {:ok, point} -> {:ok, point}
       :error -> {:error, {:unsupported_extension_point, id}}
     end
@@ -81,6 +82,14 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   @doc "List extension points in stable identifier order."
   @spec list_points() :: [ExtensionPoint.t()]
   def list_points do
+    combined_state().points
+    |> Map.values()
+    |> Enum.sort_by(& &1.id)
+  end
+
+  @doc "List host and imperative extension points available to candidate planning."
+  @spec base_points() :: [ExtensionPoint.t()]
+  def base_points do
     state().points
     |> Map.values()
     |> Enum.sort_by(& &1.id)
@@ -89,6 +98,13 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   @doc "List active generic contributions in stable order."
   @spec list_contributions() :: [Contribution.t()]
   def list_contributions do
+    combined_state()
+    |> active_contributions()
+  end
+
+  @doc "List active imperative contributions available to candidate planning."
+  @spec base_contributions() :: [Contribution.t()]
+  def base_contributions do
     state()
     |> active_contributions()
   end
@@ -96,6 +112,13 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   @doc "List active generic service claims in stable order."
   @spec list_claims() :: [Claim.t()]
   def list_claims do
+    combined_state()
+    |> active_claims()
+  end
+
+  @doc "List active imperative claims available to candidate planning."
+  @spec base_claims() :: [Claim.t()]
+  def base_claims do
     state()
     |> active_claims()
   end
@@ -119,9 +142,10 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   @spec snapshot(Context.t()) ::
           {:ok, %{claims: [Claim.t()], contributions: [Contribution.t()], metadata: map()}}
   def snapshot(%Context{}) do
-    current = state()
+    current = combined_state()
     active_contributions = active_contributions(current)
     active_claims = active_claims(current)
+    generation = GenerationStore.active_id()
 
     {:ok,
      %{
@@ -131,7 +155,8 @@ defmodule Catalyst.Runtime.ExtensionPoints do
          extension_points: map_size(current.points),
          generic_contributions: length(active_contributions),
          generic_claims: length(active_claims),
-         hidden_orphans: orphan_count(current, active_contributions, active_claims)
+         hidden_orphans: orphan_count(current, active_contributions, active_claims),
+         active_generation: generation && Catalyst.Runtime.GenerationId.to_wire(generation)
        }
      }}
   end
@@ -349,48 +374,6 @@ defmodule Catalyst.Runtime.ExtensionPoints do
     update(fn current -> put_in(current.claims[claim_key(claim)], claim) end)
   end
 
-  defp normalize_payload(%ExtensionPoint{schema: nil}, value), do: {:ok, value}
-
-  defp normalize_payload(%ExtensionPoint{id: id} = point, value) do
-    with {:ok, normalized} <- json_value(value, id),
-         :ok <- validate_payload(point, normalized) do
-      {:ok, normalized}
-    end
-  end
-
-  defp validate_payload(%ExtensionPoint{id: id} = point, value) do
-    case ExJsonSchema.Validator.validate(resolved_schema(point), value) do
-      :ok -> :ok
-      {:error, errors} -> {:error, {:invalid_contribution, id, errors}}
-    end
-  end
-
-  defp resolved_schema(%ExtensionPoint{} = point) do
-    case Map.get(point, :resolved_schema) do
-      nil ->
-        point.schema
-        |> Jason.encode!()
-        |> Jason.decode!()
-        |> ExJsonSchema.Schema.resolve()
-
-      resolved ->
-        resolved
-    end
-  end
-
-  defp json_value(value, id) do
-    normalized =
-      value
-      |> Jason.encode!()
-      |> Jason.decode!()
-
-    {:ok, normalized}
-  rescue
-    exception -> {:error, {:invalid_contribution, id, {:non_json_payload, exception}}}
-  catch
-    kind, reason -> {:error, {:invalid_contribution, id, {:non_json_payload, {kind, reason}}}}
-  end
-
   defp point_contributions(points) do
     points
     |> Map.values()
@@ -411,7 +394,7 @@ defmodule Catalyst.Runtime.ExtensionPoints do
   defp active_contribution(contribution, points) do
     case Map.fetch(points, contribution.point) do
       {:ok, point} ->
-        case normalize_payload(point, contribution.value) do
+        case ExtensionPoint.normalize_payload(point, contribution.value) do
           {:ok, value} -> [%{contribution | value: value}]
           {:error, _reason} -> []
         end
@@ -481,5 +464,34 @@ defmodule Catalyst.Runtime.ExtensionPoints do
 
   defp state do
     :persistent_term.get(@state_key, %{points: %{}, contributions: %{}, claims: %{}})
+  end
+
+  defp combined_state do
+    current = state()
+
+    case GenerationStore.active_candidate() do
+      nil ->
+        current
+
+      candidate ->
+        %{
+          points: put_managed_points(current.points, candidate.extension_points),
+          contributions:
+            put_managed_entries(
+              current.contributions,
+              candidate.contributions,
+              &contribution_key/1
+            ),
+          claims: put_managed_entries(current.claims, candidate.claims, &claim_key/1)
+        }
+    end
+  end
+
+  defp put_managed_points(points, managed) do
+    Enum.reduce(managed, points, &Map.put(&2, &1.id, &1))
+  end
+
+  defp put_managed_entries(entries, managed, key_fun) do
+    Enum.reduce(managed, entries, &Map.put(&2, key_fun.(&1), &1))
   end
 end
