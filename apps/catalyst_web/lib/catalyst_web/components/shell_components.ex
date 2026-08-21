@@ -26,6 +26,7 @@ defmodule CatalystWeb.ShellComponents do
         codex_form: codex_form(assigns.codex_prefs),
         workflow_form: workflow_form(assigns.workflow_prefs),
         diagnostic_prompt: diagnostic_prompt(assigns),
+        diagnostic_run_engine: metadata_value(assigns.run_metadata, :run_engine),
         diagnostic_workflow: metadata_value(assigns.run_metadata, :workflow),
         diagnostic_context: metadata_value(assigns.run_metadata, :context)
       )
@@ -155,6 +156,7 @@ defmodule CatalystWeb.ShellComponents do
                 running={@running}
                 context_status={@context_status}
                 diagnostic_prompt={@diagnostic_prompt}
+                diagnostic_run_engine={@diagnostic_run_engine}
                 diagnostic_workflow={@diagnostic_workflow}
                 diagnostic_context={@diagnostic_context}
                 prompt_preview={@prompt_preview}
@@ -545,6 +547,7 @@ defmodule CatalystWeb.ShellComponents do
 
         <.run_diagnostics
           prompt={@diagnostic_prompt}
+          run_engine={@diagnostic_run_engine}
           workflow={@diagnostic_workflow}
           context={@diagnostic_context}
           preview={@prompt_preview}
@@ -737,6 +740,7 @@ defmodule CatalystWeb.ShellComponents do
   end
 
   attr :prompt, :map, default: nil
+  attr :run_engine, :map, default: nil
   attr :workflow, :map, default: nil
   attr :context, :map, default: nil
   attr :preview, :any, default: nil
@@ -745,7 +749,10 @@ defmodule CatalystWeb.ShellComponents do
   defp run_diagnostics(assigns) do
     ~H"""
     <div
-      :if={@prompt || @workflow || @context || @preview == :loading || match?({:error, _}, @preview)}
+      :if={
+        @prompt || @run_engine || @workflow || @context || @preview == :loading ||
+          match?({:error, _}, @preview)
+      }
       id="run-diagnostics"
       data-open={to_string(@open)}
       class="relative ml-1 hidden shrink-0 md:block"
@@ -802,6 +809,20 @@ defmodule CatalystWeb.ShellComponents do
                   @context[:context_window_source]
                 )}
               </dd>
+            </dl>
+          </section>
+
+          <section :if={@run_engine} id="run-engine-diagnostics">
+            <h3 class="font-semibold text-ink">Run engine</h3>
+            <dl class="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.7rem]">
+              <dt class="text-faint">service</dt>
+              <dd id="run-engine-service" class="break-all font-mono text-muted">
+                {@run_engine[:service]}
+              </dd>
+              <dt class="text-faint">owner</dt>
+              <dd class="break-all font-mono text-muted">{inspect(@run_engine[:owner])}</dd>
+              <dt class="text-faint">snapshot</dt>
+              <dd class="break-all font-mono text-muted">{@run_engine[:snapshot_id]}</dd>
             </dl>
           </section>
 

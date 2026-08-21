@@ -8,7 +8,7 @@ defmodule Catalyst.Session.RunContext do
   for diagnostics; it is not reused as future configuration.
   """
 
-  alias Catalyst.{Model, Prompt, Workflow}
+  alias Catalyst.{Model, Prompt, Runtime, Workflow}
   alias Catalyst.Prompt.{Request, Resolution}
   alias Catalyst.Session.RunConfig
 
@@ -21,21 +21,23 @@ defmodule Catalyst.Session.RunContext do
   @doc "Resolve one run from an immutable session-state snapshot."
   @spec build(map(), pid(), reference(), module()) :: {:ok, t()} | {:error, term()}
   def build(state, server, run_ref, provider) do
-    with {:ok, workflow} <- Workflow.resolve(state.opts || []) do
-      build_with(state, server, run_ref, provider, workflow)
+    with {:ok, run_engine} <- resolve_run_engine(state, run_ref) do
+      build_with(state, server, run_ref, provider, run_engine)
     end
   end
 
   @doc "Resolve one run, including conditional provider resolution, inside its worker."
   @spec build(map(), pid(), reference()) :: {:ok, t()} | {:error, term()}
   def build(state, server, run_ref) do
-    with {:ok, workflow} <- Workflow.resolve(state.opts || []),
-         {:ok, provider} <- resolve_provider(state, workflow) do
-      build_with(state, server, run_ref, provider, workflow)
+    with {:ok, run_engine} <- resolve_run_engine(state, run_ref),
+         {:ok, provider} <- resolve_provider(state, run_engine.selection) do
+      build_with(state, server, run_ref, provider, run_engine)
     end
   end
 
-  defp build_with(state, server, run_ref, provider, workflow) do
+  defp build_with(state, server, run_ref, provider, run_engine) do
+    workflow = run_engine.selection
+
     with {:ok, base} <- RunConfig.build_base(state, server, run_ref, provider),
          {:ok, model, catalog} <- resolve_model(state.model),
          {:ok, prompt} <- resolve_prompt(state, model) do
@@ -44,11 +46,13 @@ defmodule Catalyst.Session.RunContext do
         |> Map.put(:model, model)
         |> Map.put(:loop, workflow.module)
         |> Map.put(:workflow, workflow)
+        |> Map.put(:run_engine_resolution, run_engine.resolution)
         |> Map.put(:prompt_override, Map.get(state, :system_prompt))
 
       metadata = %{
         prompt: prompt_metadata(prompt),
         workflow: workflow,
+        run_engine: Catalyst.Runtime.RunEngine.metadata(run_engine.resolution),
         context: model_metadata(model),
         context_status: nil
       }
@@ -69,6 +73,13 @@ defmodule Catalyst.Session.RunContext do
          metadata: metadata
        }}
     end
+  end
+
+  defp resolve_run_engine(state, run_ref) do
+    Runtime.resolve_run_engine(state.opts || [],
+      session_id: state.id,
+      run_id: inspect(run_ref)
+    )
   end
 
   defp resolve_provider(state, workflow) do

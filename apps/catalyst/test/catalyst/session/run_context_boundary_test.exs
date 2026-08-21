@@ -102,6 +102,9 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
            } = run.config.workflow
 
     assert run.metadata.workflow == run.config.workflow
+    assert run.config.run_engine_resolution.claim.implementation == Catalyst.Workflow.Runner
+    assert run.metadata.run_engine.service == "agent.run_engine/pinned-template"
+    assert run.metadata.run_engine.binding == {:pin, :run}
   end
 
   test "worker prompt failures are normalized at the supervised task boundary" do

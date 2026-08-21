@@ -44,6 +44,12 @@ defmodule CatalystWeb.Application do
     children
     |> Supervisor.start_link(opts)
     |> complete_start(fn supervisor ->
+      :ok =
+        Catalyst.Runtime.ReadModel.register_source(
+          :web,
+          {CatalystWeb.RuntimeSource, :snapshot}
+        )
+
       register_web_tools()
 
       # Re-registered on every Catalyst.Extensions restart: a registry-chain

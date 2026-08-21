@@ -39,27 +39,24 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
     end
   end
 
-  test "kind handlers use stable external captures" do
+  test "extension points use stable module-function handlers" do
     handlers = %{
-      tool: {Extensions, :register_extension_tool, 2},
-      hook: {Extensions, :register_extension_hook, 4},
-      event: {Extensions, :register_extension_observer, 3},
-      process: {Extensions, :start_extension_process, 2},
-      provider: {LLMRegistry, :register_extension_provider, 3},
-      prompt: {PromptRegistry, :register_extension_prompt, 4},
-      prompt_policy: {PromptRegistry, :register_extension_prompt_policy, 3},
-      workflow: {WorkflowRegistry, :register_extension_workflow, 4},
-      context_policy: {ContextRegistry, :register_extension_policy, 3},
-      context_threshold: {ContextRegistry, :register_extension_threshold, 4}
+      "agent.tool" => {Extensions, :activate_tool_contribution},
+      "agent.hook" => {Extensions, :activate_hook_contribution},
+      "runtime.event_observer" => {Extensions, :activate_observer_contribution},
+      "runtime.process" => {Extensions, :activate_process_contribution},
+      "llm.provider" => {LLMRegistry, :activate_provider_claim},
+      "agent.prompt" => {PromptRegistry, :activate_prompt_contribution},
+      "agent.prompt_policy" => {PromptRegistry, :activate_prompt_policy_claim},
+      "agent.run_engine" => {WorkflowRegistry, :activate_run_engine_claim},
+      "agent.context_policy" => {ContextRegistry, :activate_policy_claim},
+      "agent.context_threshold" => {ContextRegistry, :activate_threshold_contribution}
     }
 
-    for {kind, {module, name, arity}} <- handlers do
-      handler = :persistent_term.get({ExtensionAPI, :kind, kind})
+    points = Map.new(Catalyst.Runtime.ExtensionPoints.list_points(), &{&1.id, &1})
 
-      assert Function.info(handler, :type) == {:type, :external}
-      assert Function.info(handler, :module) == {:module, module}
-      assert Function.info(handler, :name) == {:name, name}
-      assert Function.info(handler, :arity) == {:arity, arity}
+    for {id, handler} <- handlers do
+      assert points[id].handler == handler
     end
   end
 

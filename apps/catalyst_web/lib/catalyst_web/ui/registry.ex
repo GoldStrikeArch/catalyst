@@ -8,9 +8,10 @@ defmodule CatalystWeb.UI.Registry do
     * **components** — named slot widgets (e.g. `:header_extra`, `:sidebar`);
     * **commands** — named command-palette entries.
 
-  Extensions register through `Catalyst.ExtensionAPI` (the `:renderer`,
-  `:component`, `:page`, `:command` kinds are wired here at boot), tagged with an
-  `owner` so reloading an extension purges its prior UI contributions.
+  Extensions register through `Catalyst.ExtensionAPI` (the `ui.renderer`,
+  `ui.component`, `ui.page`, and `ui.command` extension points are wired here at
+  boot), tagged with an `owner` so reloading an extension purges its prior UI
+  contributions.
   """
 
   use GenServer
@@ -28,6 +29,10 @@ defmodule CatalystWeb.UI.Registry do
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  @doc "Whether the UI contribution table is currently available."
+  @spec available?() :: boolean()
+  def available?, do: :ets.whereis(@table) != :undefined
 
   ## pages
 
@@ -358,11 +363,93 @@ defmodule CatalystWeb.UI.Registry do
     register_command(name, Keyword.put(opts, :owner, owner))
   end
 
+  @doc false
+  @spec activate_renderer_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: :ok
+  def activate_renderer_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{
+          value: %{kind: kind, match: match, function: function}
+        },
+        _opts
+      ),
+      do: register_extension_renderer(api, kind, match, function)
+
+  @doc false
+  @spec activate_component_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: :ok
+  def activate_component_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{
+          value: %{slot: slot, function: function, opts: component_opts}
+        },
+        _opts
+      ),
+      do: register_extension_component(api, slot, function, component_opts)
+
+  @doc false
+  @spec activate_page_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: :ok
+  def activate_page_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{
+          value: %{path: path, target: target, opts: page_opts}
+        },
+        _opts
+      ),
+      do: register_extension_page(api, path, target, page_opts)
+
+  @doc false
+  @spec activate_command_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: :ok
+  def activate_command_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{value: %{name: name, opts: command_opts}},
+        _opts
+      ),
+      do: register_extension_command(api, name, command_opts)
+
   defp wire do
-    ExtensionAPI.register_kind(:renderer, &__MODULE__.register_extension_renderer/4)
-    ExtensionAPI.register_kind(:component, &__MODULE__.register_extension_component/4)
-    ExtensionAPI.register_kind(:page, &__MODULE__.register_extension_page/4)
-    ExtensionAPI.register_kind(:command, &__MODULE__.register_extension_command/3)
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "ui.renderer", cardinality: :many},
+        {__MODULE__, :activate_renderer_contribution},
+        {:host, :web}
+      )
+
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "ui.component", cardinality: :many},
+        {__MODULE__, :activate_component_contribution},
+        {:host, :web}
+      )
+
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "ui.page", cardinality: :many},
+        {__MODULE__, :activate_page_contribution},
+        {:host, :web}
+      )
+
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "ui.command", cardinality: :many},
+        {__MODULE__, :activate_command_contribution},
+        {:host, :web}
+      )
+
     ExtensionAPI.register_purger(&__MODULE__.purge_extension_owner/1)
     Catalyst.Extensions.register_host(:web, :registry, self())
   end

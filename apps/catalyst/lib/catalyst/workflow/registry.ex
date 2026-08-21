@@ -69,6 +69,37 @@ defmodule Catalyst.Workflow.Registry do
     end
   end
 
+  @doc """
+  Resolve the effective workflow and inspect its valid lower-precedence layers.
+
+  Unlike `resolve/1`, this read-model operation may consult lower template and
+  ACP layers even when a higher layer already won.
+  """
+  @spec resolve_with_layers(keyword() | map()) ::
+          {:ok, selection(), [selection()]} | {:error, term()}
+  def resolve_with_layers(opts \\ []) do
+    with {:ok, loop} <- option(opts, :loop),
+         {:ok, workflow} <- option(opts, :workflow),
+         {:ok, selected} <- resolve_options(loop, workflow) do
+      {:ok, selected, layers(selected, loop, workflow)}
+    end
+  end
+
+  @doc """
+  Return every valid layer for the selected workflow slot in precedence order.
+
+  This is a read-model API: `resolve/1` remains the execution authority. Invalid
+  top-level configuration still returns the same tagged error as `resolve/1`;
+  malformed hidden lower layers are omitted rather than made executable.
+  """
+  @spec resolution_layers(keyword() | map()) :: {:ok, [selection()]} | {:error, term()}
+  def resolution_layers(opts \\ []) do
+    case resolve_with_layers(opts) do
+      {:ok, _selected, layers} -> {:ok, layers}
+      {:error, _reason} = error -> error
+    end
+  end
+
   # test seam. Resolves one named workflow; :default includes agent-loop and
   # built-in fallbacks.
   @doc false
@@ -260,6 +291,89 @@ defmodule Catalyst.Workflow.Registry do
     resolve_default()
     |> selection(:default)
   end
+
+  defp layers(selected, {:present, loop}, _workflow) when not is_nil(loop), do: [selected]
+
+  defp layers(selected, _loop, {:present, workflow}) when workflow not in [nil, :default],
+    do: [selected | named_lower_layers(selected, workflow)]
+
+  defp layers(selected, _loop, _workflow), do: [selected | default_lower_layers(selected)]
+
+  defp default_lower_layers(%{source: {:runtime, _owner, _key}}),
+    do: configured_workflow_layer(:default) ++ configured_agent_loop_layer() ++ [builtin_layer()]
+
+  defp default_lower_layers(%{source: {:application, {:workflows, :default}}}),
+    do: configured_agent_loop_layer() ++ [builtin_layer()]
+
+  defp default_lower_layers(%{source: {:application, :agent_loop}}), do: [builtin_layer()]
+  defp default_lower_layers(%{source: :builtin}), do: []
+
+  defp named_lower_layers(%{source: {:runtime, _owner, _key}}, name),
+    do: configured_workflow_layer(name) ++ configured_acp_layer(name) ++ template_layer(name)
+
+  defp named_lower_layers(%{source: {:application, {:workflows, _name}}}, name),
+    do: configured_acp_layer(name) ++ template_layer(name)
+
+  defp named_lower_layers(%{source: {:application, {:acp_agent, _id}}}, name),
+    do: template_layer(name)
+
+  defp named_lower_layers(%{source: {:template, _metadata}}, _name), do: []
+
+  defp configured_workflow_layer(name) do
+    case Application.fetch_env(:catalyst, :workflows) do
+      {:ok, workflows} when is_map(workflows) ->
+        case Map.fetch(workflows, name) do
+          {:ok, module} when is_atom(module) ->
+            case valid_workflow_module?(module) do
+              true -> [%{name: name, module: module, source: {:application, {:workflows, name}}}]
+              false -> []
+            end
+
+          _missing_or_invalid ->
+            []
+        end
+
+      _missing_or_malformed ->
+        []
+    end
+  end
+
+  defp configured_acp_layer("acp/" <> id = name) when id != "" do
+    case ACPAgent.fetch(id) do
+      {:ok, _agent} ->
+        [%{name: name, module: Catalyst.ACP.Workflow, source: {:application, {:acp_agent, id}}}]
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp configured_acp_layer(_name), do: []
+
+  defp template_layer(name) do
+    case resolve_template(name) do
+      {:ok, module, source, template} ->
+        [%{name: name, module: module, source: source, template: template}]
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp configured_agent_loop_layer do
+    case Application.fetch_env(:catalyst, :agent_loop) do
+      {:ok, module} ->
+        case valid_workflow_module?(module) do
+          true -> [%{name: :default, module: module, source: {:application, :agent_loop}}]
+          false -> []
+        end
+
+      :error ->
+        []
+    end
+  end
+
+  defp builtin_layer, do: %{name: :default, module: @builtin, source: :builtin}
 
   defp selection({:ok, module, source}, name),
     do: {:ok, %{name: name, module: module, source: source}}
@@ -466,8 +580,41 @@ defmodule Catalyst.Workflow.Registry do
     register_workflow(name, module, Keyword.put(opts, :owner, owner))
   end
 
+  @doc false
+  @spec activate_run_engine_claim(ExtensionAPI.t(), Catalyst.Runtime.Claim.t(), keyword()) ::
+          :ok | {:error, term()}
+  def activate_run_engine_claim(
+        api,
+        %Catalyst.Runtime.Claim{
+          key: %Catalyst.Runtime.ServiceKey{slot: slot},
+          implementation: module,
+          scope: %Catalyst.Runtime.Scope{constraints: constraints},
+          priority: 800,
+          binding: {:pin, :run}
+        },
+        opts
+      )
+      when map_size(constraints) == 0 do
+    name = if slot == "default", do: :default, else: slot
+    register_extension_workflow(api, name, module, opts)
+  end
+
+  def activate_run_engine_claim(_api, claim, _opts),
+    do: {:error, {:unsupported_run_engine_claim, claim}}
+
   defp wire_extension_api do
-    ExtensionAPI.register_kind(:workflow, &__MODULE__.register_extension_workflow/4)
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{
+          id: "agent.run_engine",
+          cardinality: :many,
+          contract: Catalyst.Contracts.RunEngine.V1.ref(),
+          service: {"agent", "run_engine"},
+          default_binding: {:pin, :run}
+        },
+        {__MODULE__, :activate_run_engine_claim}
+      )
+
     ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
   end
 end

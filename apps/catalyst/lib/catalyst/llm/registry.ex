@@ -59,6 +59,17 @@ defmodule Catalyst.LLM.Registry do
     end
   end
 
+  @doc "Runtime owner claims by provider API; seed-only providers are omitted."
+  @spec runtime_owners() :: %{optional(String.t()) => term()}
+  def runtime_owners do
+    case Process.whereis(__MODULE__) do
+      nil -> %{}
+      _pid -> GenServer.call(__MODULE__, :runtime_owners)
+    end
+  catch
+    :exit, _reason -> %{}
+  end
+
   # The rescue wraps only the :ets call: a missing table (registry restarting)
   # falls back to the seed layer; a malformed row is a real bug and must crash.
   defp table_rows do
@@ -101,6 +112,9 @@ defmodule Catalyst.LLM.Registry do
   end
 
   @impl true
+  def handle_call(:runtime_owners, _from, state),
+    do: {:reply, state.by_key, state}
+
   def handle_call({:register, api, config, opts}, _from, state) do
     owner = Owner.normalize(opts[:owner])
 
@@ -199,8 +213,39 @@ defmodule Catalyst.LLM.Registry do
     register_provider(api, config, owner: owner)
   end
 
+  @doc false
+  @spec activate_provider_claim(ExtensionAPI.t(), Catalyst.Runtime.Claim.t(), keyword()) ::
+          :ok | {:error, term()}
+  def activate_provider_claim(
+        api,
+        %Catalyst.Runtime.Claim{
+          key: %Catalyst.Runtime.ServiceKey{slot: name},
+          implementation: config,
+          scope: %Catalyst.Runtime.Scope{constraints: constraints},
+          priority: 800,
+          binding: {:pin, :request}
+        },
+        _opts
+      )
+      when map_size(constraints) == 0,
+      do: register_extension_provider(api, name, config)
+
+  def activate_provider_claim(_api, claim, _opts),
+    do: {:error, {:unsupported_provider_claim, claim}}
+
   defp wire do
-    ExtensionAPI.register_kind(:provider, &__MODULE__.register_extension_provider/3)
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{
+          id: "llm.provider",
+          cardinality: :many,
+          contract: Catalyst.Runtime.ContractRef.new!("catalyst.llm-provider", 1),
+          service: {"llm", "provider"},
+          default_binding: {:pin, :request}
+        },
+        {__MODULE__, :activate_provider_claim}
+      )
+
     ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
   end
 end

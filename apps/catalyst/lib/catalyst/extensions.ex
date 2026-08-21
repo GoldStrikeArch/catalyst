@@ -493,6 +493,60 @@ defmodule Catalyst.Extensions do
   end
 
   @doc false
+  @spec activate_tool_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: term()
+  def activate_tool_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{value: %{module: module}},
+        _opts
+      ),
+      do: register_extension_tool(api, module)
+
+  @doc false
+  @spec activate_hook_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: term()
+  def activate_hook_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{
+          value: %{point: point, function: function, opts: hook_opts}
+        },
+        _opts
+      ),
+      do: register_extension_hook(api, point, function, hook_opts)
+
+  @doc false
+  @spec activate_observer_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: term()
+  def activate_observer_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{value: %{function: function, opts: observer_opts}},
+        _opts
+      ),
+      do: register_extension_observer(api, function, observer_opts)
+
+  @doc false
+  @spec activate_process_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: term()
+  def activate_process_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{value: %{child_spec: child_spec}},
+        _opts
+      ),
+      do: start_extension_process(api, child_spec)
+
+  @doc false
   @spec inject_boot_result(term()) :: :ok
   def inject_boot_result(result) do
     send(__MODULE__, {:boot_load_finished, result})

@@ -141,6 +141,11 @@ from the bundled toolchain and reloads connected windows; the `rebuild_assets` t
   Access or move the project elsewhere.
 - **Diagnose with `read_log`:** every step (loop, tool calls, LLM request/response, errors) is in
   `~/.catalyst/debug/latest.log`; call `read_log` when something fails.
+- **Inspect composition with `runtime_graph`:** call it without arguments to list observable
+  services and contributions, with `service: "agent.run_engine/default"` to explain one selection,
+  or with `owner` to filter an extension's footprint. It reports managed registry state, source
+  health, provenance, and hidden workflow layers; arbitrary side effects from trusted raw BEAM
+  code cannot be inferred and are explicitly outside the graph.
 
 ---
 
@@ -414,6 +419,41 @@ label: "/mycmd — what it does")`. Typing `/mycmd some arg` in the chat dispatc
   long-lived process (watcher, poller, client connection) under a supervisor owned by
   your extension. Never use a bare `spawn`: supervised children are restarted on crash
   and torn down when your extension is purged/reloaded.
+
+The typed functions above are convenience wrappers over Catalyst's generic extension-point
+API. A subsystem extension can define a new declarative contribution class without changing
+`Catalyst.ExtensionAPI`, and another extension can contribute to it:
+
+```text
+:ok =
+  Catalyst.ExtensionAPI.define_extension_point(api,
+    id: "ide.editor",
+    cardinality: :many,
+    schema: %{
+      "type" => "object",
+      "required" => ["language"],
+      "properties" => %{"language" => %{"type" => "string"}}
+    }
+  )
+
+:ok =
+  Catalyst.ExtensionAPI.contribute(
+    api,
+    "ide.editor",
+    %{"language" => "elixir"},
+    id: "elixir"
+  )
+```
+
+Use `Catalyst.ExtensionAPI.claim/4` with a `Catalyst.Runtime.ServiceKey` for a declared
+replaceable service. Host-wired services such as `agent.run_engine`, `llm.provider`,
+`agent.prompt_policy`, and `agent.context_policy` activate through their existing specialized
+registries. Extension-defined points and services are declarative graph entries until the
+subsystem that defines them resolves or consumes them. Current built-in service adapters are
+global overlays; they reject scoped claims they cannot yet enforce rather than pretending a
+workspace/session scope is active. All definitions, contributions, and claims are owner-scoped;
+purging a point owner hides dependent contributions without deleting another owner's data, so
+they reactivate if a compatible point returns.
 
 An extension module may also export an optional **`metadata/0`** returning
 `%{name: "…", description: "…"}` — it is shown on the Extensions panel so humans can

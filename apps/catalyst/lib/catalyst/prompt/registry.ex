@@ -236,13 +236,58 @@ defmodule Catalyst.Prompt.Registry do
     register_policy(module, Keyword.put(opts, :owner, owner))
   end
 
-  defp wire_extension_api do
-    ExtensionAPI.register_kind(:prompt, &__MODULE__.register_extension_prompt/4)
+  @doc false
+  @spec activate_prompt_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: :ok | {:error, term()}
+  def activate_prompt_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{
+          value: %{model_key: model_key, text: text, opts: prompt_opts}
+        },
+        _opts
+      ),
+      do: register_extension_prompt(api, model_key, text, prompt_opts)
 
-    ExtensionAPI.register_kind(
-      :prompt_policy,
-      &__MODULE__.register_extension_prompt_policy/3
-    )
+  @doc false
+  @spec activate_prompt_policy_claim(ExtensionAPI.t(), Catalyst.Runtime.Claim.t(), keyword()) ::
+          :ok | {:error, term()}
+  def activate_prompt_policy_claim(
+        api,
+        %Catalyst.Runtime.Claim{
+          implementation: module,
+          scope: %Catalyst.Runtime.Scope{constraints: constraints},
+          priority: 800,
+          binding: {:pin, :request}
+        },
+        opts
+      )
+      when map_size(constraints) == 0,
+      do: register_extension_prompt_policy(api, module, opts)
+
+  def activate_prompt_policy_claim(_api, claim, _opts),
+    do: {:error, {:unsupported_prompt_policy_claim, claim}}
+
+  defp wire_extension_api do
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "agent.prompt", cardinality: :many},
+        {__MODULE__, :activate_prompt_contribution}
+      )
+
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{
+          id: "agent.prompt_policy",
+          cardinality: :one,
+          contract: Catalyst.Runtime.ContractRef.new!("catalyst.prompt-policy", 1),
+          service: {"agent", "prompt_policy"},
+          default_binding: {:pin, :request}
+        },
+        {__MODULE__, :activate_prompt_policy_claim}
+      )
 
     ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
   end

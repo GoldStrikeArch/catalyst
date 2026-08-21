@@ -1,17 +1,17 @@
 defmodule Catalyst.ExtensionAPI do
   @moduledoc """
   The facade passed to `Catalyst.Extension.setup/1`. It carries the extension's
-  provenance (`owner`) and exposes `register_*` functions for every
-  extension kind. Handles also capture the originating extension server and
-  runtime generation. Registration through a stale handle is rejected, including
-  a generation change that races a subsystem handler call.
+  provenance (`owner`) and exposes generic extension-point operations plus typed
+  `register_*` convenience wrappers. Handles also capture the originating
+  extension server and runtime generation. Registration through a stale handle
+  is rejected, including a generation change that races a subsystem handler call.
 
-  Decoupling: each *kind* is backed by a handler registered at boot by the
-  subsystem that owns it — so `apps/catalyst` (core) never has to depend on
-  `apps/catalyst_web`. Core wires `:tool`, `:hook`, `:event`; the provider
-  registry wires `:provider`; the web UI registry wires `:renderer`, `:component`,
-  `:page`, `:command`. A `register_*` call for a kind that nothing has wired yet
-  returns `{:error, {:unsupported_kind, kind}}` rather than crashing.
+  Decoupling: each host extension point is backed by a handler registered at
+  boot by the subsystem that owns it — so `apps/catalyst` (core) never has to
+  depend on `apps/catalyst_web`. A contribution to a point that no host or
+  extension has declared returns `{:error, {:unsupported_extension_point, id}}`
+  rather than crashing. Extensions may define new declarative points without
+  adding another function to this module.
 
   Handlers and purgers live in `:persistent_term` (read-mostly, set once at boot).
   """
@@ -44,6 +44,19 @@ defmodule Catalyst.ExtensionAPI do
   @spec register_kind(atom(), function()) :: :ok
   def register_kind(kind, handler) when is_atom(kind) and is_function(handler) do
     :persistent_term.put({__MODULE__, :kind, kind}, handler)
+  end
+
+  @doc """
+  Declare or refresh a host-owned extension point.
+
+  `handler` is a stable `{module, function}` invoked as
+  `function(api, contribution_or_claim, opts)`. The owning subsystem keeps its
+  existing storage, execution, and purge semantics.
+  """
+  @spec register_extension_point(map() | keyword(), {module(), atom()}, term()) ::
+          :ok | {:error, term()}
+  def register_extension_point(spec, handler, owner \\ :host) do
+    Catalyst.Runtime.ExtensionPoints.register_host(spec, handler, owner)
   end
 
   @doc """
@@ -122,82 +135,143 @@ defmodule Catalyst.ExtensionAPI do
   end
 
   # ---- registration facade --------------------------------------------------
-  # Each function returns whatever the wired handler returns, or
-  # `{:error, {:unsupported_kind, kind}}` when nothing has wired that kind yet.
+  # Existing typed functions are ergonomic wrappers over generic points and
+  # claims. The legacy atom-kind dispatcher remains available to subsystem code
+  # during migration, but the public ontology is no longer closed here.
+
+  @doc "Define a new owner-scoped declarative extension point."
+  @spec define_extension_point(t(), map() | keyword()) :: :ok | {:error, term()}
+  def define_extension_point(api, spec) do
+    result =
+      dispatch_generic(api, fn -> Catalyst.Runtime.ExtensionPoints.define(api, spec) end)
+
+    remember_owner_collision(api, result)
+  end
+
+  @doc "Contribute a payload to a declared extension point."
+  @spec contribute(t(), String.t(), term(), keyword()) :: term()
+  def contribute(api, point_id, payload, opts \\ []) do
+    result =
+      dispatch_generic(api, fn ->
+        Catalyst.Runtime.ExtensionPoints.contribute(api, point_id, payload, opts)
+      end)
+
+    remember_owner_collision(api, result)
+  end
+
+  @doc "Claim a logical service implementation through its declared service point."
+  @spec claim(t(), Catalyst.Runtime.ServiceKey.t(), term(), keyword()) :: term()
+  def claim(api, key, implementation, opts \\ []) do
+    result =
+      dispatch_generic(api, fn ->
+        Catalyst.Runtime.ExtensionPoints.claim(api, key, implementation, opts)
+      end)
+
+    remember_owner_collision(api, result)
+  end
 
   @doc "Register a tool module (owner-tagged)."
   @spec register_tool(t(), module()) :: term()
-  def register_tool(api, module) do
-    result = dispatch(api, :tool, [module])
-    remember_owner_collision(api, result)
-  end
+  def register_tool(api, module),
+    do: contribute(api, "agent.tool", %{module: module}, id: module)
 
   @doc "Register an LLM provider under `name`."
   @spec register_provider(t(), String.t(), term()) :: term()
-  def register_provider(api, name, config) do
-    result = dispatch(api, :provider, [name, config])
-    remember_owner_collision(api, result)
-  end
+  def register_provider(api, name, config),
+    do:
+      claim(
+        api,
+        Catalyst.Runtime.ServiceKey.new!("llm", "provider", name),
+        config
+      )
 
   @doc "Register purpose-aware prompt text for an exact model key."
   @spec register_prompt(t(), String.t() | :default, String.t(), keyword()) :: term()
   def register_prompt(api, model_key, text, opts \\ []) do
-    result = dispatch(api, :prompt, [model_key, text, opts])
-    remember_owner_collision(api, result)
+    contribute(api, "agent.prompt", %{model_key: model_key, text: text, opts: opts},
+      id: model_key
+    )
   end
 
   @doc "Register the runtime-default prompt policy."
   @spec register_prompt_policy(t(), module(), keyword()) :: term()
   def register_prompt_policy(api, module, opts \\ []) do
-    result = dispatch(api, :prompt_policy, [module, opts])
-    remember_owner_collision(api, result)
+    claim(
+      api,
+      Catalyst.Runtime.ServiceKey.new!("agent", "prompt_policy"),
+      module,
+      opts
+    )
   end
 
   @doc "Register a named workflow (use `:default` for the runtime default)."
   @spec register_workflow(t(), String.t() | :default, module(), keyword()) :: term()
   def register_workflow(api, name, module, opts \\ []) do
-    result = dispatch(api, :workflow, [name, module, opts])
-    remember_owner_collision(api, result)
+    slot = if name == :default, do: "default", else: name
+
+    claim(
+      api,
+      Catalyst.Runtime.ServiceKey.new!("agent", "run_engine", slot),
+      module,
+      opts
+    )
   end
 
   @doc "Register the runtime-default context policy."
   @spec register_context_policy(t(), module(), keyword()) :: term()
   def register_context_policy(api, module, opts \\ []) do
-    result = dispatch(api, :context_policy, [module, opts])
-    remember_owner_collision(api, result)
+    claim(
+      api,
+      Catalyst.Runtime.ServiceKey.new!("agent", "context_policy"),
+      module,
+      opts
+    )
   end
 
   @doc "Register a context threshold for an exact model key."
   @spec register_context_threshold(t(), String.t() | :default, term(), keyword()) :: term()
   def register_context_threshold(api, model_key, value, opts \\ []) do
-    result = dispatch(api, :context_threshold, [model_key, value, opts])
-    remember_owner_collision(api, result)
+    contribute(
+      api,
+      "agent.context_threshold",
+      %{model_key: model_key, value: value, opts: opts},
+      id: model_key
+    )
   end
 
   @doc "Register a loop hook at `point` (e.g. `:before_tool_call`)."
   @spec register_hook(t(), atom(), function(), keyword()) :: term()
-  def register_hook(api, point, fun, opts \\ []), do: dispatch(api, :hook, [point, fun, opts])
+  def register_hook(api, point, fun, opts \\ []) do
+    contribute(api, "agent.hook", %{point: point, function: fun, opts: opts})
+  end
 
   @doc "Register an event observer."
   @spec on(t(), function(), keyword()) :: term()
-  def on(api, fun, opts \\ []), do: dispatch(api, :event, [fun, opts])
+  def on(api, fun, opts \\ []),
+    do: contribute(api, "runtime.event_observer", %{function: fun, opts: opts})
 
   @doc "Register a UI renderer for `kind` values matching `match`."
   @spec register_renderer(t(), atom(), (term() -> boolean()), function()) :: term()
-  def register_renderer(api, kind, match, fun), do: dispatch(api, :renderer, [kind, match, fun])
+  def register_renderer(api, kind, match, fun),
+    do: contribute(api, "ui.renderer", %{kind: kind, match: match, function: fun})
 
   @doc "Register a UI slot component."
   @spec register_component(t(), atom(), function(), keyword()) :: term()
-  def register_component(api, slot, fun, opts \\ []),
-    do: dispatch(api, :component, [slot, fun, opts])
+  def register_component(api, slot, fun, opts \\ []) do
+    contribute(api, "ui.component", %{slot: slot, function: fun, opts: opts})
+  end
 
   @doc "Register a UI page at `path`."
   @spec register_page(t(), String.t(), module() | {module(), atom()}, keyword()) :: term()
-  def register_page(api, path, module, opts \\ []), do: dispatch(api, :page, [path, module, opts])
+  def register_page(api, path, module, opts \\ []) do
+    contribute(api, "ui.page", %{path: path, target: module, opts: opts}, id: path)
+  end
 
   @doc "Register a command-palette command."
   @spec register_command(t(), String.t(), keyword()) :: term()
-  def register_command(api, name, opts \\ []), do: dispatch(api, :command, [name, opts])
+  def register_command(api, name, opts \\ []) do
+    contribute(api, "ui.command", %{name: name, opts: opts}, id: name)
+  end
 
   @doc """
   Start a supervised, owner-tagged process (any child spec) under
@@ -206,7 +280,30 @@ defmodule Catalyst.ExtensionAPI do
   extension processes instead of unsupervised `spawn`.
   """
   @spec start_child(t(), Supervisor.child_spec() | {module(), term()} | module()) :: term()
-  def start_child(api, child_spec), do: dispatch(api, :process, [child_spec])
+  def start_child(api, child_spec),
+    do: contribute(api, "runtime.process", %{child_spec: child_spec})
+
+  @doc false
+  @spec dispatch_kind(t(), atom(), [term()]) :: term()
+  def dispatch_kind(api, kind, args) when is_atom(kind) and is_list(args),
+    do: dispatch(api, kind, args)
+
+  defp dispatch_generic(%__MODULE__{} = api, fun) when is_function(fun, 0) do
+    Catalyst.Extensions.Transaction.with_generation_gate(fn ->
+      case Catalyst.Extensions.generation_current?(api.generation) do
+        true ->
+          result = fun.()
+
+          case Catalyst.Extensions.generation_current?(api.generation) do
+            true -> result
+            false -> purge_stale_registration(api.owner)
+          end
+
+        false ->
+          {:error, :stale_extension_generation}
+      end
+    end)
+  end
 
   defp dispatch(%__MODULE__{} = api, kind, args) do
     Catalyst.Extensions.Transaction.with_generation_gate(fn ->

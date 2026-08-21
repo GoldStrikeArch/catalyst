@@ -107,6 +107,18 @@ defmodule Catalyst.Application do
 
     with {:ok, _sup} = ok <-
            Supervisor.start_link(children, strategy: :one_for_one, name: Catalyst.Supervisor) do
+      :ok =
+        Catalyst.Runtime.ReadModel.register_source(
+          :core,
+          {Catalyst.Runtime.Sources.Core, :snapshot}
+        )
+
+      :ok =
+        Catalyst.Runtime.ReadModel.register_source(
+          :extension_points,
+          {Catalyst.Runtime.ExtensionPoints, :snapshot}
+        )
+
       register_builtin_hooks()
       ok
     end

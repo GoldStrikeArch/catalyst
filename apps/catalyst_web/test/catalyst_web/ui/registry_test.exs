@@ -23,19 +23,17 @@ defmodule CatalystWeb.UI.RegistryTest do
     assert Function.info(purger, :type) == {:type, :external}
 
     handlers = %{
-      renderer: {:register_extension_renderer, 4},
-      component: {:register_extension_component, 4},
-      page: {:register_extension_page, 4},
-      command: {:register_extension_command, 3}
+      "ui.renderer" => {Registry, :activate_renderer_contribution},
+      "ui.component" => {Registry, :activate_component_contribution},
+      "ui.page" => {Registry, :activate_page_contribution},
+      "ui.command" => {Registry, :activate_command_contribution}
     }
 
-    for {kind, {name, arity}} <- handlers do
-      handler = :persistent_term.get({ExtensionAPI, :kind, kind})
+    points = Map.new(Catalyst.Runtime.ExtensionPoints.list_points(), &{&1.id, &1})
 
-      assert Function.info(handler, :type) == {:type, :external}
-      assert Function.info(handler, :module) == {:module, Registry}
-      assert Function.info(handler, :name) == {:name, name}
-      assert Function.info(handler, :arity) == {:arity, arity}
+    for {id, handler} <- handlers do
+      assert points[id].handler == handler
+      assert points[id].owner == {:host, :web}
     end
   end
 
@@ -302,15 +300,21 @@ defmodule CatalystWeb.UI.RegistryTest do
     test "an in-flight stale registration cannot purge the replacement generation" do
       owner = "generation_gate_owner"
       path = "generation-gate-page"
-      previous_handler = :persistent_term.get({ExtensionAPI, :kind, :page})
+      {:ok, previous_point} = Catalyst.Runtime.ExtensionPoints.fetch("ui.page")
       gate = make_ref()
 
       :persistent_term.put(@dispatch_probe_key, %{test: self(), gate: gate})
-      ExtensionAPI.register_kind(:page, &__MODULE__.blocking_page_registration/4)
+
+      :ok =
+        ExtensionAPI.register_extension_point(
+          Map.from_struct(previous_point),
+          {__MODULE__, :blocking_page_contribution},
+          previous_point.owner
+        )
 
       on_exit(fn ->
         :persistent_term.erase(@dispatch_probe_key)
-        ExtensionAPI.register_kind(:page, previous_handler)
+        restore_point(previous_point)
         Registry.unregister_owner(owner)
       end)
 
@@ -339,7 +343,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       assert {:error, :stale_extension_generation} = Task.await(task, 5_000)
       _ = :sys.get_state(new_extensions)
 
-      ExtensionAPI.register_kind(:page, previous_handler)
+      restore_point(previous_point)
       fresh_api = ExtensionAPI.new(owner)
 
       assert :ok = ExtensionAPI.register_page(fresh_api, path, __MODULE__)
@@ -398,9 +402,15 @@ defmodule CatalystWeb.UI.RegistryTest do
   def fake_render(assigns), do: assigns
   def fake_command(_arg, socket), do: socket
 
-  def blocking_page_registration(api, path, target, opts) do
+  def blocking_page_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{
+          value: %{path: path, target: target, opts: page_opts}
+        },
+        _opts
+      ) do
     %{test: test, gate: gate} = :persistent_term.get(@dispatch_probe_key)
-    result = Registry.register_extension_page(api, path, target, opts)
+    result = Registry.register_extension_page(api, path, target, page_opts)
     send(test, {:dispatch_waiting, self(), gate})
 
     # Bounded: this block runs inside the global generation gate — if the test
@@ -411,5 +421,14 @@ defmodule CatalystWeb.UI.RegistryTest do
     after
       10_000 -> result
     end
+  end
+
+  defp restore_point(point) do
+    :ok =
+      ExtensionAPI.register_extension_point(
+        Map.from_struct(point),
+        point.handler,
+        point.owner
+      )
   end
 end

@@ -5,9 +5,9 @@ defmodule Catalyst.Extension do
 
   An extension is a module with a `setup/1` callback. When its source file is
   loaded (`Catalyst.Extensions.load_file/1`), Catalyst calls `setup/1` with a
-  `Catalyst.ExtensionAPI` struct through which the extension registers any mix of
-  tools, loop hooks, event observers, LLM providers, and UI renderers/components/
-  pages/commands:
+  `Catalyst.ExtensionAPI` struct through which the extension defines generic
+  extension points and registers any mix of tools, loop hooks, event observers,
+  LLM providers, and UI renderers/components/pages/commands:
 
       defmodule MyExt do
         use Catalyst.Extension

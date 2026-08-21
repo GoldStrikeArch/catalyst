@@ -373,13 +373,33 @@ defmodule Catalyst.Extensions.Server do
   end
 
   defp wire_core_kinds do
-    ExtensionAPI.register_kind(:tool, &Catalyst.Extensions.register_extension_tool/2)
-    ExtensionAPI.register_kind(:hook, &Catalyst.Extensions.register_extension_hook/4)
-    ExtensionAPI.register_kind(:event, &Catalyst.Extensions.register_extension_observer/3)
-    ExtensionAPI.register_kind(:process, &Catalyst.Extensions.start_extension_process/2)
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "agent.tool", cardinality: :many},
+        {Catalyst.Extensions, :activate_tool_contribution}
+      )
+
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "agent.hook", cardinality: :many},
+        {Catalyst.Extensions, :activate_hook_contribution}
+      )
+
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "runtime.event_observer", cardinality: :many},
+        {Catalyst.Extensions, :activate_observer_contribution}
+      )
+
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "runtime.process", cardinality: :many},
+        {Catalyst.Extensions, :activate_process_contribution}
+      )
 
     ExtensionAPI.register_purger(&Hooks.unregister/1)
     ExtensionAPI.register_purger(&Processes.stop_owner/1)
+    ExtensionAPI.register_purger(&Catalyst.Runtime.ExtensionPoints.purge_owner/1)
   end
 
   defp reseeders, do: :persistent_term.get(@reseeders_key, %{})

@@ -264,13 +264,58 @@ defmodule Catalyst.Context.Registry do
     register_threshold(model_key, value, Keyword.put(opts, :owner, owner))
   end
 
-  defp wire do
-    ExtensionAPI.register_kind(:context_policy, &__MODULE__.register_extension_policy/3)
+  @doc false
+  @spec activate_policy_claim(ExtensionAPI.t(), Catalyst.Runtime.Claim.t(), keyword()) ::
+          :ok | {:error, term()}
+  def activate_policy_claim(
+        api,
+        %Catalyst.Runtime.Claim{
+          implementation: module,
+          scope: %Catalyst.Runtime.Scope{constraints: constraints},
+          priority: 800,
+          binding: {:pin, :run}
+        },
+        opts
+      )
+      when map_size(constraints) == 0,
+      do: register_extension_policy(api, module, opts)
 
-    ExtensionAPI.register_kind(
-      :context_threshold,
-      &__MODULE__.register_extension_threshold/4
-    )
+  def activate_policy_claim(_api, claim, _opts),
+    do: {:error, {:unsupported_context_policy_claim, claim}}
+
+  @doc false
+  @spec activate_threshold_contribution(
+          ExtensionAPI.t(),
+          Catalyst.Runtime.Contribution.t(),
+          keyword()
+        ) :: :ok | {:error, term()}
+  def activate_threshold_contribution(
+        api,
+        %Catalyst.Runtime.Contribution{
+          value: %{model_key: model_key, value: value, opts: threshold_opts}
+        },
+        _opts
+      ),
+      do: register_extension_threshold(api, model_key, value, threshold_opts)
+
+  defp wire do
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{
+          id: "agent.context_policy",
+          cardinality: :one,
+          contract: Catalyst.Runtime.ContractRef.new!("catalyst.context-policy", 1),
+          service: {"agent", "context_policy"},
+          default_binding: {:pin, :run}
+        },
+        {__MODULE__, :activate_policy_claim}
+      )
+
+    :ok =
+      ExtensionAPI.register_extension_point(
+        %{id: "agent.context_threshold", cardinality: :many},
+        {__MODULE__, :activate_threshold_contribution}
+      )
 
     ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
   end

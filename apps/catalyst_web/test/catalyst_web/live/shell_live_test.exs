@@ -516,6 +516,8 @@ defmodule CatalystWeb.ShellLiveTest do
     view |> element("#run-diagnostics-toggle") |> render_click()
 
     assert has_element?(view, "#model-context-diagnostics")
+    assert has_element?(view, "#run-engine-diagnostics")
+    assert has_element?(view, "#run-engine-service", "agent.run_engine/")
     assert has_element?(view, "#workflow-diagnostics")
     assert has_element?(view, "#prompt-diagnostics", "Resolved run prompt")
   end

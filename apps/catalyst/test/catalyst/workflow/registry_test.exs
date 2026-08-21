@@ -218,6 +218,20 @@ defmodule Catalyst.Workflow.RegistryTest do
 
     assert {:ok, %{module: WorkflowB, source: {:runtime, ^owner, {:workflow, "review"}}}} =
              Registry.resolve(workflow: "review")
+
+    assert {:ok, layers} = Registry.resolution_layers(workflow: "review")
+
+    assert Enum.map(layers, & &1.source) == [
+             {:runtime, owner, {:workflow, "review"}},
+             {:application, {:workflows, "review"}},
+             {:template,
+              %{
+                id: "review",
+                name: "Review",
+                version: 1,
+                digest: Template.digest(template)
+              }}
+           ]
   end
 
   test "list/0 includes templates and omits malformed template rows" do

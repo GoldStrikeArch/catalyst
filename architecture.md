@@ -706,6 +706,31 @@ written through owner-aware registration APIs (extension setup uses the unified 
 read live on each use. Seeded registries contain their built-ins at boot; the Prompt, Workflow, and
 Context registries instead store runtime overlays only and resolve live application/built-in
 fallbacks after those overlays.
+Above those specialized stores, `Catalyst.Runtime` provides a process-free semantic read model:
+versioned service keys/contracts, scoped owner claims, additive contributions, deterministic
+resolution explanations, and graph snapshot identities. Core and optional hosts register stable
+`{module, function}` read adapters, so `catalyst_web` can contribute UI pages/renderers/components/
+commands without introducing a core → web dependency. `Runtime.snapshot/1` reports each source's
+health and declared coverage; the built-in read-only `runtime_graph` tool exposes the same graph to
+the agent.
+
+The first execution pilot is `agent.run_engine`: `Session.RunContext` resolves it at the run
+boundary and records service/owner/provenance/snapshot metadata. Workflow explanations include the
+valid runtime → application/ACP → template → configured-loop → built-in chain. Phase-one
+resolutions are logical pins, **not code leases**: generation-scoped physical modules, drain
+counters, candidate activation, and state handoff remain future work. Raw trusted BEAM overrides
+also remain opaque and cannot promise complete graph introspection.
+
+The extension ontology is no longer closed in `Catalyst.ExtensionAPI`. Host subsystems declare
+schema-aware `Runtime.ExtensionPoint` values with stable `{module, function}` activation handlers,
+while extensions may call `define_extension_point/2`, `contribute/4`, and `claim/4`. Generic
+definitions and entries are owner-scoped process-free data; the specialized tool/provider/
+workflow/policy/UI registries remain authoritative execution stores. Removing the owner of a point
+hides dependent entries without deleting entries owned by other extensions. Reintroducing a
+compatible point makes those entries visible again. A generic service claim only changes execution
+when its defining subsystem consumes Runtime Graph resolution or supplies a host activation
+handler—graph visibility is not presented as execution activation.
+
 The enabler is BEAM hot code loading: behavior lives in plain modules the loop/UI call fresh, so
 loading a new version changes behavior on the next call/render — even in the packaged release (the
 Elixir compiler ships in it). Self-modification is **auto-allowed**; the safety net is **bounded
@@ -717,15 +742,16 @@ the file fails.
 
 **Unified API.** `Catalyst.Extension` is a behaviour (`setup(api) :: :ok | {:error, term}`, plus
 optional `metadata/0` — merged into `Extensions.list_loaded/0` and shown on the `/extensions`
-panel). `Catalyst.ExtensionAPI` is the facade an extension's `setup/1` receives —
+panel). `Catalyst.ExtensionAPI` is the facade an extension's `setup/1` receives. Its generic
+`define_extension_point` / `contribute` / `claim` operations support subsystem-defined ontologies;
+the existing typed wrappers remain:
 `register_tool` / `register_provider` / `register_prompt` / `register_prompt_policy` /
 `register_workflow` / `register_context_policy` / `register_context_threshold` /
 `register_hook` / `on` / `register_renderer` / `register_component` / `register_page` /
-`register_command` / `start_child` — each tagged with the
-owning file's `ext_id`. Web-only kinds (renderers/components/pages/commands) are dispatched through
-`:persistent_term` so **core never depends on `catalyst_web`**. Direct host registrations use the
-reserved `:host` owner; they may refresh their own names but cannot detach or replace an
-extension-owned tool/provider.
+`register_command` / `start_child`. Each is tagged with the owning file's `ext_id`. Web-only points
+(renderers/components/pages/commands) register their own handlers, so **core never depends on
+`catalyst_web`**. Direct host registrations use reserved host owners; they may refresh their own
+points but cannot detach or replace an extension-owned tool/provider.
 
 **Extension processes.** `ExtensionAPI.start_child(api, child_spec)` gives extensions a supervised
 home for long-lived processes (watchers, pollers, client connections): each owner gets its own
