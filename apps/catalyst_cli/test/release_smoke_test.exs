@@ -211,15 +211,10 @@ defmodule CatalystCli.ReleaseSmokeTest do
       other -> raise "expected crash-detected safe mode, got: #{inspect(other)}"
     end
 
-    case Catalyst.Extensions.fetch("read") do
-      {:ok, _module} -> :ok
-      other -> raise "built-in tools unavailable in safe mode: #{inspect(other)}"
-    end
-
-    for name <- ["list_agents", "spawn_agent"] do
+    for tool <- Catalyst.Product.tools(), name = tool.name() do
       case Catalyst.Extensions.fetch(name) do
-        {:ok, _module} -> :ok
-        other -> raise "core tool #{name} unavailable in safe mode: #{inspect(other)}"
+        {:ok, ^tool} -> :ok
+        other -> raise "product tool #{name} unavailable in safe mode: #{inspect(other)}"
       end
     end
 
