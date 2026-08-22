@@ -51,6 +51,24 @@ defmodule CatalystCli.ReleaseManifestTest do
     for app <- @forbidden_apps do
       refute app in apps, "headless CLI release must not ship #{app}"
     end
+
+    [core_dir] = Path.wildcard(Path.join(release_path, "lib/catalyst-*"))
+
+    assert {:ok, executables} =
+             Catalyst.Pack.ReleaseFiles.executables(
+               :catalyst_cli,
+               Catalyst.Pack.ReleaseFiles.platform()
+             )
+
+    for executable <- executables do
+      target = Path.join(core_dir, executable.target)
+
+      assert File.regular?(target),
+             "missing pack executable #{executable.pack_id}:#{executable.id} at #{target}"
+
+      assert {:ok, %{mode: mode}} = File.stat(target)
+      assert Bitwise.band(mode, 0o111) != 0, "pack executable is not executable: #{target}"
+    end
   end
 
   defp shipped_apps(release_path) do

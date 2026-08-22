@@ -57,7 +57,7 @@ defmodule Catalyst.Umbrella.MixProject do
         # CATALYST_RELEASE_PLAIN=1 skips the Burrito wrap (needs zig): the plain
         # assembled release is what the release smoke tier boots.
         steps:
-          [:assemble] ++
+          [:assemble, &bundle_pack_executables/1] ++
             if(System.get_env("CATALYST_RELEASE_PLAIN"), do: [], else: [&Burrito.wrap/1]),
         burrito: [
           targets: [
@@ -102,10 +102,8 @@ defmodule Catalyst.Umbrella.MixProject do
         {tailwind_bin(),
          "tailwind standalone binary under #{build_root()} (run `mix assets.setup`)"}
       ] ++
-        for executable <- release_executables!(release) do
-          {System.find_executable(executable.source),
-           "executable `#{executable.source}` from pack #{executable.pack_id} on PATH"}
-        end ++ computer_helper_checks()
+        Catalyst.Pack.ReleaseFiles.checks(release_executables!(release)) ++
+        computer_helper_checks()
 
     case for {nil, label} <- checks, do: label do
       [] ->
@@ -199,7 +197,7 @@ defmodule Catalyst.Umbrella.MixProject do
 
     IO.puts("bundle_assets: workspace at #{ws}")
 
-    bundle_fast_tools(release)
+    bundle_pack_executables(release)
     bundle_computer_helper(release)
     release
   end
@@ -347,44 +345,44 @@ defmodule Catalyst.Umbrella.MixProject do
 
   # Bundle pack-declared executables into the core app. The release plan owns
   # target validation and collision detection; preflight verified every source.
-  defp bundle_fast_tools(release) do
-    for executable <- release_executables!(release) do
-      src =
-        System.find_executable(executable.source) ||
-          raise "bundle_fast_tools: `#{executable.source}` disappeared from PATH after preflight"
+  defp bundle_pack_executables(release) do
+    executables = release_executables!(release)
+    app_dir = core_dir(release)
 
-      dest = release |> core_dir() |> Path.join(executable.target)
-      File.mkdir_p!(Path.dirname(dest))
-      cp_bin!(src, dest)
+    checks =
+      [
+        {app_dir, "catalyst core app dir under #{release.path}/lib"}
+        | Catalyst.Pack.ReleaseFiles.checks(executables)
+      ]
+
+    missing = for {nil, label} <- checks, do: label
+
+    case missing do
+      [] ->
+        case Catalyst.Pack.ReleaseFiles.copy(executables, app_dir) do
+          :ok -> release
+          {:error, reason} -> raise "pack executable copy failed: #{inspect(reason)}"
+        end
+
+      missing ->
+        raise """
+        #{release.name} release executable preflight failed — missing required inputs:
+
+        #{Enum.map_join(missing, "\n", &("  - " <> &1))}
+        """
     end
-
-    :ok
   end
 
   defp release_executables!(release) do
-    {product, host} = release_product!(release.name)
-    platform = release_platform()
-
-    case Catalyst.Pack.ReleasePlan.for_target(product.spec(), host, platform) do
-      {:ok, plan} ->
-        for %{pack_id: pack_id, declaration: %{kind: :executable} = declaration} <-
-              plan.contributions,
-            do: Map.put(declaration, :pack_id, pack_id)
+    case Catalyst.Pack.ReleaseFiles.executables(
+           release.name,
+           Catalyst.Pack.ReleaseFiles.platform()
+         ) do
+      {:ok, executables} ->
+        executables
 
       {:error, reason} ->
         raise "invalid pack release plan for #{release.name}: #{inspect(reason)}"
-    end
-  end
-
-  defp release_product!(:catalyst_desktop), do: {Catalyst.Product.Default, :desktop}
-  defp release_product!(:catalyst_cli), do: {Catalyst.Product.MinimalCLI, :cli}
-  defp release_product!(name), do: raise("unknown Catalyst release target: #{inspect(name)}")
-
-  defp release_platform do
-    case :os.type() do
-      {:unix, :darwin} -> :darwin
-      {:win32, _name} -> :windows
-      _other -> :linux
     end
   end
 
