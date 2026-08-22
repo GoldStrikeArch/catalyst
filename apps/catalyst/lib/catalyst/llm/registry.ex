@@ -17,7 +17,6 @@ defmodule Catalyst.LLM.Registry do
   alias Catalyst.Extensions.Owner
   alias Catalyst.LLM.ProviderConfig
   alias Catalyst.OwnedIndex
-  alias Catalyst.Pack.Registry, as: PackRegistry
 
   @table :catalyst_llm_providers
 
@@ -246,13 +245,9 @@ defmodule Catalyst.LLM.Registry do
     do: module_config(compiled_provider_map()[api], module)
 
   defp compiled_provider_map do
-    case PackRegistry.resolve(Catalyst.Product.active_spec().packs) do
-      {:ok, manifests} ->
-        manifests |> Enum.flat_map(& &1.services) |> provider_map()
-
-      {:error, reason} ->
-        raise ArgumentError, "invalid product provider packs: #{inspect(reason)}"
-    end
+    Catalyst.Product.composition().packs
+    |> Enum.flat_map(& &1.services)
+    |> provider_map()
   end
 
   defp provider_map(services) do

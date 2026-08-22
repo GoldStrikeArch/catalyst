@@ -23,6 +23,7 @@ defmodule Catalyst.Runtime.ReadModelTest do
     assert graph.source_metadata.core.workflow_layers == :full_valid_chain
     assert graph.source_metadata.core.product.id == "coding-agent"
     assert "catalyst.agent.default" in graph.source_metadata.core.product.packs
+    assert byte_size(graph.source_metadata.core.product.digest) == 64
     assert byte_size(graph.snapshot_id) == 64
     assert repeated.snapshot_id == graph.snapshot_id
 
@@ -32,11 +33,19 @@ defmodule Catalyst.Runtime.ReadModelTest do
            end)
 
     assert Enum.any?(graph.claims, fn claim ->
-             claim.key.namespace == "llm" and claim.key.name == "provider"
+             claim.key.namespace == "llm" and claim.key.name == "provider" and
+               claim.key.slot == "openai-codex-responses" and
+               claim.owner == {:pack, "catalyst.provider.openai"} and
+               claim.provenance ==
+                 {:pack, "catalyst.provider.openai", {:provider, "openai-codex-responses"},
+                  {:product, "coding-agent"}}
            end)
 
     assert Enum.any?(graph.contributions, fn contribution ->
-             contribution.point == "agent.tool" and contribution.id == "runtime_graph"
+             contribution.point == "agent.tool" and contribution.id == "runtime_graph" and
+               contribution.owner == {:product, "coding-agent"} and
+               contribution.provenance ==
+                 {:product, "coding-agent", {:tool, "runtime_graph"}}
            end)
   end
 

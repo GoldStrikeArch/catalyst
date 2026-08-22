@@ -10,7 +10,12 @@ defmodule Catalyst.ProductTest do
   test "the product profile owns the registry's default composition" do
     previous = Application.fetch_env(:catalyst, :product_profile)
     Application.put_env(:catalyst, :product_profile, Catalyst.Test.ProductMinimal)
-    on_exit(fn -> restore_env(:product_profile, previous) end)
+    repin_product()
+
+    on_exit(fn ->
+      restore_env(:product_profile, previous)
+      repin_product()
+    end)
 
     assert Product.profile() == Catalyst.Test.ProductMinimal
     assert Product.id() == "minimal-test"
@@ -43,6 +48,38 @@ defmodule Catalyst.ProductTest do
     assert "catalyst.ide.core" in Catalyst.Product.IDE.spec().packs
   end
 
+  test "profile allow-lists reject duplicate stable ids" do
+    assert {:error, {:duplicate_product_profile_ids, ["duplicate"]}} =
+             Selection.build_profiles([
+               {"duplicate", Catalyst.Test.ProductMinimal},
+               {"duplicate", Catalyst.Test.ProductAlternate}
+             ])
+
+    assert {:error, {:duplicate_product_profile_ids, ["coding-agent"]}} =
+             Selection.build_profiles([
+               {"coding-agent", Catalyst.Test.ProductAlternate}
+             ])
+  end
+
+  test "boot pinning fails clearly when configuration replaces a compiled profile id" do
+    previous_profiles = Application.fetch_env(:catalyst, :product_profiles)
+
+    Application.put_env(:catalyst, :product_profiles, %{
+      "coding-agent" => Catalyst.Test.ProductAlternate
+    })
+
+    :ok = Product.reset_for_test()
+
+    on_exit(fn ->
+      restore_env(:product_profiles, previous_profiles)
+      repin_product()
+    end)
+
+    assert_raise ArgumentError, ~r/duplicate_product_profile_ids.*coding-agent/, fn ->
+      Product.initialize!()
+    end
+  end
+
   test "product specs reject malformed and duplicate composition entries" do
     assert {:error, {:invalid_product_id, "IDE with spaces"}} =
              Spec.new(%{id: "IDE with spaces", packs: [], tools: [], hosts: [:desktop]})
@@ -70,15 +107,30 @@ defmodule Catalyst.ProductTest do
       "alternate-test" => Catalyst.Test.ProductAlternate
     })
 
+    repin_product()
+
     on_exit(fn ->
       restore_env(:home, previous_home)
       restore_env(:product_profile, previous_profile)
       restore_env(:product_profiles, previous_profiles)
       File.rm_rf!(tmp)
+      repin_product()
     end)
 
     assert Product.active().source == :default
+    pinned_digest = Product.composition().digest
     assert {:ok, :restart_required} = Product.select("alternate-test")
+
+    assert Product.active() == %{
+             id: "coding-agent",
+             module: Catalyst.Product.Default,
+             source: :default
+           }
+
+    assert Product.composition().digest == pinned_digest
+    assert File.read!(Catalyst.Paths.product_profile()) == "alternate-test\n"
+
+    repin_product()
 
     assert Product.active() == %{
              id: "alternate-test",
@@ -87,7 +139,16 @@ defmodule Catalyst.ProductTest do
            }
 
     assert Product.tools() == [Catalyst.Tools.Ls]
-    assert File.read!(Catalyst.Paths.product_profile()) == "alternate-test\n"
+  end
+
+  test "the same product and pack selection has a deterministic boot digest" do
+    first = Product.composition()
+    repin_product()
+    second = Product.composition()
+
+    assert second.digest == first.digest
+    assert Enum.map(second.packs, & &1.id) == Enum.map(first.packs, & &1.id)
+    assert byte_size(second.digest) == 64
   end
 
   test "an unknown persisted profile falls back without creating a module identity" do
@@ -99,11 +160,13 @@ defmodule Catalyst.ProductTest do
     Application.delete_env(:catalyst, :product_profile)
     File.mkdir_p!(tmp)
     File.write!(Catalyst.Paths.product_profile(), "Elixir.Unknown.DynamicModule\n")
+    repin_product()
 
     on_exit(fn ->
       restore_env(:home, previous_home)
       restore_env(:product_profile, previous_profile)
       File.rm_rf!(tmp)
+      repin_product()
     end)
 
     assert Product.active() == %{
@@ -111,5 +174,10 @@ defmodule Catalyst.ProductTest do
              module: Catalyst.Product.Default,
              source: :fallback
            }
+  end
+
+  defp repin_product do
+    :ok = Product.reset_for_test()
+    :ok = Product.initialize!()
   end
 end

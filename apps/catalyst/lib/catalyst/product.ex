@@ -8,6 +8,8 @@ defmodule Catalyst.Product do
 
   @type profile :: module()
 
+  @composition_key {__MODULE__, :composition}
+
   @doc "Validated initial composition supplied by a modern product profile."
   @callback spec() :: Catalyst.Product.Spec.t()
 
@@ -19,27 +21,38 @@ defmodule Catalyst.Product do
 
   @optional_callbacks spec: 0, id: 0, tools: 0
 
+  @doc "Pin the selected product composition for this application boot."
+  @spec initialize!() :: :ok
+  def initialize! do
+    case :persistent_term.get(@composition_key, :missing) do
+      :missing -> :persistent_term.put(@composition_key, build_composition!())
+      %Catalyst.Product.Composition{} -> :ok
+    end
+
+    :ok
+  end
+
+  @doc "Return the immutable composition selected for this application boot."
+  @spec composition() :: Catalyst.Product.Composition.t()
+  def composition do
+    :ok = initialize!()
+    :persistent_term.get(@composition_key)
+  end
+
   @doc "Return the configured product profile module."
   @spec profile() :: profile()
-  def profile do
-    case Application.fetch_env(:catalyst, :product_profile) do
-      {:ok, profile} -> profile
-      :error -> Catalyst.Product.Selection.active().module
-    end
-  end
+  def profile, do: composition().profile
 
   @doc "Describe the active product profile and how it was selected."
   @spec active() :: %{id: String.t(), module: module(), source: atom()}
   def active do
-    case Application.fetch_env(:catalyst, :product_profile) do
-      {:ok, profile} -> %{id: spec!(profile).id, module: profile, source: :application}
-      :error -> Catalyst.Product.Selection.active()
-    end
+    composition = composition()
+    %{id: composition.spec.id, module: composition.profile, source: composition.source}
   end
 
   @doc "Return the validated initial composition for the active product."
   @spec active_spec() :: Catalyst.Product.Spec.t()
-  def active_spec, do: spec!(profile())
+  def active_spec, do: composition().spec
 
   @doc "Persist an allow-listed product profile for the next boot."
   @spec select(String.t()) :: {:ok, :restart_required} | {:error, term()}
@@ -53,10 +66,26 @@ defmodule Catalyst.Product do
   @spec tools() :: [module()]
   def tools, do: active_spec().tools
 
-  defp spec!(profile) do
-    case Catalyst.Product.Spec.from_profile(profile) do
-      {:ok, spec} -> spec
-      {:error, reason} -> raise ArgumentError, "invalid product profile: #{inspect(reason)}"
+  @doc false
+  @spec reset_for_test() :: :ok
+  def reset_for_test do
+    :persistent_term.erase(@composition_key)
+    :ok
+  end
+
+  defp build_composition! do
+    selection = configured_selection()
+
+    case Catalyst.Product.Composition.build(selection) do
+      {:ok, composition} -> composition
+      {:error, reason} -> raise ArgumentError, "invalid product composition: #{inspect(reason)}"
+    end
+  end
+
+  defp configured_selection do
+    case Application.fetch_env(:catalyst, :product_profile) do
+      {:ok, profile} -> %{module: profile, source: :application}
+      :error -> Catalyst.Product.Selection.active()
     end
   end
 end

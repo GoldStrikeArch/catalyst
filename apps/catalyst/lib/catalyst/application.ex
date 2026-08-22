@@ -7,6 +7,7 @@ defmodule Catalyst.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = Catalyst.Product.initialize!()
     :ok = Catalyst.Debug.init()
 
     children = [

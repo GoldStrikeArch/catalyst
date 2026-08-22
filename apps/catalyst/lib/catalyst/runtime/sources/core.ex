@@ -32,39 +32,40 @@ defmodule Catalyst.Runtime.Sources.Core do
   @spec snapshot(Context.t()) ::
           {:ok, %{claims: [Claim.t()], contributions: [Contribution.t()], metadata: map()}}
   def snapshot(%Context{} = context) do
-    product = Product.active_spec()
+    composition = Product.composition()
+    product = composition.spec
 
     {:ok,
      %{
-       claims: service_claims(context),
-       contributions: contributions(),
+       claims: service_claims(context, composition),
+       contributions: contributions(composition),
        metadata: %{
          workflow_layers: :full_valid_chain,
          provider_layers: :effective_only,
          prompt_policy_layers: :effective_only,
          context_policy_layers: :effective_only,
-         product: %{id: product.id, packs: product.packs},
+         product: %{id: product.id, packs: product.packs, digest: composition.digest},
          registries: registry_health()
        }
      }}
   end
 
-  defp service_claims(context) do
+  defp service_claims(context, composition) do
     RunEngine.all_claims(context) ++
       SessionFactory.claims() ++
       SessionEngine.claims() ++
       PermissionPolicy.claims() ++
       TranscriptStore.claims() ++
-      provider_claims() ++ prompt_policy_claims() ++ context_policy_claims()
+      provider_claims(composition) ++ prompt_policy_claims() ++ context_policy_claims()
   end
 
-  defp provider_claims do
+  defp provider_claims(composition) do
     owners = ProviderRegistry.runtime_owners()
     configured = Application.get_env(:catalyst, :llm_providers, %{})
 
     ProviderRegistry.list()
     |> Enum.map(fn {api, config} ->
-      {owner, priority, provenance} = provider_origin(api, owners, configured)
+      {owner, priority, provenance} = provider_origin(api, owners, configured, composition)
 
       claim(
         ServiceKey.new!("llm", "provider", api),
@@ -119,12 +120,12 @@ defmodule Catalyst.Runtime.Sources.Core do
     end
   end
 
-  defp contributions do
-    tool_contributions() ++
+  defp contributions(composition) do
+    tool_contributions(composition) ++
       hook_contributions() ++ prompt_contributions() ++ context_threshold_contributions()
   end
 
-  defp tool_contributions do
+  defp tool_contributions(composition) do
     owner_by_name = extension_tool_owners()
     builtins = MapSet.new(ToolRegistry.default_tools())
 
@@ -133,7 +134,9 @@ defmodule Catalyst.Runtime.Sources.Core do
     |> Enum.flat_map(fn name ->
       case Catalyst.Extensions.fetch(name) do
         {:ok, module} ->
-          {owner, provenance} = tool_origin(name, module, owner_by_name, builtins)
+          {owner, provenance} =
+            tool_origin(name, module, owner_by_name, builtins, composition)
+
           [contribution("agent.tool", name, module, owner, provenance)]
 
         :error ->
@@ -222,30 +225,44 @@ defmodule Catalyst.Runtime.Sources.Core do
     }
   end
 
-  defp provider_origin(api, owners, configured) do
+  defp provider_origin(api, owners, configured, composition) do
     case Map.fetch(owners, api) do
       {:ok, owner} -> {owner, 800, {:runtime, owner, {:provider, api}}}
-      :error -> configured_provider_origin(api, configured)
+      :error -> configured_provider_origin(api, configured, composition)
     end
   end
 
-  defp configured_provider_origin(api, configured) when is_map(configured) do
+  defp configured_provider_origin(api, configured, composition) when is_map(configured) do
     case Map.has_key?(configured, api) do
       true -> {:application, 600, {:application, {:llm_providers, api}}}
-      false -> {:builtin, 0, :builtin}
+      false -> compiled_provider_origin(api, composition)
     end
   end
 
-  defp configured_provider_origin(_api, _malformed), do: {:builtin, 0, :builtin}
+  defp configured_provider_origin(api, _malformed, composition),
+    do: compiled_provider_origin(api, composition)
 
-  defp tool_origin(name, module, owner_by_name, builtins) do
+  defp compiled_provider_origin(api, composition) do
+    case Catalyst.Product.Composition.provider_pack(composition, api) do
+      {:ok, pack} ->
+        owner = {:pack, pack.id}
+        {owner, 100, {:pack, pack.id, {:provider, api}, {:product, composition.spec.id}}}
+
+      :error ->
+        owner = {:product, composition.spec.id}
+        {owner, 100, {:product, composition.spec.id, {:provider, api}}}
+    end
+  end
+
+  defp tool_origin(name, module, owner_by_name, builtins, composition) do
     cond do
       Map.has_key?(owner_by_name, name) ->
         owner = Map.fetch!(owner_by_name, name)
         {owner, {:extension, owner, {:tool, name}}}
 
       MapSet.member?(builtins, module) ->
-        {:builtin, :builtin}
+        owner = {:product, composition.spec.id}
+        {owner, {:product, composition.spec.id, {:tool, name}}}
 
       true ->
         {:host, :host}

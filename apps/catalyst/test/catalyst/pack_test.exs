@@ -97,6 +97,14 @@ defmodule Catalyst.PackTest do
                Registry.validate_product_packs(["catalyst.agent.default"])
     end
 
+    test "rejects duplicate compiled pack identifiers before indexing" do
+      first = manifest("duplicate")
+      second = manifest("duplicate", hosts: [:cli])
+
+      assert {:error, {:duplicate_pack_ids, ["duplicate"]}} =
+               Registry.index([first, second])
+    end
+
     test "resolves transitive dependencies before requested packs" do
       assert {:ok, manifests} = Registry.resolve(["catalyst.ide.core"])
 

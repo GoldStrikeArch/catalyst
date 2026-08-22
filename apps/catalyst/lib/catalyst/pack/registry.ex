@@ -3,7 +3,32 @@ defmodule Catalyst.Pack.Registry do
 
   alias Catalyst.Pack.{Catalog, Manifest}
 
-  @catalog Map.new(Catalog.all(), &{&1.id, &1})
+  @manifests Catalog.all()
+  @duplicate_ids @manifests
+                 |> Enum.frequencies_by(& &1.id)
+                 |> Enum.flat_map(fn
+                   {id, count} when count > 1 -> [id]
+                   {_id, _count} -> []
+                 end)
+                 |> Enum.sort()
+
+  if @duplicate_ids != [] do
+    raise ArgumentError, "duplicate compiled pack ids: #{inspect(@duplicate_ids)}"
+  end
+
+  @catalog Map.new(@manifests, &{&1.id, &1})
+
+  @doc "Build a manifest index, rejecting duplicate stable pack identifiers."
+  @spec index([Manifest.t()]) ::
+          {:ok, %{String.t() => Manifest.t()}} | {:error, term()}
+  def index(manifests) when is_list(manifests) do
+    with {:ok, validated} <- validate_manifests(manifests),
+         :ok <- reject_duplicate_ids(validated) do
+      {:ok, Map.new(validated, &{&1.id, &1})}
+    end
+  end
+
+  def index(manifests), do: {:error, {:invalid_pack_catalog, manifests}}
 
   @doc "List compiled pack manifests in stable identifier order."
   @spec list() :: [Manifest.t()]
@@ -137,5 +162,34 @@ defmodule Catalyst.Pack.Registry do
         version = Map.fetch!(versions, dependency.id),
         not Version.match?(version, dependency.requirement),
         do: {manifest.id, dependency, version}
+  end
+
+  defp validate_manifests(manifests) do
+    Enum.reduce_while(manifests, {:ok, []}, fn manifest, {:ok, acc} ->
+      case Manifest.new(manifest) do
+        {:ok, validated} -> {:cont, {:ok, [validated | acc]}}
+        {:error, reason} -> {:halt, {:error, {:invalid_pack_catalog, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, validated} -> {:ok, Enum.reverse(validated)}
+      error -> error
+    end
+  end
+
+  defp reject_duplicate_ids(manifests) do
+    duplicates =
+      manifests
+      |> Enum.frequencies_by(& &1.id)
+      |> Enum.flat_map(fn
+        {id, count} when count > 1 -> [id]
+        {_id, _count} -> []
+      end)
+      |> Enum.sort()
+
+    case duplicates do
+      [] -> :ok
+      _duplicates -> {:error, {:duplicate_pack_ids, duplicates}}
+    end
   end
 end
