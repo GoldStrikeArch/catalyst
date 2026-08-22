@@ -2,18 +2,23 @@ defmodule CatalystWeb.RuntimeSource do
   @moduledoc "Runtime Graph read-model adapter for web UI contributions."
 
   alias Catalyst.Runtime.{Context, Contribution, Scope}
-  alias CatalystWeb.UI.Registry
+  alias CatalystWeb.{UI.Registry, Workbench}
 
   @doc "Capture currently registered pages, renderers, components, and commands."
   @spec snapshot(Context.t()) ::
-          {:ok, %{claims: [], contributions: [Contribution.t()], metadata: map()}}
+          {:ok,
+           %{
+             claims: [Catalyst.Runtime.Claim.t()],
+             contributions: [Contribution.t()],
+             metadata: map()
+           }}
           | {:error, :ui_registry_unavailable}
   def snapshot(%Context{}) do
     case Registry.available?() do
       true ->
         {:ok,
          %{
-           claims: [],
+           claims: Workbench.unmanaged_claims(),
            contributions:
              page_contributions() ++
                renderer_contributions() ++ component_contributions() ++ command_contributions(),

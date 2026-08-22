@@ -87,6 +87,9 @@ Inside the bundle — resolve at runtime, don't hardcode:
 - **Restructure a page/layout (a LiveView/component's markup or behavior)** → you can't edit the
   compiled module's file; register a replacement page/renderer via `install_extension`, or
   hot-swap the module by loading new code, then call **`reload_ui`**.
+- **Use the minimal IDE workbench** → open `/ide` for the workspace explorer, text editor,
+  command task, and command palette. Each mount pins `ui.workbench/default`; `/` remains the
+  existing agent chat during this migration phase.
 - **Recover** → `rollback_extension` (git revert + reload; pass `name` to scope it to one
   extension), `reload_extensions`, the **Extensions panel** at `/extensions` (per-extension
   reload / roll back / disable buttons), or restart with `CATALYST_SAFE_MODE=1` (built-ins only).

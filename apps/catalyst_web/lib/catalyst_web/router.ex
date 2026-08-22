@@ -1,8 +1,8 @@
 defmodule CatalystWeb.Router do
   @moduledoc """
-  HTTP routes. Everything renders through `CatalystWeb.ShellLive`: `/` plus a
-  `/:page` catch-all that resolves runtime-registered pages from
-  `CatalystWeb.UI.Registry` — no router recompile per extension page.
+  HTTP routes. The current chat product renders through `CatalystWeb.ShellLive`;
+  `/ide` exercises the stable replaceable-workbench host before any root switch.
+  Other `/:page` paths resolve runtime-registered shell pages from the UI registry.
   """
   use CatalystWeb, :router
 
@@ -35,7 +35,10 @@ defmodule CatalystWeb.Router do
 
     get "/runtime-assets/:generation/modules/*path", RuntimeAssetController, :module
 
-    # One LiveView for everything; the catch-all resolves runtime-registered
+    # The stable workbench host is an A/B seam; `/` remains the chat Shell.
+    live "/ide", WorkbenchHostLive, :index
+
+    # One LiveView for the current shell; the catch-all resolves runtime-registered
     # pages by path (e.g. /settings) with no router recompile per page.
     live "/compare", ComparisonLive, :index
     live "/compare/:id", ComparisonLive, :show

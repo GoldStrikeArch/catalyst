@@ -310,7 +310,8 @@ defmodule CatalystWeb.UI.Registry do
       %{path: "prompts", mod: CatalystWeb.Pages.PromptsPage, label: "Models & Prompts"},
       %{path: "workflows", mod: CatalystWeb.Pages.WorkflowsPage, label: "Workflows"},
       %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"},
-      %{path: "computer", mod: CatalystWeb.Pages.ComputerPage, label: "Computer"}
+      %{path: "computer", mod: CatalystWeb.Pages.ComputerPage, label: "Computer"},
+      %{path: "ide", mod: CatalystWeb.Workbench.IDEView, label: "IDE"}
     ]
     |> Enum.map(&Map.merge(&1, %{fun: :render, owner: nil, seq: 0}))
   end
@@ -449,6 +450,19 @@ defmodule CatalystWeb.UI.Registry do
     do: {:error, {:invalid_contribution, :ui, contribution}}
 
   defp wire do
+    :ok =
+      Catalyst.Runtime.ExtensionPoints.register_host(
+        %{
+          id: "ui.workbench",
+          cardinality: :many,
+          contract: Catalyst.Contracts.Workbench.V1.ref(),
+          service: {"ui", "workbench"},
+          default_binding: {:pin, :mount}
+        },
+        nil,
+        {:host, :web}
+      )
+
     :ok =
       ExtensionAPI.register_extension_point(
         %{id: "ui.renderer", cardinality: :many},

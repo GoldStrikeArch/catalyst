@@ -31,6 +31,12 @@ defmodule CatalystWeb.UI.RegistryTest do
 
     points = Map.new(Catalyst.Runtime.ExtensionPoints.list_points(), &{&1.id, &1})
 
+    assert points["ui.workbench"].handler == nil
+    assert points["ui.workbench"].owner == {:host, :web}
+    assert points["ui.workbench"].service == {"ui", "workbench"}
+    assert points["ui.workbench"].contract == Catalyst.Contracts.Workbench.V1.ref()
+    assert points["ui.workbench"].default_binding == {:pin, :mount}
+
     for {id, handler} <- handlers do
       assert points[id].handler == handler
       assert points[id].owner == {:host, :web}
@@ -38,6 +44,10 @@ defmodule CatalystWeb.UI.RegistryTest do
   end
 
   describe "pages" do
+    test "the IDE render target is a registered built-in page" do
+      assert {:ok, {CatalystWeb.Workbench.IDEView, :render}} = Registry.fetch_page("ide")
+    end
+
     test "last write wins per path, and purging the owner restores a displaced built-in" do
       assert {:ok, {CatalystWeb.Pages.ChatPage, :render}} = Registry.fetch_page("chat")
 
