@@ -30,13 +30,13 @@ defmodule Catalyst.LLM.RegistryTest do
     assert {:ok, Catalyst.LLM.OpenAICodex.Provider} = Registry.fetch("openai-codex-responses")
     assert {:ok, {"openai-codex-responses", codex}} = Registry.fetch_by_id("openai-codex")
     assert codex.catalog == Catalyst.LLM.OpenAICodex
-    assert codex.auth == Catalyst.Auth.OpenAIOAuth
+    assert codex.auth == Catalyst.Auth.OpenAICodexFlow
 
     assert {:ok, {"grok-subscription-chat-completions", grok}} =
              Registry.fetch_by_id("grok-subscription")
 
     assert grok.catalog == Catalyst.LLM.GrokSubscription
-    assert grok.auth == Catalyst.Auth.XAIOAuth
+    assert grok.auth == Catalyst.Auth.GrokFlow
     assert Map.has_key?(Registry.list(), "faux")
   end
 
@@ -152,6 +152,14 @@ defmodule Catalyst.LLM.RegistryTest do
              Registry.register_provider(
                "invalid-catalog",
                %ProviderConfig{id: "invalid", module: EchoProvider, catalog: InvalidCatalog}
+             )
+  end
+
+  test "auth flow metadata is validated at registration" do
+    assert {:error, {:invalid_auth_flow, InvalidCatalog}} =
+             Registry.register_provider(
+               "invalid-auth-flow",
+               %ProviderConfig{id: "invalid-auth", module: EchoProvider, auth: InvalidCatalog}
              )
   end
 end

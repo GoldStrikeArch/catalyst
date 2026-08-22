@@ -7,7 +7,7 @@ defmodule Catalyst.Auth do
   """
 
   require Logger
-  alias Catalyst.Auth.{CallbackServer, OpenAIOAuth, PKCE, TokenStore, XAIOAuth}
+  alias Catalyst.Auth.{CallbackServer, Flow, OpenAIOAuth, PKCE, TokenStore, XAIOAuth}
 
   @doc "Whether the selected subscription provider has stored credentials."
   @spec logged_in?(String.t()) :: boolean()
@@ -16,6 +16,22 @@ defmodule Catalyst.Auth do
   @doc "Forget the selected subscription provider's credentials."
   @spec logout(String.t()) :: :ok | {:error, term()}
   def logout(provider \\ OpenAIOAuth.provider_id()), do: TokenStore.delete(provider)
+
+  @doc "Run the authentication flow registered for `provider`."
+  @spec login(String.t(), keyword()) :: {:ok, String.t() | nil} | {:error, term()}
+  def login(provider, opts \\ []) when is_binary(provider) and is_list(opts) do
+    with {:ok, flow} <- Flow.resolve(provider) do
+      flow.login(opts)
+    end
+  end
+
+  @doc "Human-facing label for a registered authentication provider."
+  @spec label(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def label(provider) when is_binary(provider) do
+    with {:ok, flow} <- Flow.resolve(provider) do
+      {:ok, flow.label()}
+    end
+  end
 
   @doc """
   Run the ChatGPT OAuth PKCE flow: open the browser, capture the redirect on

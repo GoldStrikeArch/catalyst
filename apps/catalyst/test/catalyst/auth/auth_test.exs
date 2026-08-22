@@ -5,6 +5,45 @@ defmodule Catalyst.AuthTest do
 
   alias Catalyst.Auth.{CallbackServer, JWT, OpenAIOAuth, PKCE, TokenStore}
 
+  defmodule FixtureProvider do
+    @behaviour Catalyst.LLM.Provider
+
+    @impl true
+    def stream(_model, _context, _opts, _sink), do: {:error, :unused}
+  end
+
+  defmodule FixtureFlow do
+    @behaviour Catalyst.Auth.Flow
+
+    @impl true
+    def provider_id, do: "fixture-auth"
+
+    @impl true
+    def label, do: "Fixture Account"
+
+    @impl true
+    def login(_opts) do
+      send(Application.fetch_env!(:catalyst, :fixture_auth_test_pid), :fixture_login)
+      {:ok, "fixture-user"}
+    end
+
+    @impl true
+    def refresh(credentials) do
+      send(
+        Application.fetch_env!(:catalyst, :fixture_auth_test_pid),
+        {:fixture_refresh, credentials["refresh"]}
+      )
+
+      {:ok,
+       %{
+         "access" => "fixture-access-new",
+         "refresh" => "fixture-refresh-new",
+         "expires" => System.system_time(:millisecond) + 3_600_000,
+         "account_id" => nil
+       }}
+    end
+  end
+
   test "PKCE generates a verifier and a distinct S256 challenge" do
     %{verifier: v, challenge: c} = PKCE.generate()
     assert byte_size(v) >= 43
@@ -81,6 +120,50 @@ defmodule Catalyst.AuthTest do
 
     assert_received :listener_ready
     assert result == {:error, "access_denied"}
+  end
+
+  test "registered auth flows drive generic login and token refresh" do
+    Application.put_env(:catalyst, :fixture_auth_test_pid, self())
+
+    config = %Catalyst.LLM.ProviderConfig{
+      id: "fixture",
+      module: FixtureProvider,
+      name: "Fixture Account",
+      auth: FixtureFlow
+    }
+
+    assert :ok = Catalyst.LLM.Registry.register_provider("fixture-auth-api", config)
+
+    on_exit(fn ->
+      Application.delete_env(:catalyst, :fixture_auth_test_pid)
+      Catalyst.LLM.Registry.unregister_provider("fixture-auth-api")
+      TokenStore.delete("fixture-auth")
+    end)
+
+    assert {:ok, "fixture-user"} = Catalyst.Auth.login("fixture-auth")
+    assert_receive :fixture_login
+    assert {:ok, "Fixture Account"} = Catalyst.Auth.label("fixture-auth")
+
+    assert :ok =
+             TokenStore.put("fixture-auth", %{
+               access: "fixture-access-old",
+               refresh: "fixture-refresh-old",
+               expires: 0,
+               account_id: "fixture-account"
+             })
+
+    assert {:ok, %{access: "fixture-access-new", account_id: "fixture-account"}} =
+             TokenStore.get_access_token("fixture-auth")
+
+    assert_receive {:fixture_refresh, "fixture-refresh-old"}
+  end
+
+  test "unknown auth providers and missing refresh tokens fail with bounded tagged errors" do
+    assert {:error, {:unknown_auth_provider, "unknown-auth"}} =
+             Catalyst.Auth.login("unknown-auth")
+
+    assert {:error, {:missing_refresh_token, "openai-codex"}} =
+             Catalyst.Auth.OpenAICodexFlow.refresh(%{"access" => "must-not-leak"})
   end
 
   test "TokenStore stores and returns a fresh access token" do

@@ -21,8 +21,19 @@ defmodule CatalystWeb.ShellLive.SettingsTest do
   end
 
   defmodule FixtureAuth do
-    @moduledoc false
+    @behaviour Catalyst.Auth.Flow
+
+    @impl true
     def provider_id, do: "fixture-auth"
+
+    @impl true
+    def label, do: "Fixture Subscription"
+
+    @impl true
+    def login(_opts), do: {:ok, "fixture-account"}
+
+    @impl true
+    def refresh(credentials), do: {:ok, credentials}
   end
 
   defmodule FixtureCatalog do

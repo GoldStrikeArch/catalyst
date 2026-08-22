@@ -12,7 +12,7 @@ defmodule Catalyst.Auth.TokenStore do
   require Logger
 
   alias Catalyst.Tasks
-  alias Catalyst.Auth.{OpenAIOAuth, XAIOAuth}
+  alias Catalyst.Auth.{Flow, OpenAIOAuth}
   alias Catalyst.Files.AtomicWrite
 
   @skew_ms 60_000
@@ -226,9 +226,8 @@ defmodule Catalyst.Auth.TokenStore do
   end
 
   defp refresh_provider(provider, creds) do
-    case provider == XAIOAuth.provider_id() do
-      true -> XAIOAuth.refresh(creds)
-      false -> OpenAIOAuth.refresh(creds["refresh"])
+    with {:ok, flow} <- Flow.resolve(provider) do
+      flow.refresh(creds)
     end
   end
 

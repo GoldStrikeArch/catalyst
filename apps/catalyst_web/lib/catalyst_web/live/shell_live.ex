@@ -791,20 +791,34 @@ defmodule CatalystWeb.ShellLive do
   defp toggle_menu(_current, menu), do: menu
 
   defp login_fun(provider) do
+    override =
+      Application.get_env(:catalyst_web, :auth_login_fun) ||
+        legacy_login_fun(provider)
+
+    case override do
+      fun when is_function(fun, 1) -> fn -> fun.(provider) end
+      fun when is_function(fun, 0) -> fun
+      nil -> fn -> Catalyst.Auth.login(provider) end
+    end
+  end
+
+  # Preserve the two provider-specific test/config hooks that predate auth
+  # descriptors. New providers use :auth_login_fun or their registered flow.
+  defp legacy_login_fun(provider) do
     case provider == Catalyst.Auth.XAIOAuth.provider_id() do
-      true -> Application.get_env(:catalyst_web, :grok_login_fun, &Catalyst.Auth.login_grok/0)
-      false -> Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)
+      true -> Application.get_env(:catalyst_web, :grok_login_fun)
+      false -> Application.get_env(:catalyst_web, :login_fun)
     end
   end
 
   defp auth_label(provider) do
-    case provider == Catalyst.Auth.XAIOAuth.provider_id() do
-      true -> "SuperGrok"
-      false -> "ChatGPT"
+    case Catalyst.Auth.label(provider) do
+      {:ok, label} -> label
+      {:error, _unknown_provider} -> provider
     end
   end
 
-  # Config-injectable like :login_fun, so tests never open System Settings.
+  # Config-injectable so tests never open System Settings.
   defp open_url_fun do
     Application.get_env(:catalyst_web, :open_url_fun, fn url ->
       System.cmd("/usr/bin/open", [url], stderr_to_stdout: true)

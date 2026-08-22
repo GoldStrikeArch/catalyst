@@ -31,7 +31,7 @@ defmodule Catalyst.LLM.Registry do
       module: Catalyst.LLM.OpenAICodex.Provider,
       name: "ChatGPT",
       catalog: Catalyst.LLM.OpenAICodex,
-      auth: Catalyst.Auth.OpenAIOAuth,
+      auth: Catalyst.Auth.OpenAICodexFlow,
       controls: %{transports: ~w(auto websocket sse)},
       catalog_priority: 100
     },
@@ -40,7 +40,7 @@ defmodule Catalyst.LLM.Registry do
       module: Catalyst.LLM.GrokSubscription.Provider,
       name: "SuperGrok",
       catalog: Catalyst.LLM.GrokSubscription,
-      auth: Catalyst.Auth.XAIOAuth,
+      auth: Catalyst.Auth.GrokFlow,
       catalog_priority: 200
     }
   }
@@ -200,8 +200,9 @@ defmodule Catalyst.LLM.Registry do
   end
 
   defp validate_config(%ProviderConfig{} = config) do
-    with :ok <- validate_provider_module(config.module) do
-      validate_catalog(config)
+    with :ok <- validate_provider_module(config.module),
+         :ok <- validate_catalog(config) do
+      validate_auth(config)
     end
   end
 
@@ -217,6 +218,15 @@ defmodule Catalyst.LLM.Registry do
            Enum.all?(callbacks, fn {name, arity} -> function_exported?(catalog, name, arity) end) do
       true -> :ok
       false -> {:error, {:invalid_model_catalog, catalog}}
+    end
+  end
+
+  defp validate_auth(%ProviderConfig{auth: nil}), do: :ok
+
+  defp validate_auth(%ProviderConfig{auth: auth}) do
+    case Catalyst.Auth.Flow.flow?(auth) do
+      true -> :ok
+      false -> {:error, {:invalid_auth_flow, auth}}
     end
   end
 

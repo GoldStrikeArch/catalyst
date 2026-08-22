@@ -41,6 +41,53 @@ defmodule CatalystWeb.CodexControlsTest do
     end
   end
 
+  defmodule ThirdProvider do
+    @behaviour Catalyst.LLM.Provider
+
+    @impl true
+    def stream(_model, _context, _opts, _sink), do: {:error, :unused}
+  end
+
+  defmodule ThirdCatalog do
+    @behaviour Catalyst.LLM.ModelCatalog
+
+    @entry %{
+      id: "third-model",
+      name: "Third Model",
+      efforts: ["medium"],
+      default_effort: "medium",
+      fast?: false
+    }
+
+    @impl true
+    def default_model_id, do: @entry.id
+
+    @impl true
+    def catalog_snapshot(_id), do: %{models: [@entry], selected: @entry}
+
+    @impl true
+    def model(id), do: %Catalyst.Model{id: id, api: "third-api", provider: "third"}
+  end
+
+  defmodule ThirdAuth do
+    @behaviour Catalyst.Auth.Flow
+
+    @impl true
+    def provider_id, do: "third-auth"
+
+    @impl true
+    def label, do: "Third Account"
+
+    @impl true
+    def login(_opts) do
+      send(Application.fetch_env!(:catalyst_web, :third_auth_test_pid), :third_login_called)
+      {:ok, "third-user"}
+    end
+
+    @impl true
+    def refresh(credentials), do: {:ok, credentials}
+  end
+
   setup do
     previous_models = CatalogCache.models()
     previous_prefs = :persistent_term.get(@codex_prefs_ptr, :not_set)
@@ -157,12 +204,13 @@ defmodule CatalystWeb.CodexControlsTest do
   test "Grok 4.6 selects the direct subscription provider and SuperGrok auth", %{conn: conn} do
     parent = self()
 
-    Application.put_env(:catalyst_web, :grok_login_fun, fn ->
+    Application.put_env(:catalyst_web, :auth_login_fun, fn provider ->
+      assert provider == Catalyst.Auth.XAIOAuth.provider_id()
       send(parent, :grok_login_called)
       {:ok, "xai-user"}
     end)
 
-    on_exit(fn -> Application.delete_env(:catalyst_web, :grok_login_fun) end)
+    on_exit(fn -> Application.delete_env(:catalyst_web, :auth_login_fun) end)
 
     {:ok, view, _html} = live(conn, "/")
     pid = session_pid(view)
@@ -187,6 +235,37 @@ defmodule CatalystWeb.CodexControlsTest do
     view |> element("#login-button") |> render_click()
     assert_receive :grok_login_called, 1_000
     assert has_element?(view, ~s(#logout-button[title="Sign out of SuperGrok"]))
+  end
+
+  test "a third provider's descriptor supplies Shell login without a provider branch", %{
+    conn: conn
+  } do
+    Application.put_env(:catalyst_web, :third_auth_test_pid, self())
+
+    config = %Catalyst.LLM.ProviderConfig{
+      id: "third",
+      module: ThirdProvider,
+      name: "Third Account",
+      catalog: ThirdCatalog,
+      auth: ThirdAuth
+    }
+
+    assert :ok = Registry.register_provider("third-api", config)
+
+    on_exit(fn ->
+      Application.delete_env(:catalyst_web, :third_auth_test_pid)
+      Registry.unregister_provider("third-api")
+    end)
+
+    {:ok, view, _html} = live(conn, "/")
+    assert has_element?(view, "#codex-opts option[value='third-model']", "Third Model")
+
+    view |> form("#codex-opts") |> render_change(%{"model" => "third-model"})
+    assert has_element?(view, "#login-button", "Sign in to Third Account")
+
+    view |> element("#login-button") |> render_click()
+    assert_receive :third_login_called
+    assert has_element?(view, ~s(#logout-button[title="Sign out of Third Account"]))
   end
 
   test "a Luna selection reaches the provider request for a newly created chat", %{conn: conn} do
