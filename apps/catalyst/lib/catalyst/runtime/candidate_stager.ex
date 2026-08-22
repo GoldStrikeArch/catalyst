@@ -38,12 +38,20 @@ defmodule Catalyst.Runtime.CandidateStager do
              parent: parent
            ) do
       candidate = Map.put(candidate, :activation_id, activation_id)
-
-      case Artifacts.attach(activation_id, candidate.artifacts) do
-        :ok -> stage_candidate(candidate)
-        {:error, reason} -> {:error, reason, candidate}
-      end
+      validate_and_stage(candidate, activation_id)
     end
+  end
+
+  defp validate_and_stage(%Candidate{migrations: []} = candidate, activation_id) do
+    case Artifacts.attach(activation_id, candidate.artifacts) do
+      :ok -> stage_candidate(candidate)
+      {:error, reason} -> {:error, reason, candidate}
+    end
+  end
+
+  defp validate_and_stage(%Candidate{} = candidate, _activation_id) do
+    ids = Enum.map(candidate.migrations, & &1.id)
+    {:error, {:state_migrations_not_supported, ids}, candidate}
   end
 
   defp existing_claims do

@@ -53,6 +53,13 @@ defmodule Catalyst.Runtime.GenerationsTest do
     end
   end
 
+  defmodule Migration do
+    def run do
+      send(:persistent_term.get({__MODULE__, :test}), :migration_ran)
+      :ok
+    end
+  end
+
   setup do
     :ok = Generations.clear()
     :ok = ExtensionPoints.purge_owner(@host_owner)
@@ -245,6 +252,27 @@ defmodule Catalyst.Runtime.GenerationsTest do
     rejected_generation = Enum.find(Generations.list(), &(&1.status == :rejected))
     assert rejected_generation.reason == {:health_check_failed, "unhealthy", :unhealthy}
     assert CandidateProcesses.list(rejected_generation.id) == []
+  end
+
+  test "declared state migrations fail closed until handoff is supported" do
+    :persistent_term.put({Migration, :test}, self())
+    on_exit(fn -> :persistent_term.erase({Migration, :test}) end)
+
+    manifest =
+      manifest("test.generation.migration",
+        migrations: [
+          %{id: "session-state", from: 1, to: 2, module: Migration, function: :run}
+        ]
+      )
+
+    assert {:error, {:state_migrations_not_supported, ["session-state"]}} =
+             Generations.install("migration_source", [manifest])
+
+    refute_received :migration_ran
+    assert GenerationStore.active_id() == nil
+
+    assert %{status: :rejected, reason: {:state_migrations_not_supported, ["session-state"]}} =
+             Enum.find(Generations.list(), &(&1.status == :rejected))
   end
 
   test "artifact attachment failure is retained as a rejected generation" do
