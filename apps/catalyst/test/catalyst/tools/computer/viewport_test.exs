@@ -9,10 +9,17 @@ defmodule Catalyst.Tools.Computer.ViewportTest do
   @viewport %{origin: {10, 20}, scale: 2.0, ratio: 0.5}
 
   test "the viewport table is owned by Viewport, supervised beside Helper" do
-    children = Catalyst.Supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+    root_children =
+      Catalyst.Supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
 
-    assert Catalyst.Tools.Computer.Viewport in children
-    assert Catalyst.Tools.Computer.Helper in children
+    runtime_children =
+      Catalyst.Tools.Computer.RuntimeSupervisor
+      |> Supervisor.which_children()
+      |> Enum.map(&elem(&1, 0))
+
+    assert Catalyst.Tools.Computer.RuntimeSupervisor in root_children
+    assert Catalyst.Tools.Computer.Viewport in runtime_children
+    assert Catalyst.Tools.Computer.Helper in runtime_children
   end
 
   test "recorded geometry survives a Helper crash (stable table owner)" do

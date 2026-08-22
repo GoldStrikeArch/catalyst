@@ -74,6 +74,8 @@ defmodule Catalyst.Product.Default do
         "catalyst.provider.openai",
         "catalyst.provider.grok",
         "catalyst.tools.coding",
+        "catalyst.tools.computer",
+        "catalyst.tools.shell",
         "catalyst.tools.self-development"
       ],
       tools: @tools,

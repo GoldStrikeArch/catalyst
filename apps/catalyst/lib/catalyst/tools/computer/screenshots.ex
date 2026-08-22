@@ -18,10 +18,10 @@ defmodule Catalyst.Tools.Computer.Screenshots do
   full; and compaction persists its replacement untransformed, so pruning
   shrinks the *request*, not the durable transcript.
 
-  Registered at boot by `Catalyst.Application` (plus an
-  `Catalyst.Extensions.register_reseeder/2` entry so extension-runtime restarts
-  and `load_all` re-seed it); `register_hooks/0` is idempotent — it revokes the
-  owner's prior registration first.
+  Registered at boot by `Catalyst.Application` only when the Computer Use pack
+  is selected (plus a `Catalyst.Extensions.register_reseeder/2` entry so
+  extension-runtime restarts and `load_all` re-seed it); `register_hooks/0` is
+  idempotent — it revokes the owner's prior registration first.
   """
 
   alias Catalyst.{Content, Hooks, Message}

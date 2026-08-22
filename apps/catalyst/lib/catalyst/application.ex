@@ -43,20 +43,6 @@ defmodule Catalyst.Application do
       # Holds OAuth credentials, refreshes tokens on demand.
       Catalyst.Auth.TokenStore,
       pack_children,
-      # Stable owner of the per-session screenshot-geometry ETS table. Kept
-      # outside the Helper deliberately: a Helper crash must not destroy the
-      # recorded viewports, or the next click silently falls back to the
-      # default main-display mapping after a window-scoped screenshot.
-      Catalyst.Tools.Computer.Viewport,
-      # Owns the native computer-use input helper Port. Lazy: no Port (and no
-      # TCC prompt) until the first computer-use call; :permanent so the held-
-      # input release invariant survives helper crashes.
-      Catalyst.Tools.Computer.Helper,
-      # Cross-turn PTY shell sessions (shell_session tool): one Server per
-      # shell under the DynamicSupervisor, registered by shell-session id with
-      # the owning Catalyst session id as the value.
-      {Registry, keys: :unique, name: Catalyst.Tools.Shell.Registry},
-      {DynamicSupervisor, name: Catalyst.Tools.Shell.Supervisor, strategy: :one_for_one},
       # The extension runtime registries, grouped under :rest_for_one because
       # they have hard inter-child dependencies (see extension_runtime/0).
       # Under the previous flat :one_for_one those held only at first boot: a
@@ -131,10 +117,19 @@ defmodule Catalyst.Application do
   # live in the same runtime Hooks registry extensions use, so a reseeder keeps
   # them registered across extension-runtime restarts and load_all reloads.
   defp register_builtin_hooks do
-    :ok = Catalyst.Tools.Computer.Screenshots.register_hooks()
+    case Enum.any?(Catalyst.Product.composition().packs, &(&1.id == "catalyst.tools.computer")) do
+      true ->
+        :ok = Catalyst.Tools.Computer.Screenshots.register_hooks()
 
-    :ok =
-      Catalyst.Extensions.register_reseeder(Catalyst.Tools.Computer.Screenshots, :register_hooks)
+        :ok =
+          Catalyst.Extensions.register_reseeder(
+            Catalyst.Tools.Computer.Screenshots,
+            :register_hooks
+          )
+
+      false ->
+        :ok
+    end
   end
 
   @impl true

@@ -178,6 +178,61 @@ defmodule Catalyst.PackTest do
       assert {:error, {:duplicate_pack_process_ids, [Catalyst.LLM.OpenAICodex.CatalogCache]}} =
                BootPlan.build([first, second])
     end
+
+    test "computer and shell runtimes follow the products that expose their tools" do
+      default_ids = boot_process_ids(Catalyst.Product.Default)
+      ide_ids = boot_process_ids(Catalyst.Product.IDE)
+      minimal_ids = boot_process_ids(Catalyst.Product.MinimalCLI)
+
+      assert default_ids == [
+               Catalyst.LLM.OpenAICodex.CatalogCache,
+               Catalyst.LLM.OpenAICodex.ConnCache,
+               Catalyst.Tools.Computer.RuntimeSupervisor,
+               Catalyst.Tools.Shell.RuntimeSupervisor
+             ]
+
+      assert ide_ids == default_ids
+
+      assert minimal_ids == [
+               Catalyst.LLM.OpenAICodex.CatalogCache,
+               Catalyst.LLM.OpenAICodex.ConnCache
+             ]
+
+      assert Catalyst.Tools.Computer in Catalyst.Product.Default.tools()
+      assert Catalyst.Tools.ShellSession in Catalyst.Product.Default.tools()
+      refute Catalyst.Tools.Computer in Catalyst.Product.MinimalCLI.tools()
+      refute Catalyst.Tools.ShellSession in Catalyst.Product.MinimalCLI.tools()
+    end
+
+    test "the running product owns cohesive computer and shell supervisor roots" do
+      root_ids = Catalyst.Supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+
+      assert Catalyst.Tools.Computer.RuntimeSupervisor in root_ids
+      assert Catalyst.Tools.Shell.RuntimeSupervisor in root_ids
+      refute Catalyst.Tools.Computer.Viewport in root_ids
+      refute Catalyst.Tools.Shell.Registry in root_ids
+
+      assert is_pid(Process.whereis(Catalyst.Tools.Computer.Viewport))
+      assert is_pid(Process.whereis(Catalyst.Tools.Computer.Helper))
+      assert is_pid(Process.whereis(Catalyst.Tools.Shell.Registry))
+      assert is_pid(Process.whereis(Catalyst.Tools.Shell.Supervisor))
+
+      shell_child_ids =
+        Catalyst.Tools.Shell.RuntimeSupervisor
+        |> Supervisor.which_children()
+        |> Enum.map(&elem(&1, 0))
+        |> MapSet.new()
+
+      assert shell_child_ids ==
+               MapSet.new([
+                 Catalyst.Tools.Shell.Registry,
+                 Catalyst.Tools.Shell.Supervisor
+               ])
+
+      assert Enum.any?(Catalyst.Hooks.handlers(:transform_context), fn handler ->
+               handler.owner == :computer_use_builtin
+             end)
+    end
   end
 
   describe "release aggregation" do
@@ -294,6 +349,12 @@ defmodule Catalyst.PackTest do
 
   defp executable(id, target),
     do: %{kind: :executable, id: id, source: id, target: target}
+
+  defp boot_process_ids(profile) do
+    {:ok, manifests} = Registry.resolve(profile.spec().packs)
+    {:ok, entries} = BootPlan.build(manifests)
+    Enum.map(entries, & &1.id)
+  end
 
   defp manifest(id, opts \\ []) do
     opts

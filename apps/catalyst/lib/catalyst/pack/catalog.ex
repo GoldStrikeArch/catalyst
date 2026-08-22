@@ -115,6 +115,40 @@ defmodule Catalyst.Pack.Catalog do
         end)
     }),
     Manifest.new!(%{
+      id: "catalyst.tools.computer",
+      version: @version,
+      trust: :compiled_trusted,
+      dependencies: [
+        "catalyst.meta-runtime",
+        "catalyst.agent.default",
+        "catalyst.tools.coding"
+      ],
+      hosts: [:web, :desktop],
+      processes: [
+        %{
+          id: Catalyst.Tools.Computer.RuntimeSupervisor,
+          child_spec: Catalyst.Tools.Computer.RuntimeSupervisor
+        }
+      ]
+    }),
+    Manifest.new!(%{
+      id: "catalyst.tools.shell",
+      version: @version,
+      trust: :compiled_trusted,
+      dependencies: [
+        "catalyst.meta-runtime",
+        "catalyst.agent.default",
+        "catalyst.tools.coding"
+      ],
+      hosts: @all_hosts,
+      processes: [
+        %{
+          id: Catalyst.Tools.Shell.RuntimeSupervisor,
+          child_spec: Catalyst.Tools.Shell.RuntimeSupervisor
+        }
+      ]
+    }),
+    Manifest.new!(%{
       id: "catalyst.tools.self-development",
       version: @version,
       trust: :compiled_trusted,
