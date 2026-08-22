@@ -621,8 +621,10 @@ esbuild/tailwind) instead of warn-and-skip. Then:
 
 1. **`bundle_assets/1`** ships a self-contained esbuild/tailwind workspace into the `.app`
    (`<webapp>/priv/asset_build/{assets,lib,bin}` + the JS `deps/` esbuild resolves), so
-   `CatalystWeb.Assets.rebuild/0` (§11) regenerates CSS/JS at runtime. `config/{runtime,prod}.exs`
-   switch to **no-digest** serving so a runtime rebuild overwrites the served `app.{css,js}`.
+   `CatalystWeb.Assets.rebuild/0` (§11) can seed a writable workspace below `CATALYST_HOME`.
+   Successful builds publish an immutable content-digest generation below
+   `runtime-assets/generations/` and atomically switch the active pointer; packaged `priv/static`
+   remains the fallback and is never mutated at runtime.
    `bundle_fast_tools/1` copies `rg`/`fd`/`sd`/`ast-grep` into `lib/catalyst-*/priv/bin` (a GUI
    `.app` has a minimal PATH; `Tools.Binaries` checks the bundled dir).
 2. **`generate_installer/1`** (the dep) builds the `.app` + `.dmg`/`.pkg`.
@@ -633,12 +635,12 @@ esbuild/tailwind) instead of warn-and-skip. Then:
    **before** flipping `CFBundleExecutable` (else codesign tries to seal the whole bundle and fails
    on the unsigned `run`), then rebuilds the `.dmg`/`.pkg` from the fixed app.
 
-Runtime-path rule (in the packaged app): resolve writable locations via `Application.app_dir/2` /
-`:code.priv_dir/1`, never hardcoded bundle paths. The session `cwd` defaults to `$HOME` when
+Runtime-path rule (in the packaged app): resolve immutable bundled inputs via
+`Application.app_dir/2` / `:code.priv_dir/1` and writable state via `Catalyst.Paths`, never
+hardcoded paths. The session `cwd` defaults to `$HOME` when
 `RELEASE_NAME` is set (repoint with the `/cd` chat command). **macOS TCC** blocks a `.app` from
-`~/Desktop|Documents|Downloads` (`:eperm`) unless granted Full Disk Access. Caveat: runtime asset
-rebuilds need `priv/static` to be user-writable, i.e. run the `.app` from a writable dir (not a
-root-owned `/Applications`).
+`~/Desktop|Documents|Downloads` (`:eperm`) unless granted Full Disk Access. Runtime asset rebuilds
+remain available when the `.app` is installed in a root-owned directory such as `/Applications`.
 
 ---
 

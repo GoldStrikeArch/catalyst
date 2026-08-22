@@ -63,13 +63,15 @@ Outside the bundle — stable, user-writable, your durable workspace:
 | This guide                                               | `~/.catalyst/guide.md`                           |
 | Per-session debug log (+ `latest.log`)                   | `~/.catalyst/debug/<session_id>.log`             |
 | Auth / session transcripts                               | `~/.catalyst/auth.json`, `~/.catalyst/sessions/` |
+| Editable runtime CSS/JS source                           | `~/.catalyst/asset-workspace/assets/`            |
+| Published runtime asset generations                      | `~/.catalyst/runtime-assets/generations/`        |
 
 Inside the bundle — resolve at runtime, don't hardcode:
 
 | What                                           | Resolve with                                                                                                                                                   |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Served assets (what the window loads)          | `Application.app_dir(:catalyst_web, "priv/static/assets/css/app.css")` (and `js/app.js`)                                                                       |
-| **Editable** CSS/JS source (rebuild from here) | `Application.app_dir(:catalyst_web, "priv/asset_build/assets/")` → `css/app.css`, `js/app.js`, `vendor/`                                                       |
+| Packaged fallback assets                       | `Application.app_dir(:catalyst_web, "priv/static/assets/css/app.css")` (and `js/app.js`)                                                                       |
+| Runtime asset seed and bundled compiler inputs | `Application.app_dir(:catalyst_web, "priv/asset_build/")` — copied to the writable workspace on first use; do not edit the bundle                              |
 | Bundled fast-tool binaries                     | `Application.app_dir(:catalyst, "priv/bin/")` (`rg`,`fd`,`sd`,`ast-grep`) — used automatically by `grep`/`find`/`replace`/`ast_grep`; you rarely need the path |
 
 ### How to change the running app
@@ -79,7 +81,7 @@ Inside the bundle — resolve at runtime, don't hardcode:
   module that `use Catalyst.Extension` and registers them in `setup/1` (see "Beyond tools"
   below). Live immediately, no rebuild.
 - **Change CSS / styling (incl. new Tailwind classes), or a JS hook** → edit the **runtime asset
-  source** under `Application.app_dir(:catalyst_web, "priv/asset_build/assets/...")`, then call the
+  source** under `Catalyst.Paths.asset_workspace()` (`assets/...`), then call the
   **`rebuild_assets`** tool; the window reloads. (Tailwind also scans `~/.catalyst/extensions`, so
   classes in components you create are compiled.)
 - **Restructure a page/layout (a LiveView/component's markup or behavior)** → you can't edit the
@@ -107,7 +109,7 @@ and increases usage.
 
 ### Worked example: make the app background white
 
-The canonical runtime UI change — edits the bundled CSS source via `app_dir` (no hardcoded path)
+The canonical runtime UI change — edits the writable CSS source below `CATALYST_HOME`
 and rebuilds. Call `install_extension` with name `white_background` and this source:
 
 ```elixir
@@ -116,7 +118,8 @@ defmodule Catalyst.Ext.WhiteBackground do
 
   @impl true
   def setup(_api) do
-    css = Application.app_dir(:catalyst_web, "priv/asset_build/assets/css/app.css")
+    {:ok, workspace} = CatalystWeb.RuntimeAssets.ensure_workspace()
+    css = Path.join(workspace, "assets/css/app.css")
     File.write!(css, "\nbody { background: #ffffff; color: #111827; }\n", [:append])
     CatalystWeb.Assets.rebuild()
     :ok
@@ -129,9 +132,10 @@ from the bundled toolchain and reloads connected windows; the `rebuild_assets` t
 
 ### Constraints in the bundled app (read before acting)
 
-- **Writable assets:** `rebuild_assets` writes into the bundle's `priv/static`. Works when the
-  `.app` runs from a **user-writable** location (e.g. `…/_build/prod/Catalyst.app`); if copied to
-  `/Applications` (root-owned) it fails — tell the user.
+- **Writable assets:** `rebuild_assets` writes source and digest-addressed output below
+  `CATALYST_HOME` (default `~/.catalyst`), so an app installed in root-owned `/Applications`
+  remains rebuildable. The immutable packaged assets remain the fallback until the first
+  successful runtime build.
 - **Working directory:** defaults to the user's **home**, not their project. Don't assume the cwd
   is any repo. The user repoints the session by typing **`/cd <path>`** in the chat. Resolve user
   paths with `Catalyst.Tools.Paths.resolve(path, ctx.cwd)`.

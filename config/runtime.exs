@@ -34,10 +34,10 @@ if config_env() == :prod do
         url: [host: "localhost", port: port, scheme: "http"],
         secret_key_base: secret_key_base
 
-      # Runtime asset rebuild (rebuild_assets / CatalystWeb.Assets) inside the packaged
-      # app. The release `bundle_assets` step ships a self-contained asset workspace
-      # (source + JS deps + esbuild/tailwind binaries) under the catalyst_web app dir;
-      # point esbuild/tailwind at it with absolute paths resolved here at boot.
+      # Runtime asset rebuild inputs inside the packaged app. `bundle_assets` ships a
+      # self-contained source/toolchain seed here; CatalystWeb.RuntimeAssets copies the
+      # source to CATALYST_HOME and overrides these output arguments for each immutable
+      # candidate generation, so the paths below are never mutated by a runtime build.
       web_dir = Application.app_dir(:catalyst_web)
       ws = Path.join(web_dir, "priv/asset_build")
       static = Path.join(web_dir, "priv/static/assets")

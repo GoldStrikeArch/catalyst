@@ -160,12 +160,12 @@ defmodule CatalystWeb.Flex.GuideExamplesTest do
     remove_installed_fixture!("guide_http_get")
   end
 
-  test "G1: WhiteBackground compiles without setup and keeps the packaged path contract" do
+  test "G1: WhiteBackground compiles and uses the writable asset workspace" do
     block = guide_block!("white_background")
     assert {:ok, _ast} = Code.string_to_quoted(block.source)
 
-    assert block.source =~
-             "Application.app_dir(:catalyst_web, \"priv/asset_build/assets/css/app.css\")"
+    assert block.source =~ "CatalystWeb.RuntimeAssets.ensure_workspace()"
+    assert block.source =~ "Path.join(workspace, \"assets/css/app.css\")"
 
     purge_module(Catalyst.Ext.WhiteBackground)
 

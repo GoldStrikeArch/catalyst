@@ -30,10 +30,8 @@ defmodule CatalystWeb.Endpoint do
 
   # Serve at "/" the static files from "priv/static" directory.
   #
-  # gzip stays OFF in every env: the runtime asset rebuild
-  # (CatalystWeb.Tools.RebuildAssets) overwrites the plain app.js/app.css in
-  # place, and with gzip on Plug.Static would prefer stale .gz siblings over
-  # the rebuilt files. Same reason assets.deploy does not run phx.digest.
+  # gzip stays OFF for the fixed packaged fallback. Runtime rebuilds use their
+  # own digest-addressed controller paths and never mutate these files.
   plug Plug.Static,
     at: "/",
     from: :catalyst_web,

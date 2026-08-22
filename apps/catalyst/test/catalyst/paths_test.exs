@@ -28,6 +28,8 @@ defmodule Catalyst.PathsTest do
     assert Paths.prompts() == Path.join(home, "prompts")
     assert Paths.agents() == Path.join(home, "agents")
     assert Paths.workflows() == Path.join(home, "workflows")
+    assert Paths.asset_workspace() == Path.join(home, "asset-workspace")
+    assert Paths.runtime_assets() == Path.join(home, "runtime-assets")
     assert Paths.join("bin") == Path.join(home, "bin")
   end
 

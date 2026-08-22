@@ -29,6 +29,14 @@ defmodule Catalyst.Paths do
     Application.get_env(:catalyst, :extensions_dir) || join("extensions")
   end
 
+  @doc "Writable source workspace used for runtime web-asset rebuilds."
+  @spec asset_workspace() :: Path.t()
+  def asset_workspace, do: join("asset-workspace")
+
+  @doc "Digest-addressed runtime web-asset generations."
+  @spec runtime_assets() :: Path.t()
+  def runtime_assets, do: join("runtime-assets")
+
   @doc "Default session-store root."
   @spec sessions() :: Path.t()
   def sessions, do: join("sessions")

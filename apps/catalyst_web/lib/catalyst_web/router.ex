@@ -25,6 +25,14 @@ defmodule CatalystWeb.Router do
     # a static asset by verified routes.
     get "/image/:digest", ImageController, :show
 
+    # Runtime rebuilds are published outside the immutable application bundle.
+    # The generation digest makes these responses safe to cache permanently.
+    get "/runtime-assets/:generation/assets/css/app.css", RuntimeAssetController, :css
+
+    get "/runtime-assets/:generation/assets/js/app.js",
+        RuntimeAssetController,
+        :javascript
+
     # One LiveView for everything; the catch-all resolves runtime-registered
     # pages by path (e.g. /settings) with no router recompile per page.
     live "/compare", ComparisonLive, :index
