@@ -7,6 +7,9 @@ defmodule Catalyst.Auth.Flow do
   """
 
   alias Catalyst.LLM.Registry
+  alias Catalyst.Tasks
+
+  @default_metadata_timeout 1_000
 
   @typedoc "Validated credentials stored by `Catalyst.Auth.TokenStore`."
   @type credentials :: %{required(String.t()) => term()}
@@ -29,16 +32,25 @@ defmodule Catalyst.Auth.Flow do
           | {:error,
              {:unknown_auth_provider, String.t()} | {:ambiguous_auth_provider, String.t()}}
   def resolve(provider_id) when is_binary(provider_id) do
-    matches =
-      Registry.list()
-      |> Map.values()
-      |> Enum.map(& &1.auth)
-      |> Enum.filter(&flow?/1)
-      |> Enum.uniq()
-      |> Enum.filter(&(&1.provider_id() == provider_id))
+    matches = Enum.filter(descriptors(), &(&1.provider_id == provider_id))
 
     case matches do
-      [flow] -> {:ok, flow}
+      [%{flow: flow}] -> {:ok, flow}
+      [] -> {:error, {:unknown_auth_provider, provider_id}}
+      _many -> {:error, {:ambiguous_auth_provider, provider_id}}
+    end
+  end
+
+  @doc "Return a registered flow's bounded, validated human-facing label."
+  @spec label(String.t()) ::
+          {:ok, String.t()}
+          | {:error,
+             {:unknown_auth_provider, String.t()} | {:ambiguous_auth_provider, String.t()}}
+  def label(provider_id) when is_binary(provider_id) do
+    matches = Enum.filter(descriptors(), &(&1.provider_id == provider_id))
+
+    case matches do
+      [%{label: label}] -> {:ok, label}
       [] -> {:error, {:unknown_auth_provider, provider_id}}
       _many -> {:error, {:ambiguous_auth_provider, provider_id}}
     end
@@ -54,4 +66,33 @@ defmodule Catalyst.Auth.Flow do
   end
 
   def flow?(_flow), do: false
+
+  defp descriptors do
+    Registry.list()
+    |> Map.values()
+    |> Enum.map(& &1.auth)
+    |> Enum.filter(&flow?/1)
+    |> Enum.uniq()
+    |> Enum.flat_map(&descriptor/1)
+  end
+
+  defp descriptor(flow) do
+    task = Tasks.async(fn -> {flow.provider_id(), flow.label()} end)
+
+    case Tasks.await(task, metadata_timeout()) do
+      {:ok, {provider_id, label}}
+      when is_binary(provider_id) and provider_id != "" and is_binary(label) and label != "" ->
+        [%{flow: flow, provider_id: provider_id, label: label}]
+
+      _invalid_or_unavailable ->
+        []
+    end
+  end
+
+  defp metadata_timeout do
+    case Application.get_env(:catalyst, :auth_flow_metadata_timeout, @default_metadata_timeout) do
+      timeout when is_integer(timeout) and timeout >= 0 -> timeout
+      _invalid -> @default_metadata_timeout
+    end
+  end
 end

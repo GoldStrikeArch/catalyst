@@ -2,6 +2,7 @@ defmodule Catalyst.AuthTest do
   use ExUnit.Case, async: false
 
   import Bitwise, only: [band: 2]
+  import Catalyst.EnvCase, only: [restore_env: 2]
 
   alias Catalyst.Auth.{CallbackServer, JWT, OpenAIOAuth, PKCE, TokenStore}
 
@@ -42,6 +43,26 @@ defmodule Catalyst.AuthTest do
          "account_id" => nil
        }}
     end
+  end
+
+  defmodule HangingFlow do
+    @behaviour Catalyst.Auth.Flow
+
+    @impl true
+    def provider_id do
+      receive do
+        :never -> "hanging-auth"
+      end
+    end
+
+    @impl true
+    def label, do: "Hanging Account"
+
+    @impl true
+    def login(_opts), do: {:error, :unused}
+
+    @impl true
+    def refresh(credentials), do: {:ok, credentials}
   end
 
   test "PKCE generates a verifier and a distinct S256 challenge" do
@@ -164,6 +185,27 @@ defmodule Catalyst.AuthTest do
 
     assert {:error, {:missing_refresh_token, "openai-codex"}} =
              Catalyst.Auth.OpenAICodexFlow.refresh(%{"access" => "must-not-leak"})
+  end
+
+  test "extension auth metadata cannot hang its caller" do
+    previous_timeout = Application.fetch_env(:catalyst, :auth_flow_metadata_timeout)
+    Application.put_env(:catalyst, :auth_flow_metadata_timeout, 10)
+
+    config = %Catalyst.LLM.ProviderConfig{
+      id: "hanging",
+      module: FixtureProvider,
+      auth: HangingFlow
+    }
+
+    assert :ok = Catalyst.LLM.Registry.register_provider("hanging-auth-api", config)
+
+    on_exit(fn ->
+      restore_env(:auth_flow_metadata_timeout, previous_timeout)
+      Catalyst.LLM.Registry.unregister_provider("hanging-auth-api")
+    end)
+
+    assert {:error, {:unknown_auth_provider, "hanging-auth"}} =
+             Catalyst.Auth.label("hanging-auth")
   end
 
   test "TokenStore stores and returns a fresh access token" do

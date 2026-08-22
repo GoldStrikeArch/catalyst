@@ -27,11 +27,7 @@ defmodule Catalyst.Auth do
 
   @doc "Human-facing label for a registered authentication provider."
   @spec label(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def label(provider) when is_binary(provider) do
-    with {:ok, flow} <- Flow.resolve(provider) do
-      {:ok, flow.label()}
-    end
-  end
+  def label(provider) when is_binary(provider), do: Flow.label(provider)
 
   @doc """
   Run the ChatGPT OAuth PKCE flow: open the browser, capture the redirect on
