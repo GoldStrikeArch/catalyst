@@ -1,27 +1,58 @@
 defmodule Catalyst.Session.EventEnvelope do
   @moduledoc """
-  Versioned, process-local input delivered to a session engine.
+  Versioned input delivered to a session engine and, for durable payloads, the
+  transcript store.
 
-  Version one deliberately leaves persistence and PubSub wire shapes unchanged;
-  external observers continue receiving the enclosed `Catalyst.Agent.Event`.
+  PubSub continues receiving the enclosed raw event. `causation_id` and
+  `producer_contract` stay nil when the host does not possess that information;
+  the envelope never infers identity from message contents.
   """
 
-  alias Catalyst.Agent.Event
+  alias Catalyst.Runtime.ContractRef
 
-  @enforce_keys [:session_id, :event]
-  defstruct @enforce_keys ++ [version: 1, run_id: nil]
+  @enforce_keys [:event_id, :session_id, :event, :payload_schema_version]
+  defstruct @enforce_keys ++
+              [
+                version: 1,
+                causation_id: nil,
+                correlation_id: nil,
+                producer_contract: nil
+              ]
 
   @type t :: %__MODULE__{
           version: 1,
+          event_id: String.t(),
           session_id: String.t(),
-          run_id: String.t() | nil,
-          event: Event.t()
+          causation_id: String.t() | nil,
+          correlation_id: String.t() | nil,
+          producer_contract: ContractRef.t() | nil,
+          payload_schema_version: pos_integer(),
+          event: term()
         }
 
   @doc "Wrap one accepted agent event for the session engine."
-  @spec new(Event.t(), String.t(), String.t() | nil) :: t()
-  def new(event, session_id, run_id \\ nil)
-      when is_binary(session_id) and (is_binary(run_id) or is_nil(run_id)) do
-    %__MODULE__{event: event, session_id: session_id, run_id: run_id}
+  @spec new(term(), String.t(), keyword() | String.t() | nil) :: t()
+  def new(event, session_id, opts \\ []) when is_binary(session_id) do
+    opts = normalize_opts(opts)
+
+    %__MODULE__{
+      event: event,
+      event_id: Keyword.get_lazy(opts, :event_id, fn -> Catalyst.Ids.hex(16) end),
+      session_id: session_id,
+      causation_id: Keyword.get(opts, :causation_id),
+      correlation_id: Keyword.get(opts, :correlation_id),
+      producer_contract: normalize_contract(Keyword.get(opts, :producer_contract)),
+      payload_schema_version: Keyword.get(opts, :payload_schema_version, 1)
+    }
   end
+
+  defp normalize_opts(nil), do: []
+  defp normalize_opts(run_id) when is_binary(run_id), do: [correlation_id: run_id]
+  defp normalize_opts(opts) when is_list(opts), do: opts
+
+  defp normalize_contract(nil), do: nil
+  defp normalize_contract(%ContractRef{} = contract), do: contract
+
+  defp normalize_contract(%{id: id, version: version}),
+    do: ContractRef.new!(id, version)
 end

@@ -3,16 +3,16 @@ defmodule Catalyst.Session.Store do
   Append-only JSONL persistence for a session (PI's JSONL session repo).
 
   Layout: `~/.catalyst/sessions/<cwd-hash>/<id>.jsonl`. Line 1 is a session
-  header; each subsequent line is a `{"type":"message","message":{…}}` entry,
-  appended as the single writer (`Catalyst.Session.Server`) sees `message_end`.
-  `load/1` folds the lines back into a message list for resume.
+  header; legacy records and versioned event envelopes share the same file.
+  `load/1` folds both representations through the legacy replay rules.
   """
 
   require Logger
 
   alias Catalyst.Context.Transcript
   alias Catalyst.Message
-  alias Catalyst.Session.Store.Codec
+  alias Catalyst.Session.EventEnvelope
+  alias Catalyst.Session.Store.{Codec, EventEnvelopeCodec}
 
   @type handle :: %{id: String.t(), path: String.t(), cwd: String.t()}
   @type open_error ::
@@ -124,6 +124,15 @@ defmodule Catalyst.Session.Store do
   @spec append_message(handle(), Message.t()) :: :ok | {:error, append_error()}
   def append_message(handle, message) do
     append_line(handle, fn -> %{"type" => "message", "message" => encode(message)} end)
+  end
+
+  @doc "Append one versioned durable event envelope as a JSONL line."
+  @spec append_envelope(handle(), EventEnvelope.t()) :: :ok | {:error, append_error()}
+  def append_envelope(handle, %EventEnvelope{} = envelope) do
+    case EventEnvelopeCodec.encode(envelope) do
+      {:ok, entry} -> append_line(handle, fn -> entry end)
+      {:error, reason} -> {:error, {:build_failed, reason}}
+    end
   end
 
   @doc """
@@ -300,6 +309,22 @@ defmodule Catalyst.Session.Store do
     end
   end
 
+  defp encode_entry_without_details(
+         %{
+           "type" => "event",
+           "envelope" =>
+             %{"payload" => %{"message" => %{"details" => details} = message}} = envelope
+         } = entry
+       )
+       when not is_nil(details) do
+    payload = %{envelope["payload"] | "message" => %{message | "details" => nil}}
+
+    case Jason.encode(%{entry | "envelope" => %{envelope | "payload" => payload}}) do
+      {:ok, encoded} -> {:ok, encoded}
+      {:error, reason} -> {:error, {:encode_failed, reason}}
+    end
+  end
+
   defp encode_entry_without_details(entry), do: {:error, {:encode_failed, {:invalid_json, entry}}}
 
   # Deliberately re-opens the file per append: a held raw device keeps
@@ -429,6 +454,13 @@ defmodule Catalyst.Session.Store do
   defp fold_state_line(line, state) do
     case Jason.decode(String.trim(line)) do
       {:ok, entry} -> fold_entry(entry, state)
+      {:error, _reason} -> state
+    end
+  end
+
+  defp fold_entry(%{"type" => "event"} = entry, state) do
+    case EventEnvelopeCodec.decode(entry) do
+      {:ok, %EventEnvelope{event: payload}} -> fold_entry(payload, state)
       {:error, _reason} -> state
     end
   end

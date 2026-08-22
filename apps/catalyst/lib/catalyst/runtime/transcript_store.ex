@@ -40,26 +40,10 @@ defmodule Catalyst.Runtime.TranscriptStore do
           {:ok, Catalyst.Session.Store.loaded_state()} | {:error, term()}
   def load_state(%StoreHandle{} = handle), do: invoke(handle, :load_state, [])
 
-  @doc "Append a message through the pinned backend."
-  @spec append_message(StoreHandle.t(), Catalyst.Message.t()) :: :ok | {:error, term()}
-  def append_message(%StoreHandle{} = handle, message),
-    do: invoke(handle, :append_message, [message])
-
-  @doc "Append an authoritative reset marker through the pinned backend."
-  @spec append_reset(StoreHandle.t()) :: :ok | {:error, term()}
-  def append_reset(%StoreHandle{} = handle), do: invoke(handle, :append_reset, [])
-
-  @doc "Append an authoritative compaction through the pinned backend."
-  @spec append_compaction(StoreHandle.t(), Catalyst.Agent.Event.ContextCompacted.t()) ::
-          :ok | {:error, term()}
-  def append_compaction(%StoreHandle{} = handle, event),
-    do: invoke(handle, :append_compaction, [event])
-
-  @doc "Append the current persisted settings through the pinned backend."
-  @spec append_settings_snapshot(StoreHandle.t(), Catalyst.Session.Store.persisted_settings()) ::
-          :ok | {:error, term()}
-  def append_settings_snapshot(%StoreHandle{} = handle, settings),
-    do: invoke(handle, :append_settings_snapshot, [settings])
+  @doc "Append a versioned durable event through the pinned backend."
+  @spec append(StoreHandle.t(), Catalyst.Session.EventEnvelope.t()) :: :ok | {:error, term()}
+  def append(%StoreHandle{} = handle, %Catalyst.Session.EventEnvelope{} = envelope),
+    do: invoke(handle, :append, [envelope])
 
   @doc "Close the backend handle and release its managed-generation lease."
   @spec close(StoreHandle.t()) :: :ok

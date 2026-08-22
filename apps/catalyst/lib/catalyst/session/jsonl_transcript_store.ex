@@ -24,16 +24,7 @@ defmodule Catalyst.Session.JSONLTranscriptStore do
   def load_state(%{path: path}), do: Store.load_state(path)
 
   @impl true
-  defdelegate append_message(handle, message), to: Store
-
-  @impl true
-  defdelegate append_reset(handle), to: Store
-
-  @impl true
-  defdelegate append_compaction(handle, event), to: Store
-
-  @impl true
-  defdelegate append_settings_snapshot(handle, settings), to: Store
+  defdelegate append(handle, envelope), to: Store, as: :append_envelope
 
   @impl true
   def close(_handle), do: :ok

@@ -290,7 +290,7 @@ defmodule Catalyst.Session.Server do
     # The reset marker is authoritative state, like a compaction replacement.
     # Append it before killing the run or changing memory: on failure the live
     # session continues unchanged and restart cannot resurrect cleared history.
-    case TranscriptStore.append_reset(state.store) do
+    case append_durable_event(state, :reset) do
       :ok ->
         {:reply, :ok, install_reset(state)}
 
@@ -564,13 +564,13 @@ defmodule Catalyst.Session.Server do
 
   defp restore_system_prompt(default, _settings), do: default
 
-  defp persist(state, %Event.MessageEnd{message: m}),
-    do: TranscriptStore.append_message(state.store, m)
+  defp persist(state, %EventEnvelope{event: %Event.MessageEnd{}} = envelope),
+    do: TranscriptStore.append(state.store, envelope)
 
-  defp persist(state, %Event.ContextCompacted{} = event),
-    do: TranscriptStore.append_compaction(state.store, event)
+  defp persist(state, %EventEnvelope{event: %Event.ContextCompacted{}} = envelope),
+    do: TranscriptStore.append(state.store, envelope)
 
-  defp persist(_state, _event), do: :ok
+  defp persist(_state, %EventEnvelope{}), do: :ok
 
   # Synthesize and persist error ToolResults for tool calls left dangling by a
   # previous incarnation. No broadcast: this runs in handle_continue before
@@ -583,7 +583,7 @@ defmodule Catalyst.Session.Server do
       results ->
         Enum.each(results, fn result ->
           append_best_effort(state, :transcript_repair, fn ->
-            TranscriptStore.append_message(state.store, result)
+            append_durable_event(state, %Event.MessageEnd{message: result})
           end)
         end)
 
@@ -607,32 +607,35 @@ defmodule Catalyst.Session.Server do
   end
 
   defp fold_run_event(state, event) do
-    persist_best_effort(state, event)
-    accept_run_event(state, event)
+    envelope = event_envelope(state, event)
+    persist_best_effort(state, envelope)
+    accept_run_event(state, envelope)
   end
 
   defp persist_and_accept(state, event) do
-    case persist(state, event) do
-      :ok -> {:ok, accept_committed_event(state, event)}
+    envelope = event_envelope(state, event)
+
+    case persist(state, envelope) do
+      :ok -> {:ok, accept_committed_event(state, envelope)}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp accept_committed_event(state, event) do
-    state = session_engine_event(state, event)
+  defp accept_committed_event(state, %EventEnvelope{event: event} = envelope) do
+    state = session_engine_event(state, envelope)
     :ok = EventSink.committed(event, state.id)
     broadcast(state, event)
     track_agent_end(state, event)
   end
 
-  defp accept_run_event(state, event) do
-    state = session_engine_event(state, event)
+  defp accept_run_event(state, %EventEnvelope{event: event} = envelope) do
+    state = session_engine_event(state, envelope)
     broadcast(state, event)
     track_agent_end(state, event)
   end
 
-  defp persist_best_effort(state, event) do
-    case persist(state, event) do
+  defp persist_best_effort(state, %EventEnvelope{event: event} = envelope) do
+    case persist(state, envelope) do
       :ok -> :ok
       {:error, reason} -> log_persistence_failure(state, event_name(event), reason)
     end
@@ -655,7 +658,7 @@ defmodule Catalyst.Session.Server do
     msg = session_engine_failure_message(state, reason)
 
     append_best_effort(state, :failure_message, fn ->
-      TranscriptStore.append_message(state.store, msg)
+      append_durable_event(state, %Event.MessageEnd{message: msg})
     end)
 
     state = clear_failed_run(state, msg)
@@ -675,7 +678,7 @@ defmodule Catalyst.Session.Server do
       results ->
         Enum.each(results, fn result ->
           append_best_effort(state, :aborted_tool_result, fn ->
-            TranscriptStore.append_message(state.store, result)
+            append_durable_event(state, %Event.MessageEnd{message: result})
           end)
 
           synthetic_and_broadcast(state, %Event.MessageEnd{message: result})
@@ -906,7 +909,7 @@ defmodule Catalyst.Session.Server do
   # loader keeps decoding legacy model_change/thinking_level_change records.
   defp persist_settings_snapshot(old, new) do
     case persisted_settings(old) != persisted_settings(new) do
-      true -> TranscriptStore.append_settings_snapshot(new.store, persisted_settings(new))
+      true -> append_durable_event(new, {:settings_snapshot, persisted_settings(new)})
       false -> :ok
     end
   end
@@ -931,9 +934,7 @@ defmodule Catalyst.Session.Server do
     end
   end
 
-  defp session_engine_event(%State{} = state, event) do
-    envelope = EventEnvelope.new(event, state.id, current_run_id(state))
-
+  defp session_engine_event(%State{} = state, %EventEnvelope{} = envelope) do
     state
     |> EngineState.from_server()
     |> then(&SessionEngine.event(state.session_engine_handle, envelope, &1))
@@ -958,6 +959,24 @@ defmodule Catalyst.Session.Server do
 
   defp current_run_id(%State{run_ref: run_ref}) when is_reference(run_ref), do: inspect(run_ref)
   defp current_run_id(%State{}), do: nil
+
+  defp event_envelope(%State{} = state, event) do
+    EventEnvelope.new(event, state.id,
+      correlation_id: current_run_id(state),
+      producer_contract: current_producer_contract(state)
+    )
+  end
+
+  defp current_producer_contract(%State{
+         current_run_metadata: %{run_engine: %{contract: contract}}
+       }),
+       do: contract
+
+  defp current_producer_contract(%State{}), do: nil
+
+  defp append_durable_event(%State{} = state, event) do
+    TranscriptStore.append(state.store, event_envelope(state, event))
+  end
 
   defp release_session_engine(nil), do: :ok
   defp release_session_engine(handle), do: SessionEngine.release(handle)

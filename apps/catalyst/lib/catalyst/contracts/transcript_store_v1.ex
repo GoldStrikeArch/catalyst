@@ -7,9 +7,8 @@ defmodule Catalyst.Contracts.TranscriptStore.V1 do
   session read/write through the pinned implementation.
   """
 
-  alias Catalyst.Agent.Event
-  alias Catalyst.Message
   alias Catalyst.Runtime.ContractRef
+  alias Catalyst.Session.EventEnvelope
   alias Catalyst.Session.Store
 
   @typedoc "Backend-private open transcript handle."
@@ -22,11 +21,7 @@ defmodule Catalyst.Contracts.TranscriptStore.V1 do
   @callback create_new(String.t(), keyword()) :: {:ok, handle()} | {:error, term()}
   @callback describe(handle()) :: {:ok, identity()} | {:error, term()}
   @callback load_state(handle()) :: {:ok, Store.loaded_state()} | {:error, term()}
-  @callback append_message(handle(), Message.t()) :: :ok | {:error, term()}
-  @callback append_reset(handle()) :: :ok | {:error, term()}
-  @callback append_compaction(handle(), Event.ContextCompacted.t()) :: :ok | {:error, term()}
-  @callback append_settings_snapshot(handle(), Store.persisted_settings()) ::
-              :ok | {:error, term()}
+  @callback append(handle(), EventEnvelope.t()) :: :ok | {:error, term()}
   @callback close(handle()) :: :ok
 
   @doc "Return the stable Runtime Graph contract reference."

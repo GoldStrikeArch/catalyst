@@ -63,6 +63,31 @@ defmodule Catalyst.Session.ServerTest do
     # JSONL persisted and reloadable to the same transcript length.
     assert File.exists?(snap.store_path)
     assert length(Store.load(snap.store_path)) == 6
+
+    durable_events =
+      snap.store_path
+      |> File.stream!()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.filter(&(&1["type"] == "event"))
+
+    assert length(durable_events) == 6
+
+    assert %{
+             "version" => 1,
+             "eventId" => event_id,
+             "sessionId" => ^id,
+             "correlationId" => correlation_id,
+             "payloadSchemaVersion" => 1,
+             "producerContract" => %{
+               "id" => "catalyst.agent-run-engine",
+               "version" => 1
+             },
+             "payload" => %{"type" => "message"}
+           } = hd(durable_events)["envelope"]
+
+    assert is_binary(event_id) and event_id != ""
+    assert is_binary(correlation_id) and correlation_id != ""
+    refute Map.has_key?(hd(durable_events)["envelope"], "causationId")
   end
 
   test "rejects a second prompt while running, then accepts after", %{tmp: tmp, model: model} do
