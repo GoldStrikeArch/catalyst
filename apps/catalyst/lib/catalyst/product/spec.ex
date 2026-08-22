@@ -59,8 +59,24 @@ defmodule Catalyst.Product.Spec do
          :ok <- validate_list(:packs, spec.packs, &valid_id?/1),
          :ok <- Catalyst.Pack.Registry.validate_product_packs(spec.packs),
          :ok <- validate_list(:tools, spec.tools, &module?/1),
-         :ok <- validate_list(:hosts, spec.hosts, &(&1 in @hosts)) do
+         :ok <- validate_list(:hosts, spec.hosts, &(&1 in @hosts)),
+         :ok <- validate_pack_hosts(spec.packs, spec.hosts) do
       {:ok, spec}
+    end
+  end
+
+  defp validate_pack_hosts(pack_ids, hosts) do
+    with {:ok, packs} <- Catalyst.Pack.Registry.resolve(pack_ids) do
+      incompatible =
+        for pack <- packs,
+            host <- hosts,
+            host not in pack.hosts,
+            do: {pack.id, host}
+
+      case incompatible do
+        [] -> :ok
+        _incompatible -> {:error, {:incompatible_product_pack_hosts, incompatible}}
+      end
     end
   end
 

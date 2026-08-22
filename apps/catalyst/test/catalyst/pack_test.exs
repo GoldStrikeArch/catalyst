@@ -160,13 +160,13 @@ defmodule Catalyst.PackTest do
              ]
     end
 
-    test "builds a host-filtered target plan for the shipped coding agent" do
-      product = Catalyst.Product.Default.spec()
+    test "builds a host-filtered target plan for the shipped CLI product" do
+      product = Catalyst.Product.MinimalCLI.spec()
 
       assert {:ok, plan} = ReleasePlan.for_target(product, :cli, :darwin)
 
       refute "catalyst.workbench.default" in plan.packs
-      assert plan.product_id == "coding-agent"
+      assert plan.product_id == "minimal-cli"
       assert plan.host == :cli
       assert plan.platform == :darwin
 

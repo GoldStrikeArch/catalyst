@@ -3,6 +3,13 @@ import Config
 # config/runtime.exs is executed for all environments, including during
 # releases. The block below is prod (packaged-app) runtime configuration.
 if config_env() == :prod do
+  # A release owns its initial product profile. Do not let a profile pointer
+  # written by the desktop product make the headless CLI boot web-only packs.
+  case System.get_env("RELEASE_NAME") do
+    "catalyst_cli" -> config :catalyst, product_profile: Catalyst.Product.MinimalCLI
+    _other_release -> :ok
+  end
+
   # Everything below configures :catalyst_web (endpoint + runtime asset
   # rebuild). The catalyst_cli release ships without :catalyst_web, where
   # Application.app_dir/1 would raise and abort the binary during runtime-config

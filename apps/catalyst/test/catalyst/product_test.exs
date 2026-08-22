@@ -94,6 +94,16 @@ defmodule Catalyst.ProductTest do
              Spec.new(%{id: "valid", packs: ["unknown.pack"], tools: [], hosts: [:cli]})
   end
 
+  test "a product cannot claim a host unsupported by one of its packs" do
+    assert {:error, {:incompatible_product_pack_hosts, [{"catalyst.workbench.default", :cli}]}} =
+             Spec.new(%{
+               id: "invalid-cli-workbench",
+               packs: ["catalyst.meta-runtime", "catalyst.workbench.default"],
+               tools: [],
+               hosts: [:cli]
+             })
+  end
+
   test "a known product profile can be selected for the next boot" do
     tmp = Path.join(System.tmp_dir!(), "catalyst_product_#{System.unique_integer([:positive])}")
     previous_home = Application.fetch_env(:catalyst, :home)

@@ -77,7 +77,7 @@ defmodule Catalyst.Product.Default do
         "catalyst.tools.self-development"
       ],
       tools: @tools,
-      hosts: [:cli, :web, :desktop]
+      hosts: [:web, :desktop]
     })
   end
 

@@ -71,6 +71,7 @@ defmodule CatalystCli.ReleaseSmokeTest do
     ~S'''
     {:ok, _apps} = Application.ensure_all_started(:catalyst)
     :ok = Catalyst.Extensions.await_ready(5_000)
+    "minimal-cli" = Catalyst.Product.id()
     home = Path.expand(System.fetch_env!("CATALYST_HOME"))
 
     paths = [
