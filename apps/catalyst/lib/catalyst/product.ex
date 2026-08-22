@@ -8,11 +8,16 @@ defmodule Catalyst.Product do
 
   @type profile :: module()
 
+  @doc "Validated initial composition supplied by a modern product profile."
+  @callback spec() :: Catalyst.Product.Spec.t()
+
   @doc "Stable identifier for a product composition."
   @callback id() :: String.t()
 
   @doc "Tool modules installed by a product composition."
   @callback tools() :: [module()]
+
+  @optional_callbacks spec: 0, id: 0, tools: 0
 
   @doc "Return the configured product profile module."
   @spec profile() :: profile()
@@ -27,10 +32,14 @@ defmodule Catalyst.Product do
   @spec active() :: %{id: String.t(), module: module(), source: atom()}
   def active do
     case Application.fetch_env(:catalyst, :product_profile) do
-      {:ok, profile} -> %{id: profile.id(), module: profile, source: :application}
+      {:ok, profile} -> %{id: spec!(profile).id, module: profile, source: :application}
       :error -> Catalyst.Product.Selection.active()
     end
   end
+
+  @doc "Return the validated initial composition for the active product."
+  @spec active_spec() :: Catalyst.Product.Spec.t()
+  def active_spec, do: spec!(profile())
 
   @doc "Persist an allow-listed product profile for the next boot."
   @spec select(String.t()) :: {:ok, :restart_required} | {:error, term()}
@@ -38,9 +47,16 @@ defmodule Catalyst.Product do
 
   @doc "Return the configured product identifier."
   @spec id() :: String.t()
-  def id, do: profile().id()
+  def id, do: active_spec().id
 
   @doc "Return the product's default tool modules."
   @spec tools() :: [module()]
-  def tools, do: profile().tools()
+  def tools, do: active_spec().tools
+
+  defp spec!(profile) do
+    case Catalyst.Product.Spec.from_profile(profile) do
+      {:ok, spec} -> spec
+      {:error, reason} -> raise ArgumentError, "invalid product profile: #{inspect(reason)}"
+    end
+  end
 end

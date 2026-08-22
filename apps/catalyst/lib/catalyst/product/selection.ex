@@ -34,7 +34,15 @@ defmodule Catalyst.Product.Selection do
   @spec profiles() :: %{String.t() => module()}
   def profiles do
     configured = Application.get_env(:catalyst, :product_profiles, %{})
-    Map.merge(%{Catalyst.Product.Default.id() => Catalyst.Product.Default}, configured)
+
+    Map.merge(
+      %{
+        "coding-agent" => Catalyst.Product.Default,
+        "minimal-cli" => Catalyst.Product.MinimalCLI,
+        "ide" => Catalyst.Product.IDE
+      },
+      configured
+    )
   end
 
   @doc "Resolve one allow-listed profile id without creating atoms."
@@ -58,7 +66,7 @@ defmodule Catalyst.Product.Selection do
   end
 
   defp default(source) do
-    %{id: Catalyst.Product.Default.id(), module: Catalyst.Product.Default, source: source}
+    %{id: "coding-agent", module: Catalyst.Product.Default, source: source}
   end
 
   defp read_id do
@@ -76,18 +84,10 @@ defmodule Catalyst.Product.Selection do
   end
 
   defp validate_profile(id, profile) when is_atom(profile) do
-    callbacks = [id: 0, tools: 0]
-
-    case Code.ensure_loaded?(profile) and
-           Enum.all?(callbacks, fn {name, arity} -> function_exported?(profile, name, arity) end) and
-           profile.id() == id do
-      true -> {:ok, profile}
-      false -> {:error, {:unknown_product_profile, id}}
+    case Catalyst.Product.Spec.from_profile(profile) do
+      {:ok, %{id: ^id}} -> {:ok, profile}
+      _invalid -> {:error, {:unknown_product_profile, id}}
     end
-  rescue
-    _error -> {:error, {:unknown_product_profile, id}}
-  catch
-    _kind, _reason -> {:error, {:unknown_product_profile, id}}
   end
 
   defp validate_profile(id, _profile), do: {:error, {:unknown_product_profile, id}}

@@ -21,6 +21,8 @@ defmodule Catalyst.Runtime.ReadModelTest do
 
     assert graph.source_status.core == :ready
     assert graph.source_metadata.core.workflow_layers == :full_valid_chain
+    assert graph.source_metadata.core.product.id == "coding-agent"
+    assert "catalyst.agent.default" in graph.source_metadata.core.product.packs
     assert byte_size(graph.snapshot_id) == 64
     assert repeated.snapshot_id == graph.snapshot_id
 

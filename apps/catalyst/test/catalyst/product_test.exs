@@ -4,38 +4,54 @@ defmodule Catalyst.ProductTest do
   import Catalyst.EnvCase, only: [restore_env: 2]
 
   alias Catalyst.Product
+  alias Catalyst.Product.{Selection, Spec}
   alias Catalyst.Tools.Registry
-
-  defmodule Minimal do
-    @behaviour Catalyst.Product
-
-    @impl true
-    def id, do: "minimal-test"
-
-    @impl true
-    def tools, do: [Catalyst.Tools.Read]
-  end
-
-  defmodule Alternate do
-    @behaviour Catalyst.Product
-
-    @impl true
-    def id, do: "alternate-test"
-
-    @impl true
-    def tools, do: [Catalyst.Tools.Ls]
-  end
 
   test "the product profile owns the registry's default composition" do
     previous = Application.fetch_env(:catalyst, :product_profile)
-    Application.put_env(:catalyst, :product_profile, Minimal)
+    Application.put_env(:catalyst, :product_profile, Catalyst.Test.ProductMinimal)
     on_exit(fn -> restore_env(:product_profile, previous) end)
 
-    assert Product.profile() == Minimal
+    assert Product.profile() == Catalyst.Test.ProductMinimal
     assert Product.id() == "minimal-test"
     assert Product.tools() == [Catalyst.Tools.Read]
+
+    assert Product.active_spec() == %Spec{
+             id: "minimal-test",
+             packs: [],
+             tools: [Catalyst.Tools.Read],
+             hosts: [:cli]
+           }
+
     assert Registry.default_tools() == [Catalyst.Tools.Read]
     assert Map.keys(Registry.index()) == ["read"]
+  end
+
+  test "compiled profiles expose validated initial compositions under stable ids" do
+    assert Selection.profiles()
+           |> Map.take(["coding-agent", "minimal-cli", "ide"])
+           |> Map.keys()
+           |> Enum.sort() == ["coding-agent", "ide", "minimal-cli"]
+
+    for id <- ["coding-agent", "minimal-cli", "ide"] do
+      assert {:ok, profile} = Selection.fetch(id)
+      assert {:ok, %Spec{id: ^id, packs: packs}} = Spec.from_profile(profile)
+      assert Enum.all?(packs, &is_binary/1)
+    end
+
+    assert Catalyst.Product.MinimalCLI.spec().hosts == [:cli]
+    assert "catalyst.ide.core" in Catalyst.Product.IDE.spec().packs
+  end
+
+  test "product specs reject malformed and duplicate composition entries" do
+    assert {:error, {:invalid_product_id, "IDE with spaces"}} =
+             Spec.new(%{id: "IDE with spaces", packs: [], tools: [], hosts: [:desktop]})
+
+    assert {:error, {:invalid_product_field, :packs, ["same", "same"]}} =
+             Spec.new(%{id: "valid", packs: ["same", "same"], tools: [], hosts: [:cli]})
+
+    assert {:error, {:invalid_product_field, :hosts, [:unknown]}} =
+             Spec.new(%{id: "valid", packs: [], tools: [], hosts: [:unknown]})
   end
 
   test "a known product profile can be selected for the next boot" do
@@ -46,7 +62,10 @@ defmodule Catalyst.ProductTest do
 
     Application.put_env(:catalyst, :home, tmp)
     Application.delete_env(:catalyst, :product_profile)
-    Application.put_env(:catalyst, :product_profiles, %{"alternate-test" => Alternate})
+
+    Application.put_env(:catalyst, :product_profiles, %{
+      "alternate-test" => Catalyst.Test.ProductAlternate
+    })
 
     on_exit(fn ->
       restore_env(:home, previous_home)
@@ -57,7 +76,13 @@ defmodule Catalyst.ProductTest do
 
     assert Product.active().source == :default
     assert {:ok, :restart_required} = Product.select("alternate-test")
-    assert Product.active() == %{id: "alternate-test", module: Alternate, source: :persisted}
+
+    assert Product.active() == %{
+             id: "alternate-test",
+             module: Catalyst.Test.ProductAlternate,
+             source: :persisted
+           }
+
     assert Product.tools() == [Catalyst.Tools.Ls]
     assert File.read!(Catalyst.Paths.product_profile()) == "alternate-test\n"
   end

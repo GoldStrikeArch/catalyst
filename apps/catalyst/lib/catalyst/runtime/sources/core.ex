@@ -21,15 +21,19 @@ defmodule Catalyst.Runtime.Sources.Core do
     Scope,
     ServiceKey,
     SessionEngine,
+    SessionFactory,
     TranscriptStore
   }
 
   alias Catalyst.Tools.Registry, as: ToolRegistry
+  alias Catalyst.Product
 
   @doc "Capture core service claims and additive contributions."
   @spec snapshot(Context.t()) ::
           {:ok, %{claims: [Claim.t()], contributions: [Contribution.t()], metadata: map()}}
   def snapshot(%Context{} = context) do
+    product = Product.active_spec()
+
     {:ok,
      %{
        claims: service_claims(context),
@@ -39,6 +43,7 @@ defmodule Catalyst.Runtime.Sources.Core do
          provider_layers: :effective_only,
          prompt_policy_layers: :effective_only,
          context_policy_layers: :effective_only,
+         product: %{id: product.id, packs: product.packs},
          registries: registry_health()
        }
      }}
@@ -46,6 +51,7 @@ defmodule Catalyst.Runtime.Sources.Core do
 
   defp service_claims(context) do
     RunEngine.all_claims(context) ++
+      SessionFactory.claims() ++
       SessionEngine.claims() ++
       PermissionPolicy.claims() ++
       TranscriptStore.claims() ++

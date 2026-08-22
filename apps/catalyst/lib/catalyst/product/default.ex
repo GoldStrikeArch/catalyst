@@ -60,6 +60,26 @@ defmodule Catalyst.Product.Default do
   @impl true
   def id, do: "coding-agent"
 
+  @doc "Return the coding-agent initial composition."
+  @spec spec() :: Catalyst.Product.Spec.t()
+  @impl true
+  def spec do
+    Catalyst.Product.Spec.new!(%{
+      id: id(),
+      packs: [
+        "catalyst.meta-runtime",
+        "catalyst.agent.default",
+        "catalyst.workbench.default",
+        "catalyst.provider.openai",
+        "catalyst.provider.grok",
+        "catalyst.tools.coding",
+        "catalyst.tools.self-development"
+      ],
+      tools: @tools,
+      hosts: [:cli, :web, :desktop]
+    })
+  end
+
   @doc "Return the coding-agent tools installed by this product."
   @spec tools() :: [module()]
   @impl true
