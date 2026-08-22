@@ -105,6 +105,15 @@ defmodule Catalyst.ExtensionsLoadTest do
     first_target = first_pinned.handle.implementation
     assert first_target.marker() == :first
 
+    assert {:ok, [], %{generation: :first}} =
+             RunEngine.invoke(
+               first_pinned.handle,
+               [],
+               %{generation: :first},
+               %{},
+               fn _event -> :ok end
+             )
+
     File.write!(path, generation_artifact_source(:second, workflow))
     assert {:ok, second_summary} = Extensions.load_file(path)
     assert second_summary.activation == :active
@@ -117,6 +126,24 @@ defmodule Catalyst.ExtensionsLoadTest do
     assert first_target != second_target
     assert first_target.marker() == :first
     assert :code.is_loaded(first_target) != false
+
+    assert {:ok, [], %{generation: :first}} =
+             RunEngine.invoke(
+               first_pinned.handle,
+               [],
+               %{generation: :first},
+               %{},
+               fn _event -> :ok end
+             )
+
+    assert {:ok, [], %{generation: :second}} =
+             RunEngine.invoke(
+               second_pinned.handle,
+               [],
+               %{generation: :second},
+               %{},
+               fn _event -> :ok end
+             )
 
     assert :ok = RunEngine.release(first_pinned)
     _state = :sys.get_state(Generations)

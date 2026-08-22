@@ -66,6 +66,17 @@ defmodule Catalyst.Runtime.RunEngineTest do
     assert Enum.map(resolution.explanation.hidden, & &1.owner) == [:builtin]
   end
 
+  test "a pinned handle invokes its exact local target", %{owner: owner} do
+    assert :ok = Registry.register_workflow(:default, RuntimeWorkflow, owner: owner)
+    assert {:ok, resolved} = RunEngine.resolve([], session_id: "session-1")
+    assert {:ok, pinned} = RunEngine.pin(resolved)
+
+    assert {:ok, [], %{value: 1}} =
+             RunEngine.invoke(pinned.handle, [], %{value: 1}, %{}, fn _event -> :ok end)
+
+    assert :ok = RunEngine.release(pinned)
+  end
+
   test "the default explanation includes every valid lower workflow layer", %{owner: owner} do
     Application.put_env(:catalyst, :workflows, %{default: RuntimeWorkflow})
     Application.put_env(:catalyst, :agent_loop, Catalyst.Test.RunBoundaryWorkflow)

@@ -25,6 +25,7 @@ defmodule Catalyst.Runtime.RunEngine do
   }
 
   alias Catalyst.Workflow.Registry
+  alias Catalyst.Workflow
 
   @type resolved :: %{
           optional(:handle) => Handle.t(),
@@ -67,6 +68,15 @@ defmodule Catalyst.Runtime.RunEngine do
   @spec release(resolved()) :: :ok
   def release(%{handle: %Handle{} = handle}), do: Handle.release(handle)
   def release(_unmanaged_or_unpinned), do: :ok
+
+  @doc "Invoke a pinned run-engine target through its declared transport."
+  @spec invoke(Handle.t(), [Catalyst.Message.t()], map(), map(), Workflow.emitter()) ::
+          Workflow.result()
+  def invoke(%Handle{} = handle, prompts, context, config, emit) do
+    case ImplementationRef.transport(handle.resolution.claim.implementation) do
+      :local -> handle.implementation.run(prompts, context, config, emit)
+    end
+  end
 
   @doc "Explain the effective run-engine selection without starting a run."
   @spec explain(keyword() | map(), Context.t() | map() | keyword()) ::

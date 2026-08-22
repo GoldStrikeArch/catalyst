@@ -426,8 +426,13 @@ defmodule Catalyst.Session.Server do
         try do
           GenServer.cast(server, {:run_metadata, run_ref, run_context.metadata})
 
-          prompts
-          |> run_context.config.loop.run(run_context.context, run_context.config, emit)
+          Catalyst.Runtime.RunEngine.invoke(
+            run_context.run_engine_handle,
+            prompts,
+            run_context.context,
+            run_context.config,
+            emit
+          )
           |> classify_workflow_result()
         after
           RunContext.release(run_context)

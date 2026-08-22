@@ -40,6 +40,11 @@ defmodule Catalyst.Runtime.ImplementationRef do
   def target(%__MODULE__{target: target}), do: target
   def target(implementation), do: implementation
 
+  @doc "Return the transport used to invoke an implementation."
+  @spec transport(t() | term()) :: transport()
+  def transport(%__MODULE__{transport: transport}), do: transport
+  def transport(_implementation), do: :local
+
   @doc "Return a digest-safe representation that excludes physical target identity."
   @spec digest_term(t() | term()) :: term()
   def digest_term(%__MODULE__{} = reference) do
