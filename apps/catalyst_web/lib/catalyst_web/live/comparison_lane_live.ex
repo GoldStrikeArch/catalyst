@@ -11,6 +11,8 @@ defmodule CatalystWeb.ComparisonLaneLive do
   alias Catalyst.Session.Server
   alias CatalystWeb.UI.MessageRenderer
 
+  @legacy_provider_id "openai-codex"
+
   @impl true
   def mount(_params, %{"comparison_id" => comparison_id, "lane_id" => lane_id}, socket) do
     with {:ok, comparison} <- Comparison.get(comparison_id),
@@ -88,8 +90,9 @@ defmodule CatalystWeb.ComparisonLaneLive do
 
   def handle_event("configure", %{"config" => params}, socket) do
     with {:ok, _pid} <- session_pid(socket),
+         {:ok, selection} <- Models.decode_selection(params["model"]),
          {:ok, {_provider_id, model}} <-
-           resolve_form_model(socket.assigns.lane, params["model"]) do
+           resolve_form_model(socket.assigns.lane, selection) do
       changes = [
         model: model,
         provider: model.api,
@@ -457,7 +460,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
   defp config_form(%{"model_id" => model, "system_prompt" => prompt} = lane) do
     to_form(
       %{
-        "model" => model,
+        "model" => picker_value(lane["provider_id"], model),
         "system_prompt" => prompt,
         "effort" => Map.get(lane, "reasoning_effort") || "medium",
         "workflow" => Map.get(lane, "workflow") || ""
@@ -467,9 +470,15 @@ defmodule CatalystWeb.ComparisonLaneLive do
   end
 
   defp config_form(snapshot) do
+    provider_id =
+      case Models.provider_id(snapshot.model) do
+        {:ok, provider_id} -> provider_id
+        {:error, _reason} -> nil
+      end
+
     to_form(
       %{
-        "model" => snapshot.model.id,
+        "model" => picker_value(provider_id, snapshot.model.id),
         "system_prompt" => snapshot.system_prompt || "",
         "effort" => Keyword.get(snapshot.opts, :reasoning_effort, "medium"),
         "workflow" => Keyword.get(snapshot.opts, :workflow, "")
@@ -479,8 +488,19 @@ defmodule CatalystWeb.ComparisonLaneLive do
   end
 
   defp model_options do
-    {:ok, models} = Models.list()
-    Enum.map(models, &{&1.name, &1.id})
+    case Models.list() do
+      {:ok, models} -> Models.picker_options(models)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp picker_value(provider_id, model_id) do
+    provider_id = provider_id || @legacy_provider_id
+
+    case Models.list() do
+      {:ok, models} -> Models.picker_value(models, provider_id, model_id)
+      {:error, _reason} -> model_id
+    end
   end
 
   defp resolve_form_model(
@@ -489,6 +509,9 @@ defmodule CatalystWeb.ComparisonLaneLive do
        )
        when is_binary(provider_id),
        do: Models.resolve(provider_id, model_id)
+
+  defp resolve_form_model(_lane, %{"provider_id" => provider_id, "model_id" => model_id}),
+    do: Models.resolve(provider_id, model_id)
 
   defp resolve_form_model(_lane, model_id) when is_binary(model_id), do: Models.resolve(model_id)
   defp resolve_form_model(_lane, model_id), do: {:error, {:invalid_model_id, model_id}}

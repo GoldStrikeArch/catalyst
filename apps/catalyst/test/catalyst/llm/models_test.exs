@@ -4,42 +4,19 @@ defmodule Catalyst.LLM.ModelsTest do
   alias Catalyst.LLM.{Models, ProviderConfig, Registry}
   alias Catalyst.Model
 
-  defmodule Provider do
-    @behaviour Catalyst.LLM.Provider
-
-    @impl true
-    def stream(_model, _context, _opts, _sink), do: {:error, :unused}
-  end
-
-  defmodule Catalog do
-    @behaviour Catalyst.LLM.ModelCatalog
-
-    @entry %{
-      id: "fixture-model",
-      name: "Fixture Model",
-      efforts: ["low"],
-      default_effort: "low",
-      fast?: false
-    }
-
-    @impl true
-    def default_model_id, do: @entry.id
-
-    @impl true
-    def catalog_snapshot(id) do
-      selected = if id == @entry.id, do: @entry, else: %{@entry | id: id, name: id}
-      models = if id == @entry.id, do: [@entry], else: [@entry, selected]
-      %{models: models, selected: selected}
-    end
-
-    @impl true
-    def model(id), do: %Model{id: id, api: "fixture-api", provider: "fixture"}
-  end
+  alias Catalyst.Test.LLM.{
+    CrashingModelCatalog,
+    FixtureModelCatalog,
+    FixtureProvider,
+    HangingModelCatalog
+  }
 
   setup do
     on_exit(fn ->
       Registry.unregister_provider("fixture-api")
       Registry.unregister_provider("duplicate-api")
+      Registry.unregister_provider("broken-api")
+      Registry.unregister_provider("hanging-api")
     end)
 
     :ok
@@ -84,18 +61,125 @@ defmodule Catalyst.LLM.ModelsTest do
 
     assert {:error, {:ambiguous_model, "fixture-model", ["duplicate", "fixture"]}} =
              Models.infer_provider("fixture-model")
+
+    options =
+      Models.list()
+      |> elem(1)
+      |> Enum.filter(&(&1.id == "fixture-model"))
+      |> Models.picker_options()
+
+    assert Enum.all?(options, fn {_label, value} -> value != "fixture-model" end)
+
+    assert options
+           |> Enum.map(fn {_label, value} -> Models.decode_selection(value) end)
+           |> Enum.sort() ==
+             [
+               {:ok, %{"model_id" => "fixture-model", "provider_id" => "duplicate"}},
+               {:ok, %{"model_id" => "fixture-model", "provider_id" => "fixture"}}
+             ]
+  end
+
+  test "catalog crashes and timeouts are bounded and tagged" do
+    put_catalog_timeout(10)
+
+    assert :ok =
+             Registry.register_provider(
+               "broken-api",
+               catalog_config("broken", CrashingModelCatalog)
+             )
+
+    assert :ok =
+             Registry.register_provider(
+               "hanging-api",
+               catalog_config("hanging", HangingModelCatalog)
+             )
+
+    assert {:error, {:model_catalog_exit, "broken", :model, _reason}} =
+             Models.build("broken", "broken-model")
+
+    assert {:error, {:model_catalog_exit, "broken", :catalog_snapshot, _reason}} =
+             Models.catalog_snapshot("broken", "broken-model")
+
+    assert {:error, {:model_catalog_timeout, "hanging", :default_model_id}} =
+             Models.default_model_id("hanging")
+
+    assert {:error, {:model_catalog_timeout, "hanging", :catalog_snapshot}} =
+             Models.catalog_snapshot("hanging", "hanging-model")
+
+    assert {:error, {:model_catalog_timeout, "hanging", :model}} =
+             Models.build("hanging", "hanging-model")
+
+    assert {:ok, models} = Models.list()
+    refute Enum.any?(models, &(&1.provider in ["broken", "hanging"]))
+  end
+
+  test "listing reports every broken catalog when none remain" do
+    put_catalog_timeout(10)
+
+    assert :ok =
+             Registry.register_provider(
+               "openai-codex-responses",
+               catalog_config("broken-openai", CrashingModelCatalog)
+             )
+
+    assert :ok =
+             Registry.register_provider(
+               "grok-subscription-chat-completions",
+               catalog_config("broken-grok", HangingModelCatalog)
+             )
+
+    on_exit(fn ->
+      Registry.unregister_provider("openai-codex-responses")
+      Registry.unregister_provider("grok-subscription-chat-completions")
+    end)
+
+    assert {:error, {:no_model_catalogs_available, failures}} = Models.list()
+    assert failures |> Enum.map(& &1.provider) |> Enum.sort() == ["broken-grok", "broken-openai"]
+
+    assert Enum.any?(failures, fn failure ->
+             match?({:model_catalog_exit, "broken-openai", :catalog_snapshot, _}, failure.reason)
+           end)
+
+    assert Enum.any?(failures, fn failure ->
+             failure.reason == {:model_catalog_timeout, "broken-grok", :default_model_id}
+           end)
   end
 
   test "providers without catalogs remain valid but cannot build models" do
     assert {:error, {:provider_has_no_catalog, "faux"}} = Models.build("faux", "faux")
   end
 
+  test "rejects provider-qualified picker values with empty ids" do
+    for selection <- [["", "fixture-model"], ["fixture", ""]] do
+      encoded = selection |> Jason.encode!() |> Base.url_encode64(padding: false)
+      value = "catalyst-provider-model:" <> encoded
+
+      assert {:error, {:invalid_model_selection, ^value}} = Models.decode_selection(value)
+    end
+  end
+
   defp fixture_config(id) do
     %ProviderConfig{
       id: id,
-      module: Provider,
+      module: FixtureProvider,
       name: String.capitalize(id),
-      catalog: Catalog
+      catalog: FixtureModelCatalog
     }
+  end
+
+  defp catalog_config(id, catalog) do
+    %ProviderConfig{id: id, module: FixtureProvider, name: id, catalog: catalog}
+  end
+
+  defp put_catalog_timeout(timeout) do
+    previous = Application.get_env(:catalyst, :model_catalog_timeout)
+    Application.put_env(:catalyst, :model_catalog_timeout, timeout)
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:catalyst, :model_catalog_timeout)
+        value -> Application.put_env(:catalyst, :model_catalog_timeout, value)
+      end
+    end)
   end
 end

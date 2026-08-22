@@ -4,34 +4,7 @@ defmodule Catalyst.Session.RunContextEffectiveModelTest do
   alias Catalyst.LLM.{ProviderConfig, Registry}
   alias Catalyst.Model
   alias Catalyst.Session.RunContext
-
-  defmodule Provider do
-    @behaviour Catalyst.LLM.Provider
-
-    @impl true
-    def stream(_model, _context, _opts, _sink), do: {:error, :unused}
-  end
-
-  defmodule Catalog do
-    @behaviour Catalyst.LLM.ModelCatalog
-
-    @entry %{
-      id: "epoch-model",
-      name: "Epoch Model",
-      context_window: 77_777,
-      max_context_window: 88_888,
-      efforts: ["low"]
-    }
-
-    @impl true
-    def default_model_id, do: @entry.id
-
-    @impl true
-    def catalog_snapshot(_id), do: %{models: [@entry], selected: @entry}
-
-    @impl true
-    def model(id), do: %Model{id: id, api: "epoch-api", provider: "epoch"}
-  end
+  alias Catalyst.Test.LLM.{EpochModelCatalog, FixtureProvider}
 
   test "nil and non-catalog models pass through unchanged" do
     assert RunContext.effective_model(nil) == nil
@@ -68,9 +41,9 @@ defmodule Catalyst.Session.RunContextEffectiveModelTest do
                "epoch-api",
                %ProviderConfig{
                  id: "epoch",
-                 module: Provider,
+                 module: FixtureProvider,
                  name: "Epoch",
-                 catalog: Catalog
+                 catalog: EpochModelCatalog
                }
              )
 

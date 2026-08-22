@@ -5,42 +5,11 @@ defmodule CatalystWeb.ComparisonLiveTest do
 
   alias Catalyst.Comparison
   alias Catalyst.{Content, Message}
-  alias Catalyst.LLM.ProviderConfig
+  alias Catalyst.LLM.{Models, ProviderConfig}
   alias Catalyst.LLM.Registry, as: LLMRegistry
-  alias Catalyst.Model
   alias Catalyst.Session.{Manager, Server}
-
-  defmodule ThirdProvider do
-    @behaviour Catalyst.LLM.Provider
-
-    @impl true
-    def stream(_model, _context, _opts, _sink), do: {:error, :unused}
-  end
-
-  defmodule ThirdCatalog do
-    @behaviour Catalyst.LLM.ModelCatalog
-
-    @entry %{
-      id: "third-ui-model",
-      name: "Third UI Model",
-      efforts: ["low", "medium"],
-      default_effort: "low",
-      context_window: 32_000
-    }
-
-    @impl true
-    def default_model_id, do: @entry.id
-
-    @impl true
-    def catalog_snapshot(id) do
-      selected = if id == @entry.id, do: @entry, else: %{@entry | id: id, name: id}
-      models = if id == @entry.id, do: [@entry], else: [@entry, selected]
-      %{models: models, selected: selected}
-    end
-
-    @impl true
-    def model(id), do: %Model{id: id, api: "third-ui-api", provider: "third-ui"}
-  end
+  alias Catalyst.Test.LLM.{CrashingModelCatalog, FixtureProvider, HangingModelCatalog}
+  alias CatalystWeb.Test.LLM.UIModelCatalog
 
   setup do
     tmp =
@@ -161,7 +130,7 @@ defmodule CatalystWeb.ComparisonLiveTest do
     register_third_provider()
 
     assert {:ok, comparison} =
-             Comparison.create(source, ["gpt-5.6-sol", "gpt-5.6-terra"])
+             Comparison.create(source, ["gpt-5.6-terra", "gpt-5.6-luna"])
 
     lane = hd(comparison["lanes"])
     assert {:ok, view, _html} = live(conn, ~p"/compare/#{comparison["id"]}")
@@ -186,6 +155,81 @@ defmodule CatalystWeb.ComparisonLiveTest do
     assert configured["model_id"] == "third-ui-model"
     assert has_element?(lane_view, "#lane-effort-#{lane["id"]} option[value='low']")
     refute has_element?(lane_view, "#lane-effort-#{lane["id"]} option[value='high']")
+  end
+
+  test "duplicate model ids submit provider-qualified lane selections", %{
+    conn: conn,
+    source: source
+  } do
+    register_third_provider()
+
+    {:ok, models} = Models.list()
+    options = Models.picker_options(models)
+
+    values =
+      models
+      |> Enum.zip(options)
+      |> Map.new(fn {entry, {_label, value}} -> {{entry.provider, entry.id}, value} end)
+
+    third_value = Map.fetch!(values, {"third-ui", "gpt-5.6-sol"})
+    openai_value = Map.fetch!(values, {"openai-codex", "gpt-5.6-sol"})
+
+    assert is_binary(third_value)
+
+    assert {:ok, %{"provider_id" => "third-ui", "model_id" => "gpt-5.6-sol"}} =
+             Models.decode_selection(third_value)
+
+    assert {:ok, create_view, _html} = live(conn, ~p"/compare")
+    refute has_element?(create_view, "#comparison-model-a option[value='gpt-5.6-sol']")
+    assert has_element?(create_view, "#comparison-model-a option[value='#{third_value}']")
+
+    create_view
+    |> form("#create-comparison-form", %{
+      "comparison" => %{
+        "source" => source,
+        "model_a" => openai_value,
+        "model_b" => third_value,
+        "system_prompt" => ""
+      }
+    })
+    |> render_submit()
+
+    wait_until(fn ->
+      Comparison.list() != []
+    end)
+
+    [comparison] = Comparison.list()
+    assert Enum.map(comparison["lanes"], & &1["provider_id"]) == ["openai-codex", "third-ui"]
+
+    lane = hd(comparison["lanes"])
+    assert {:ok, detail_view, _html} = live(conn, ~p"/compare/#{comparison["id"]}")
+    lane_view = find_live_child(detail_view, "comparison-lane-live-#{lane["id"]}")
+
+    lane_view
+    |> form("#lane-config-form-#{lane["id"]}", %{
+      "config" => %{
+        "model" => third_value,
+        "effort" => "medium",
+        "workflow" => "",
+        "system_prompt" => "Qualified duplicate."
+      }
+    })
+    |> render_submit()
+
+    assert {:ok, updated} = Comparison.get(comparison["id"])
+    assert {:ok, configured} = Comparison.lane(updated, lane["id"])
+    assert configured["provider_id"] == "third-ui"
+  end
+
+  test "broken and hanging catalogs do not prevent comparison UI mount", %{conn: conn} do
+    put_catalog_timeout(10)
+    register_provider("openai-codex-responses", "broken-ui", CrashingModelCatalog)
+    register_provider("grok-subscription-chat-completions", "hanging-ui", HangingModelCatalog)
+
+    assert {:ok, view, _html} = live(conn, ~p"/compare")
+    assert has_element?(view, "#create-comparison-form")
+    refute has_element?(view, "#comparison-model-a option")
+    assert has_element?(view, "#flash-error", "no_model_catalogs_available")
   end
 
   test "a stopped lane disables controls and can be explicitly reattached", %{
@@ -282,17 +326,30 @@ defmodule CatalystWeb.ComparisonLiveTest do
   defp restore(key, value), do: Application.put_env(:catalyst, key, value)
 
   defp register_third_provider do
-    on_exit(fn -> LLMRegistry.unregister_provider("third-ui-api") end)
+    register_provider("third-ui-api", "third-ui", UIModelCatalog)
+  end
+
+  defp register_provider(api, id, catalog) do
+    on_exit(fn -> LLMRegistry.unregister_provider(api) end)
 
     assert :ok =
-             LLMRegistry.register_provider(
-               "third-ui-api",
-               %ProviderConfig{
-                 id: "third-ui",
-                 module: ThirdProvider,
-                 name: "Third UI",
-                 catalog: ThirdCatalog
-               }
-             )
+             LLMRegistry.register_provider(api, %ProviderConfig{
+               id: id,
+               module: FixtureProvider,
+               name: String.capitalize(id),
+               catalog: catalog
+             })
+  end
+
+  defp put_catalog_timeout(timeout) do
+    previous = Application.get_env(:catalyst, :model_catalog_timeout)
+    Application.put_env(:catalyst, :model_catalog_timeout, timeout)
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:catalyst, :model_catalog_timeout)
+        value -> Application.put_env(:catalyst, :model_catalog_timeout, value)
+      end
+    end)
   end
 end

@@ -22,26 +22,28 @@ defmodule Catalyst.Comparison do
 
   @type manifest :: Store.manifest()
   @type lane :: map()
+  @type model_selection :: String.t() | %{required(String.t()) => String.t()}
 
   @doc "Create a comparison with at least two model lanes."
-  @spec create(Path.t(), [String.t()], keyword()) :: {:ok, manifest()} | {:error, term()}
-  def create(source, model_ids, opts \\ [])
+  @spec create(Path.t(), [model_selection()], keyword()) ::
+          {:ok, manifest()} | {:error, term()}
+  def create(source, model_selections, opts \\ [])
 
-  def create(source, model_ids, opts)
-      when is_binary(source) and is_list(model_ids) and is_list(opts) do
-    with :ok <- validate_models(model_ids, 2),
+  def create(source, model_selections, opts)
+      when is_binary(source) and is_list(model_selections) and is_list(opts) do
+    with :ok <- validate_models(model_selections, 2),
          {:ok, source_root} <- Workspace.git_root(source) do
       create_in(
         Catalyst.Ids.hex(16),
         source_root,
-        model_ids,
+        model_selections,
         Keyword.get(opts, :system_prompt)
       )
     end
   end
 
-  def create(source, model_ids, _opts),
-    do: {:error, {:invalid_comparison_options, source, model_ids}}
+  def create(source, model_selections, _opts),
+    do: {:error, {:invalid_comparison_options, source, model_selections}}
 
   @doc "Load one persisted comparison."
   @spec get(String.t()) :: {:ok, manifest()} | {:error, term()}
@@ -56,14 +58,14 @@ defmodule Catalyst.Comparison do
   def comparison_topic(id), do: "comparison:" <> id
 
   @doc "Add a lane from a fresh snapshot of the comparison's original source."
-  @spec add_lane(String.t(), String.t()) :: {:ok, manifest()} | {:error, term()}
-  def add_lane(id, model_id) when is_binary(model_id) do
-    with :ok <- validate_models([model_id], 1) do
-      locked(id, fn -> do_add_lane(id, model_id) end)
+  @spec add_lane(String.t(), model_selection()) :: {:ok, manifest()} | {:error, term()}
+  def add_lane(id, model_selection) when is_binary(id) do
+    with :ok <- validate_models([model_selection], 1) do
+      locked(id, fn -> do_add_lane(id, model_selection) end)
     end
   end
 
-  def add_lane(_id, model_id), do: {:error, {:invalid_model_id, model_id}}
+  def add_lane(_id, model_selection), do: {:error, {:invalid_model_id, model_selection}}
 
   @doc "Start or resume the ordinary Catalyst session owned by a lane."
   @spec ensure_session(lane()) :: {:ok, pid()} | {:error, term()}
@@ -267,10 +269,10 @@ defmodule Catalyst.Comparison do
     end
   end
 
-  defp start_lane_session(workspace, snapshot, model_id, prompt) do
+  defp start_lane_session(workspace, snapshot, model_selection, prompt) do
     session_id = Catalyst.Ids.hex(16)
 
-    with {:ok, {provider_id, model}} <- resolve_model_id(model_id),
+    with {:ok, {provider_id, model}} <- resolve_model_selection(model_selection),
          {:ok, %{pid: _pid}} <-
            Manager.start_unique_session(
              id: session_id,
@@ -287,7 +289,7 @@ defmodule Catalyst.Comparison do
          "cwd" => workspace.cwd,
          "session_id" => session_id,
          "snapshot_id" => snapshot["id"],
-         "model_id" => model_id,
+         "model_id" => model.id,
          "provider_id" => provider_id,
          "system_prompt" => prompt,
          "reasoning_effort" => "medium",
@@ -332,11 +334,18 @@ defmodule Catalyst.Comparison do
   defp selected_lanes(_lanes, _ids), do: {:error, :invalid_lanes}
 
   defp validate_models(models, minimum) do
-    case length(models) >= minimum and Enum.all?(models, &(is_binary(&1) and &1 != "")) do
+    case length(models) >= minimum and Enum.all?(models, &valid_model_selection?/1) do
       true -> :ok
       false -> {:error, {:invalid_models, models}}
     end
   end
+
+  defp valid_model_selection?(model_id) when is_binary(model_id), do: model_id != ""
+
+  defp valid_model_selection?(%{"provider_id" => provider_id, "model_id" => model_id}),
+    do: is_binary(provider_id) and provider_id != "" and is_binary(model_id) and model_id != ""
+
+  defp valid_model_selection?(_selection), do: false
 
   defp cleanup_comparison(id, lanes, result) do
     Enum.each(lanes, &cleanup_lane/1)
@@ -376,6 +385,11 @@ defmodule Catalyst.Comparison do
        do: Models.resolve(provider_id, model_id)
 
   defp resolve_lane_model(%{"model_id" => model_id}), do: resolve_model_id(model_id)
+
+  defp resolve_model_selection(%{"provider_id" => provider_id, "model_id" => model_id}),
+    do: Models.resolve(provider_id, model_id)
+
+  defp resolve_model_selection(model_id), do: resolve_model_id(model_id)
 
   defp resolve_model_id(model_id) do
     case Models.resolve(model_id) do

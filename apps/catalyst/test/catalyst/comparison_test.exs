@@ -8,41 +8,13 @@ defmodule Catalyst.ComparisonTest do
   alias Catalyst.Comparison.Store
   alias Catalyst.LLM.ProviderConfig
   alias Catalyst.LLM.Registry, as: LLMRegistry
-  alias Catalyst.Model
   alias Catalyst.Session.{Manager, Server}
 
-  defmodule ThirdProvider do
-    @behaviour Catalyst.LLM.Provider
-
-    @impl true
-    def stream(_model, _context, _opts, _sink), do: {:error, :unused}
-  end
-
-  defmodule ThirdCatalog do
-    @behaviour Catalyst.LLM.ModelCatalog
-
-    @entry %{
-      id: "third-comparison-model",
-      name: "Third Comparison Model",
-      efforts: ["medium"],
-      default_effort: "medium",
-      context_window: 64_000
-    }
-
-    @impl true
-    def default_model_id, do: @entry.id
-
-    @impl true
-    def catalog_snapshot(id) do
-      selected = if id == @entry.id, do: @entry, else: %{@entry | id: id, name: id}
-      models = if id == @entry.id, do: [@entry], else: [@entry, selected]
-      %{models: models, selected: selected}
-    end
-
-    @impl true
-    def model(id),
-      do: %Model{id: id, api: "third-comparison-api", provider: "third-comparison"}
-  end
+  alias Catalyst.Test.LLM.{
+    ComparisonModelCatalog,
+    DuplicateComparisonModelCatalog,
+    FixtureProvider
+  }
 
   setup do
     tmp =
@@ -145,6 +117,25 @@ defmodule Catalyst.ComparisonTest do
 
     assert {:ok, pid} = Comparison.ensure_session(legacy_third)
     assert Server.state(pid).model.api == "third-comparison-api"
+  end
+
+  test "provider-qualified selections disambiguate duplicate model ids", %{source: source} do
+    register_provider(
+      "duplicate-comparison-api",
+      "duplicate",
+      DuplicateComparisonModelCatalog
+    )
+
+    assert {:ok, comparison} =
+             Comparison.create(source, [
+               %{"provider_id" => "openai-codex", "model_id" => "gpt-5.6-sol"},
+               %{"provider_id" => "duplicate", "model_id" => "gpt-5.6-sol"}
+             ])
+
+    assert Enum.map(comparison["lanes"], & &1["provider_id"]) == [
+             "openai-codex",
+             "duplicate"
+           ]
   end
 
   test "a later lane captures a fresh source snapshot", %{source: source} do
@@ -268,17 +259,18 @@ defmodule Catalyst.ComparisonTest do
   defp restore(key, value), do: Application.put_env(:catalyst, key, value)
 
   defp register_third_provider do
-    on_exit(fn -> LLMRegistry.unregister_provider("third-comparison-api") end)
+    register_provider("third-comparison-api", "third-comparison", ComparisonModelCatalog)
+  end
+
+  defp register_provider(api, id, catalog) do
+    on_exit(fn -> LLMRegistry.unregister_provider(api) end)
 
     assert :ok =
-             LLMRegistry.register_provider(
-               "third-comparison-api",
-               %ProviderConfig{
-                 id: "third-comparison",
-                 module: ThirdProvider,
-                 name: "Third Comparison",
-                 catalog: ThirdCatalog
-               }
-             )
+             LLMRegistry.register_provider(api, %ProviderConfig{
+               id: id,
+               module: FixtureProvider,
+               name: String.capitalize(id),
+               catalog: catalog
+             })
   end
 end

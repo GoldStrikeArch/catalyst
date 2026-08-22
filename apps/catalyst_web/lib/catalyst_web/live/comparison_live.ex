@@ -13,10 +13,8 @@ defmodule CatalystWeb.ComparisonLive do
 
   @impl true
   def mount(params, _session, socket) do
-    {:ok, models} = Models.list()
-    options = Enum.map(models, &{&1.name, &1.id})
-    default = models |> List.first() |> Map.fetch!(:id)
-    second = models |> Enum.at(1, List.first(models)) |> Map.fetch!(:id)
+    {options, catalog_error} = catalog_options()
+    {default, second} = default_models(options)
     source = default_cwd()
 
     socket =
@@ -45,6 +43,7 @@ defmodule CatalystWeb.ComparisonLive do
       socket
       |> load_comparison(params)
       |> subscribe_comparison()
+      |> maybe_put_catalog_error(catalog_error)
 
     {:ok, socket}
   end
@@ -52,29 +51,39 @@ defmodule CatalystWeb.ComparisonLive do
   @impl true
   def handle_event("create", %{"comparison" => params}, socket) do
     source = String.trim(params["source"] || "")
-    models = [params["model_a"], params["model_b"]]
     prompt = blank_to_nil(params["system_prompt"])
 
-    {:noreply,
-     socket
-     |> assign(
-       creating?: true,
-       create_form: to_form(params, as: :comparison)
-     )
-     |> start_async(:create_comparison, fn ->
-       Comparison.create(source, models, system_prompt: prompt)
-     end)}
+    with {:ok, model_a} <- Models.decode_selection(params["model_a"]),
+         {:ok, model_b} <- Models.decode_selection(params["model_b"]) do
+      {:noreply,
+       socket
+       |> assign(
+         creating?: true,
+         create_form: to_form(params, as: :comparison)
+       )
+       |> start_async(:create_comparison, fn ->
+         Comparison.create(source, [model_a, model_b], system_prompt: prompt)
+       end)}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, comparison_error(reason))}
+    end
   end
 
   def handle_event("add_lane", %{"lane" => %{"model" => model}}, socket) do
     comparison_id = socket.assigns.comparison["id"]
 
-    {:noreply,
-     socket
-     |> assign(adding?: true)
-     |> start_async(:add_lane, fn ->
-       Comparison.add_lane(comparison_id, model)
-     end)}
+    case Models.decode_selection(model) do
+      {:ok, selection} ->
+        {:noreply,
+         socket
+         |> assign(adding?: true)
+         |> start_async(:add_lane, fn ->
+           Comparison.add_lane(comparison_id, selection)
+         end)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, comparison_error(reason))}
+    end
   end
 
   def handle_event("send_shared", _params, %{assigns: %{dispatching?: true}} = socket) do
@@ -462,4 +471,22 @@ defmodule CatalystWeb.ComparisonLive do
   defp comparison_error(:no_recipients), do: "Select at least one lane."
   defp comparison_error(:comparison_not_found), do: "Comparison not found."
   defp comparison_error(reason), do: "Comparison failed: #{inspect(reason)}"
+
+  defp catalog_options do
+    case Models.list() do
+      {:ok, models} -> {Models.picker_options(models), nil}
+      {:error, reason} -> {[], reason}
+    end
+  end
+
+  defp default_models([{_first_label, first}, {_second_label, second} | _rest]),
+    do: {first, second}
+
+  defp default_models([{_label, first}]), do: {first, first}
+  defp default_models([]), do: {"", ""}
+
+  defp maybe_put_catalog_error(socket, nil), do: socket
+
+  defp maybe_put_catalog_error(socket, reason),
+    do: put_flash(socket, :error, comparison_error(reason))
 end
