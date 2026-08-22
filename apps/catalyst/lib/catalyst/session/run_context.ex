@@ -9,6 +9,7 @@ defmodule Catalyst.Session.RunContext do
   """
 
   alias Catalyst.{Model, Prompt, Runtime, Workflow}
+  alias Catalyst.LLM.Models
   alias Catalyst.Prompt.{Request, Resolution}
   alias Catalyst.Session.RunConfig
 
@@ -162,7 +163,7 @@ defmodule Catalyst.Session.RunContext do
   @doc """
   Resolve the effective model a run started now would use.
 
-  For catalog-backed APIs (OpenAI Codex) this refreshes context-window
+  For catalog-backed APIs this refreshes context-window
   metadata from the current catalog snapshot — the same pre-request refresh
   `build/4` performs. The single resolver behind preview/panel call sites;
   non-catalog models (and `nil`) pass through unchanged.
@@ -182,10 +183,15 @@ defmodule Catalyst.Session.RunContext do
           {:ok, Model.t() | nil} | {:error, term()}
   def resolve_epoch_model(nil, _snapshot), do: {:ok, nil}
 
-  def resolve_epoch_model(%Model{api: "openai-codex-responses"} = model, snapshot) do
+  def resolve_epoch_model(%Model{} = model, snapshot) when is_map(snapshot) do
     case model.context_window_source do
-      :session -> {:ok, model}
-      _refreshable -> {:ok, merge_catalog_metadata(model, snapshot_entry(snapshot, model.id))}
+      :session ->
+        {:ok, model}
+
+      _refreshable ->
+        entry = snapshot_entry(snapshot, model)
+        fallback = selected_model_fallback(snapshot, model)
+        {:ok, merge_catalog_metadata(model, entry, fallback)}
     end
   end
 
@@ -367,34 +373,42 @@ defmodule Catalyst.Session.RunContext do
   defp resolve_model(nil), do: {:ok, nil, nil}
 
   defp resolve_model(%Model{} = model) do
-    case model.api do
-      "openai-codex-responses" -> resolve_codex_model(model)
-      _other -> {:ok, model, nil}
+    with {:ok, provider_id} <- Models.provider_id(model),
+         {:ok, snapshot} <- Models.catalog_snapshot(provider_id, model.id),
+         {:ok, {_provider_id, catalog_model}} <- Models.resolve(provider_id, model.id),
+         snapshot = Map.put(snapshot, :selected_model, catalog_model),
+         {:ok, resolved} <- resolve_epoch_model(model, snapshot) do
+      {:ok, resolved, snapshot}
+    else
+      _not_catalog_backed -> {:ok, model, nil}
     end
   end
 
   defp resolve_model(other), do: {:error, {:invalid_model, other}}
 
-  defp resolve_codex_model(model) do
-    snapshot = Catalyst.LLM.OpenAICodex.catalog_snapshot(model.id)
+  defp merge_catalog_metadata(%Model{} = model, entry, fallback) do
+    catalog_window =
+      positive(Map.get(entry, :context_window)) ||
+        positive(Map.get(entry, :max_context_window)) ||
+        positive(Map.get(fallback, :context_window)) ||
+        positive(Map.get(fallback, :max_context_window))
 
-    with {:ok, resolved} <- resolve_epoch_model(model, snapshot) do
-      {:ok, resolved, snapshot}
-    end
-  end
-
-  defp merge_catalog_metadata(%Model{} = model, entry) do
-    catalog_window = positive(entry.context_window) || positive(entry.max_context_window)
     persisted_window = positive(model.context_window) || positive(model.max_context_window)
 
     %Model{
       model
-      | context_window: catalog_window || persisted_window || 272_000,
-        max_context_window: positive(entry.max_context_window) || model.max_context_window,
+      | context_window: catalog_window || persisted_window,
+        max_context_window:
+          positive(Map.get(entry, :max_context_window)) ||
+            positive(Map.get(fallback, :max_context_window)) || model.max_context_window,
         effective_context_window_percent:
-          entry.effective_context_window_percent || model.effective_context_window_percent,
+          Map.get(entry, :effective_context_window_percent) ||
+            Map.get(fallback, :effective_context_window_percent) ||
+            model.effective_context_window_percent,
         auto_compact_token_limit:
-          positive(entry.auto_compact_token_limit) || model.auto_compact_token_limit,
+          positive(Map.get(entry, :auto_compact_token_limit)) ||
+            positive(Map.get(fallback, :auto_compact_token_limit)) ||
+            model.auto_compact_token_limit,
         context_window_source: context_window_source(model, catalog_window, persisted_window)
     }
   end
@@ -416,13 +430,25 @@ defmodule Catalyst.Session.RunContext do
     %{text: prompt.text, digest: prompt.digest, sources: prompt.sources}
   end
 
-  defp snapshot_entry(%{models: models}, id) when is_list(models) do
-    Enum.find(models, &(&1.id == id)) ||
-      Catalyst.LLM.OpenAICodex.Catalog.normalize(%{id: id})
+  defp snapshot_entry(%{models: models}, %Model{id: id, api: api}) when is_list(models) do
+    Enum.find(models, fn entry ->
+      Map.get(entry, :id) == id and Map.get(entry, :api, api) == api
+    end) || %{}
   end
 
-  defp snapshot_entry(_snapshot, id),
-    do: Catalyst.LLM.OpenAICodex.Catalog.normalize(%{id: id})
+  defp snapshot_entry(_snapshot, _model), do: %{}
+
+  defp selected_model_fallback(
+         %{selected: selected, selected_model: %Model{} = fallback},
+         %Model{id: id, api: api}
+       ) do
+    case Map.get(selected, :id) == id and Map.get(selected, :api, api) == api do
+      true -> fallback
+      false -> %{}
+    end
+  end
+
+  defp selected_model_fallback(_snapshot, _model), do: %{}
 
   defp model_key(nil), do: :default
   defp model_key(model), do: {model.id, model.api}

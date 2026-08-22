@@ -10,6 +10,7 @@ defmodule Catalyst.WorkflowRun.SessionAttempt do
   @behaviour Catalyst.WorkflowRun.Attempt
 
   alias Catalyst.Session.Store.Codec
+  alias Catalyst.LLM.Models
   alias Catalyst.Workflow.Attempt
 
   @impl true
@@ -77,14 +78,29 @@ defmodule Catalyst.WorkflowRun.SessionAttempt do
 
   defp attempt_options(context), do: {:error, {:invalid_attempt_context, context}}
 
-  defp model(%{"model" => selected}, _input) when is_binary(selected) and selected != "inherit" do
-    {:ok, Catalyst.LLM.OpenAICodex.model(selected)}
+  defp model(%{"model" => selected}, input) when is_binary(selected) and selected != "inherit" do
+    case Models.resolve(selected) do
+      {:ok, {_provider_id, model}} -> {:ok, model}
+      {:error, {:unknown_model, ^selected}} -> build_from_input_provider(selected, input)
+      {:error, _reason} = error -> error
+    end
   end
 
   defp model(_stage, %{"model" => encoded}) do
     case Codec.decode_model(encoded) do
       {:ok, model} -> {:ok, model}
       :error -> {:error, :invalid_workflow_model}
+    end
+  end
+
+  defp build_from_input_provider(selected, %{"model" => encoded}) do
+    with {:ok, inherited} <- Codec.decode_model(encoded),
+         {:ok, provider_id} <- Models.provider_id(inherited),
+         {:ok, {_provider_id, model}} <- Models.resolve(provider_id, selected) do
+      {:ok, model}
+    else
+      :error -> {:error, :invalid_workflow_model}
+      {:error, _reason} = error -> error
     end
   end
 

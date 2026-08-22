@@ -9,11 +9,11 @@ defmodule CatalystWeb.ComparisonLive do
   use CatalystWeb, :live_view
 
   alias Catalyst.Comparison
+  alias Catalyst.LLM.Models
 
   @impl true
   def mount(params, _session, socket) do
-    selected_model = Catalyst.LLM.OpenAICodex.model().id
-    models = Catalyst.LLM.OpenAICodex.catalog_snapshot(selected_model).models
+    {:ok, models} = Models.list()
     options = Enum.map(models, &{&1.name, &1.id})
     default = models |> List.first() |> Map.fetch!(:id)
     second = models |> Enum.at(1, List.first(models)) |> Map.fetch!(:id)

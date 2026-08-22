@@ -151,6 +151,7 @@ defmodule Catalyst.Comparison.Store do
     valid_id?(id) and valid_id?(workspace_id) and is_binary(cwd) and cwd != "" and
       valid_id?(session_id) and Map.has_key?(snapshots, snapshot_id) and is_binary(model_id) and
       model_id != "" and is_binary(system_prompt) and is_binary(created_at) and
+      optional_nonempty_binary?(Map.get(lane, "provider_id")) and
       optional_binary?(Map.get(lane, "reasoning_effort")) and
       optional_binary?(Map.get(lane, "workflow"))
   end
@@ -164,6 +165,8 @@ defmodule Catalyst.Comparison.Store do
 
   defp optional_binary?(nil), do: true
   defp optional_binary?(value), do: is_binary(value)
+  defp optional_nonempty_binary?(nil), do: true
+  defp optional_nonempty_binary?(value), do: is_binary(value) and value != ""
   defp valid_or_error(true), do: :ok
   defp valid_or_error(false), do: {:error, :invalid}
   defp invalid_manifest(manifest), do: {:error, {:invalid_comparison_manifest, manifest}}

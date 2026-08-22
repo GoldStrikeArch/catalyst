@@ -8,7 +8,11 @@ defmodule Catalyst.Comparison do
   """
 
   alias Catalyst.Comparison.{Store, Workspace}
+  alias Catalyst.LLM.Models
   alias Catalyst.Session.{Manager, Server}
+
+  # Comparison v1 accepted only Codex model ids and persisted no provider descriptor.
+  @legacy_provider_id "openai-codex"
 
   @workspace_instruction """
 
@@ -63,24 +67,23 @@ defmodule Catalyst.Comparison do
 
   @doc "Start or resume the ordinary Catalyst session owned by a lane."
   @spec ensure_session(lane()) :: {:ok, pid()} | {:error, term()}
-  def ensure_session(%{"session_id" => id, "cwd" => cwd, "model_id" => model_id} = lane) do
+  def ensure_session(%{"session_id" => id, "cwd" => cwd, "model_id" => _model_id} = lane) do
     case Manager.whereis(id) do
       {:ok, pid} ->
         {:ok, pid}
 
       :error ->
-        model = Catalyst.LLM.OpenAICodex.model(model_id)
-
-        case Manager.start_session(
-               id: id,
-               cwd: cwd,
-               model: model,
-               provider: model.api,
-               system_prompt: lane["system_prompt"],
-               opts: lane_session_opts(lane)
-             ) do
-          {:ok, %{pid: pid}} -> {:ok, pid}
-          {:error, reason} -> {:error, reason}
+        with {:ok, {_provider_id, model}} <- resolve_lane_model(lane),
+             {:ok, %{pid: pid}} <-
+               Manager.start_session(
+                 id: id,
+                 cwd: cwd,
+                 model: model,
+                 provider: model.api,
+                 system_prompt: lane["system_prompt"],
+                 opts: lane_session_opts(lane)
+               ) do
+          {:ok, pid}
         end
     end
   end
@@ -266,31 +269,32 @@ defmodule Catalyst.Comparison do
 
   defp start_lane_session(workspace, snapshot, model_id, prompt) do
     session_id = Catalyst.Ids.hex(16)
-    model = Catalyst.LLM.OpenAICodex.model(model_id)
 
-    case Manager.start_unique_session(
-           id: session_id,
-           cwd: workspace.cwd,
-           model: model,
-           provider: model.api,
-           system_prompt: prompt,
-           opts: [reasoning_effort: "medium"]
-         ) do
-      {:ok, %{pid: _pid}} ->
-        {:ok,
-         %{
-           "id" => Catalyst.Ids.hex(8),
-           "workspace_id" => workspace.id,
-           "cwd" => workspace.cwd,
-           "session_id" => session_id,
-           "snapshot_id" => snapshot["id"],
-           "model_id" => model_id,
-           "system_prompt" => prompt,
-           "reasoning_effort" => "medium",
-           "workflow" => nil,
-           "created_at" => now()
-         }}
-
+    with {:ok, {provider_id, model}} <- resolve_model_id(model_id),
+         {:ok, %{pid: _pid}} <-
+           Manager.start_unique_session(
+             id: session_id,
+             cwd: workspace.cwd,
+             model: model,
+             provider: model.api,
+             system_prompt: prompt,
+             opts: [reasoning_effort: "medium"]
+           ) do
+      {:ok,
+       %{
+         "id" => Catalyst.Ids.hex(8),
+         "workspace_id" => workspace.id,
+         "cwd" => workspace.cwd,
+         "session_id" => session_id,
+         "snapshot_id" => snapshot["id"],
+         "model_id" => model_id,
+         "provider_id" => provider_id,
+         "system_prompt" => prompt,
+         "reasoning_effort" => "medium",
+         "workflow" => nil,
+         "created_at" => now()
+       }}
+    else
       {:error, reason} ->
         Workspace.cleanup(workspace.cwd)
         {:error, {:lane_session_start_failed, reason}}
@@ -351,18 +355,32 @@ defmodule Catalyst.Comparison do
   end
 
   defp configured_lane(lane, snapshot) do
-    case snapshot.model do
-      %{id: model_id} when is_binary(model_id) ->
-        {:ok,
-         Map.merge(lane, %{
-           "model_id" => model_id,
-           "system_prompt" => snapshot.system_prompt,
-           "reasoning_effort" => Keyword.get(snapshot.opts, :reasoning_effort),
-           "workflow" => Keyword.get(snapshot.opts, :workflow)
-         })}
+    with %{id: model_id} = model when is_binary(model_id) <- snapshot.model,
+         {:ok, provider_id} <- Models.provider_id(model) do
+      {:ok,
+       Map.merge(lane, %{
+         "model_id" => model_id,
+         "provider_id" => provider_id,
+         "system_prompt" => snapshot.system_prompt,
+         "reasoning_effort" => Keyword.get(snapshot.opts, :reasoning_effort),
+         "workflow" => Keyword.get(snapshot.opts, :workflow)
+       })}
+    else
+      {:error, _reason} = error -> error
+      model -> {:error, {:invalid_configured_model, model}}
+    end
+  end
 
-      model ->
-        {:error, {:invalid_configured_model, model}}
+  defp resolve_lane_model(%{"provider_id" => provider_id, "model_id" => model_id})
+       when is_binary(provider_id),
+       do: Models.resolve(provider_id, model_id)
+
+  defp resolve_lane_model(%{"model_id" => model_id}), do: resolve_model_id(model_id)
+
+  defp resolve_model_id(model_id) do
+    case Models.resolve(model_id) do
+      {:error, {:unknown_model, ^model_id}} -> Models.resolve(@legacy_provider_id, model_id)
+      result -> result
     end
   end
 

@@ -53,6 +53,24 @@ defmodule Catalyst.LLM.Models do
     end
   end
 
+  @doc "Infer a model's provider descriptor and build the request model."
+  @spec resolve(String.t()) :: {:ok, {String.t(), Model.t()}} | {:error, term()}
+  def resolve(model_id) when is_binary(model_id) do
+    with {:ok, provider_id} <- infer_provider(model_id),
+         {:ok, model} <- build(provider_id, model_id) do
+      {:ok, {provider_id, model}}
+    end
+  end
+
+  @doc "Build a request model from an explicit provider and model id."
+  @spec resolve(String.t(), String.t()) :: {:ok, {String.t(), Model.t()}} | {:error, term()}
+  def resolve(provider_id, model_id)
+      when is_binary(provider_id) and is_binary(model_id) do
+    with {:ok, model} <- build(provider_id, model_id) do
+      {:ok, {provider_id, model}}
+    end
+  end
+
   @doc "Return the selected provider's configured default model id."
   @spec default_model_id(String.t()) :: {:ok, String.t()} | {:error, term()}
   def default_model_id(provider_id) when is_binary(provider_id) do

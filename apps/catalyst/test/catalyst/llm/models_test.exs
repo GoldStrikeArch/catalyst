@@ -74,6 +74,8 @@ defmodule Catalyst.LLM.ModelsTest do
 
     assert {:ok, "fixture"} = Models.provider_id(model)
     assert {:ok, "fixture"} = Models.infer_provider("fixture-model")
+    assert {:ok, {"fixture", ^model}} = Models.resolve("fixture-model")
+    assert {:ok, {"fixture", ^model}} = Models.resolve("fixture", "fixture-model")
   end
 
   test "reports duplicate model ids instead of choosing by registry order" do

@@ -5,7 +5,42 @@ defmodule CatalystWeb.ComparisonLiveTest do
 
   alias Catalyst.Comparison
   alias Catalyst.{Content, Message}
+  alias Catalyst.LLM.ProviderConfig
+  alias Catalyst.LLM.Registry, as: LLMRegistry
+  alias Catalyst.Model
   alias Catalyst.Session.{Manager, Server}
+
+  defmodule ThirdProvider do
+    @behaviour Catalyst.LLM.Provider
+
+    @impl true
+    def stream(_model, _context, _opts, _sink), do: {:error, :unused}
+  end
+
+  defmodule ThirdCatalog do
+    @behaviour Catalyst.LLM.ModelCatalog
+
+    @entry %{
+      id: "third-ui-model",
+      name: "Third UI Model",
+      efforts: ["low", "medium"],
+      default_effort: "low",
+      context_window: 32_000
+    }
+
+    @impl true
+    def default_model_id, do: @entry.id
+
+    @impl true
+    def catalog_snapshot(id) do
+      selected = if id == @entry.id, do: @entry, else: %{@entry | id: id, name: id}
+      models = if id == @entry.id, do: [@entry], else: [@entry, selected]
+      %{models: models, selected: selected}
+    end
+
+    @impl true
+    def model(id), do: %Model{id: id, api: "third-ui-api", provider: "third-ui"}
+  end
 
   setup do
     tmp =
@@ -119,6 +154,40 @@ defmodule CatalystWeb.ComparisonLiveTest do
            )
   end
 
+  test "a catalog-registered third provider appears and configures without UI branches", %{
+    conn: conn,
+    source: source
+  } do
+    register_third_provider()
+
+    assert {:ok, comparison} =
+             Comparison.create(source, ["gpt-5.6-sol", "gpt-5.6-terra"])
+
+    lane = hd(comparison["lanes"])
+    assert {:ok, view, _html} = live(conn, ~p"/compare/#{comparison["id"]}")
+    assert has_element?(view, "#add-lane-model option[value='third-ui-model']")
+
+    lane_view = find_live_child(view, "comparison-lane-live-#{lane["id"]}")
+
+    lane_view
+    |> form("#lane-config-form-#{lane["id"]}", %{
+      "config" => %{
+        "model" => "third-ui-model",
+        "effort" => "low",
+        "workflow" => "",
+        "system_prompt" => "Third provider prompt."
+      }
+    })
+    |> render_submit()
+
+    assert {:ok, updated} = Comparison.get(comparison["id"])
+    assert {:ok, configured} = Comparison.lane(updated, lane["id"])
+    assert configured["provider_id"] == "third-ui"
+    assert configured["model_id"] == "third-ui-model"
+    assert has_element?(lane_view, "#lane-effort-#{lane["id"]} option[value='low']")
+    refute has_element?(lane_view, "#lane-effort-#{lane["id"]} option[value='high']")
+  end
+
   test "a stopped lane disables controls and can be explicitly reattached", %{
     conn: conn,
     source: source
@@ -211,4 +280,19 @@ defmodule CatalystWeb.ComparisonLiveTest do
 
   defp restore(key, nil), do: Application.delete_env(:catalyst, key)
   defp restore(key, value), do: Application.put_env(:catalyst, key, value)
+
+  defp register_third_provider do
+    on_exit(fn -> LLMRegistry.unregister_provider("third-ui-api") end)
+
+    assert :ok =
+             LLMRegistry.register_provider(
+               "third-ui-api",
+               %ProviderConfig{
+                 id: "third-ui",
+                 module: ThirdProvider,
+                 name: "Third UI",
+                 catalog: ThirdCatalog
+               }
+             )
+  end
 end

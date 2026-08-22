@@ -7,6 +7,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
 
   alias Catalyst.Agent.Event
   alias Catalyst.{Comparison, Content, Message}
+  alias Catalyst.LLM.Models
   alias Catalyst.Session.Server
   alias CatalystWeb.UI.MessageRenderer
 
@@ -33,6 +34,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
           prompt_form: to_form(%{"message" => ""}, as: :prompt),
           config_form: config_form(lane),
           model_options: model_options(),
+          effort_options: effort_options(lane["provider_id"], lane["model_id"]),
           workflow_options: workflow_options()
         )
         |> stream_configure(:messages,
@@ -85,25 +87,26 @@ defmodule CatalystWeb.ComparisonLaneLive do
   end
 
   def handle_event("configure", %{"config" => params}, socket) do
-    model = Catalyst.LLM.OpenAICodex.model(params["model"])
-    prompt = Comparison.system_prompt(params["system_prompt"])
-
-    changes = [
-      model: model,
-      provider: model.api,
-      system_prompt: prompt,
-      opts: [
-        reasoning_effort: blank_to_nil(params["effort"]),
-        workflow: blank_to_nil(params["workflow"])
+    with {:ok, _pid} <- session_pid(socket),
+         {:ok, {_provider_id, model}} <-
+           resolve_form_model(socket.assigns.lane, params["model"]) do
+      changes = [
+        model: model,
+        provider: model.api,
+        system_prompt: Comparison.system_prompt(params["system_prompt"]),
+        opts: [
+          reasoning_effort: blank_to_nil(params["effort"]),
+          workflow: blank_to_nil(params["workflow"])
+        ]
       ]
-    ]
 
-    case session_pid(socket) do
-      {:ok, _pid} ->
-        configure_lane(socket, changes)
-
+      configure_lane(socket, changes)
+    else
       :error ->
         {:noreply, unavailable(socket)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Unknown model: #{inspect(reason)}")}
     end
   end
 
@@ -218,7 +221,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
                   field={@config_form[:effort]}
                   type="select"
                   id={"lane-effort-#{@lane["id"]}"}
-                  options={Enum.map(Catalyst.LLM.OpenAICodex.efforts(), &{String.capitalize(&1), &1})}
+                  options={@effort_options}
                   disabled={not @session_ready?}
                   container_class="m-0"
                 />
@@ -354,7 +357,8 @@ defmodule CatalystWeb.ComparisonLaneLive do
           message_count: length(items),
           message_seq: length(items),
           replayed_tail: replayed_tail(snapshot.messages),
-          config_form: config_form(snapshot)
+          config_form: config_form(snapshot),
+          effort_options: effort_options(snapshot.model)
         )
         |> stream(:messages, items, reset: true)
 
@@ -475,10 +479,46 @@ defmodule CatalystWeb.ComparisonLaneLive do
   end
 
   defp model_options do
-    selected_model = Catalyst.LLM.OpenAICodex.model().id
+    {:ok, models} = Models.list()
+    Enum.map(models, &{&1.name, &1.id})
+  end
 
-    Catalyst.LLM.OpenAICodex.catalog_snapshot(selected_model).models
-    |> Enum.map(&{&1.name, &1.id})
+  defp resolve_form_model(
+         %{"provider_id" => provider_id, "model_id" => model_id},
+         model_id
+       )
+       when is_binary(provider_id),
+       do: Models.resolve(provider_id, model_id)
+
+  defp resolve_form_model(_lane, model_id) when is_binary(model_id), do: Models.resolve(model_id)
+  defp resolve_form_model(_lane, model_id), do: {:error, {:invalid_model_id, model_id}}
+
+  defp effort_options(%Catalyst.Model{} = model) do
+    case Models.provider_id(model) do
+      {:ok, provider_id} -> effort_options(provider_id, model.id)
+      {:error, _reason} -> effort_options(nil, model.id)
+    end
+  end
+
+  defp effort_options(provider_id, model_id) do
+    provider =
+      case provider_id do
+        id when is_binary(id) -> {:ok, id}
+        _missing -> Models.infer_provider(model_id)
+      end
+
+    with {:ok, provider_id} <- provider,
+         {:ok, %{selected: selected}} <- Models.catalog_snapshot(provider_id, model_id) do
+      case Map.get(selected, :efforts) do
+        efforts when is_list(efforts) and efforts != [] ->
+          Enum.map(efforts, &{String.capitalize(&1), &1})
+
+        _missing ->
+          [{"Medium", "medium"}]
+      end
+    else
+      _error -> [{"Medium", "medium"}]
+    end
   end
 
   defp workflow_options do
@@ -501,7 +541,12 @@ defmodule CatalystWeb.ComparisonLaneLive do
 
         {:noreply,
          socket
-         |> assign(lane: configured_lane, config_form: config_form(configured_lane))
+         |> assign(
+           lane: configured_lane,
+           config_form: config_form(configured_lane),
+           effort_options:
+             effort_options(configured_lane["provider_id"], configured_lane["model_id"])
+         )
          |> put_flash(:info, "Lane settings apply to the next run.")}
 
       {:error, reason} ->

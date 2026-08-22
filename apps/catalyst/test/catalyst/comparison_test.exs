@@ -6,7 +6,43 @@ defmodule Catalyst.ComparisonTest do
 
   alias Catalyst.Comparison
   alias Catalyst.Comparison.Store
-  alias Catalyst.Session.Manager
+  alias Catalyst.LLM.ProviderConfig
+  alias Catalyst.LLM.Registry, as: LLMRegistry
+  alias Catalyst.Model
+  alias Catalyst.Session.{Manager, Server}
+
+  defmodule ThirdProvider do
+    @behaviour Catalyst.LLM.Provider
+
+    @impl true
+    def stream(_model, _context, _opts, _sink), do: {:error, :unused}
+  end
+
+  defmodule ThirdCatalog do
+    @behaviour Catalyst.LLM.ModelCatalog
+
+    @entry %{
+      id: "third-comparison-model",
+      name: "Third Comparison Model",
+      efforts: ["medium"],
+      default_effort: "medium",
+      context_window: 64_000
+    }
+
+    @impl true
+    def default_model_id, do: @entry.id
+
+    @impl true
+    def catalog_snapshot(id) do
+      selected = if id == @entry.id, do: @entry, else: %{@entry | id: id, name: id}
+      models = if id == @entry.id, do: [@entry], else: [@entry, selected]
+      %{models: models, selected: selected}
+    end
+
+    @impl true
+    def model(id),
+      do: %Model{id: id, api: "third-comparison-api", provider: "third-comparison"}
+  end
 
   setup do
     tmp =
@@ -69,6 +105,7 @@ defmodule Catalyst.ComparisonTest do
              Comparison.create(source, ["gpt-5.6-sol", "gpt-5.6-terra"])
 
     assert length(comparison["lanes"]) == 2
+    assert Enum.all?(comparison["lanes"], &(&1["provider_id"] == "openai-codex"))
     assert comparison["lanes"] |> Enum.map(& &1["snapshot_id"]) |> Enum.uniq() |> length() == 1
 
     Enum.each(comparison["lanes"], fn lane ->
@@ -83,6 +120,31 @@ defmodule Catalyst.ComparisonTest do
     refute first["cwd"] == second["cwd"]
     assert {:ok, _pid} = Comparison.ensure_session(first)
     assert {:ok, _pid} = Comparison.ensure_session(second)
+  end
+
+  test "third-provider lanes persist descriptors and legacy lanes infer them", %{source: source} do
+    register_third_provider()
+
+    assert {:ok, comparison} =
+             Comparison.create(source, ["third-comparison-model", "gpt-5.6-sol"])
+
+    third = hd(comparison["lanes"])
+    assert third["provider_id"] == "third-comparison"
+
+    legacy =
+      Map.update!(comparison, "lanes", fn [lane | lanes] ->
+        [Map.delete(lane, "provider_id") | lanes]
+      end)
+
+    assert :ok = Store.persist(legacy)
+    assert {:ok, persisted_legacy} = Comparison.get(comparison["id"])
+    legacy_third = hd(persisted_legacy["lanes"])
+
+    :ok = Manager.stop(third["session_id"])
+    wait_until(fn -> Manager.whereis(third["session_id"]) == :error end)
+
+    assert {:ok, pid} = Comparison.ensure_session(legacy_third)
+    assert Server.state(pid).model.api == "third-comparison-api"
   end
 
   test "a later lane captures a fresh source snapshot", %{source: source} do
@@ -204,4 +266,19 @@ defmodule Catalyst.ComparisonTest do
 
   defp restore(key, nil), do: Application.delete_env(:catalyst, key)
   defp restore(key, value), do: Application.put_env(:catalyst, key, value)
+
+  defp register_third_provider do
+    on_exit(fn -> LLMRegistry.unregister_provider("third-comparison-api") end)
+
+    assert :ok =
+             LLMRegistry.register_provider(
+               "third-comparison-api",
+               %ProviderConfig{
+                 id: "third-comparison",
+                 module: ThirdProvider,
+                 name: "Third Comparison",
+                 catalog: ThirdCatalog
+               }
+             )
+  end
 end
