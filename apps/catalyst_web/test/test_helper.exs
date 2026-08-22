@@ -22,6 +22,13 @@ ExUnit.start()
 # provider. Register through the same live seam used by runtime extensions.
 codex_api = "openai-codex-responses"
 {:ok, previous_codex_provider} = Catalyst.LLM.Registry.fetch_config(codex_api)
+previous_provider_overrides = Application.get_env(:catalyst, :llm_providers, %{})
+
+Application.put_env(
+  :catalyst,
+  :llm_providers,
+  Map.put(previous_provider_overrides, codex_api, Catalyst.LLM.Demo)
+)
 
 :ok =
   Catalyst.LLM.Registry.register_provider(
@@ -31,4 +38,5 @@ codex_api = "openai-codex-responses"
 
 ExUnit.after_suite(fn _results ->
   Catalyst.LLM.Registry.register_provider(codex_api, previous_codex_provider)
+  Application.put_env(:catalyst, :llm_providers, previous_provider_overrides)
 end)

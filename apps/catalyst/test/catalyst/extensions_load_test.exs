@@ -146,8 +146,7 @@ defmodule Catalyst.ExtensionsLoadTest do
              )
 
     assert :ok = RunEngine.release(first_pinned)
-    _state = :sys.get_state(Generations)
-    assert :code.is_loaded(first_target) == false
+    wait_until(fn -> :code.is_loaded(first_target) == false end)
     assert :code.is_loaded(second_target) != false
     assert {:ok, [_active_artifact]} = Artifacts.snapshot()
 
@@ -190,8 +189,7 @@ defmodule Catalyst.ExtensionsLoadTest do
     assert target.marker() == :retained_after_failure
 
     assert :ok = RunEngine.release(pinned)
-    _state = :sys.get_state(Generations)
-    assert :code.is_loaded(target) == false
+    wait_until(fn -> :code.is_loaded(target) == false end)
   end
 
   test "artifact-manager restart retains code held by a surviving run lease" do

@@ -509,6 +509,31 @@ defmodule Catalyst.Ext.MyEngineExtension do
 end
 ```
 
+For distributable managed extensions, prefer an adjacent data-only manifest
+named `<source>.manifest.json`. It is validated before source compilation, so
+discovering the proposed runtime graph does not execute extension code. The
+source then contains ordinary top-level implementation modules, while the JSON
+uses their fully qualified logical names:
+
+```json
+{
+  "api": 2,
+  "id": "my-engine",
+  "version": "1.0.0",
+  "trust": "local_trusted",
+  "services": [{
+    "key": ["agent", "run_engine", "named:my-engine"],
+    "contract": ["catalyst.agent-run-engine", 1],
+    "implementation": "Catalyst.Ext.MyEngine",
+    "binding": "run"
+  }]
+}
+```
+
+The embedded `manifest/1` form remains supported for existing trusted local
+extensions. External manifests currently support the same generation-managed
+service-only surface described below.
+
 In this mode Catalyst gives every top-level module an artifact-qualified physical name. A run
 pins that physical implementation, so reloading the file does not change code underneath the
 active run; the old modules are purged after its generation lease drains, including when the
