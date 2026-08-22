@@ -119,6 +119,16 @@ defmodule Catalyst.Session.Server do
   def configure(server, changes) when is_list(changes),
     do: GenServer.call(server, {:configure, changes})
 
+  @doc """
+  Handoff a quiescent session to the currently effective session engine.
+
+  Returns `{:error, :session_running}` without resolving the replacement while
+  a run is active. Resolution, snapshot, restore, and verification failures
+  leave the current engine and public session state unchanged.
+  """
+  @spec handoff_session_engine(GenServer.server()) :: :ok | {:error, term()}
+  def handoff_session_engine(server), do: GenServer.call(server, :handoff_session_engine)
+
   # ---- callbacks ------------------------------------------------------------
 
   @impl true
@@ -285,6 +295,16 @@ defmodule Catalyst.Session.Server do
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
+
+  def handle_call(:handoff_session_engine, _from, %State{run: nil} = state) do
+    case perform_session_engine_handoff(state) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:handoff_session_engine, _from, %State{} = state),
+    do: {:reply, {:error, :session_running}, state}
 
   def handle_call(:reset, _from, state) do
     # The reset marker is authoritative state, like a compaction replacement.
@@ -939,6 +959,45 @@ defmodule Catalyst.Session.Server do
     |> EngineState.from_server()
     |> then(&SessionEngine.event(state.session_engine_handle, envelope, &1))
     |> then(&EngineState.merge_into_server(state, &1))
+  end
+
+  defp perform_session_engine_handoff(%State{} = state) do
+    case SessionEngine.resolve_and_pin([session_id: state.id], self()) do
+      {:ok, target} -> perform_session_engine_handoff(state, target)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp perform_session_engine_handoff(%State{} = state, target) do
+    source_state = EngineState.from_server(state)
+
+    result =
+      with {:ok, snapshot} <- SessionEngine.snapshot(state.session_engine_handle, source_state),
+           {:ok, restored} <- SessionEngine.restore(target, snapshot),
+           :ok <- verify_session_engine_handoff(source_state, restored) do
+        {:ok,
+         state
+         |> EngineState.merge_into_server(restored)
+         |> Map.put(:session_engine_handle, target)
+         |> Map.put(:session_engine_metadata, SessionEngine.metadata(target.resolution))}
+      end
+
+    finish_session_engine_handoff(result, state.session_engine_handle, target)
+  end
+
+  defp verify_session_engine_handoff(%EngineState{} = state, %EngineState{} = state), do: :ok
+
+  defp verify_session_engine_handoff(%EngineState{}, %EngineState{}),
+    do: {:error, :session_engine_handoff_state_mismatch}
+
+  defp finish_session_engine_handoff({:ok, state}, source, _target) do
+    :ok = SessionEngine.release(source)
+    {:ok, state}
+  end
+
+  defp finish_session_engine_handoff({:error, _reason} = error, _source, target) do
+    :ok = SessionEngine.release(target)
+    error
   end
 
   defp session_engine_aborted_tool_results(%State{} = state, reason) do

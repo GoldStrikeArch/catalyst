@@ -17,4 +17,10 @@ defmodule Catalyst.Test.SessionEngineA do
 
   @impl true
   defdelegate failure_message(state, reason), to: DefaultEngine
+
+  @impl true
+  defdelegate snapshot(state), to: DefaultEngine
+
+  @impl true
+  defdelegate restore(snapshot), to: DefaultEngine
 end

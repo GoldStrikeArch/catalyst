@@ -84,6 +84,34 @@ defmodule Catalyst.Runtime.SessionEngine do
     end
   end
 
+  @doc "Snapshot engine-owned state through a pinned source handle."
+  @spec snapshot(Handle.t(), EngineState.t()) :: {:ok, V1.snapshot()} | {:error, term()}
+  def snapshot(%Handle{} = handle, %EngineState{} = state) do
+    with :ok <- ensure_handoff_callback(handle, :snapshot),
+         result <-
+           safe_handoff_callback(:snapshot, fn ->
+             case ImplementationRef.transport(handle.resolution.claim.implementation) do
+               :local -> handle.implementation.snapshot(state)
+             end
+           end) do
+      validate_snapshot(result)
+    end
+  end
+
+  @doc "Restore engine-owned state through a pinned target handle."
+  @spec restore(Handle.t(), V1.snapshot()) :: {:ok, EngineState.t()} | {:error, term()}
+  def restore(%Handle{} = handle, snapshot) do
+    with :ok <- ensure_handoff_callback(handle, :restore),
+         result <-
+           safe_handoff_callback(:restore, fn ->
+             case ImplementationRef.transport(handle.resolution.claim.implementation) do
+               :local -> handle.implementation.restore(snapshot)
+             end
+           end) do
+      validate_restored_state(result)
+    end
+  end
+
   @doc "Explain the effective session engine without starting a session."
   @spec explain(Context.t() | map() | keyword()) :: Catalyst.Runtime.Explanation.t()
   def explain(context \\ %{}) do
@@ -149,4 +177,39 @@ defmodule Catalyst.Runtime.SessionEngine do
       {:ok, Handle.new(resolution, lease)}
     end
   end
+
+  defp safe_handoff_callback(operation, callback) do
+    case callback.() do
+      {:ok, _value} = success -> success
+      {:error, _reason} = error -> error
+      invalid -> {:error, {:invalid_session_engine_handoff_result, operation, invalid}}
+    end
+  rescue
+    error -> {:error, {:session_engine_handoff_exception, operation, error}}
+  catch
+    kind, reason -> {:error, {:session_engine_handoff_exception, operation, {kind, reason}}}
+  end
+
+  defp ensure_handoff_callback(%Handle{implementation: implementation}, callback) do
+    case function_exported?(implementation, callback, 1) do
+      true -> :ok
+      false -> {:error, {:session_engine_handoff_not_supported, implementation, callback}}
+    end
+  end
+
+  defp validate_snapshot({:ok, %{version: version, payload: _payload} = snapshot})
+       when is_integer(version) and version > 0,
+       do: {:ok, snapshot}
+
+  defp validate_snapshot({:ok, invalid}),
+    do: {:error, {:invalid_session_engine_handoff_result, :snapshot, invalid}}
+
+  defp validate_snapshot({:error, _reason} = error), do: error
+
+  defp validate_restored_state({:ok, %EngineState{} = state}), do: {:ok, state}
+
+  defp validate_restored_state({:ok, invalid}),
+    do: {:error, {:invalid_session_engine_handoff_result, :restore, invalid}}
+
+  defp validate_restored_state({:error, _reason} = error), do: error
 end

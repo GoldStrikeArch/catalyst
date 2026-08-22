@@ -48,6 +48,10 @@ defmodule Catalyst.Runtime.SessionEngineTest do
     assert %EngineState{error_message: "session-engine-a"} =
              SessionEngine.event(handle, envelope, %EngineState{})
 
+    state = %EngineState{error_message: "preserved"}
+    assert {:ok, %{version: 1} = snapshot} = SessionEngine.snapshot(handle, state)
+    assert {:ok, ^state} = SessionEngine.restore(handle, snapshot)
+
     assert :ok = SessionEngine.release(handle)
   end
 end

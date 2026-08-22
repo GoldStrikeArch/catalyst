@@ -11,6 +11,9 @@ defmodule Catalyst.Contracts.SessionEngine.V1 do
   alias Catalyst.Runtime.ContractRef
   alias Catalyst.Session.{EngineState, EventEnvelope}
 
+  @typedoc "Versioned, process-local state capsule used during an active-session handoff."
+  @type snapshot :: %{version: pos_integer(), payload: term()}
+
   @doc "Fold one accepted event into the engine-owned session state."
   @callback event(EventEnvelope.t(), EngineState.t()) :: EngineState.t()
 
@@ -19,6 +22,14 @@ defmodule Catalyst.Contracts.SessionEngine.V1 do
 
   @doc "Build the terminal assistant message for a failed or aborted run."
   @callback failure_message(EngineState.t(), term()) :: Message.Assistant.t()
+
+  @doc "Snapshot the complete engine-owned state while the session is quiescent."
+  @callback snapshot(EngineState.t()) :: {:ok, snapshot()} | {:error, term()}
+
+  @doc "Restore a quiescent state snapshot into this implementation."
+  @callback restore(snapshot()) :: {:ok, EngineState.t()} | {:error, term()}
+
+  @optional_callbacks snapshot: 1, restore: 1
 
   @doc "Return the stable Runtime Graph contract reference."
   @spec ref() :: ContractRef.t()

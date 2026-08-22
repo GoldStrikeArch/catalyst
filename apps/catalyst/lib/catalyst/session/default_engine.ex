@@ -18,4 +18,12 @@ defmodule Catalyst.Session.DefaultEngine do
   @impl true
   def failure_message(%EngineState{} = state, reason),
     do: Reducer.failure_message(state, reason)
+
+  @impl true
+  def snapshot(%EngineState{} = state), do: {:ok, %{version: 1, payload: state}}
+
+  @impl true
+  def restore(%{version: 1, payload: %EngineState{schema_version: 1} = state}), do: {:ok, state}
+
+  def restore(snapshot), do: {:error, {:unsupported_session_engine_snapshot, snapshot}}
 end
