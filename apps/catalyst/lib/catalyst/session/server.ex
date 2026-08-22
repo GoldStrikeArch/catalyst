@@ -30,7 +30,7 @@ defmodule Catalyst.Session.Server do
   }
 
   alias Catalyst.Session.Server.State
-  alias Catalyst.Runtime.{SessionEngine, TranscriptStore}
+  alias Catalyst.Runtime.{SessionEngine, SessionFactory, TranscriptStore}
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
 
   # ---- public API -----------------------------------------------------------
@@ -137,7 +137,8 @@ defmodule Catalyst.Session.Server do
 
     id = Keyword.fetch!(opts, :id)
 
-    with {:ok, cwd} <- session_cwd(opts),
+    with {:ok, session_factory_handle} <- session_factory_handle(opts),
+         {:ok, cwd} <- session_cwd(opts),
          {:ok, session_engine_handle} <- SessionEngine.resolve_and_pin(session_id: id) do
       case open_store(cwd, opts) do
         {:ok, store} ->
@@ -151,6 +152,8 @@ defmodule Catalyst.Session.Server do
             # resolved per turn by the loop. Pass an explicit list to pin tools.
             tools: Keyword.get(opts, :tools, :extensions),
             opts: initial_session_opts(opts),
+            session_factory_handle: session_factory_handle,
+            session_factory_metadata: session_factory_metadata(session_factory_handle),
             store: store,
             session_engine_handle: session_engine_handle,
             session_engine_metadata: SessionEngine.metadata(session_engine_handle.resolution),
@@ -406,6 +409,7 @@ defmodule Catalyst.Session.Server do
     RunConfig.cleanup_session(state)
     TranscriptStore.close(state.store)
     release_session_engine(state.session_engine_handle)
+    SessionFactory.release(state.session_factory_handle)
     :ok
   end
 
@@ -1039,6 +1043,16 @@ defmodule Catalyst.Session.Server do
 
   defp release_session_engine(nil), do: :ok
   defp release_session_engine(handle), do: SessionEngine.release(handle)
+
+  defp session_factory_handle(opts) do
+    case Keyword.get(opts, :session_factory_handle) do
+      nil -> {:ok, nil}
+      handle -> SessionFactory.adopt(handle, self())
+    end
+  end
+
+  defp session_factory_metadata(nil), do: nil
+  defp session_factory_metadata(handle), do: SessionFactory.metadata(handle.resolution)
 
   defp finish_successful_run(state) do
     state = cleanup_run_resources(state)

@@ -39,6 +39,12 @@ defmodule Catalyst.Runtime.Leases do
     :exit, _reason -> :ok
   end
 
+  @doc false
+  @spec transfer(Lease.t(), pid()) :: {:ok, Lease.t()} | {:error, term()}
+  def transfer(%Lease{} = lease, owner) when is_pid(owner) do
+    GenServer.call(__MODULE__, {:transfer, lease.ref, owner})
+  end
+
   @doc "List active leases in stable acquisition order."
   @spec list() :: [Lease.t()]
   def list, do: GenServer.call(__MODULE__, :list)
@@ -100,6 +106,26 @@ defmodule Catalyst.Runtime.Leases do
     {state, generations} = drop_refs(state, [ref])
     notify_drained(generations, state)
     {:reply, :ok, persist(state)}
+  end
+
+  def handle_call({:transfer, ref, owner}, _from, state) do
+    case {Map.fetch(state.leases, ref), Process.alive?(owner)} do
+      {{:ok, %Lease{owner: ^owner} = lease}, true} ->
+        {:reply, {:ok, lease}, state}
+
+      {{:ok, %Lease{} = lease}, true} ->
+        leases = Map.delete(state.leases, ref)
+        state = state |> Map.put(:leases, leases) |> drop_owner_ref(lease.owner, ref)
+        transferred = %{lease | owner: owner}
+        next = put_lease(state, transferred)
+        {:reply, {:ok, transferred}, persist(next)}
+
+      {{:ok, %Lease{}}, false} ->
+        {:reply, {:error, :lease_owner_not_alive}, state}
+
+      {:error, _alive?} ->
+        {:reply, {:error, :unknown_lease}, state}
+    end
   end
 
   def handle_call(:list, _from, state) do

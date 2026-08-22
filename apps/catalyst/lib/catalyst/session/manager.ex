@@ -1,12 +1,15 @@
 defmodule Catalyst.Session.Manager do
   @moduledoc """
   Starts and looks up sessions. Each session is a `Catalyst.Session.Server`
-  started under a `DynamicSupervisor` and registered by id in a `Registry`.
+  child spec selected by the managed-local session factory, started under a
+  `DynamicSupervisor`, and registered by id in a `Registry`.
   """
 
   @registry Catalyst.Session.Registry
   @dynamic_supervisor Catalyst.Session.DynamicSupervisor
   @valid_id ~r/\A[A-Za-z0-9_-]+\z/
+
+  alias Catalyst.Runtime.SessionFactory
 
   @doc """
   Start a new session. Options are forwarded to `Catalyst.Session.Server`
@@ -79,18 +82,7 @@ defmodule Catalyst.Session.Manager do
   end
 
   defp start_validated(id, opts) do
-    # A poisoned runtime seam must not spend the DynamicSupervisor's shared
-    # restart budget and take unrelated sessions down with it. The transcript
-    # remains durable, so callers can explicitly resume this id after the
-    # underlying fault is fixed instead of automatically restart-looping it.
-    child_spec =
-      Supervisor.child_spec({Catalyst.Session.Server, opts}, restart: :temporary)
-
-    case DynamicSupervisor.start_child(@dynamic_supervisor, child_spec) do
-      {:ok, pid} -> {:ok, %{id: id, pid: pid}}
-      {:error, {:already_started, pid}} -> {:ok, %{id: id, pid: pid}}
-      other -> other
-    end
+    start_with_factory(id, opts, :resume)
   end
 
   defp start_unique_validated(id, opts) do
@@ -99,20 +91,54 @@ defmodule Catalyst.Session.Manager do
       |> Keyword.put(:id, id)
       |> Keyword.put(:create, :exclusive)
 
-    # `:temporary`: a crashed exclusive child must not be supervisor-restarted —
-    # the retained `create: :exclusive` opt would hit its own JSONL (`:eexist`),
-    # fail every restart, and exhaust the shared supervisor's intensity, killing
-    # every live session. spawn_agent monitors the child and reports the crash.
-    child_spec =
-      Supervisor.child_spec({Catalyst.Session.Server, child_opts}, restart: :temporary)
+    start_with_factory(id, child_opts, :exclusive)
+  end
 
-    case DynamicSupervisor.start_child(@dynamic_supervisor, child_spec) do
-      {:ok, pid} -> {:ok, %{id: id, pid: pid}}
-      {:error, {:already_started, _pid}} -> {:error, {:session_id_collision, id}}
-      {:error, {:shutdown, {:session_exists, ^id}}} -> {:error, {:session_exists, id}}
-      {:error, {:session_exists, ^id}} -> {:error, {:session_exists, id}}
-      other -> other
+  defp start_with_factory(id, opts, mode) do
+    case SessionFactory.resolve_and_pin([session_id: id], self()) do
+      {:ok, factory} -> start_with_factory(id, opts, mode, factory)
+      {:error, _reason} = error -> error
     end
+  end
+
+  defp start_with_factory(id, opts, mode, factory) do
+    case SessionFactory.child_spec(factory, opts) do
+      {:ok, child_spec} ->
+        @dynamic_supervisor
+        |> DynamicSupervisor.start_child(child_spec)
+        |> finish_start(id, factory, mode)
+
+      {:error, _reason} = error ->
+        :ok = SessionFactory.release(factory)
+        error
+    end
+  end
+
+  defp finish_start({:ok, pid}, id, _factory, _mode), do: {:ok, %{id: id, pid: pid}}
+
+  defp finish_start({:error, {:already_started, pid}}, id, factory, :resume) do
+    :ok = SessionFactory.release(factory)
+    {:ok, %{id: id, pid: pid}}
+  end
+
+  defp finish_start({:error, {:already_started, _pid}}, id, factory, :exclusive) do
+    :ok = SessionFactory.release(factory)
+    {:error, {:session_id_collision, id}}
+  end
+
+  defp finish_start({:error, {:shutdown, {:session_exists, id}}}, id, factory, :exclusive) do
+    :ok = SessionFactory.release(factory)
+    {:error, {:session_exists, id}}
+  end
+
+  defp finish_start({:error, {:session_exists, id}}, id, factory, :exclusive) do
+    :ok = SessionFactory.release(factory)
+    {:error, {:session_exists, id}}
+  end
+
+  defp finish_start(result, _id, factory, _mode) do
+    :ok = SessionFactory.release(factory)
+    result
   end
 
   defp valid_id?(id) when is_binary(id), do: Regex.match?(@valid_id, id)
