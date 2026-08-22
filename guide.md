@@ -550,6 +550,12 @@ and executes it only in a candidate-owned external Elixir VM. That boundary isol
 and host code loading, but it is not an OS sandbox and can still access the current user's files
 and network.
 
+By default, an overdue generation remains retained rather than terminating work that still owns a
+lease. Product configuration may choose bounded cancellation instead. An operator can also call
+`Catalyst.Runtime.force_retire_generation/1`; this is intentionally destructive and terminates the
+processes holding that generation's leases before its code can be purged. `runtime_graph` reports
+drain deadlines, observed timeouts, and forced-retirement timestamps.
+
 `runtime_graph` and the Extensions panel report the guarantee derived from the
 active invocation target, independently of the manifest trust label:
 artifact-qualified local code, an external worker, a sovereign local process,

@@ -200,6 +200,9 @@ defmodule Catalyst.Tools.RuntimeGraph do
       "graph=#{Catalyst.Runtime.GenerationId.to_wire(generation.graph_id)} " <>
       "status=#{generation.status} leases=#{generation.lease_count} " <>
       "parent=#{generation_parent(generation.parent)} " <>
+      "deadline=#{inspect(generation.drain_deadline)} " <>
+      "timed_out=#{inspect(generation.drain_timed_out_at)} " <>
+      "forced=#{inspect(generation.forced_retirement_at)} " <>
       "owners=#{inspect(generation_owners(generation))} " <>
       "processes=#{length(CandidateProcesses.list(generation.id))}/#{length(generation.candidate.processes)} " <>
       "capabilities=#{declaration_ids(generation.candidate.capabilities, :capability)} " <>

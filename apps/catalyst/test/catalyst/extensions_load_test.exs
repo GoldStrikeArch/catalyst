@@ -206,6 +206,7 @@ defmodule Catalyst.ExtensionsLoadTest do
     File.rm!(path)
 
     old_artifacts = Process.whereis(Artifacts)
+    old_extensions = Process.whereis(Extensions)
     monitor = Process.monitor(old_artifacts)
     Process.exit(old_artifacts, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^old_artifacts, :killed}
@@ -214,9 +215,13 @@ defmodule Catalyst.ExtensionsLoadTest do
       artifacts = Process.whereis(Artifacts)
       leases = Process.whereis(Leases)
       generations = Process.whereis(Generations)
-      is_pid(artifacts) and artifacts != old_artifacts and is_pid(leases) and is_pid(generations)
+      extensions = Process.whereis(Extensions)
+
+      is_pid(artifacts) and artifacts != old_artifacts and is_pid(leases) and is_pid(generations) and
+        is_pid(extensions) and extensions != old_extensions
     end)
 
+    assert :ok = Extensions.await_ready()
     _state = :sys.get_state(Generations)
     assert Leases.count(activation) == 1
     assert :code.is_loaded(target) != false

@@ -71,6 +71,18 @@ defmodule Catalyst.Runtime.Leases do
   @spec revoke_all() :: :ok
   def revoke_all, do: GenServer.call(__MODULE__, :revoke_all)
 
+  @doc """
+  Terminate every process holding a lease for a generation.
+
+  This is intentionally destructive and exists only for explicit or configured
+  forced retirement. Leases are not removed here: owner monitors remove them
+  after the processes are confirmed dead, preserving the no-purge-while-running
+  invariant.
+  """
+  @spec cancel_generation(ActivationId.t()) :: {:ok, non_neg_integer()}
+  def cancel_generation(%ActivationId{} = generation),
+    do: GenServer.call(__MODULE__, {:cancel_generation, generation})
+
   @impl true
   def init(:ok) do
     state =
@@ -150,6 +162,18 @@ defmodule Catalyst.Runtime.Leases do
 
     {state, _generations} = drop_refs(state, refs)
     {:reply, :ok, persist(state)}
+  end
+
+  def handle_call({:cancel_generation, generation}, _from, state) do
+    owners =
+      state.leases
+      |> Map.values()
+      |> Enum.filter(&(&1.generation == generation))
+      |> Enum.map(& &1.owner)
+      |> Enum.uniq()
+
+    Enum.each(owners, &Process.exit(&1, :kill))
+    {:reply, {:ok, length(owners)}, state}
   end
 
   def handle_call(:revoke_all, _from, state) do

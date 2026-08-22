@@ -119,7 +119,7 @@ guarantees.
 
 - Bind artifact-local extension points, contributions, processes, health checks,
   and migrations through typed implementation references.
-- Decide drain deadlines and forced-retirement policy.
+- Generalize ADR-0013 retirement policy beyond local process-owned leases.
 - Generalize implementation-target dispatch beyond `agent.run_engine`.
 - Eliminate transient main-VM compile side effects by staging compilation on a
   disposable peer node. The trusted local compiler validates and rolls back

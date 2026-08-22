@@ -102,8 +102,8 @@ transactionality claim.
 
 - artifact binding beyond service implementations for the generation-qualified
   loader introduced by ADR-0005;
-- drain deadlines, forced retirement, and delayed module purge beyond the
-  lifecycle leases introduced by ADR-0004;
+- delayed module purge beyond the lifecycle leases introduced by ADR-0004;
+- drain deadlines and forced retirement are specified by ADR-0013;
 - state capsules, migrations, and session handoff;
 - isolated compilation and staging on a peer node or external worker;
 - durable last-known-good generation storage owned by the Recovery Host;

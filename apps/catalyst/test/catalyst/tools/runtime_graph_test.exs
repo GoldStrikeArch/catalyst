@@ -87,6 +87,9 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
     assert [%Content.Text{text: text}] = result.content
     assert text =~ Catalyst.Runtime.ActivationId.to_wire(generation.id)
     assert text =~ ~s(owners=["runtime-graph-owner"])
+    assert text =~ "deadline=nil"
+    assert text =~ "timed_out=nil"
+    assert text =~ "forced=nil"
     assert text =~ "capabilities=[:filesystem]"
     assert text =~ ~s(migrations=["workspace-state"])
     assert result.details.capability_count == 1

@@ -24,7 +24,8 @@ defmodule Catalyst.Runtime.Generations do
     Generation,
     GenerationStore,
     Leases,
-    Resolution
+    Resolution,
+    RetirementPolicy
   }
 
   alias Catalyst.Tasks
@@ -73,6 +74,17 @@ defmodule Catalyst.Runtime.Generations do
   @spec clear() :: :ok
   def clear, do: GenServer.call(__MODULE__, :clear, call_timeout())
 
+  @doc """
+  Explicitly terminate lease owners blocking retirement of a failed or retiring generation.
+
+  The generation remains retained until owner monitors confirm that every lease
+  has drained. Active generations cannot be force-retired.
+  """
+  @spec force_retire(ActivationId.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def force_retire(%ActivationId{} = generation_id) do
+    GenServer.call(__MODULE__, {:force_retire, generation_id}, call_timeout())
+  end
+
   @doc false
   @spec acquire_lease(Resolution.t(), pid()) ::
           {:ok, Catalyst.Runtime.Lease.t() | nil} | {:error, term()}
@@ -118,6 +130,23 @@ defmodule Catalyst.Runtime.Generations do
     release_unleased_artifacts()
     GenerationStore.clear()
     {:reply, :ok, state}
+  end
+
+  def handle_call({:force_retire, generation_id}, _from, state) do
+    case GenerationStore.fetch(generation_id) do
+      {:ok, %Generation{status: status}} when status in [:retiring, :failed] ->
+        {result, state} = force_retirement(generation_id, state)
+        {:reply, result, state}
+
+      {:ok, %Generation{status: :active}} ->
+        {:reply, {:error, :active_generation}, state}
+
+      {:ok, %Generation{status: status}} ->
+        {:reply, {:error, {:generation_not_retiring, status}}, state}
+
+      :error ->
+        {:reply, {:error, :unknown_generation}, state}
+    end
   end
 
   def handle_call({:acquire_lease, resolution, owner}, _from, state) do
@@ -182,20 +211,27 @@ defmodule Catalyst.Runtime.Generations do
 
   def handle_info({:generation_drain_timeout, generation_id}, state) do
     state = drop_drain_timer(state, generation_id)
-    owners = lease_owners(generation_id)
 
-    case owners do
-      [] ->
+    case Leases.count(generation_id) do
+      0 ->
         {:noreply, retire_if_drained(generation_id, state)}
 
-      _retained ->
-        Logger.warning("forcing runtime generation retirement after drain timeout",
-          generation: ActivationId.to_wire(generation_id),
-          lease_owners: length(owners)
-        )
+      count ->
+        GenerationStore.mark_drain_timeout(generation_id, DateTime.utc_now())
 
-        Enum.each(owners, &Process.exit(&1, :kill))
-        {:noreply, state}
+        case RetirementPolicy.current().on_timeout do
+          :retain ->
+            Logger.warning("runtime generation exceeded its drain deadline",
+              generation: ActivationId.to_wire(generation_id),
+              lease_count: count
+            )
+
+            {:noreply, state}
+
+          :cancel_owners ->
+            {_result, state} = force_retirement(generation_id, state)
+            {:noreply, state}
+        end
     end
   end
 
@@ -506,7 +542,9 @@ defmodule Catalyst.Runtime.Generations do
   end
 
   defp schedule_drain_timeout(state, generation_id) do
-    case {drain_timeout(), GenerationStore.fetch(generation_id), Leases.count(generation_id)} do
+    timeout = RetirementPolicy.current().drain_timeout
+
+    case {timeout, GenerationStore.fetch(generation_id), Leases.count(generation_id)} do
       {:infinity, _generation, _leases} ->
         state
 
@@ -548,12 +586,17 @@ defmodule Catalyst.Runtime.Generations do
     %{state | drain_timers: %{}}
   end
 
-  defp lease_owners(generation_id) do
-    Leases.list()
-    |> Enum.filter(&(&1.generation == generation_id))
-    |> Enum.map(& &1.owner)
-    |> Enum.reject(&(&1 == self()))
-    |> Enum.uniq()
+  defp force_retirement(generation_id, state) do
+    GenerationStore.mark_forced_retirement(generation_id, DateTime.utc_now())
+    state = cancel_drain_timer(state, generation_id)
+
+    case Leases.cancel_generation(generation_id) do
+      {:ok, 0} ->
+        {{:ok, 0}, retire_if_drained(generation_id, state)}
+
+      {:ok, count} ->
+        {{:ok, count}, state}
+    end
   end
 
   defp release_unleased_artifacts do
@@ -675,13 +718,6 @@ defmodule Catalyst.Runtime.Generations do
       cleanups: %{},
       cleanup_generations: %{}
     }
-  end
-
-  defp drain_timeout do
-    case Application.get_env(:catalyst, :runtime_generation_drain_timeout, :infinity) do
-      timeout when is_integer(timeout) and timeout >= 0 -> timeout
-      _infinite_or_invalid -> :infinity
-    end
   end
 
   defp stabilization_ms do

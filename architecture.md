@@ -725,7 +725,11 @@ process-free for previews and explanation; an executing managed run upgrades it 
 all new runs resolve the new active activation. Deterministic graph IDs, unique activation IDs, and
 compiled-artifact IDs are distinct. Handles separate logical implementation identity from their
 physical execution target. `runtime_graph` reports active/retiring/retired activations and their
-leases and retained artifacts. Declarative API-v2 source may explicitly opt into
+leases, retirement deadlines, forced-retirement state, and retained artifacts. The default
+retirement policy retains overdue generations so leased work can finish; products may opt into
+bounded cancellation, and operators may explicitly force retirement. Lease-owner monitors remain
+the proof that old code is no longer executing before subtree cleanup and artifact purge.
+Declarative API-v2 source may explicitly opt into
 `code: :generation`: the loader compiles top-level modules into an artifact-qualified namespace,
 validates that every emitted module belongs to the artifact mapping, stages service implementation
 references with the candidate, and retains old physical modules until every referring activation

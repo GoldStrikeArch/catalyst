@@ -1,7 +1,7 @@
 defmodule Catalyst.Runtime.GenerationsTest do
   use ExUnit.Case, async: false
 
-  import Catalyst.EnvCase, only: [restore_env: 2, wait_until: 1]
+  import Catalyst.EnvCase, only: [put_env: 2, restore_env: 2, wait_until: 1]
 
   alias Catalyst.Contracts.RunEngine.V1
   alias Catalyst.Extension.Manifest
@@ -181,6 +181,104 @@ defmodule Catalyst.Runtime.GenerationsTest do
         generation.id == first_generation.id and generation.status == :retired
       end)
     end)
+  end
+
+  test "an overdue generation remains retained under the safe policy" do
+    put_env(:runtime_generation_stabilization_ms, 0)
+    put_env(:runtime_generation_retirement, drain_timeout: 0, on_timeout: :retain)
+
+    first = healthy_manifest("test.generation.overdue")
+    assert {:ok, first_generation} = Generations.install("overdue_source", [first])
+
+    holder =
+      start_supervised!(
+        {Task,
+         fn ->
+           receive do
+             :stop -> :ok
+           end
+         end}
+      )
+
+    assert {:ok, lease} = Leases.acquire(first_generation.id, holder, :session)
+
+    second = healthy_manifest("test.generation.current")
+    assert {:ok, _second_generation} = Generations.install("overdue_source", [second])
+
+    wait_until(fn ->
+      case Enum.find(Generations.list(), &(&1.id == first_generation.id)) do
+        %{status: :retiring, drain_timed_out_at: %DateTime{}} -> true
+        _pending -> false
+      end
+    end)
+
+    assert Process.alive?(holder)
+    assert CandidateProcesses.alive?(first_generation.id)
+    assert Leases.count(first_generation.id) == 1
+    assert :ok = Leases.release(lease)
+  end
+
+  test "explicit forced retirement terminates lease owners before purging" do
+    put_env(:runtime_generation_stabilization_ms, 0)
+    first = healthy_manifest("test.generation.forced")
+    assert {:ok, first_generation} = Generations.install("forced_source", [first])
+
+    holder =
+      start_supervised!(
+        {Task,
+         fn ->
+           receive do
+             :stop -> :ok
+           end
+         end}
+      )
+
+    holder_monitor = Process.monitor(holder)
+    assert {:ok, _lease} = Leases.acquire(first_generation.id, holder, :session)
+
+    second = healthy_manifest("test.generation.after-force")
+    assert {:ok, _second_generation} = Generations.install("forced_source", [second])
+
+    assert {:ok, 1} = Generations.force_retire(first_generation.id)
+    assert_receive {:DOWN, ^holder_monitor, :process, ^holder, :killed}
+
+    wait_until(fn ->
+      case Enum.find(Generations.list(), &(&1.id == first_generation.id)) do
+        %{status: :retired, forced_retirement_at: %DateTime{}} -> true
+        _pending -> false
+      end
+    end)
+
+    refute CandidateProcesses.alive?(first_generation.id)
+  end
+
+  test "generation history retains only the configured number of terminal records" do
+    put_env(:runtime_generation_history_limit, 1)
+
+    rejected_one =
+      manifest("test.generation.history-one",
+        health_checks: [
+          %{id: "unhealthy-one", module: Health, function: :check, args: [:error], timeout: 100}
+        ]
+      )
+
+    rejected_two =
+      manifest("test.generation.history-two",
+        health_checks: [
+          %{id: "unhealthy-two", module: Health, function: :check, args: [:error], timeout: 100}
+        ]
+      )
+
+    assert {:error, {:health_check_failed, "unhealthy-one", :unhealthy}} =
+             Generations.install("history_source", [rejected_one])
+
+    assert {:error, {:health_check_failed, "unhealthy-two", :unhealthy}} =
+             Generations.install("history_source", [rejected_two])
+
+    assert [%{status: :rejected, owners: %{"history_source" => [manifest]}}] =
+             Generations.list()
+
+    assert manifest.id == "test.generation.history-two"
   end
 
   test "the same graph can reactivate without replacing a leased retiring activation" do

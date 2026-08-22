@@ -47,7 +47,7 @@ does **not** by itself guarantee exact old BEAM code:
 - ordinary managed modules still use their source module names;
 - loading a replacement may install new code under the same name;
 - raw trusted module shadowing remains immediate and opaque;
-- there is no drain deadline or forced-retirement policy yet.
+- drain deadlines and forced retirement are governed by ADR-0013.
 
 ADR-0005 separates graph, activation, and artifact identities. Explicitly
 opted-in API-v2 service implementations now use generation-qualified physical

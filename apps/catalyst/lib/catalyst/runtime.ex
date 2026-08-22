@@ -3,8 +3,8 @@ defmodule Catalyst.Runtime do
   Public entry point for runtime service resolution and introspection.
 
   Provides a pure generic resolver, host-extensible read model, generic
-  extension-point declarations, and the first production adapter:
-  `agent.run_engine`. Specialized subsystem registries remain authoritative
+  extension-point declarations, and production adapters for run and session
+  runtime services. Specialized subsystem registries remain authoritative
   execution stores while later phases migrate them behind this semantic model.
   """
 
@@ -89,4 +89,9 @@ defmodule Catalyst.Runtime do
   @doc "List retained managed generation lifecycle records."
   @spec generations() :: [Generation.t()]
   defdelegate generations(), to: Generations, as: :list
+
+  @doc "Explicitly terminate lease owners blocking retirement of one generation."
+  @spec force_retire_generation(Catalyst.Runtime.ActivationId.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  defdelegate force_retire_generation(generation_id), to: Generations, as: :force_retire
 end

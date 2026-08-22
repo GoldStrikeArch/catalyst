@@ -114,7 +114,11 @@ defmodule Catalyst.Runtime.GenerationStore do
         reason: reason
       }
 
-      generations = put_rejected(current.generations, generation)
+      generations =
+        current.generations
+        |> put_rejected(generation)
+        |> prune_history()
+
       next = %{current | generations: generations}
 
       :persistent_term.put(@state_key, next)
@@ -178,6 +182,22 @@ defmodule Catalyst.Runtime.GenerationStore do
   end
 
   @doc false
+  @spec mark_drain_timeout(ActivationId.t(), DateTime.t()) :: :ok
+  def mark_drain_timeout(%ActivationId{} = id, %DateTime{} = timed_out_at) do
+    update_generation(id, fn generation ->
+      %{generation | drain_timed_out_at: timed_out_at}
+    end)
+  end
+
+  @doc false
+  @spec mark_forced_retirement(ActivationId.t(), DateTime.t()) :: :ok
+  def mark_forced_retirement(%ActivationId{} = id, %DateTime{} = forced_at) do
+    update_generation(id, fn generation ->
+      %{generation | forced_retirement_at: forced_at}
+    end)
+  end
+
+  @doc false
   @spec clear() :: :ok
   def clear do
     :global.trans(@state_lock, fn ->
@@ -199,7 +219,13 @@ defmodule Catalyst.Runtime.GenerationStore do
   defp begin_retirement(generations, nil, _now), do: generations
 
   defp begin_retirement(generations, generation, now) do
-    retiring = %{generation | status: :retiring, retiring_at: now}
+    retiring = %{
+      generation
+      | status: :retiring,
+        retiring_at: now,
+        drain_deadline: drain_deadline(now)
+    }
+
     Map.put(generations, ActivationId.to_wire(generation.id), retiring)
   end
 
@@ -220,6 +246,7 @@ defmodule Catalyst.Runtime.GenerationStore do
             generation
             | status: :failed,
               retiring_at: DateTime.utc_now(),
+              drain_deadline: generation.drain_deadline || drain_deadline(DateTime.utc_now()),
               retired_at: nil,
               reason: reason
           }
@@ -249,6 +276,7 @@ defmodule Catalyst.Runtime.GenerationStore do
           generation
           | status: :failed,
             retiring_at: generation.retiring_at || DateTime.utc_now(),
+            drain_deadline: generation.drain_deadline || drain_deadline(DateTime.utc_now()),
             retired_at: nil,
             reason: reason
         }
@@ -270,6 +298,7 @@ defmodule Catalyst.Runtime.GenerationStore do
       failed
       | status: :failed,
         retiring_at: now,
+        drain_deadline: failed.drain_deadline || drain_deadline(now),
         retired_at: nil,
         reason: reason
     }
@@ -279,6 +308,9 @@ defmodule Catalyst.Runtime.GenerationStore do
       | status: :active,
         activated_at: now,
         retiring_at: nil,
+        drain_deadline: nil,
+        drain_timed_out_at: nil,
+        forced_retirement_at: nil,
         retired_at: nil,
         reason: nil
     }
@@ -313,7 +345,10 @@ defmodule Catalyst.Runtime.GenerationStore do
 
         :persistent_term.put(
           @state_key,
-          %{current | generations: Map.put(current.generations, key, retired)}
+          %{
+            current
+            | generations: current.generations |> Map.put(key, retired) |> prune_history()
+          }
         )
 
       %Generation{status: :failed} = generation ->
@@ -325,7 +360,7 @@ defmodule Catalyst.Runtime.GenerationStore do
 
         :persistent_term.put(
           @state_key,
-          %{current | generations: Map.put(current.generations, key, failed)}
+          %{current | generations: current.generations |> Map.put(key, failed) |> prune_history()}
         )
 
       _not_retiring ->
@@ -344,4 +379,56 @@ defmodule Catalyst.Runtime.GenerationStore do
 
     %{candidate | claims: claims}
   end
+
+  defp update_generation(id, update) do
+    :global.trans(@state_lock, fn ->
+      current = state()
+      key = ActivationId.to_wire(id)
+
+      case Map.fetch(current.generations, key) do
+        {:ok, generation} ->
+          generations = Map.put(current.generations, key, update.(generation))
+          :persistent_term.put(@state_key, %{current | generations: generations})
+
+        :error ->
+          :ok
+      end
+
+      :ok
+    end)
+  end
+
+  defp drain_deadline(now) do
+    case Catalyst.Runtime.RetirementPolicy.current().drain_timeout do
+      :infinity -> nil
+      timeout -> DateTime.add(now, timeout, :millisecond)
+    end
+  end
+
+  defp prune_history(generations) do
+    limit = Application.get_env(:catalyst, :runtime_generation_history_limit, 100)
+
+    case is_integer(limit) and limit >= 0 do
+      true -> prune_terminal_generations(generations, limit)
+      false -> generations
+    end
+  end
+
+  defp prune_terminal_generations(generations, limit) do
+    terminal =
+      generations
+      |> Map.values()
+      |> Enum.filter(&terminal?/1)
+      |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
+
+    terminal
+    |> Enum.drop(limit)
+    |> Enum.reduce(generations, fn generation, retained ->
+      Map.delete(retained, ActivationId.to_wire(generation.id))
+    end)
+  end
+
+  defp terminal?(%Generation{status: status}) when status in [:retired, :rejected], do: true
+  defp terminal?(%Generation{status: :failed, retired_at: %DateTime{}}), do: true
+  defp terminal?(%Generation{}), do: false
 end
