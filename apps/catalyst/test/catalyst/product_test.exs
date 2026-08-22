@@ -52,6 +52,9 @@ defmodule Catalyst.ProductTest do
 
     assert {:error, {:invalid_product_field, :hosts, [:unknown]}} =
              Spec.new(%{id: "valid", packs: [], tools: [], hosts: [:unknown]})
+
+    assert {:error, {:unknown_pack, "unknown.pack"}} =
+             Spec.new(%{id: "valid", packs: ["unknown.pack"], tools: [], hosts: [:cli]})
   end
 
   test "a known product profile can be selected for the next boot" do

@@ -57,6 +57,7 @@ defmodule Catalyst.Product.Spec do
   defp validate(spec) do
     with :ok <- validate_id(spec.id),
          :ok <- validate_list(:packs, spec.packs, &valid_id?/1),
+         :ok <- Catalyst.Pack.Registry.validate_product_packs(spec.packs),
          :ok <- validate_list(:tools, spec.tools, &module?/1),
          :ok <- validate_list(:hosts, spec.hosts, &(&1 in @hosts)) do
       {:ok, spec}
