@@ -77,12 +77,13 @@ defmodule CatalystWeb.Workbench do
   def info(%Handle{} = handle, message, state, context),
     do: invoke_transition(handle, :info, [message, state, context])
 
-  @doc "Resolve and validate the registered render-target ID for current state."
-  @spec render_target(Handle.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  @doc "Resolve and validate the render target reference for current state."
+  @spec render_target(Handle.t(), map()) :: {:ok, V1.render_target()} | {:error, term()}
   def render_target(%Handle{} = handle, state) do
     with {:ok, result} <- invoke_callback(handle, :render_target, [state]) do
       case result do
         target when is_binary(target) and byte_size(target) > 0 -> {:ok, target}
+        {module, function} = target when is_atom(module) and is_atom(function) -> {:ok, target}
         invalid -> {:error, {:invalid_workbench_render_target, invalid}}
       end
     end

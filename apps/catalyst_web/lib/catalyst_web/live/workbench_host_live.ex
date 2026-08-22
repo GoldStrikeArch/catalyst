@@ -212,7 +212,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   defp pin_target(handle, state) do
     with {:ok, id} <- Workbench.render_target(handle, state),
-         {:ok, target} <- RenderTarget.capture(id, handle.resolution) do
+         {:ok, target} <- RenderTarget.capture(id, handle) do
       {:ok, target}
     end
   end
@@ -372,6 +372,10 @@ defmodule CatalystWeb.WorkbenchHostLive do
   end
 
   defp owner(metadata), do: metadata |> Map.get(:owner, :unavailable) |> to_string()
+
+  defp target_id(%RenderTarget{id: {module, function}}),
+    do: "#{inspect(module)}.#{function}/1"
+
   defp target_id(%RenderTarget{id: id}), do: id
   defp target_id(_unmounted), do: nil
 end

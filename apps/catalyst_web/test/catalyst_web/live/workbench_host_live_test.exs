@@ -6,7 +6,18 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
   alias Catalyst.Contracts.Workbench.V1
   alias Catalyst.Extension.Manifest
   alias Catalyst.ExtensionAPI
-  alias Catalyst.Runtime.{ExtensionPoints, GenerationStore, Generations, Leases, PermissionPolicy}
+  alias Catalyst.Extensions.GenerationCompiler
+
+  alias Catalyst.Runtime.{
+    ArtifactSet,
+    Artifacts,
+    ExtensionPoints,
+    GenerationStore,
+    Generations,
+    Leases,
+    PermissionPolicy
+  }
+
   alias CatalystWeb.UI.Registry
   alias CatalystWeb.Workbench
 
@@ -120,6 +131,34 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
     second_conn = build_conn() |> init_test_session(%{"workbench_workspace" => root})
     {:ok, second_view, _html} = live(second_conn, "/ide")
     assert has_element?(second_view, "#command-output", "test.workbench-b")
+  end
+
+  test "an artifact workbench renders through its exact pinned implementation", %{
+    conn: conn,
+    root: root
+  } do
+    install_artifact_workbench!("{__MODULE__, :render}")
+
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/ide")
+
+    assert has_element?(view, "#artifact-workbench")
+    assert has_element?(view, "#workbench-host[data-workbench-owner='test.artifact-workbench']")
+    refute has_element?(view, "#workbench-error")
+  end
+
+  test "an artifact workbench cannot render through an unrelated module", %{
+    conn: conn,
+    root: root
+  } do
+    install_artifact_workbench!("{CatalystWeb.Test.WorkbenchTargetA, :render}")
+
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/ide")
+
+    assert has_element?(view, "#workbench-error")
+    assert has_element?(view, "#workbench-error-reason", "workbench_render_target_not_pinned")
+    refute Enum.any?(Leases.list(), &(&1.owner == view.pid))
   end
 
   test "a mount pins its render descriptor until an explicit generation remount", %{
@@ -305,5 +344,62 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
         }
       ]
     })
+  end
+
+  defp install_artifact_workbench!(target) do
+    source = """
+    defmodule Catalyst.Ext.ArtifactWorkbench do
+      @behaviour Catalyst.Contracts.Workbench.V1
+
+      @impl true
+      def mount(_context), do: {:ok, %{output: "artifact"}, []}
+
+      @impl true
+      def event(_event, _params, state, _context), do: {:ok, state, []}
+
+      @impl true
+      def info(_message, state, _context), do: {:ok, state, []}
+
+      @impl true
+      def render_target(_state), do: #{target}
+
+      @impl true
+      def forms(_state), do: %{}
+
+      def render(_assigns), do: Phoenix.HTML.raw("<main id=\\\"artifact-workbench\\\"></main>")
+    end
+
+    defmodule Catalyst.Ext.ArtifactWorkbenchExtension do
+      use Catalyst.Extension, api: 2, code: :generation
+
+      manifest %{
+        id: "test.artifact-workbench",
+        version: "1.0.0",
+        services: [
+          %{
+            key: {"ui", "workbench", "default"},
+            contract: {"catalyst.workbench", 1},
+            implementation: Catalyst.Ext.ArtifactWorkbench,
+            priority: 900,
+            binding: {:pin, :mount}
+          }
+        ]
+      }
+    end
+    """
+
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "catalyst-artifact-workbench-#{System.unique_integer([:positive])}.exs"
+      )
+
+    File.write!(path, source)
+    on_exit(fn -> File.rm(path) end)
+
+    assert {:ok, %ArtifactSet{} = artifact} = GenerationCompiler.compile_file(path)
+    assert :ok = Artifacts.register(artifact)
+    [manifest] = GenerationCompiler.manifests(artifact)
+    assert {:ok, _generation} = Generations.install("artifact_workbench_source", [manifest])
   end
 end

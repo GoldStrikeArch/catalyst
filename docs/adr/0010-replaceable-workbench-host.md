@@ -21,6 +21,14 @@ JSON-serializable state plus validated effects, and identifies a registered
 function-component render target. The host owns forms, navigation, filesystem
 and command effects, task supervision, and permission-broker calls.
 
+Legacy Workbenches identify renderers by string ID. The host captures the
+effective `UI.Registry` descriptor once at mount or remount and never resolves
+it during later renders. An artifact-backed managed Workbench may instead
+return `{module, function}` only when `module` is the exact physical local
+implementation retained by its Runtime Handle and generation lease. Built-in,
+imperative, process, external-worker, and raw implementations use the legacy
+ID path unless a later contract defines a separately pinned renderer artifact.
+
 Runtime replacements use the state-handoff protocol in ADR-0009. Workbench
 effects are bounded and request IDs are unique per transition. Browser behavior
 uses the single packaged `RuntimeHook` and same-origin, digest-addressed modules

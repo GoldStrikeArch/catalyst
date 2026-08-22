@@ -23,6 +23,7 @@ defmodule Catalyst.Contracts.Workbench.V1 do
           | {:navigate, String.t()}
   @type transition :: {:ok, state(), [effect()]} | {:error, term()}
   @type capsule :: %{version: pos_integer(), payload: term()}
+  @type render_target :: String.t() | {module(), atom()}
 
   @doc "Initialize serializable workbench state and declarative host effects."
   @callback mount(context()) :: transition()
@@ -33,8 +34,14 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   @doc "Handle one host-owned effect result or routed process message."
   @callback info(term(), state(), context()) :: transition()
 
-  @doc "Return the ID of a function component registered with the web host."
-  @callback render_target(state()) :: String.t()
+  @doc """
+  Return a legacy registered component ID or the managed implementation's own
+  artifact-bound `{module, function}` component.
+
+  The stable host rejects a direct target unless its module is the exact local
+  implementation pinned by the Workbench Runtime Handle.
+  """
+  @callback render_target(state()) :: render_target()
 
   @doc "Return raw named form values; the stable host constructs Phoenix forms."
   @callback forms(state()) :: %{optional(atom()) => map()}
