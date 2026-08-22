@@ -543,8 +543,12 @@ ordinary aliases, and service declarations only. It rejects dynamic/nested modul
 protocols, implementations, and other module output outside the declared artifact mapping. Use
 ordinary API-v2 loading for extension points, contributions, processes, health checks, or
 migrations until their artifact contracts are defined. High-churn generated extensions should
-also avoid this trusted main-VM mode for now because BEAM module-name atoms are not
-garbage-collected; full compile isolation requires the planned disposable peer-node worker.
+also avoid this trusted main-VM mode because BEAM module-name atoms are not garbage-collected;
+Catalyst bounds artifact namespaces in the host VM. An external manifest may instead declare
+`"trust": "isolated_worker"` for the `catalyst.permission-policy/1` service: Catalyst then compiles
+and executes it only in a candidate-owned external Elixir VM. That boundary isolates VM crashes
+and host code loading, but it is not an OS sandbox and can still access the current user's files
+and network.
 
 An extension module may also export an optional **`metadata/0`** returning
 `%{name: "…", description: "…"}` — it is shown on the Extensions panel so humans can

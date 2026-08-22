@@ -12,8 +12,9 @@ APIs directly. A replaceable permission policy can govern actions routed through
 Catalyst, but it cannot constrain arbitrary code running in the same VM.
 
 The runtime needs to describe this difference without presenting policy hooks as
-a sandbox. Future isolated workers and remote services also need an explicit
-manifest identity before resource brokers can enforce capability grants.
+a sandbox. Isolated workers and remote services therefore need an explicit
+manifest identity and a matching invocation transport before resource brokers
+can enforce capability grants.
 
 ## Decision
 
@@ -31,16 +32,24 @@ itself. Activation must reject a service whose declared trust class is
 incompatible with its actual invocation transport once isolated transports are
 introduced.
 
+Activation rejects an isolated trust declaration unless the contract has a real
+external transport. The first such vertical is `catalyst.permission-policy/1`:
+source is compiled and executed only in a candidate-owned external Elixir VM,
+and the host accepts only bounded, versioned permission decisions over its wire
+protocol.
+
 `agent.permission_policy/default` is resolved and pinned for each brokered tool
-action. It fails closed when resolution, execution, timeout, or result validation
-fails. Existing tool hooks remain a secondary product-policy gate.
+or Workbench action. It fails closed when resolution, execution, timeout, worker
+death, or result validation fails. Existing tool hooks remain a secondary
+product-policy gate.
 
 ## Guarantee Boundary
 
 Permission decisions are enforceable only for actions that pass through a
-Catalyst broker. A trusted in-process extension can bypass those brokers. Strong
-resource enforcement therefore requires a peer node, OS worker, or remote
-service that has no direct access to host resources.
+Catalyst broker. A trusted in-process extension can bypass those brokers. The
+external permission worker isolates VM crashes and host code loading, but still
+runs as the Catalyst OS user. Strong filesystem/network/process enforcement
+requires an OS sandbox or remote service with no direct access to host resources.
 
 Human approval challenges must eventually identify a host-controlled channel;
 an agent-readable file or ordinary tool call is not proof of human consent.

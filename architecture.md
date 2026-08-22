@@ -732,10 +732,15 @@ references with the candidate, and retains old physical modules until every refe
 drains. Process-subtree and coordinator failures fail closed for new resolution without revoking
 surviving run leases. Artifact and lease ownership survives runtime-chain restarts; byte-identical
 source reuses its artifact namespace and activation. Rejected candidates and drained activations
-purge their artifacts. This first loader path is intentionally limited to service declarations;
-artifact-bound processes, health checks, contributions, migrations, drain deadlines, peer-node
-compilation, and state handoff remain future work. Raw trusted BEAM overrides also remain opaque and
-cannot promise complete graph introspection.
+stop and join their candidate processes before purging artifacts. Local generation-qualified source
+remains intentionally limited to service declarations, and its permanent artifact namespaces have a
+bounded budget. Candidate compilation is preflighted in a disposable Elixir VM. A manifest declaring
+`:isolated_worker` is compiled and executed only outside the host VM, currently for the
+`catalyst.permission-policy/1` contract; its bounded protocol fails closed, but the worker runs as the
+same OS user and is not a filesystem/network sandbox. Session-engine and Workbench contracts support
+quiescent state handoff, while generic state-changing manifest migrations remain fail-closed except
+for `:new_instances_only`. Raw trusted BEAM overrides remain opaque and cannot promise complete graph
+introspection or transactional activation.
 
 The extension ontology is no longer closed in `Catalyst.ExtensionAPI`. Host subsystems declare
 schema-aware `Runtime.ExtensionPoint` values with stable `{module, function}` activation handlers,
