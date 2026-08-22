@@ -13,6 +13,7 @@ defmodule Catalyst.Tools.RuntimeGraph do
   alias Catalyst.Runtime.{
     Artifact,
     Artifacts,
+    CandidateProcesses,
     Claim,
     Contribution,
     Generation,
@@ -72,6 +73,9 @@ defmodule Catalyst.Tools.RuntimeGraph do
           generation_count: length(generations),
           lease_count: lease_count(lease_snapshot),
           artifact_count: artifact_count(artifact_snapshot),
+          process_count: generation_process_count(generations),
+          capability_count: generation_declaration_count(generations, :capabilities),
+          migration_count: generation_declaration_count(generations, :migrations),
           truncation: truncation
         })
 
@@ -144,6 +148,7 @@ defmodule Catalyst.Tools.RuntimeGraph do
       inspect(graph.source_metadata, pretty: true),
       "\nGenerations:\n",
       render_rows(generations, &generation_line/1),
+      generation_summary(generations),
       "\nLeases:\n",
       render_lease_snapshot(lease_snapshot),
       "\nArtifacts:\n",
@@ -186,11 +191,22 @@ defmodule Catalyst.Tools.RuntimeGraph do
     "  - #{Catalyst.Runtime.ActivationId.to_wire(generation.id)} " <>
       "graph=#{Catalyst.Runtime.GenerationId.to_wire(generation.graph_id)} " <>
       "status=#{generation.status} leases=#{generation.lease_count} " <>
-      "parent=#{generation_parent(generation.parent)} reason=#{inspect(generation.reason)}\n"
+      "parent=#{generation_parent(generation.parent)} " <>
+      "owners=#{inspect(generation_owners(generation))} " <>
+      "processes=#{length(CandidateProcesses.list(generation.id))}/#{length(generation.candidate.processes)} " <>
+      "capabilities=#{declaration_ids(generation.candidate.capabilities, :capability)} " <>
+      "migrations=#{declaration_ids(generation.candidate.migrations, :id)} " <>
+      "reason=#{inspect(generation.reason)}\n"
   end
 
   defp generation_parent(nil), do: "none"
   defp generation_parent(parent), do: Catalyst.Runtime.ActivationId.to_wire(parent)
+
+  defp generation_summary(generations) do
+    "Managed footprint: processes=#{generation_process_count(generations)} " <>
+      "capabilities=#{generation_declaration_count(generations, :capabilities)} " <>
+      "migrations=#{generation_declaration_count(generations, :migrations)}\n"
+  end
 
   defp lease_line(%Lease{} = lease) do
     "  - #{Catalyst.Runtime.ActivationId.to_wire(lease.generation)} " <>
@@ -225,6 +241,35 @@ defmodule Catalyst.Tools.RuntimeGraph do
 
   defp artifact_count({:ok, artifacts}), do: length(artifacts)
   defp artifact_count({:error, _reason}), do: :unknown
+
+  defp generation_process_count(generations) do
+    generations
+    |> Enum.map(&CandidateProcesses.list(&1.id))
+    |> Enum.map(&length/1)
+    |> Enum.sum()
+  end
+
+  defp generation_declaration_count(generations, field) do
+    generations
+    |> Enum.map(&Map.fetch!(&1.candidate, field))
+    |> Enum.map(&length/1)
+    |> Enum.sum()
+  end
+
+  defp generation_owners(%Generation{} = generation) do
+    generation.owners
+    |> Map.keys()
+    |> Enum.sort()
+  end
+
+  defp declaration_ids([], _field), do: "[]"
+
+  defp declaration_ids(declarations, field) do
+    declarations
+    |> Enum.map(&Map.fetch!(&1, field))
+    |> Enum.sort()
+    |> inspect()
+  end
 
   defp value_summary(value) when is_binary(value), do: "<binary #{byte_size(value)} bytes>"
 
