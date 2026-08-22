@@ -10,7 +10,7 @@ defmodule Catalyst.Extension.ManifestFile do
   """
 
   alias Catalyst.Extension.Manifest
-  alias Catalyst.Runtime.Context
+  alias Catalyst.Runtime.{Context, ImplementationRef}
 
   @default_max_bytes 262_144
   @top_fields ~w(api id version requires services extension_points contributions processes health_checks migrations capabilities trust metadata)
@@ -57,48 +57,53 @@ defmodule Catalyst.Extension.ManifestFile do
   @spec exists?(Path.t()) :: boolean()
   def exists?(source_path) when is_binary(source_path), do: File.regular?(path(source_path))
 
+  @doc "Read only the declared trust class from an adjacent data manifest."
+  @spec trust(Path.t()) :: :none | {:ok, Catalyst.Extension.Trust.t()} | {:error, term()}
+  def trust(source_path) when is_binary(source_path) do
+    case read(source_path) do
+      {:ok, %{decoded: decoded}} when is_map(decoded) ->
+        known_value(@trust, Map.get(decoded, "trust", "local_trusted"), :trust)
+
+      {:ok, %{decoded: decoded}} ->
+        {:error, {:invalid_external_manifest, decoded}}
+
+      other ->
+        other
+    end
+  end
+
   @doc "Read and validate the adjacent manifest without evaluating extension code."
   @spec load(Path.t(), [module()]) :: :none | {:ok, loaded()} | {:error, term()}
   def load(source_path, logical_modules)
       when is_binary(source_path) and is_list(logical_modules) do
-    manifest_path = path(source_path)
-    max_bytes = max_bytes()
-
-    case File.stat(manifest_path) do
-      {:ok, %{type: :regular, size: size}} when size <= max_bytes ->
-        with {:ok, bytes} <- File.read(manifest_path),
-             {:ok, decoded} <- Jason.decode(bytes),
-             {:ok, manifest} <- normalize(decoded, logical_modules) do
-          {:ok, %{manifest: manifest, bytes: bytes}}
-        else
-          {:error, %Jason.DecodeError{} = error} ->
-            {:error, {:invalid_external_manifest_json, Exception.message(error)}}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:ok, %{type: :regular, size: size}} ->
-        {:error, {:external_manifest_too_large, size, max_bytes}}
-
-      {:ok, _other} ->
-        {:error, :external_manifest_not_regular}
-
-      {:error, :enoent} ->
-        :none
-
-      {:error, reason} ->
-        {:error, {:external_manifest_read_failed, reason}}
+    with {:ok, %{bytes: bytes, decoded: decoded}} <- read(source_path),
+         {:ok, manifest} <- normalize(decoded, logical_modules, :local) do
+      {:ok, %{manifest: manifest, bytes: bytes}}
     end
   end
 
-  defp normalize(decoded, logical_modules) when is_map(decoded) do
+  @doc false
+  @spec load_isolated(Path.t(), [String.t()]) ::
+          :none | {:ok, loaded()} | {:error, term()}
+  def load_isolated(source_path, logical_modules)
+      when is_binary(source_path) and is_list(logical_modules) do
+    with {:ok, %{bytes: bytes, decoded: decoded}} <- read(source_path),
+         {:ok, manifest} <- normalize(decoded, logical_modules, :external_worker),
+         true <-
+           manifest.trust == :isolated_worker ||
+             {:error, {:isolated_manifest_trust_required, manifest.trust}} do
+      {:ok, %{manifest: manifest, bytes: bytes}}
+    end
+  end
+
+  defp normalize(decoded, logical_modules, transport) when is_map(decoded) do
     with :ok <- known_keys(decoded, @top_fields, :manifest),
          :ok <- empty_unsupported_declarations(decoded),
          {:ok, trust} <- known_value(@trust, Map.get(decoded, "trust", "local_trusted"), :trust),
          {:ok, capabilities} <- normalize_capabilities(Map.get(decoded, "capabilities", [])),
          {:ok, requires} <- normalize_requires(Map.get(decoded, "requires", [])),
-         {:ok, services} <- normalize_services(Map.get(decoded, "services", []), logical_modules),
+         {:ok, services} <-
+           normalize_services(Map.get(decoded, "services", []), logical_modules, transport),
          {:ok, metadata} <- normalize_metadata(Map.get(decoded, "metadata", %{})) do
       Manifest.new(%{
         api: Map.get(decoded, "api", 2),
@@ -113,7 +118,7 @@ defmodule Catalyst.Extension.ManifestFile do
     end
   end
 
-  defp normalize(decoded, _logical_modules),
+  defp normalize(decoded, _logical_modules, _transport),
     do: {:error, {:invalid_external_manifest, decoded}}
 
   defp empty_unsupported_declarations(decoded) do
@@ -125,15 +130,18 @@ defmodule Catalyst.Extension.ManifestFile do
     end
   end
 
-  defp normalize_services(services, logical_modules) when is_list(services) do
+  defp normalize_services(services, logical_modules, transport) when is_list(services) do
     module_index =
       Map.new(logical_modules, fn module ->
-        {module |> Module.split() |> Enum.join("."), module}
+        case module do
+          module when is_atom(module) -> {module |> Module.split() |> Enum.join("."), module}
+          name when is_binary(name) -> {String.trim_leading(name, "Elixir."), name}
+        end
       end)
 
     services
     |> Enum.reduce_while({:ok, []}, fn service, {:ok, acc} ->
-      case normalize_service(service, module_index) do
+      case normalize_service(service, module_index, transport) do
         {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
         {:error, _reason} = error -> {:halt, error}
       end
@@ -141,15 +149,21 @@ defmodule Catalyst.Extension.ManifestFile do
     |> reverse_result()
   end
 
-  defp normalize_services(services, _logical_modules),
+  defp normalize_services(services, _logical_modules, _transport),
     do: {:error, {:invalid_external_manifest_services, services}}
 
-  defp normalize_service(service, module_index) when is_map(service) do
+  defp normalize_service(service, module_index, transport) when is_map(service) do
     with :ok <- known_keys(service, @service_fields, :service),
          {:ok, key} <- normalize_key(Map.get(service, "key")),
          {:ok, contract} <- normalize_contract(Map.get(service, "contract")),
          {:ok, implementation} <-
-           normalize_implementation(Map.get(service, "implementation"), module_index),
+           normalize_implementation(
+             Map.get(service, "implementation"),
+             module_index,
+             transport,
+             key,
+             contract
+           ),
          {:ok, scope} <- normalize_scope(Map.get(service, "scope", %{})),
          {:ok, binding} <- optional_known_value(@bindings, Map.get(service, "binding"), :binding),
          {:ok, metadata} <- normalize_metadata(Map.get(service, "metadata", %{})) do
@@ -166,7 +180,7 @@ defmodule Catalyst.Extension.ManifestFile do
     end
   end
 
-  defp normalize_service(service, _module_index),
+  defp normalize_service(service, _module_index, _transport),
     do: {:error, {:invalid_external_manifest_service, service}}
 
   defp normalize_key(key) when is_binary(key), do: {:ok, key}
@@ -190,15 +204,68 @@ defmodule Catalyst.Extension.ManifestFile do
   defp normalize_contract(contract),
     do: {:error, {:invalid_external_manifest_contract, contract}}
 
-  defp normalize_implementation(name, module_index) when is_binary(name) do
+  defp normalize_implementation(name, module_index, :local, _key, _contract)
+       when is_binary(name) do
     case Map.fetch(module_index, name) do
       {:ok, module} -> {:ok, module}
       :error -> {:error, {:unknown_external_manifest_module, name}}
     end
   end
 
-  defp normalize_implementation(name, _module_index),
+  defp normalize_implementation(
+         name,
+         module_index,
+         :external_worker,
+         {"agent", "permission_policy", "default"},
+         {"catalyst.permission-policy", 1}
+       )
+       when is_binary(name) do
+    case Map.fetch(module_index, name) do
+      {:ok, logical} ->
+        {:ok, ImplementationRef.external_worker(logical, :permission_policy_v1)}
+
+      :error ->
+        {:error, {:unknown_external_manifest_module, name}}
+    end
+  end
+
+  defp normalize_implementation(name, _module_index, :external_worker, key, contract)
+       when is_binary(name),
+       do: {:error, {:unsupported_isolated_worker_service, key, contract}}
+
+  defp normalize_implementation(name, _module_index, _transport, _key, _contract),
     do: {:error, {:invalid_external_manifest_module, name}}
+
+  defp read(source_path) do
+    manifest_path = path(source_path)
+    max_bytes = max_bytes()
+
+    case File.stat(manifest_path) do
+      {:ok, %{type: :regular, size: size}} when size <= max_bytes ->
+        with {:ok, bytes} <- File.read(manifest_path),
+             {:ok, decoded} <- Jason.decode(bytes) do
+          {:ok, %{bytes: bytes, decoded: decoded}}
+        else
+          {:error, %Jason.DecodeError{} = error} ->
+            {:error, {:invalid_external_manifest_json, Exception.message(error)}}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:ok, %{type: :regular, size: size}} ->
+        {:error, {:external_manifest_too_large, size, max_bytes}}
+
+      {:ok, _other} ->
+        {:error, :external_manifest_not_regular}
+
+      {:error, :enoent} ->
+        :none
+
+      {:error, reason} ->
+        {:error, {:external_manifest_read_failed, reason}}
+    end
+  end
 
   defp normalize_scope(scope) when is_map(scope) do
     scope

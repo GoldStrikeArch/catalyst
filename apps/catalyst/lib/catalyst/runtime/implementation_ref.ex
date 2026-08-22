@@ -3,7 +3,8 @@ defmodule Catalyst.Runtime.ImplementationRef do
   Separates a service implementation's logical identity from its execution target.
 
   The logical value participates in graph identity and diagnostics. The target is
-  the exact local module or named OTP process invoked by a pinned handle.
+  the exact local module, named OTP process, or candidate-owned external worker
+  invoked by a pinned handle.
   """
 
   alias Catalyst.Runtime.ArtifactId
@@ -12,7 +13,8 @@ defmodule Catalyst.Runtime.ImplementationRef do
   defstruct @enforce_keys ++ [artifact: nil]
 
   @type process_target :: %{server: GenServer.server(), protocol: term()}
-  @type transport :: :local | :process
+  @type external_worker_target :: %{protocol: term()}
+  @type transport :: :local | :process | :external_worker
   @type t :: %__MODULE__{
           logical: term(),
           target: term(),
@@ -38,6 +40,16 @@ defmodule Catalyst.Runtime.ImplementationRef do
       logical: logical,
       target: %{server: server, protocol: protocol},
       transport: :process
+    }
+  end
+
+  @doc "Build a reference to an external worker owned by the claim's generation."
+  @spec external_worker(term(), term()) :: t()
+  def external_worker(logical, protocol) do
+    %__MODULE__{
+      logical: logical,
+      target: %{protocol: protocol},
+      transport: :external_worker
     }
   end
 
@@ -69,5 +81,9 @@ defmodule Catalyst.Runtime.ImplementationRef do
   def digest_term(implementation), do: implementation
 
   defp protocol(%__MODULE__{transport: :process, target: %{protocol: protocol}}), do: protocol
+
+  defp protocol(%__MODULE__{transport: :external_worker, target: %{protocol: protocol}}),
+    do: protocol
+
   defp protocol(%__MODULE__{}), do: nil
 end

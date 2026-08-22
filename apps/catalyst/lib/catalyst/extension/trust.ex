@@ -3,9 +3,10 @@ defmodule Catalyst.Extension.Trust do
   Trust classes declared by extension manifests.
 
   `:compiled_trusted` and `:local_trusted` execute in the Catalyst VM and are
-  therefore unrestricted. `:isolated_worker` and `:remote_service` describe
-  implementations that must be reached through an external transport before
-  their resource policy can be enforced as an isolation boundary.
+  therefore unrestricted. `:isolated_worker` and `:remote_service` require an
+  external transport. A separate worker isolates VM crashes, but does not by
+  itself restrict filesystem or network access; enforceable resource policy
+  still requires operating-system sandboxing or brokered resources.
   """
 
   @classes [:compiled_trusted, :local_trusted, :isolated_worker, :remote_service]

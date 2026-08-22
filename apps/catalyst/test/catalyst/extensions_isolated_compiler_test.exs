@@ -84,7 +84,7 @@ defmodule Catalyst.Extensions.IsolatedCompilerTest do
     on_exit(fn -> Artifacts.discard([contribution.artifact.id]) end)
   end
 
-  test "isolated trust cannot be activated through the local managed transport", %{directory: dir} do
+  test "isolated workers reject unsupported service contracts", %{directory: dir} do
     path =
       write_extension(
         dir,
@@ -98,7 +98,9 @@ defmodule Catalyst.Extensions.IsolatedCompilerTest do
 
     on_exit(fn -> restore_env(:extension_managed_preflight, previous) end)
 
-    assert {:error, {:isolated_runtime_transport_required, _manifest_id, :isolated_worker}, []} =
+    assert {:error,
+            {:unsupported_isolated_worker_service, {"agent", "run_engine", "default"},
+             {"catalyst.agent-run-engine", 1}}, []} =
              Loader.compile(path)
 
     refute Code.ensure_loaded?(Catalyst.Test.IsolatedCompilerLoader)

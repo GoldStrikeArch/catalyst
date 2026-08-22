@@ -5,11 +5,12 @@ defmodule Catalyst.Runtime.Transport do
   Local targets are ordinary modules. Process targets implement a small OTP
   protocol by handling `{:catalyst_runtime, protocol, callback, arguments}`
   calls. This permits sovereign in-node subsystems without exposing their
-  internal process topology to service consumers. It is not an isolation
-  boundary; external workers require a separate transport.
+  internal process topology to service consumers. External-worker targets run
+  in candidate-owned OS processes. That boundary isolates VM crashes; it is not
+  an operating-system filesystem or network sandbox.
   """
 
-  alias Catalyst.Runtime.{Handle, ImplementationRef}
+  alias Catalyst.Runtime.{Handle, ImplementationRef, IsolatedWorker}
 
   @default_process_timeout 30_000
 
@@ -30,8 +31,28 @@ defmodule Catalyst.Runtime.Transport do
           process_timeout()
         )
 
+      %ImplementationRef{
+        transport: :external_worker,
+        target: %{protocol: protocol}
+      } ->
+        invoke_external(handle, protocol, callback, args)
+
       implementation ->
         apply(ImplementationRef.target(implementation), callback, args)
+    end
+  end
+
+  defp invoke_external(handle, protocol, callback, args) do
+    case IsolatedWorker.call(
+           handle.generation,
+           handle.owner,
+           protocol,
+           callback,
+           args,
+           process_timeout()
+         ) do
+      {:ok, result} -> result
+      {:error, reason} -> exit({:isolated_worker_unavailable, reason})
     end
   end
 

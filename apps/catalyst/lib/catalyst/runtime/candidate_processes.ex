@@ -22,7 +22,7 @@ defmodule Catalyst.Runtime.CandidateProcesses do
   @spec start(Candidate.t()) :: {:ok, pid()} | {:error, term()}
   def start(%Candidate{activation_id: %ActivationId{} = activation_id} = candidate) do
     with {:ok, supervisor} <- start_supervisor(activation_id, @stale_retries) do
-      case start_declarations(supervisor, candidate.processes, []) do
+      case start_declarations(supervisor, activation_id, candidate.processes, []) do
         :ok ->
           {:ok, supervisor}
 
@@ -150,9 +150,9 @@ defmodule Catalyst.Runtime.CandidateProcesses do
     end
   end
 
-  defp start_declarations(supervisor, declarations, children) do
+  defp start_declarations(supervisor, activation_id, declarations, children) do
     Enum.reduce_while(declarations, {:ok, children}, fn declaration, {:ok, started} ->
-      case start_declaration(supervisor, declaration) do
+      case start_declaration(supervisor, activation_id, declaration) do
         {:ok, pid} -> {:cont, {:ok, [pid | started]}}
         {:error, reason} -> {:halt, {:error, reason, started}}
       end
@@ -163,9 +163,11 @@ defmodule Catalyst.Runtime.CandidateProcesses do
     end
   end
 
-  defp start_declaration(supervisor, declaration) do
+  defp start_declaration(supervisor, activation_id, declaration) do
+    child_spec = inject_activation(declaration.child_spec, activation_id)
+
     task =
-      Tasks.async(fn -> DynamicSupervisor.start_child(supervisor, declaration.child_spec) end)
+      Tasks.async(fn -> DynamicSupervisor.start_child(supervisor, child_spec) end)
 
     case Tasks.await(task, start_timeout()) do
       {:ok, {:ok, pid}} ->
@@ -187,6 +189,13 @@ defmodule Catalyst.Runtime.CandidateProcesses do
         {:error, {:candidate_process_start_timeout, declaration.id}}
     end
   end
+
+  defp inject_activation({Catalyst.Runtime.IsolatedWorker, opts}, activation_id)
+       when is_list(opts) do
+    {Catalyst.Runtime.IsolatedWorker, Keyword.put(opts, :activation_id, activation_id)}
+  end
+
+  defp inject_activation(child_spec, _activation_id), do: child_spec
 
   defp lookup(id) do
     case Registry.lookup(@registry, ActivationId.to_wire(id)) do

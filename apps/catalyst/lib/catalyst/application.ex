@@ -174,6 +174,7 @@ defmodule Catalyst.Application do
       # before Extensions, whose boot load reconstructs API-v2 compositions
       # after any rest-for-one recovery.
       {Registry, keys: :unique, name: Catalyst.Runtime.CandidateProcessRegistry},
+      {Registry, keys: :unique, name: Catalyst.Runtime.IsolatedWorkerRegistry},
       {
         DynamicSupervisor,
         name: Catalyst.Runtime.CandidateProcessSupervisor, strategy: :one_for_one

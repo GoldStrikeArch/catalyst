@@ -12,6 +12,7 @@ defmodule Catalyst.Extensions.Loader do
   require Logger
 
   alias Catalyst.{Extension, ExtensionAPI, Tasks}
+  alias Catalyst.Extension.ManifestFile
   alias Catalyst.Extensions.{CompilerTracer, Contribution, GenerationCompiler, IsolatedCompiler}
   alias Catalyst.Runtime.{ArtifactSet, Artifacts}
   alias Catalyst.Tools.Registry, as: ToolRegistry
@@ -25,9 +26,10 @@ defmodule Catalyst.Extensions.Loader do
   @doc """
   Compile and classify one source file within bounded work.
 
-  Generation-managed sources may first be compiled in a disposable OS process
-  by setting `:extension_managed_preflight` to `:isolated_process`. The default
-  `:local` path and legacy/raw source behavior are unchanged.
+  Sources declaring `isolated_worker` trust are compiled and retained only in a
+  candidate-owned external VM. Other generation-managed sources may opt into a
+  disposable external preflight with `:extension_managed_preflight`; the local
+  and legacy/raw paths otherwise remain unchanged.
   """
   @spec compile(Path.t()) :: {:ok, contribution()} | {:error, term(), [module()]}
   def compile(path) do
@@ -73,6 +75,16 @@ defmodule Catalyst.Extensions.Loader do
   end
 
   defp compile_generation(path) do
+    case ManifestFile.trust(path) do
+      {:ok, :isolated_worker} -> compile_isolated_generation(path)
+      {:ok, :remote_service} -> {:error, :remote_service_transport_not_supported, []}
+      {:ok, _local_trust} -> compile_local_generation(path)
+      :none -> compile_local_generation(path)
+      {:error, reason} -> {:error, reason, []}
+    end
+  end
+
+  defp compile_local_generation(path) do
     with {:ok, preflight} <- managed_preflight(path) do
       case compile_generation_tracked(path) do
         {:ok, contribution, trace_ref} ->
@@ -84,6 +96,40 @@ defmodule Catalyst.Extensions.Loader do
           {:error, reason, emitted_modules}
       end
     else
+      {:error, reason} -> {:error, reason, []}
+    end
+  end
+
+  defp compile_isolated_generation(path) do
+    with {:ok, preflight} <- IsolatedCompiler.preflight(path),
+         logical_modules = Enum.map(preflight.artifact["modules"], & &1["logical"]),
+         {:ok, %{manifest: manifest}} <- ManifestFile.load_isolated(path, logical_modules) do
+      process = %{
+        id: {:isolated_worker, manifest.id},
+        child_spec:
+          {Catalyst.Runtime.IsolatedWorker,
+           [
+             owner: manifest.id,
+             source_path: Path.expand(path),
+             expected_artifact: preflight.artifact["id"]
+           ]}
+      }
+
+      manifest = %{manifest | processes: [process]}
+
+      {:ok,
+       %Contribution{
+         modules: [],
+         beams: %{},
+         ext_mods: [],
+         manifests: [manifest],
+         artifact: nil,
+         tool_mods: [],
+         tool_names: [],
+         metadata: manifest.metadata
+       }}
+    else
+      :none -> {:error, :external_manifest_required, []}
       {:error, reason} -> {:error, reason, []}
     end
   end

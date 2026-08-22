@@ -18,6 +18,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
     Contribution,
     ExtensionPoint,
     GenerationId,
+    ImplementationRef,
     Scope,
     ServiceKey,
     Snapshot
@@ -119,10 +120,41 @@ defmodule Catalyst.Runtime.Candidate.Builder do
   end
 
   defp validate_activation_trust(manifests) do
-    case Enum.find(manifests, &(not Trust.unrestricted?(&1.trust))) do
-      nil -> :ok
-      manifest -> {:error, {:isolated_runtime_transport_required, manifest.id, manifest.trust}}
+    manifests
+    |> Enum.reduce_while(:ok, fn manifest, :ok ->
+      case validate_manifest_trust(manifest) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_manifest_trust(%Manifest{} = manifest) do
+    cond do
+      Trust.unrestricted?(manifest.trust) ->
+        :ok
+
+      manifest.trust == :isolated_worker and isolated_worker_manifest?(manifest) ->
+        :ok
+
+      true ->
+        {:error, {:isolated_runtime_transport_required, manifest.id, manifest.trust}}
     end
+  end
+
+  defp isolated_worker_manifest?(manifest) do
+    Enum.all?(manifest.services, fn service ->
+      match?(
+        %ImplementationRef{transport: :external_worker},
+        Map.get(declaration_map(service), :implementation)
+      )
+    end) and
+      Enum.any?(manifest.processes, fn process ->
+        match?(
+          {Catalyst.Runtime.IsolatedWorker, _opts},
+          Map.get(declaration_map(process), :child_spec)
+        )
+      end)
   end
 
   defp validate_dependencies(manifests, available_manifests) do
