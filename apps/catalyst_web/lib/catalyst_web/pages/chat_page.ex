@@ -89,10 +89,8 @@ defmodule CatalystWeb.Pages.ChatPage do
                 class="inline-flex items-center gap-1.5 text-muted"
               >
                 <span class="sr-only">Assistant is working</span>
-                <span class="size-1.5 animate-bounce rounded-full bg-faint [animation-delay:-0.2s]">
-                </span>
-                <span class="size-1.5 animate-bounce rounded-full bg-faint [animation-delay:-0.1s]">
-                </span>
+                <span class="size-1.5 animate-bounce rounded-full bg-faint [animation-delay:-0.2s]"></span>
+                <span class="size-1.5 animate-bounce rounded-full bg-faint [animation-delay:-0.1s]"></span>
                 <span class="size-1.5 animate-bounce rounded-full bg-faint"></span>
               </div>
             </div>
@@ -104,8 +102,7 @@ defmodule CatalystWeb.Pages.ChatPage do
             class="flex flex-col items-start gap-1"
           >
             <div class="flex items-center gap-1.5 text-xs text-muted">
-              <span class="size-3 animate-spin rounded-full border-[1.5px] border-edge border-t-muted">
-              </span>
+              <span class="size-3 animate-spin rounded-full border-[1.5px] border-edge border-t-muted"></span>
               running <code class="font-mono">{t.name}</code>…
             </div>
             <%!-- Live output tail streamed by the tool (bash) via ToolExecutionUpdate. --%>

@@ -176,8 +176,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
               "size-2 rounded-full",
               @running && "animate-pulse bg-accent",
               !@running && "bg-ok"
-            ]}>
-            </span>
+            ]}></span>
             <div class="min-w-0 flex-1">
               <h2 class="truncate text-xs font-semibold">{current_model(@config_form)}</h2>
               <p class="truncate text-[9px] text-faint">
@@ -293,8 +292,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
             id={"lane-#{@lane["id"]}-tool-#{call_id}"}
             class="mt-2 inline-flex items-center gap-2 rounded-full border border-edge px-2.5 py-1 text-[10px] text-muted"
           >
-            <span class="size-2.5 animate-spin rounded-full border border-edge-strong border-t-accent">
-            </span>
+            <span class="size-2.5 animate-spin rounded-full border border-edge-strong border-t-accent"></span>
             {tool.name}
           </div>
         </div>

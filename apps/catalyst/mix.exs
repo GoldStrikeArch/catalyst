@@ -49,20 +49,20 @@ defmodule Catalyst.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
-      {:phoenix_pubsub, "~> 2.1"},
+      {:phoenix_pubsub, "~> 2.2"},
       {:jason, "~> 1.4"},
-      {:ex_json_schema, "~> 0.10"},
-      {:finch, "~> 0.19"},
+      {:ex_json_schema, "~> 0.11"},
+      {:finch, "~> 0.23"},
       # Codex websocket transport (Mint is already in the tree via Finch).
       {:mint_web_socket, "~> 1.0"},
-      {:req, "~> 0.5"},
+      {:req, "~> 0.7"},
       # `fetch` reduces HTML to readable text. Floki's default mochiweb backend
       # is pure Erlang, so this adds no NIF and no packaging risk.
-      {:floki, "~> 0.36"},
-      {:bandit, "~> 1.5"},
-      {:plug, "~> 1.16"},
+      {:floki, "~> 0.38"},
+      {:bandit, "~> 1.12"},
+      {:plug, "~> 1.20"},
       # Test-only: local websocket server for the Codex websocket client tests.
-      {:websock_adapter, "~> 0.5", only: :test}
+      {:websock_adapter, "~> 0.6", only: :test}
     ] ++ platform_deps()
   end
 
@@ -71,7 +71,7 @@ defmodule Catalyst.MixProject do
   # weakening its process-tree cancellation contract.
   defp platform_deps do
     case :os.type() do
-      {:unix, _name} -> [{:muontrap, "~> 1.0"}]
+      {:unix, _name} -> [{:muontrap, "~> 2.0"}]
       {_family, _name} -> []
     end
   end

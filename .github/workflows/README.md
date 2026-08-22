@@ -28,9 +28,8 @@ not support building on a Windows host; the plain release is the common native a
 built and executed on all three hosted operating systems. The separate release smoke gate still
 tests the deeper persisted-session and safe-mode contracts on Linux.
 
-The toolchain tracks the versions used by current Catalyst development: Elixir 1.20 on OTP 28 in
-GitHub Actions. The architecture has also been exercised locally on OTP 29; hosted runner support
-can be advanced independently once `erlef/setup-beam` publishes that pairing.
+The toolchain tracks the versions used by current Catalyst development: Elixir 1.20 on OTP 29 in
+GitHub Actions and local release validation.
 
 ## Desktop releases
 

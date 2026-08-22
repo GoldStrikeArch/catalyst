@@ -163,8 +163,7 @@ defmodule Catalyst.Ext.UIAudioProbe do
         controls
         preload="none"
         src={"data:#{@audio.mime_type};base64,#{@audio.data}"}
-      >
-      </audio>
+      ></audio>
     </article>
     """
   end

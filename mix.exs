@@ -27,7 +27,11 @@ defmodule Catalyst.Umbrella.MixProject do
       icon: "apps/catalyst_desktop/priv/icon.png",
       category_macos: "public.app-category.developer-tools",
       identifier: "dev.catalyst.app",
-      app_name: :catalyst_desktop
+      app_name: :catalyst_desktop,
+      # Catalyst compiles its own native launcher after deployment, so retain
+      # the BEAM-first bundle layout instead of requiring deployment's separate
+      # DesktopWebView host binary.
+      macos_layout: :release_first
     ]
   end
 
@@ -46,6 +50,7 @@ defmodule Catalyst.Umbrella.MixProject do
           :assemble,
           &release_preflight!/1,
           &bundle_assets/1,
+          &make_release_executables_writable/1,
           &Desktop.Deployment.generate_installer/1,
           &native_macos_launcher/1
         ]
@@ -125,6 +130,35 @@ defmodule Catalyst.Umbrella.MixProject do
   # (bundle_computer_helper/1), so its inputs are preflight-checked on Darwin.
   # Non-Darwin desktop builds ship without it by design (macOS-only feature).
   @computer_helper_src "rel/macos/computer_helper.m"
+
+  # desktop_deployment ad-hoc signs every executable in the assembled release.
+  # OTP ships some scripts as 0555, but codesign -f needs owner-write access to
+  # replace their signatures. Normalize that permission before deployment
+  # rather than special-casing whichever OTP executable exposes it next.
+  defp make_release_executables_writable(release) do
+    release.path
+    |> Path.join("**")
+    |> Path.wildcard()
+    |> Enum.each(&ensure_executable_writable/1)
+
+    release
+  end
+
+  defp ensure_executable_writable(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :regular, mode: mode}} ->
+        cond do
+          Bitwise.band(mode, 0o111) != 0 and Bitwise.band(mode, 0o200) == 0 ->
+            File.chmod!(path, Bitwise.bor(mode, 0o200))
+
+          true ->
+            :ok
+        end
+
+      _other ->
+        :ok
+    end
+  end
 
   defp computer_helper_checks do
     case :os.type() do
@@ -288,6 +322,13 @@ defmodule Catalyst.Umbrella.MixProject do
           plist
         ])
 
+        # Current desktop_deployment seals the complete app. Adding a launcher
+        # and changing Info.plist invalidates that outer signature, so seal the
+        # script (now that it is no longer the main executable) and then the
+        # bundle again after all post-deployment mutations.
+        cmd!("codesign", ["--force", "-s", "-", Path.join([app, "Contents/MacOS", "run"])])
+        cmd!("codesign", ["--force", "-s", "-", app])
+
         IO.puts("native_macos_launcher: installed native arm64 launcher (#{name})")
 
         rebuild_installers(release, app)
@@ -381,19 +422,27 @@ defmodule Catalyst.Umbrella.MixProject do
   defp deps do
     [
       # Required to run "mix format" on ~H/.heex files from the umbrella root
-      {:phoenix_live_view, ">= 0.0.0"},
+      {:phoenix_live_view, "~> 1.2.10"},
       # Packaging the headless core into a self-contained binary.
-      {:burrito, "~> 1.5"},
+      {:burrito, "~> 1.6"},
       # Packaging the wx GUI into a macOS .app/.dmg (bundles wxWidgets dylibs).
       # Pinned: the release steps depend on its internals (Package.MacOS build
       # layout, the `run` launcher script) — an unpinned deps.update could
       # silently break the installer.
       {:desktop_deployment,
        github: "elixir-desktop/deployment",
-       ref: "73fed3e6a5096724cb6af11ff9a5b5c79a2c7186",
+       ref: "9eb67173a0ac7d772c37d0a10c22340b37b48c6b",
        runtime: false},
+      # desktop_deployment still constrains these build-only packages to old
+      # major versions. Its HTTPoison usage is API-compatible with 3.x, and
+      # Poison is currently unused; override both to avoid stale/vulnerable
+      # transitive packages without adding either to the shipped applications.
+      # Poison 4 is the newest compatible line: 5/6 require Decimal 2 while
+      # ex_json_schema requires Decimal 3.
+      {:httpoison, "~> 3.0", runtime: false, override: true},
+      {:poison, "~> 4.0", runtime: false, override: true},
       # Static analysis via `mix dialyzer`.
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4.7", only: [:dev, :test], runtime: false}
     ]
   end
 

@@ -116,8 +116,7 @@ defmodule CatalystWeb.ShellComponents do
                 id="login-pending"
                 class="flex items-center gap-2 text-xs text-muted"
               >
-                <span class="size-3 animate-spin rounded-full border-2 border-edge border-t-muted">
-                </span>
+                <span class="size-3 animate-spin rounded-full border-2 border-edge border-t-muted"></span>
                 finish in your browser…
               </span>
             <% end %>
@@ -251,8 +250,7 @@ defmodule CatalystWeb.ShellComponents do
                 "size-1 shrink-0 rounded-full",
                 thread.live? && "bg-ok/80",
                 !thread.live? && "bg-edge-strong"
-              ]}>
-              </span>
+              ]}></span>
               <span class="min-w-0 truncate">{thread.title}</span>
             </button>
             <button

@@ -76,6 +76,15 @@ defmodule CatalystWeb.CoreComponents do
     """
   end
 
+  # LiveView 1.2.10 makes JS.t/0 opaque. Dialyzer still infers the concrete
+  # non-empty ops list returned by the public JS builders and reports that
+  # success type as a contract violation, even though these wrappers return
+  # the upstream type exactly. Keep the public contracts and suppress only
+  # that upstream opaque-type mismatch.
+  @dialyzer {:nowarn_function, show: 1}
+  @dialyzer {:nowarn_function, hide: 1}
+  @dialyzer {:nowarn_function, hide: 2}
+
   @doc "Builds a LiveView JS command that reveals the target with a transition."
   @spec show(String.t()) :: JS.t()
   def show(selector), do: JS.show(show_options(selector))

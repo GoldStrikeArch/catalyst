@@ -26,4 +26,7 @@ erl_crash.dump
 # (compiled, not checked in).
 /apps/catalyst/priv/bin/catalyst-input
 
+# desktop_deployment records the native files it signs during macOS packaging.
+/codesign.log
+
 
