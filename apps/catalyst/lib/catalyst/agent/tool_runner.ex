@@ -9,9 +9,8 @@ defmodule Catalyst.Agent.ToolRunner do
   """
 
   alias Catalyst.Agent.Event
-  alias Catalyst.{Content, Hooks, Message}
+  alias Catalyst.{Content, Hooks, Message, Resources}
   alias Catalyst.Content.Text
-  alias Catalyst.Runtime.PermissionPolicy
   alias Catalyst.Session.RunConfig
   alias Catalyst.Tools.{Context, Registry, Truncate}
 
@@ -167,15 +166,19 @@ defmodule Catalyst.Agent.ToolRunner do
   end
 
   defp run_resolved_tool(entry, args, tool_call, hook_ctx, config, emit) do
-    case authorize_tool(hook_ctx, config) do
-      {:deny, reason} ->
+    {action, principal, resource, context} = resource_request(hook_ctx, config)
+
+    case Resources.request(action, principal, resource, context, fn ->
+           run_hooked_tool(entry, args, tool_call, hook_ctx, config, emit)
+         end) do
+      {:error, {:denied, reason}} ->
         blocked_tool_result(reason)
 
-      {:challenge, challenge} ->
+      {:error, {:challenge, challenge}} ->
         blocked_tool_result({:permission_challenge, challenge})
 
-      :allow ->
-        run_hooked_tool(entry, args, tool_call, hook_ctx, config, emit)
+      {:ok, result} ->
+        result
     end
   end
 
@@ -236,7 +239,7 @@ defmodule Catalyst.Agent.ToolRunner do
     end
   end
 
-  defp authorize_tool(hook_ctx, config) do
+  defp resource_request(hook_ctx, config) do
     principal = %{
       type: :agent,
       session_id: session_id(config),
@@ -253,7 +256,7 @@ defmodule Catalyst.Agent.ToolRunner do
 
     resource = %{type: :tool, name: hook_ctx.name}
     context = %{cwd: hook_ctx.cwd}
-    PermissionPolicy.authorize(action, principal, resource, context)
+    {action, principal, resource, context}
   end
 
   defp apply_after_tool_hook(raw_result, hook_ctx, config) do
