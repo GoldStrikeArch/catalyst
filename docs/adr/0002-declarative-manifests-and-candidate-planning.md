@@ -22,6 +22,14 @@ graph without changing the active runtime.
 
 ## Decision
 
+Generation-managed extensions may declare their authoritative manifest in an
+adjacent `<source>.manifest.json` file. Catalyst size-bounds, parses, and
+validates that file before source compilation, resolves implementation names
+only against modules declared by the parsed source, and includes the exact
+manifest bytes in artifact identity. This data-only path avoids executing
+extension code merely to discover its proposed graph. The embedded `manifest/1`
+macro remains supported for compatibility and trusted local development.
+
 Catalyst introduces API-v2 extension manifests:
 
 ```elixir

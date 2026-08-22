@@ -10,18 +10,25 @@ defmodule Catalyst.Runtime.ArtifactSet do
   alias Catalyst.Runtime.ArtifactId
 
   @enforce_keys [:id, :modules, :beams]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [manifests: []]
 
   @type t :: %__MODULE__{
           id: ArtifactId.t(),
           modules: %{optional(module()) => module()},
-          beams: %{optional(module()) => binary()}
+          beams: %{optional(module()) => binary()},
+          manifests: [Catalyst.Extension.Manifest.t()]
         }
 
   @doc "Build an artifact set from logical-to-physical modules and accepted BEAM binaries."
-  @spec new(ArtifactId.t(), %{module() => module()}, %{module() => binary()}) :: t()
-  def new(%ArtifactId{} = id, modules, beams) when is_map(modules) and is_map(beams) do
-    %__MODULE__{id: id, modules: modules, beams: beams}
+  @spec new(
+          ArtifactId.t(),
+          %{module() => module()},
+          %{module() => binary()},
+          [Catalyst.Extension.Manifest.t()]
+        ) :: t()
+  def new(%ArtifactId{} = id, modules, beams, manifests \\ [])
+      when is_map(modules) and is_map(beams) and is_list(manifests) do
+    %__MODULE__{id: id, modules: modules, beams: beams, manifests: manifests}
   end
 
   @doc "Return the physical module for a logical module."

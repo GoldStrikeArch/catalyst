@@ -12,7 +12,7 @@ defmodule Catalyst.Extensions.GenerationCompiler do
   errors rather than compiled with ambiguous identity.
   """
 
-  alias Catalyst.Extension.Manifest
+  alias Catalyst.Extension.{Manifest, ManifestFile}
   alias Catalyst.Extensions.Contribution
 
   alias Catalyst.Runtime.{
@@ -35,7 +35,9 @@ defmodule Catalyst.Extensions.GenerationCompiler do
          {:ok, quoted} <- parse(source, path),
          :ok <- validate_source_forms(quoted),
          {:ok, logical_modules} <- top_level_modules(quoted),
-         artifact_id = ArtifactId.from_source(source),
+         {:ok, external} <- external_manifest(path, logical_modules),
+         :ok <- validate_external_source_mode(external, quoted),
+         artifact_id = ArtifactId.from_source(artifact_source(source, external)),
          :ok <- Artifacts.reserve_namespace(artifact_id),
          mappings = module_mappings(logical_modules, artifact_id),
          {:ok, rewritten} <- rewrite(quoted, mappings) do
@@ -44,7 +46,7 @@ defmodule Catalyst.Extensions.GenerationCompiler do
           {:ok, artifact}
 
         :error ->
-          compile_artifact(rewritten, path, artifact_id, mappings)
+          compile_artifact(rewritten, path, artifact_id, mappings, external_manifests(external))
       end
     end
   end
@@ -75,11 +77,17 @@ defmodule Catalyst.Extensions.GenerationCompiler do
   @doc "True when source explicitly requests generation-qualified code loading."
   @spec generation_managed_file?(Path.t()) :: boolean()
   def generation_managed_file?(path) when is_binary(path) do
-    with {:ok, source} <- File.read(path),
-         {:ok, quoted} <- parse(source, path) do
-      Enum.any?(top_level_forms(quoted), &generation_module?/1)
-    else
-      _error -> false
+    case ManifestFile.exists?(path) do
+      true ->
+        true
+
+      false ->
+        with {:ok, source} <- File.read(path),
+             {:ok, quoted} <- parse(source, path) do
+          Enum.any?(top_level_forms(quoted), &generation_module?/1)
+        else
+          _error -> false
+        end
     end
   end
 
@@ -100,8 +108,7 @@ defmodule Catalyst.Extensions.GenerationCompiler do
   @spec manifests(ArtifactSet.t()) :: [Manifest.t()]
   def manifests(%ArtifactSet{} = artifact) do
     artifact
-    |> ArtifactSet.physical_modules()
-    |> Catalyst.Extension.manifests_of()
+    |> artifact_manifests()
     |> Enum.map(&bind_manifest(&1, artifact))
   end
 
@@ -112,7 +119,7 @@ defmodule Catalyst.Extensions.GenerationCompiler do
     tool_modules = Enum.filter(modules, &tool_module?/1)
     manifests = manifests(artifact)
 
-    with :ok <- require_manifest_modules(extension_modules),
+    with :ok <- require_manifest_source(artifact, extension_modules),
          :ok <- reject_imperative_modules(imperative_modules),
          :ok <- reject_tool_modules(tool_modules),
          :ok <- validate_supported_manifests(manifests),
@@ -126,7 +133,7 @@ defmodule Catalyst.Extensions.GenerationCompiler do
          artifact: artifact,
          tool_mods: [],
          tool_names: [],
-         metadata: Catalyst.Extension.metadata_of(extension_modules)
+         metadata: manifest_metadata(manifests, extension_modules)
        }}
     else
       {:error, reason} ->
@@ -143,6 +150,14 @@ defmodule Catalyst.Extensions.GenerationCompiler do
       false -> {:error, :mixed_extension_code_modes}
     end
   end
+
+  defp require_manifest_source(%ArtifactSet{manifests: []}, modules),
+    do: require_manifest_modules(modules)
+
+  defp require_manifest_source(%ArtifactSet{manifests: [_ | _]}, []), do: :ok
+
+  defp require_manifest_source(%ArtifactSet{manifests: [_ | _]}, modules),
+    do: {:error, {:external_manifest_embedded_extensions_not_supported, modules}}
 
   defp reject_imperative_modules([]), do: :ok
 
@@ -327,11 +342,11 @@ defmodule Catalyst.Extensions.GenerationCompiler do
     kind, reason -> {:error, {:compile, {kind, reason}}}
   end
 
-  defp compile_artifact(rewritten, path, artifact_id, mappings) do
+  defp compile_artifact(rewritten, path, artifact_id, mappings, manifests) do
     case compile(rewritten, path) do
       {:ok, compiled} ->
         with :ok <- validate_compiled_modules(compiled, mappings) do
-          {:ok, ArtifactSet.new(artifact_id, mappings, Map.new(compiled))}
+          {:ok, ArtifactSet.new(artifact_id, mappings, Map.new(compiled), manifests)}
         else
           {:error, _reason} = error ->
             purge_modules(Enum.map(compiled, &elem(&1, 0)))
@@ -379,6 +394,47 @@ defmodule Catalyst.Extensions.GenerationCompiler do
 
       :error ->
         :error
+    end
+  end
+
+  defp external_manifest(path, logical_modules) do
+    case ManifestFile.load(path, logical_modules) do
+      :none -> {:ok, nil}
+      {:ok, loaded} -> {:ok, loaded}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_external_source_mode(nil, _quoted), do: :ok
+
+  defp validate_external_source_mode(%{manifest: %Manifest{}}, quoted) do
+    case Enum.any?(top_level_forms(quoted), &generation_module?/1) do
+      true -> {:error, :external_manifest_cannot_mix_with_embedded_generation_manifest}
+      false -> :ok
+    end
+  end
+
+  defp artifact_source(source, nil), do: source
+
+  defp artifact_source(source, %{bytes: manifest}) do
+    IO.iodata_to_binary([source, <<0>>, "catalyst.external-manifest", <<0>>, manifest])
+  end
+
+  defp external_manifests(nil), do: []
+  defp external_manifests(%{manifest: %Manifest{} = manifest}), do: [manifest]
+
+  defp artifact_manifests(%ArtifactSet{manifests: [_ | _] = manifests}), do: manifests
+
+  defp artifact_manifests(%ArtifactSet{} = artifact) do
+    artifact
+    |> ArtifactSet.physical_modules()
+    |> Catalyst.Extension.manifests_of()
+  end
+
+  defp manifest_metadata(manifests, extension_modules) do
+    case manifests do
+      [] -> Catalyst.Extension.metadata_of(extension_modules)
+      manifests -> Enum.reduce(manifests, %{}, &Map.merge(&2, &1.metadata))
     end
   end
 
@@ -500,21 +556,27 @@ defmodule Catalyst.Extensions.GenerationCompiler do
   end
 
   defp bind_service(service, artifact) do
-    case fetch_implementation(service) do
-      {:ok, physical} ->
-        case ArtifactSet.logical(artifact, physical) do
-          {:ok, logical} ->
-            put_implementation(
-              service,
-              ImplementationRef.local(logical, physical, artifact.id)
-            )
+    with {:ok, implementation} <- fetch_implementation(service),
+         {:ok, logical, physical} <- artifact_implementation(artifact, implementation) do
+      put_implementation(
+        service,
+        ImplementationRef.local(logical, physical, artifact.id)
+      )
+    else
+      :error -> service
+    end
+  end
 
-          :error ->
-            service
-        end
+  defp artifact_implementation(artifact, implementation) do
+    case ArtifactSet.logical(artifact, implementation) do
+      {:ok, logical} ->
+        {:ok, logical, implementation}
 
       :error ->
-        service
+        case ArtifactSet.target(artifact, implementation) do
+          {:ok, physical} -> {:ok, implementation, physical}
+          :error -> :error
+        end
     end
   end
 

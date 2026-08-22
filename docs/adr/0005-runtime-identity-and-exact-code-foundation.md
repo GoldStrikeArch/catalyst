@@ -85,9 +85,10 @@ lease records survive coordinator restarts so recovery does not purge code under
 those runs. The loader's legacy module-version stack does not own
 generation-qualified modules.
 
-Artifact IDs include a source/compiler fingerprint. Byte-identical reloads reuse
-the same physical namespace and active composition instead of minting new module
-atoms and activations. Distinct source still receives a distinct artifact.
+Artifact IDs include a source/compiler fingerprint and, when present, the exact
+external data-manifest bytes. Byte-identical reloads reuse the same physical
+namespace and active composition instead of minting new module atoms and
+activations. Distinct source or manifest data receives a distinct artifact.
 
 Because module names are permanent atoms in a running VM, the local compiler
 reserves every distinct artifact namespace before it constructs physical module

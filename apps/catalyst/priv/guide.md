@@ -87,6 +87,9 @@ Inside the bundle — resolve at runtime, don't hardcode:
 - **Restructure a page/layout (a LiveView/component's markup or behavior)** → you can't edit the
   compiled module's file; register a replacement page/renderer via `install_extension`, or
   hot-swap the module by loading new code, then call **`reload_ui`**.
+- **Use the minimal IDE workbench** → open `/ide` for the workspace explorer, text editor,
+  command task, and command palette. Each mount pins `ui.workbench/default`; `/` remains the
+  existing agent chat during this migration phase.
 - **Recover** → `rollback_extension` (git revert + reload; pass `name` to scope it to one
   extension), `reload_extensions`, the **Extensions panel** at `/extensions` (per-extension
   reload / roll back / disable buttons), or restart with `CATALYST_SAFE_MODE=1` (built-ins only).
@@ -505,6 +508,31 @@ defmodule Catalyst.Ext.MyEngineExtension do
   }
 end
 ```
+
+For distributable managed extensions, prefer an adjacent data-only manifest
+named `<source>.manifest.json`. It is validated before source compilation, so
+discovering the proposed runtime graph does not execute extension code. The
+source then contains ordinary top-level implementation modules, while the JSON
+uses their fully qualified logical names:
+
+```json
+{
+  "api": 2,
+  "id": "my-engine",
+  "version": "1.0.0",
+  "trust": "local_trusted",
+  "services": [{
+    "key": ["agent", "run_engine", "named:my-engine"],
+    "contract": ["catalyst.agent-run-engine", 1],
+    "implementation": "Catalyst.Ext.MyEngine",
+    "binding": "run"
+  }]
+}
+```
+
+The embedded `manifest/1` form remains supported for existing trusted local
+extensions. External manifests currently support the same generation-managed
+service-only surface described below.
 
 In this mode Catalyst gives every top-level module an artifact-qualified physical name. A run
 pins that physical implementation, so reloading the file does not change code underneath the

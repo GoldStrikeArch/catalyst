@@ -115,6 +115,70 @@ defmodule Catalyst.Extensions.GenerationCompilerTest do
              GenerationCompiler.compile_file(second)
   end
 
+  test "loads an adjacent data manifest before compiling extension source" do
+    path =
+      write_source("""
+      defmodule GenerationCompilerExternalEngine do
+        def marker, do: :external
+      end
+      """)
+
+    write_manifest(path, %{
+      "api" => 2,
+      "id" => "test.external-generation-manifest",
+      "version" => "1.0.0",
+      "trust" => "local_trusted",
+      "metadata" => %{"name" => "External generation manifest"},
+      "services" => [
+        %{
+          "key" => ["agent", "run_engine", "default"],
+          "contract" => ["catalyst.agent-run-engine", 1],
+          "implementation" => "GenerationCompilerExternalEngine",
+          "binding" => "run"
+        }
+      ]
+    })
+
+    assert GenerationCompiler.generation_managed_file?(path)
+    assert {:ok, contribution} = Loader.compile(path)
+    assert %ArtifactSet{} = artifact = contribution.artifact
+    on_exit(fn -> Artifacts.discard([artifact.id]) end)
+
+    assert contribution.ext_mods == []
+    assert [manifest] = contribution.manifests
+    assert manifest.id == "test.external-generation-manifest"
+    assert manifest.metadata.name == "External generation manifest"
+
+    implementation = manifest.services |> hd() |> Map.fetch!(:implementation)
+    assert implementation.logical == :"Elixir.GenerationCompilerExternalEngine"
+    assert implementation.target.marker() == :external
+  end
+
+  test "rejects an invalid data manifest before source code can execute" do
+    sentinel =
+      Path.join(
+        System.tmp_dir!(),
+        "catalyst-external-manifest-sentinel-#{System.unique_integer([:positive])}"
+      )
+
+    path =
+      write_source("""
+      File.write!(#{inspect(sentinel)}, "compiled")
+
+      defmodule GenerationCompilerExternalSideEffect do
+      end
+      """)
+
+    File.write!(Catalyst.Extension.ManifestFile.path(path), "{invalid")
+    on_exit(fn -> File.rm(Catalyst.Extension.ManifestFile.path(path)) end)
+    on_exit(fn -> File.rm(sentinel) end)
+
+    assert {:error, {:invalid_external_manifest_json, _reason}} =
+             GenerationCompiler.compile_file(path)
+
+    refute File.exists?(sentinel)
+  end
+
   test "rejects dynamic module names with a tagged error" do
     path =
       write_source("""
@@ -294,6 +358,13 @@ defmodule Catalyst.Extensions.GenerationCompilerTest do
       )
 
     File.write!(path, source)
+    on_exit(fn -> File.rm(path) end)
+    path
+  end
+
+  defp write_manifest(source_path, manifest) do
+    path = Catalyst.Extension.ManifestFile.path(source_path)
+    File.write!(path, Jason.encode!(manifest))
     on_exit(fn -> File.rm(path) end)
     path
   end
