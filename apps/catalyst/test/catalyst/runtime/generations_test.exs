@@ -1,7 +1,7 @@
 defmodule Catalyst.Runtime.GenerationsTest do
   use ExUnit.Case, async: false
 
-  import Catalyst.EnvCase, only: [wait_until: 1]
+  import Catalyst.EnvCase, only: [restore_env: 2, wait_until: 1]
 
   alias Catalyst.Contracts.RunEngine.V1
   alias Catalyst.Extension.Manifest
@@ -144,6 +144,36 @@ defmodule Catalyst.Runtime.GenerationsTest do
 
     assert %{status: :retired, lease_count: 0, reason: :drained} =
              Enum.find(Generations.list(), &(&1.id == first_generation.id))
+  end
+
+  test "an opt-in drain deadline terminates lease owners before retirement" do
+    previous_timeout = Application.fetch_env(:catalyst, :runtime_generation_drain_timeout)
+    Application.put_env(:catalyst, :runtime_generation_drain_timeout, 20)
+    on_exit(fn -> restore_env(:runtime_generation_drain_timeout, previous_timeout) end)
+
+    first = healthy_manifest("test.generation.forced-drain")
+    assert {:ok, first_generation} = Generations.install("forced_source", [first])
+
+    lease_owner =
+      spawn(fn ->
+        receive do
+          :never -> :ok
+        end
+      end)
+
+    monitor = Process.monitor(lease_owner)
+    assert {:ok, _lease} = Leases.acquire(first_generation.id, lease_owner, :run)
+
+    second = healthy_manifest("test.generation.forced-replacement")
+    assert {:ok, _second_generation} = Generations.install("forced_source", [second])
+
+    assert_receive {:DOWN, ^monitor, :process, ^lease_owner, :killed}, 1_000
+
+    wait_until(fn ->
+      Enum.any?(Generations.list(), fn generation ->
+        generation.id == first_generation.id and generation.status == :retired
+      end)
+    end)
   end
 
   test "the same graph can reactivate without replacing a leased retiring activation" do

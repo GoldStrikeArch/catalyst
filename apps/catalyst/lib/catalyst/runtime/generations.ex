@@ -101,13 +101,14 @@ defmodule Catalyst.Runtime.Generations do
     CandidateProcesses.stop_all()
     release_unleased_artifacts()
     GenerationStore.clear()
-    {:ok, %{operation: nil, monitors: %{}}}
+    {:ok, %{operation: nil, monitors: %{}, drain_timers: %{}}}
   end
 
   @impl true
   def handle_call(:clear, _from, state) do
     state = cancel_operation(state)
     state = demonitor_all(state)
+    state = cancel_drain_timers(state)
     CandidateProcesses.stop_all()
     release_unleased_artifacts()
     GenerationStore.clear()
@@ -160,6 +161,25 @@ defmodule Catalyst.Runtime.Generations do
 
   def handle_info({:generation_drained, generation_id}, state) do
     {:noreply, retire_if_drained(generation_id, state)}
+  end
+
+  def handle_info({:generation_drain_timeout, generation_id}, state) do
+    state = drop_drain_timer(state, generation_id)
+    owners = lease_owners(generation_id)
+
+    case owners do
+      [] ->
+        {:noreply, retire_if_drained(generation_id, state)}
+
+      _retained ->
+        Logger.warning("forcing runtime generation retirement after drain timeout",
+          generation: ActivationId.to_wire(generation_id),
+          lease_owners: length(owners)
+        )
+
+        Enum.each(owners, &Process.exit(&1, :kill))
+        {:noreply, state}
+    end
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -262,8 +282,14 @@ defmodule Catalyst.Runtime.Generations do
   defp retire_superseded(old_id, new_id, _mode, state) do
     case old_id == new_id do
       true -> state
-      false -> retire_if_drained(old_id, state)
+      false -> retire_or_schedule(old_id, state)
     end
+  end
+
+  defp retire_or_schedule(generation_id, state) do
+    generation_id
+    |> retire_if_drained(state)
+    |> schedule_drain_timeout(generation_id)
   end
 
   defp retire_if_drained(%ActivationId{} = generation_id, state) do
@@ -271,6 +297,7 @@ defmodule Catalyst.Runtime.Generations do
       {{:ok, %Generation{status: status}}, 0} when status in [:retiring, :failed] ->
         supervisor = generation_supervisor(state, generation_id)
         state = demonitor_generation(state, generation_id)
+        state = cancel_drain_timer(state, generation_id)
         GenerationStore.retire(generation_id, :drained)
         stop_retired_generation(generation_id, supervisor)
         Artifacts.release_activation(generation_id)
@@ -360,7 +387,58 @@ defmodule Catalyst.Runtime.Generations do
     end
 
     GenerationStore.fail(generation_id, {:candidate_process_exit, reason})
-    retire_if_drained(generation_id, state)
+    retire_or_schedule(generation_id, state)
+  end
+
+  defp schedule_drain_timeout(state, generation_id) do
+    case {drain_timeout(), GenerationStore.fetch(generation_id), Leases.count(generation_id)} do
+      {:infinity, _generation, _leases} ->
+        state
+
+      {_timeout, {:ok, %Generation{status: status}}, 0}
+      when status in [:retiring, :failed] ->
+        state
+
+      {timeout, {:ok, %Generation{status: status}}, leases}
+      when status in [:retiring, :failed] and leases > 0 ->
+        cancel_drain_timer(state, generation_id)
+        |> put_drain_timer(generation_id, timeout)
+
+      _not_retiring ->
+        state
+    end
+  end
+
+  defp put_drain_timer(state, generation_id, timeout) do
+    timer = Process.send_after(self(), {:generation_drain_timeout, generation_id}, timeout)
+    %{state | drain_timers: Map.put(state.drain_timers, generation_id, timer)}
+  end
+
+  defp cancel_drain_timer(state, generation_id) do
+    case Map.pop(state.drain_timers, generation_id) do
+      {nil, _timers} ->
+        state
+
+      {timer, timers} ->
+        Process.cancel_timer(timer)
+        %{state | drain_timers: timers}
+    end
+  end
+
+  defp drop_drain_timer(state, generation_id),
+    do: %{state | drain_timers: Map.delete(state.drain_timers, generation_id)}
+
+  defp cancel_drain_timers(state) do
+    Enum.each(state.drain_timers, fn {_generation_id, timer} -> Process.cancel_timer(timer) end)
+    %{state | drain_timers: %{}}
+  end
+
+  defp lease_owners(generation_id) do
+    Leases.list()
+    |> Enum.filter(&(&1.generation == generation_id))
+    |> Enum.map(& &1.owner)
+    |> Enum.reject(&(&1 == self()))
+    |> Enum.uniq()
   end
 
   defp release_unleased_artifacts do
@@ -427,5 +505,12 @@ defmodule Catalyst.Runtime.Generations do
 
   defp call_timeout do
     Application.get_env(:catalyst, :runtime_generation_call_timeout, @default_call_timeout)
+  end
+
+  defp drain_timeout do
+    case Application.get_env(:catalyst, :runtime_generation_drain_timeout, :infinity) do
+      timeout when is_integer(timeout) and timeout >= 0 -> timeout
+      _infinite_or_invalid -> :infinity
+    end
   end
 end
