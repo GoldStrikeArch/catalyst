@@ -43,15 +43,26 @@ defmodule Catalyst.Runtime.CandidateStager do
   end
 
   defp validate_and_stage(%Candidate{migrations: []} = candidate, activation_id) do
+    attach_and_stage(candidate, activation_id)
+  end
+
+  defp validate_and_stage(%Candidate{} = candidate, activation_id) do
+    case Enum.split_with(candidate.migrations, &(&1.strategy == :new_instances_only)) do
+      {_accepted, []} -> attach_and_stage(candidate, activation_id)
+      {_accepted, unsupported} -> reject_migrations(candidate, unsupported)
+    end
+  end
+
+  defp attach_and_stage(candidate, activation_id) do
     case Artifacts.attach(activation_id, candidate.artifacts) do
       :ok -> stage_candidate(candidate)
       {:error, reason} -> {:error, reason, candidate}
     end
   end
 
-  defp validate_and_stage(%Candidate{} = candidate, _activation_id) do
-    ids = Enum.map(candidate.migrations, & &1.id)
-    {:error, {:state_migrations_not_supported, ids}, candidate}
+  defp reject_migrations(candidate, migrations) do
+    unsupported = Enum.map(migrations, &%{id: &1.id, strategy: &1.strategy})
+    {:error, {:state_migrations_not_supported, unsupported}, candidate}
   end
 
   defp existing_claims do

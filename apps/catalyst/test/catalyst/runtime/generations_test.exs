@@ -254,7 +254,7 @@ defmodule Catalyst.Runtime.GenerationsTest do
     assert CandidateProcesses.list(rejected_generation.id) == []
   end
 
-  test "declared state migrations fail closed until handoff is supported" do
+  test "state-changing migrations fail closed until handoff is supported" do
     :persistent_term.put({Migration, :test}, self())
     on_exit(fn -> :persistent_term.erase({Migration, :test}) end)
 
@@ -265,14 +265,34 @@ defmodule Catalyst.Runtime.GenerationsTest do
         ]
       )
 
-    assert {:error, {:state_migrations_not_supported, ["session-state"]}} =
+    assert {:error,
+            {:state_migrations_not_supported, [%{id: "session-state", strategy: :forward_only}]}} =
              Generations.install("migration_source", [manifest])
 
     refute_received :migration_ran
     assert GenerationStore.active_id() == nil
 
-    assert %{status: :rejected, reason: {:state_migrations_not_supported, ["session-state"]}} =
-             Enum.find(Generations.list(), &(&1.status == :rejected))
+    assert %{
+             status: :rejected,
+             reason:
+               {:state_migrations_not_supported,
+                [%{id: "session-state", strategy: :forward_only}]}
+           } = Enum.find(Generations.list(), &(&1.status == :rejected))
+  end
+
+  test "new-instances-only migrations activate without executing state callbacks" do
+    manifest =
+      manifest("test.generation.new-instances",
+        migrations: [
+          %{id: "session-state", from: 1, to: 2, strategy: :new_instances_only}
+        ]
+      )
+
+    assert {:ok, generation} = Generations.install("migration_source", [manifest])
+    assert generation.status == :active
+
+    assert [%{strategy: :new_instances_only, callback: nil}] =
+             generation.candidate.migrations
   end
 
   test "artifact attachment failure is retained as a rejected generation" do

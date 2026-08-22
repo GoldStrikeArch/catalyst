@@ -36,7 +36,8 @@ defmodule Catalyst.Runtime.Candidate.Builder do
   @contribution_fields [:point, :id, :value, :scope, :metadata]
   @process_fields [:id, :child_spec, :metadata]
   @health_check_fields [:id, :module, :function, :args, :timeout, :metadata]
-  @migration_fields [:id, :from, :to, :module, :function, :metadata]
+  @migration_fields [:id, :from, :to, :strategy, :module, :function, :metadata]
+  @migration_strategies [:reversible, :snapshot_reversible, :forward_only, :new_instances_only]
   @managed_default_priority 900
   @max_health_timeout 60_000
 
@@ -469,16 +470,16 @@ defmodule Catalyst.Runtime.Candidate.Builder do
            {:ok, from} <- required_non_negative_integer(declaration, :from),
            {:ok, to} <- required_non_negative_integer(declaration, :to),
            :ok <- validate_migration_range(from, to),
-           {:ok, module} <- required_atom(declaration, :module),
-           {:ok, function} <- required_atom(declaration, :function),
+           {:ok, strategy} <- migration_strategy(Map.get(declaration, :strategy, :forward_only)),
+           {:ok, callback} <- migration_callback(declaration, strategy),
            {:ok, metadata} <- metadata(Map.get(declaration, :metadata, %{})) do
         {:ok,
          %{
            id: id,
            from: from,
            to: to,
-           module: module,
-           function: function,
+           strategy: strategy,
+           callback: callback,
            owner: manifest.id,
            provenance: manifest_provenance(manifest, :migration, index),
            metadata: metadata
@@ -488,6 +489,18 @@ defmodule Catalyst.Runtime.Candidate.Builder do
       end
     end)
     |> unique_owned_declarations(:migration)
+  end
+
+  defp migration_strategy(strategy) when strategy in @migration_strategies, do: {:ok, strategy}
+  defp migration_strategy(strategy), do: {:error, {:invalid_migration_strategy, strategy}}
+
+  defp migration_callback(_declaration, :new_instances_only), do: {:ok, nil}
+
+  defp migration_callback(declaration, _strategy) do
+    with {:ok, module} <- required_atom(declaration, :module),
+         {:ok, function} <- required_atom(declaration, :function) do
+      {:ok, {module, function}}
+    end
   end
 
   defp build_capabilities(manifests) do
