@@ -80,6 +80,41 @@ defmodule Catalyst.Extensions.GenerationCompilerTest do
              GenerationCompiler.compile_file(path)
   end
 
+  test "bounds permanent physical-module namespaces before creating atoms" do
+    previous_budget = Application.fetch_env(:catalyst, :runtime_artifact_namespace_budget)
+
+    Application.put_env(
+      :catalyst,
+      :runtime_artifact_namespace_budget,
+      Artifacts.namespace_count() + 1
+    )
+
+    on_exit(fn ->
+      Catalyst.EnvCase.restore_env(:runtime_artifact_namespace_budget, previous_budget)
+    end)
+
+    first =
+      write_source("""
+      defmodule GenerationCompilerBudgetFirst do
+        def marker, do: #{System.unique_integer([:positive])}
+      end
+      """)
+
+    second =
+      write_source("""
+      defmodule GenerationCompilerBudgetSecond do
+        def marker, do: #{System.unique_integer([:positive])}
+      end
+      """)
+
+    assert {:ok, artifact} = GenerationCompiler.compile_file(first)
+    assert :ok = Artifacts.register(artifact)
+    on_exit(fn -> Artifacts.discard([artifact.id]) end)
+
+    assert {:error, {:artifact_namespace_budget_exhausted, _budget}} =
+             GenerationCompiler.compile_file(second)
+  end
+
   test "rejects dynamic module names with a tagged error" do
     path =
       write_source("""

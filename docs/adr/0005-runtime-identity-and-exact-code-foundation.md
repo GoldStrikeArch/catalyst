@@ -89,6 +89,13 @@ Artifact IDs include a source/compiler fingerprint. Byte-identical reloads reuse
 the same physical namespace and active composition instead of minting new module
 atoms and activations. Distinct source still receives a distinct artifact.
 
+Because module names are permanent atoms in a running VM, the local compiler
+reserves every distinct artifact namespace before it constructs physical module
+names. A configurable VM-lifetime budget bounds that namespace set and rejects
+new source once exhausted. Reusing an existing artifact does not consume the
+budget. High-churn compilation still belongs on a disposable peer node or
+external worker, where terminating the worker reclaims its atom table.
+
 This first integrated path accepts service declarations only. Artifact-bound
 extension points, contributions, processes, health checks, and migrations are
 rejected with tagged errors rather than receiving incomplete lifecycle
@@ -113,10 +120,6 @@ guarantees.
   and migrations through typed implementation references.
 - Decide drain deadlines and forced-retirement policy.
 - Generalize implementation-target dispatch beyond `agent.run_engine`.
-- Bound main-VM artifact namespaces. Every generated module name creates an atom
-  that the VM does not garbage-collect. Unchanged source now reuses its namespace,
-  but high-churn or untrusted compilation should eventually move to a disposable
-  peer node or external worker.
 - Eliminate transient main-VM compile side effects by staging compilation on a
   disposable peer node. The trusted local compiler validates and rolls back
   emitted modules, but macros execute before post-compile validation.

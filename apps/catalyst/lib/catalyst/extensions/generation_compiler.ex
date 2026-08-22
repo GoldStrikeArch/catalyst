@@ -36,6 +36,7 @@ defmodule Catalyst.Extensions.GenerationCompiler do
          :ok <- validate_source_forms(quoted),
          {:ok, logical_modules} <- top_level_modules(quoted),
          artifact_id = ArtifactId.from_source(source),
+         :ok <- Artifacts.reserve_namespace(artifact_id),
          mappings = module_mappings(logical_modules, artifact_id),
          {:ok, rewritten} <- rewrite(quoted, mappings) do
       case cached_artifact(artifact_id) do

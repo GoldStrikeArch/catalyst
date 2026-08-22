@@ -25,6 +25,8 @@ defmodule Catalyst.Runtime.Artifacts do
   }
 
   @default_call_timeout 30_000
+  @default_namespace_budget 2_048
+  @namespace_key {__MODULE__, :artifact_namespaces}
   @state_key {__MODULE__, :state}
 
   @type snapshot_result :: {:ok, [Artifact.t()]} | {:error, term()}
@@ -39,6 +41,22 @@ defmodule Catalyst.Runtime.Artifacts do
   @spec register(ArtifactSet.t()) :: :ok | {:error, term()}
   def register(%ArtifactSet{} = set),
     do: GenServer.call(__MODULE__, {:register, set}, call_timeout())
+
+  @doc "Reserve one bounded VM-lifetime physical-module namespace."
+  @spec reserve_namespace(ArtifactId.t()) :: :ok | {:error, term()}
+  def reserve_namespace(%ArtifactId{} = id) do
+    GenServer.call(__MODULE__, {:reserve_namespace, id}, call_timeout())
+  catch
+    :exit, reason -> {:error, {:artifact_namespace_registry_unavailable, reason}}
+  end
+
+  @doc "Number of artifact namespaces permanently allocated in this VM."
+  @spec namespace_count() :: non_neg_integer()
+  def namespace_count do
+    @namespace_key
+    |> :persistent_term.get(MapSet.new())
+    |> MapSet.size()
+  end
 
   @doc false
   @spec fetch_set(ArtifactId.t()) :: {:ok, ArtifactSet.t()} | :error
@@ -132,6 +150,23 @@ defmodule Catalyst.Runtime.Artifacts do
 
       {:ok, _artifact} ->
         {:reply, {:error, {:artifact_identity_collision, key}}, artifacts}
+    end
+  end
+
+  def handle_call({:reserve_namespace, %ArtifactId{} = id}, _from, artifacts) do
+    namespaces = :persistent_term.get(@namespace_key, MapSet.new())
+    key = ArtifactId.to_wire(id)
+
+    cond do
+      MapSet.member?(namespaces, key) ->
+        {:reply, :ok, artifacts}
+
+      MapSet.size(namespaces) < namespace_budget() ->
+        :persistent_term.put(@namespace_key, MapSet.put(namespaces, key))
+        {:reply, :ok, artifacts}
+
+      true ->
+        {:reply, {:error, {:artifact_namespace_budget_exhausted, namespace_budget()}}, artifacts}
     end
   end
 
@@ -364,6 +399,17 @@ defmodule Catalyst.Runtime.Artifacts do
     case :persistent_term.get(@state_key, %{}) do
       artifacts when is_map(artifacts) -> artifacts
       _invalid -> %{}
+    end
+  end
+
+  defp namespace_budget do
+    case Application.get_env(
+           :catalyst,
+           :runtime_artifact_namespace_budget,
+           @default_namespace_budget
+         ) do
+      budget when is_integer(budget) and budget >= 0 -> budget
+      _invalid -> @default_namespace_budget
     end
   end
 
