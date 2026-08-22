@@ -1,6 +1,8 @@
 defmodule Catalyst.Extensions.GenerationCompilerTest do
   use ExUnit.Case, async: false
 
+  import Catalyst.EnvCase, only: [wait_until: 1]
+
   alias Catalyst.Extensions.{GenerationCompiler, Loader}
 
   alias Catalyst.Runtime.{
@@ -13,6 +15,15 @@ defmodule Catalyst.Extensions.GenerationCompilerTest do
   }
 
   @owner "generation_compiler_test"
+
+  defmodule Worker do
+    use GenServer
+
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok)
+
+    @impl true
+    def init(:ok), do: {:ok, %{}}
+  end
 
   setup do
     :ok = Generations.clear()
@@ -353,6 +364,45 @@ defmodule Catalyst.Extensions.GenerationCompilerTest do
 
     assert {:ok, []} = Artifacts.snapshot()
     assert :code.is_loaded(physical) == false
+  end
+
+  test "retirement joins candidate processes before purging their artifact" do
+    artifact = compile_artifact!(:ordered_cleanup)
+    physical = artifact |> ArtifactSet.physical_modules() |> List.first()
+    assert :ok = Artifacts.register(artifact)
+
+    [compiled_manifest] = GenerationCompiler.manifests(artifact)
+
+    compiled_manifest =
+      %{compiled_manifest | processes: [%{id: "worker", child_spec: {Worker, []}}]}
+
+    assert {:ok, generation} = Generations.install(@owner, [compiled_manifest])
+    assert [worker] = Catalyst.Runtime.CandidateProcesses.list(generation.id)
+    monitor = Process.monitor(worker)
+    assert {:ok, lease} = Catalyst.Runtime.Leases.acquire(generation.id, self(), :run)
+
+    replacement =
+      Catalyst.Extension.Manifest.new!(%{
+        id: "test.generation-replacement",
+        version: "1.0.0",
+        services: [
+          %{
+            key: {"agent", "run_engine", "default"},
+            contract: {"catalyst.agent-run-engine", 1},
+            implementation: Catalyst.Agent.Loop
+          }
+        ]
+      })
+
+    assert {:ok, _replacement} = Generations.install(@owner, [replacement])
+    assert :ok = Catalyst.Runtime.Leases.release(lease)
+
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 1_000
+
+    wait_until(fn ->
+      {:ok, artifacts} = Artifacts.snapshot()
+      artifacts == [] and :code.is_loaded(physical) == false
+    end)
   end
 
   defp compile_artifact!(marker) do

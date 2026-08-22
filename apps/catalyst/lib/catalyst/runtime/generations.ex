@@ -101,12 +101,13 @@ defmodule Catalyst.Runtime.Generations do
     CandidateProcesses.stop_all()
     release_unleased_artifacts()
     GenerationStore.clear()
-    {:ok, %{operation: nil, monitors: %{}, drain_timers: %{}}}
+    {:ok, empty_state()}
   end
 
   @impl true
   def handle_call(:clear, _from, state) do
     state = cancel_operation(state)
+    state = cancel_cleanups(state)
     state = demonitor_all(state)
     state = cancel_drain_timers(state)
     CandidateProcesses.stop_all()
@@ -148,14 +149,26 @@ defmodule Catalyst.Runtime.Generations do
     {:noreply, %{state | operation: nil}}
   end
 
-  def handle_info({:DOWN, reference, :process, _pid, reason}, state) do
-    case Map.pop(state.monitors, reference) do
-      {nil, _monitors} ->
+  def handle_info({reference, result}, state) when is_reference(reference) do
+    case Map.pop(state.cleanups, reference) do
+      {nil, _cleanups} ->
         {:noreply, state}
 
-      {%{generation_id: generation_id}, monitors} ->
-        state = %{state | monitors: monitors}
-        {:noreply, handle_generation_exit(generation_id, reason, state)}
+      {cleanup, cleanups} ->
+        Process.demonitor(reference, [:flush])
+        state = drop_cleanup(state, cleanup.generation_id, cleanups)
+        {:noreply, finish_retirement_cleanup(cleanup.generation_id, result, state)}
+    end
+  end
+
+  def handle_info({:DOWN, reference, :process, _pid, reason}, state) do
+    case Map.pop(state.cleanups, reference) do
+      {nil, _cleanups} ->
+        handle_generation_down(reference, reason, state)
+
+      {cleanup, cleanups} ->
+        state = drop_cleanup(state, cleanup.generation_id, cleanups)
+        {:noreply, retry_retirement_cleanup(cleanup.generation_id, reason, state)}
     end
   end
 
@@ -180,6 +193,10 @@ defmodule Catalyst.Runtime.Generations do
         Enum.each(owners, &Process.exit(&1, :kill))
         {:noreply, state}
     end
+  end
+
+  def handle_info({:generation_cleanup_retry, generation_id}, state) do
+    {:noreply, retire_if_drained(generation_id, state)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -295,13 +312,7 @@ defmodule Catalyst.Runtime.Generations do
   defp retire_if_drained(%ActivationId{} = generation_id, state) do
     case {GenerationStore.fetch(generation_id), Leases.count(generation_id)} do
       {{:ok, %Generation{status: status}}, 0} when status in [:retiring, :failed] ->
-        supervisor = generation_supervisor(state, generation_id)
-        state = demonitor_generation(state, generation_id)
-        state = cancel_drain_timer(state, generation_id)
-        GenerationStore.retire(generation_id, :drained)
-        stop_retired_generation(generation_id, supervisor)
-        Artifacts.release_activation(generation_id)
-        state
+        begin_retirement_cleanup(generation_id, state)
 
       {:error, 0} ->
         Artifacts.release_activation(generation_id)
@@ -357,21 +368,23 @@ defmodule Catalyst.Runtime.Generations do
     %{state | monitors: Map.new(retained)}
   end
 
-  defp generation_supervisor(state, generation_id) do
-    Enum.find_value(state.monitors, fn {_reference, entry} ->
-      case entry.generation_id == generation_id do
-        true -> entry.pid
-        false -> nil
-      end
-    end)
-  end
-
   defp demonitor_all(state) do
     Enum.each(state.monitors, fn {reference, _entry} ->
       Process.demonitor(reference, [:flush])
     end)
 
     %{state | monitors: %{}}
+  end
+
+  defp handle_generation_down(reference, reason, state) do
+    case Map.pop(state.monitors, reference) do
+      {nil, _monitors} ->
+        {:noreply, state}
+
+      {%{generation_id: generation_id}, monitors} ->
+        state = %{state | monitors: monitors}
+        {:noreply, handle_generation_exit(generation_id, reason, state)}
+    end
   end
 
   defp handle_generation_exit(generation_id, reason, state) do
@@ -475,19 +488,63 @@ defmodule Catalyst.Runtime.Generations do
     %{state | operation: nil}
   end
 
-  defp stop_retired_generation(_generation_id, nil), do: :ok
+  defp begin_retirement_cleanup(generation_id, state) do
+    key = ActivationId.to_wire(generation_id)
 
-  defp stop_retired_generation(generation_id, supervisor) do
-    case Tasks.start_background(fn -> CandidateProcesses.stop(supervisor) end) do
-      {:ok, _pid} ->
-        :ok
+    case Map.has_key?(state.cleanup_generations, key) do
+      true ->
+        state
 
-      {:error, reason} ->
-        Logger.warning("could not schedule retired generation cleanup",
-          generation: ActivationId.to_wire(generation_id),
-          reason: inspect(reason)
-        )
+      false ->
+        state = state |> demonitor_generation(generation_id) |> cancel_drain_timer(generation_id)
+        task = Tasks.async(fn -> CandidateProcesses.stop(generation_id) end)
+        cleanup = %{generation_id: generation_id, task: task}
+
+        %{
+          state
+          | cleanups: Map.put(state.cleanups, task.ref, cleanup),
+            cleanup_generations: Map.put(state.cleanup_generations, key, task.ref)
+        }
     end
+  end
+
+  defp finish_retirement_cleanup(generation_id, :ok, state) do
+    GenerationStore.retire(generation_id, :drained)
+    Artifacts.release_activation(generation_id)
+    state
+  end
+
+  defp finish_retirement_cleanup(generation_id, result, state) do
+    retry_retirement_cleanup(generation_id, result, state)
+  end
+
+  defp retry_retirement_cleanup(generation_id, reason, state) do
+    Logger.warning("runtime generation cleanup did not complete",
+      generation: ActivationId.to_wire(generation_id),
+      reason: inspect(reason)
+    )
+
+    Process.send_after(self(), {:generation_cleanup_retry, generation_id}, 100)
+    state
+  end
+
+  defp drop_cleanup(state, generation_id, cleanups) do
+    key = ActivationId.to_wire(generation_id)
+
+    %{
+      state
+      | cleanups: cleanups,
+        cleanup_generations: Map.delete(state.cleanup_generations, key)
+    }
+  end
+
+  defp cancel_cleanups(state) do
+    Enum.each(state.cleanups, fn {reference, cleanup} ->
+      Process.demonitor(reference, [:flush])
+      Task.shutdown(cleanup.task, :brutal_kill)
+    end)
+
+    %{state | cleanups: %{}, cleanup_generations: %{}}
   end
 
   defp cleanup_operation_artifacts(operation) do
@@ -505,6 +562,16 @@ defmodule Catalyst.Runtime.Generations do
 
   defp call_timeout do
     Application.get_env(:catalyst, :runtime_generation_call_timeout, @default_call_timeout)
+  end
+
+  defp empty_state do
+    %{
+      operation: nil,
+      monitors: %{},
+      drain_timers: %{},
+      cleanups: %{},
+      cleanup_generations: %{}
+    }
   end
 
   defp drain_timeout do
