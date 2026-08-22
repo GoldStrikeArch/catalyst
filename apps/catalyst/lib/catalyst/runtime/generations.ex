@@ -4,7 +4,9 @@ defmodule Catalyst.Runtime.Generations do
 
   Candidate construction, process startup, and health checks run outside the
   coordinator process. Only a completely staged candidate is atomically
-  published. Failed staging leaves the prior generation untouched.
+  published. Failed staging leaves the prior generation untouched. A retained
+  parent is restored only when the active candidate process root exits during
+  its bounded post-activation stabilization window.
   """
 
   use GenServer
@@ -28,6 +30,7 @@ defmodule Catalyst.Runtime.Generations do
   alias Catalyst.Tasks
 
   @default_call_timeout 120_000
+  @default_stabilization_ms 10_000
 
   @type owner_manifests :: %{optional(String.t()) => [Manifest.t()]}
 
@@ -110,6 +113,7 @@ defmodule Catalyst.Runtime.Generations do
     state = cancel_cleanups(state)
     state = demonitor_all(state)
     state = cancel_drain_timers(state)
+    state = cancel_stabilizations(state)
     CandidateProcesses.stop_all()
     release_unleased_artifacts()
     GenerationStore.clear()
@@ -197,6 +201,13 @@ defmodule Catalyst.Runtime.Generations do
 
   def handle_info({:generation_cleanup_retry, generation_id}, state) do
     {:noreply, retire_if_drained(generation_id, state)}
+  end
+
+  def handle_info({:generation_stabilized, generation_id, parent_id}, state) do
+    case pop_stabilization(state, generation_id, parent_id) do
+      {:ok, state} -> {:noreply, retire_or_schedule(parent_id, state)}
+      :error -> {:noreply, state}
+    end
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -289,24 +300,32 @@ defmodule Catalyst.Runtime.Generations do
     old_id = GenerationStore.active_id()
     {:ok, generation, _previous} = GenerationStore.publish(candidate, operation.owners)
     state = monitor_generation(state, generation.id, supervisor)
-    state = retire_superseded(old_id, generation.id, mode, state)
+    state = retain_superseded(old_id, generation.id, mode, state)
     GenServer.reply(operation.from, {:ok, generation})
     state
   end
 
-  defp retire_superseded(nil, _new_id, _mode, state), do: state
+  defp retain_superseded(nil, _new_id, _mode, state), do: state
 
-  defp retire_superseded(old_id, new_id, _mode, state) do
-    case old_id == new_id do
-      true -> state
-      false -> retire_or_schedule(old_id, state)
+  defp retain_superseded(old_id, new_id, _mode, state) do
+    case {old_id == new_id, stabilization_ms()} do
+      {true, _timeout} -> state
+      {false, 0} -> retire_or_schedule(old_id, state)
+      {false, timeout} -> put_stabilization(state, new_id, old_id, timeout)
     end
   end
 
   defp retire_or_schedule(generation_id, state) do
-    generation_id
-    |> retire_if_drained(state)
-    |> schedule_drain_timeout(generation_id)
+    case stabilization_parent?(state, generation_id) do
+      true -> state
+      false -> generation_id |> retire_if_drained(state) |> schedule_drain_timeout(generation_id)
+    end
+  end
+
+  defp stabilization_parent?(state, generation_id) do
+    Enum.any?(state.stabilizations, fn {_child, entry} ->
+      entry.parent_id == generation_id
+    end)
   end
 
   defp retire_if_drained(%ActivationId{} = generation_id, state) do
@@ -388,7 +407,9 @@ defmodule Catalyst.Runtime.Generations do
   end
 
   defp handle_generation_exit(generation_id, reason, state) do
-    case GenerationStore.active_id() == generation_id do
+    active? = GenerationStore.active_id() == generation_id
+
+    case active? do
       true ->
         Logger.error("active runtime generation process subtree exited",
           generation: inspect(generation_id),
@@ -399,8 +420,89 @@ defmodule Catalyst.Runtime.Generations do
         :ok
     end
 
-    GenerationStore.fail(generation_id, {:candidate_process_exit, reason})
-    retire_or_schedule(generation_id, state)
+    case take_stabilization(state, generation_id) do
+      {%{} = stabilization, state} when active? ->
+        rollback_or_fail(generation_id, stabilization.parent_id, reason, state)
+
+      {%{} = stabilization, state} ->
+        GenerationStore.fail(generation_id, {:candidate_process_exit, reason})
+
+        state = retire_or_schedule(generation_id, state)
+        retire_or_schedule(stabilization.parent_id, state)
+
+      {nil, state} ->
+        GenerationStore.fail(generation_id, {:candidate_process_exit, reason})
+        retire_or_schedule(generation_id, state)
+    end
+  end
+
+  defp rollback_or_fail(generation_id, parent_id, reason, state) do
+    rollback_reason =
+      {:candidate_process_exit, reason, {:rolled_back_to, ActivationId.to_wire(parent_id)}}
+
+    with true <- CandidateProcesses.alive?(parent_id),
+         {:ok, _parent} <- GenerationStore.rollback(generation_id, parent_id, rollback_reason) do
+      Logger.warning("rolled back unstable runtime generation after process subtree exit",
+        generation: ActivationId.to_wire(generation_id),
+        parent: ActivationId.to_wire(parent_id),
+        reason: inspect(reason)
+      )
+
+      state = cancel_drain_timer(state, parent_id)
+      retire_or_schedule(generation_id, state)
+    else
+      _not_safe ->
+        GenerationStore.fail(generation_id, {:candidate_process_exit, reason})
+
+        state = retire_or_schedule(generation_id, state)
+        retire_or_schedule(parent_id, state)
+    end
+  end
+
+  defp put_stabilization(state, generation_id, parent_id, timeout) do
+    timer =
+      Process.send_after(
+        self(),
+        {:generation_stabilized, generation_id, parent_id},
+        timeout
+      )
+
+    entry = %{parent_id: parent_id, timer: timer}
+    key = ActivationId.to_wire(generation_id)
+    %{state | stabilizations: Map.put(state.stabilizations, key, entry)}
+  end
+
+  defp take_stabilization(state, generation_id) do
+    key = ActivationId.to_wire(generation_id)
+
+    case Map.pop(state.stabilizations, key) do
+      {nil, _stabilizations} ->
+        {nil, state}
+
+      {entry, stabilizations} ->
+        Process.cancel_timer(entry.timer)
+        {entry, %{state | stabilizations: stabilizations}}
+    end
+  end
+
+  defp pop_stabilization(state, generation_id, parent_id) do
+    key = ActivationId.to_wire(generation_id)
+
+    case Map.get(state.stabilizations, key) do
+      %{parent_id: ^parent_id} ->
+        {:ok, %{state | stabilizations: Map.delete(state.stabilizations, key)}}
+
+      _missing_or_stale ->
+        :error
+    end
+  end
+
+  defp cancel_stabilizations(state) do
+    Enum.each(state.stabilizations, fn {_generation, entry} ->
+      Process.cancel_timer(entry.timer)
+    end)
+
+    %{state | stabilizations: %{}}
   end
 
   defp schedule_drain_timeout(state, generation_id) do
@@ -568,6 +670,7 @@ defmodule Catalyst.Runtime.Generations do
     %{
       operation: nil,
       monitors: %{},
+      stabilizations: %{},
       drain_timers: %{},
       cleanups: %{},
       cleanup_generations: %{}
@@ -578,6 +681,17 @@ defmodule Catalyst.Runtime.Generations do
     case Application.get_env(:catalyst, :runtime_generation_drain_timeout, :infinity) do
       timeout when is_integer(timeout) and timeout >= 0 -> timeout
       _infinite_or_invalid -> :infinity
+    end
+  end
+
+  defp stabilization_ms do
+    case Application.get_env(
+           :catalyst,
+           :runtime_generation_stabilization_ms,
+           @default_stabilization_ms
+         ) do
+      timeout when is_integer(timeout) and timeout >= 0 -> timeout
+      _invalid -> @default_stabilization_ms
     end
   end
 end

@@ -184,6 +184,10 @@ defmodule Catalyst.Runtime.GenerationsTest do
   end
 
   test "the same graph can reactivate without replacing a leased retiring activation" do
+    previous_window = Application.fetch_env(:catalyst, :runtime_generation_stabilization_ms)
+    Application.put_env(:catalyst, :runtime_generation_stabilization_ms, 0)
+    on_exit(fn -> restore_env(:runtime_generation_stabilization_ms, previous_window) end)
+
     first = healthy_manifest("test.generation.retained-instance")
     assert {:ok, first_generation} = Generations.install("retained_source", [first])
     assert {:ok, lease} = Leases.acquire(first_generation.id, self(), :run)
@@ -230,6 +234,117 @@ defmodule Catalyst.Runtime.GenerationsTest do
     wait_until(fn ->
       Enum.find(Generations.list(), &(&1.id == generation.id)).retired_at != nil
     end)
+  end
+
+  test "rolls back an unstable active generation to its retained parent" do
+    previous_window = Application.fetch_env(:catalyst, :runtime_generation_stabilization_ms)
+    Application.put_env(:catalyst, :runtime_generation_stabilization_ms, 5_000)
+    on_exit(fn -> restore_env(:runtime_generation_stabilization_ms, previous_window) end)
+
+    first = healthy_manifest("test.generation.rollback-parent")
+    assert {:ok, parent} = Generations.install("rollback_source", [first])
+
+    second = healthy_manifest("test.generation.rollback-failed")
+    assert {:ok, failed} = Generations.install("rollback_source", [second])
+    assert CandidateProcesses.alive?(parent.id)
+
+    assert :ok = CandidateProcesses.stop(failed.id)
+    wait_until(fn -> GenerationStore.active_id() == parent.id end)
+
+    assert GenerationStore.owners() == %{"rollback_source" => [first]}
+    assert Enum.any?(ExtensionPoints.list_claims(), &(&1.owner == first.id))
+    refute Enum.any?(ExtensionPoints.list_claims(), &(&1.owner == second.id))
+
+    assert %{status: :active, retiring_at: nil} =
+             Enum.find(Generations.list(), &(&1.id == parent.id))
+
+    assert %{
+             status: :failed,
+             reason: {:candidate_process_exit, _reason, {:rolled_back_to, parent_wire}}
+           } = Enum.find(Generations.list(), &(&1.id == failed.id))
+
+    assert parent_wire == Catalyst.Runtime.ActivationId.to_wire(parent.id)
+  end
+
+  test "fails closed when an unstable generation no longer has a live parent" do
+    previous_window = Application.fetch_env(:catalyst, :runtime_generation_stabilization_ms)
+    Application.put_env(:catalyst, :runtime_generation_stabilization_ms, 5_000)
+    on_exit(fn -> restore_env(:runtime_generation_stabilization_ms, previous_window) end)
+
+    assert {:ok, parent} =
+             Generations.install("missing_parent_source", [
+               healthy_manifest("test.generation.missing-parent")
+             ])
+
+    assert {:ok, active} =
+             Generations.install("missing_parent_source", [
+               healthy_manifest("test.generation.missing-parent-successor")
+             ])
+
+    assert :ok = CandidateProcesses.stop(parent.id)
+    wait_until(fn -> not CandidateProcesses.alive?(parent.id) end)
+    assert GenerationStore.active_id() == active.id
+
+    assert :ok = CandidateProcesses.stop(active.id)
+    wait_until(fn -> GenerationStore.active_id() == nil end)
+
+    assert GenerationStore.owners() == %{}
+    assert Enum.find(Generations.list(), &(&1.id == active.id)).status == :failed
+  end
+
+  test "does not roll back a failed generation after a successor is active" do
+    previous_window = Application.fetch_env(:catalyst, :runtime_generation_stabilization_ms)
+    Application.put_env(:catalyst, :runtime_generation_stabilization_ms, 5_000)
+    on_exit(fn -> restore_env(:runtime_generation_stabilization_ms, previous_window) end)
+
+    assert {:ok, first} =
+             Generations.install("stale_rollback_source", [
+               healthy_manifest("test.generation.stale-first")
+             ])
+
+    assert {:ok, superseded} =
+             Generations.install("stale_rollback_source", [
+               healthy_manifest("test.generation.stale-superseded")
+             ])
+
+    assert {:ok, active} =
+             Generations.install("stale_rollback_source", [
+               healthy_manifest("test.generation.stale-active")
+             ])
+
+    assert :ok = CandidateProcesses.stop(superseded.id)
+
+    wait_until(fn ->
+      Enum.find(Generations.list(), &(&1.id == superseded.id)).status == :failed
+    end)
+
+    wait_until(fn -> not CandidateProcesses.alive?(first.id) end)
+    assert GenerationStore.active_id() == active.id
+
+    assert %{"stale_rollback_source" => [%Manifest{id: "test.generation.stale-active"}]} =
+             GenerationStore.owners()
+  end
+
+  test "releases the retained parent after the stabilization window" do
+    previous_window = Application.fetch_env(:catalyst, :runtime_generation_stabilization_ms)
+    Application.put_env(:catalyst, :runtime_generation_stabilization_ms, 200)
+    on_exit(fn -> restore_env(:runtime_generation_stabilization_ms, previous_window) end)
+
+    assert {:ok, parent} =
+             Generations.install("stable_source", [
+               healthy_manifest("test.generation.stable-parent")
+             ])
+
+    assert {:ok, active} =
+             Generations.install("stable_source", [
+               healthy_manifest("test.generation.stable-successor")
+             ])
+
+    assert CandidateProcesses.alive?(parent.id)
+    wait_until(fn -> not CandidateProcesses.alive?(parent.id) end)
+
+    assert GenerationStore.active_id() == active.id
+    assert Enum.find(Generations.list(), &(&1.id == parent.id)).status == :retired
   end
 
   test "a failed health check leaves the prior generation active" do

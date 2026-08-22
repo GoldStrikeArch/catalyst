@@ -26,6 +26,9 @@ config :catalyst,
   prompts_dir: Path.join(test_tmp, "prompts"),
   agents_dir: Path.join(test_tmp, "agents"),
   boot_stable_ms: 50,
+  # Production retains the prior generation for post-activation rollback.
+  # Ordinary tests opt into that timer only when exercising its lifecycle.
+  runtime_generation_stabilization_ms: 0,
   # Computer use: pin the whole grant so the advertised tool set is identical
   # on every host. The helper path stays inside test_tmp (nothing builds it),
   # and the backend is explicitly reported unavailable — tests that need the

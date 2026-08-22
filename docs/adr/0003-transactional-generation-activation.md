@@ -40,11 +40,14 @@ immutable persistent-term snapshot. Runtime Graph readers therefore observe the
 old managed points, claims, and contributions or the complete new set, never a
 partially published managed candidate.
 
-The previous candidate process subtree remains alive until publication
-completes. This ADR originally stopped it immediately afterward. ADR-0004
-supersedes that lifecycle rule: a leased superseded generation now retires only
-after its final handle is released. A rejected candidate's subtree is stopped
-before the error is returned.
+The previous candidate process subtree remains alive through a bounded
+post-activation stabilization window (ten seconds by default). If the active
+candidate process root exits inside that window, the coordinator atomically
+restores the retained parent graph and then drains the failed candidate. The
+rollback occurs only when the failed generation is still active and its direct
+parent remains both retained and alive. Otherwise Catalyst fails closed.
+After stabilization, ADR-0004 governs ordinary lease-aware retirement. A
+rejected candidate's subtree is stopped before the error is returned.
 
 The first execution consumer is `agent.run_engine`. New run resolution combines
 active generation claims with existing workflow layers and returns generation
@@ -70,8 +73,12 @@ generation coordinator publishes the candidate. API-v2 `setup/1` and
   coordinator in the `:rest_for_one` runtime group, recompiles enabled sources
   and reconstructs the composition.
 - The coordinator monitors the active candidate process root. If that root exits,
-  the matching generation is marked failed and its managed graph is immediately
-  removed from resolution.
+  the matching generation is marked failed. During its stabilization window a
+  retained live parent is restored; after the window, or without a viable
+  parent, its managed graph is immediately removed from resolution.
+- Post-activation rollback covers process-root health only. It does not reverse
+  arbitrary process side effects, external writes, raw code loading, or state
+  migrations. Stateful migrations remain fail-closed under ADR-0009.
 - Safe mode explicitly clears managed generations and candidate processes.
 
 ## Scope of Atomicity
@@ -97,7 +104,6 @@ transactionality claim.
   loader introduced by ADR-0005;
 - drain deadlines, forced retirement, and delayed module purge beyond the
   lifecycle leases introduced by ADR-0004;
-- post-activation rollback to a retained process generation;
 - state capsules, migrations, and session handoff;
 - isolated compilation and staging on a peer node or external worker;
 - durable last-known-good generation storage owned by the Recovery Host;

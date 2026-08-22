@@ -148,6 +148,26 @@ defmodule Catalyst.Runtime.GenerationStore do
   end
 
   @doc false
+  @spec rollback(ActivationId.t(), ActivationId.t(), term()) ::
+          {:ok, Generation.t()} | {:error, term()}
+  def rollback(%ActivationId{} = failed_id, %ActivationId{} = parent_id, reason) do
+    :global.trans(@state_lock, fn ->
+      current = state()
+
+      with true <- current.active == failed_id,
+           %Generation{parent: ^parent_id} = failed <- active_generation(current),
+           %Generation{status: :retiring} = parent <-
+             Map.get(current.generations, ActivationId.to_wire(parent_id)) do
+        rollback_to_parent(current, failed, parent, reason)
+      else
+        false -> {:error, :stale_active_generation}
+        nil -> {:error, :parent_generation_not_retained}
+        %Generation{} -> {:error, :parent_generation_not_retained}
+      end
+    end)
+  end
+
+  @doc false
   @spec retire(ActivationId.t(), term()) :: :ok
   def retire(%ActivationId{} = id, reason) do
     :global.trans(@state_lock, fn ->
@@ -241,6 +261,42 @@ defmodule Catalyst.Runtime.GenerationStore do
       nil ->
         :ok
     end
+  end
+
+  defp rollback_to_parent(current, failed, parent, reason) do
+    now = DateTime.utc_now()
+
+    failed = %{
+      failed
+      | status: :failed,
+        retiring_at: now,
+        retired_at: nil,
+        reason: reason
+    }
+
+    parent = %{
+      parent
+      | status: :active,
+        activated_at: now,
+        retiring_at: nil,
+        retired_at: nil,
+        reason: nil
+    }
+
+    generations =
+      current.generations
+      |> Map.put(ActivationId.to_wire(failed.id), failed)
+      |> Map.put(ActivationId.to_wire(parent.id), parent)
+
+    :persistent_term.put(@state_key, %{
+      current
+      | active: parent.id,
+        previous: failed.id,
+        generations: generations,
+        owners: parent.owners
+    })
+
+    {:ok, parent}
   end
 
   defp retire_expected(current, id, reason) do
