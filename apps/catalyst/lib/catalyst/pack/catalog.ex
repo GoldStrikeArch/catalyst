@@ -57,7 +57,10 @@ defmodule Catalyst.Pack.Catalog do
             name: "ChatGPT",
             catalog: Catalyst.LLM.OpenAICodex,
             auth: Catalyst.Auth.OpenAICodexFlow,
-            controls: %{transports: ~w(auto websocket sse)},
+            controls: %{
+              transports: ~w(auto websocket sse),
+              legacy_web_login_env: :login_fun
+            },
             catalog_priority: 100
           }
         }
@@ -79,6 +82,7 @@ defmodule Catalyst.Pack.Catalog do
             name: "SuperGrok",
             catalog: Catalyst.LLM.GrokSubscription,
             auth: Catalyst.Auth.GrokFlow,
+            controls: %{legacy_web_login_env: :grok_login_fun},
             catalog_priority: 200
           }
         }

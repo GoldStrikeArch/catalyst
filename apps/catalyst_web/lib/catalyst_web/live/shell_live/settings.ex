@@ -26,8 +26,6 @@ defmodule CatalystWeb.ShellLive.Settings do
   # Workflow selection is provider-agnostic, so it also gets its own key
   # rather than riding in `codex_prefs` (same wholesale-rebuild hazard).
   @workflow_prefs_ptr {CatalystWeb.ShellLive, :workflow_prefs}
-  @default_provider "openai-codex"
-
   @type codex_prefs :: %{
           model: String.t(),
           provider: String.t(),
@@ -48,12 +46,12 @@ defmodule CatalystWeb.ShellLive.Settings do
   @doc "Loads persisted Codex controls over the current application defaults."
   @spec load_codex() :: codex_prefs()
   def load_codex do
-    model = default_model_id(@default_provider)
+    %{provider_id: provider, model_id: model} = default_selection()
 
     defaults = %{
       model: model,
-      provider: @default_provider,
-      effort: selected_entry(@default_provider, model).default_effort,
+      provider: provider,
+      effort: selected_entry(provider, model).default_effort,
       fast: false,
       transport: "auto"
     }
@@ -533,12 +531,18 @@ defmodule CatalystWeb.ShellLive.Settings do
   end
 
   defp provider(prefs) do
-    requested = Map.get(prefs, :provider, @default_provider)
+    default = default_selection().provider_id
+    requested = Map.get(prefs, :provider, default)
 
     case Models.default_model_id(requested) do
       {:ok, _model_id} -> requested
-      {:error, _reason} -> @default_provider
+      {:error, _reason} -> default
     end
+  end
+
+  defp default_selection do
+    {:ok, selection} = Models.default_selection()
+    selection
   end
 
   defp persist(key, prefs), do: :persistent_term.put(key, prefs)

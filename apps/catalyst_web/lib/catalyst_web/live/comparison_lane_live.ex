@@ -11,8 +11,6 @@ defmodule CatalystWeb.ComparisonLaneLive do
   alias Catalyst.Session.Server
   alias CatalystWeb.UI.MessageRenderer
 
-  @legacy_provider_id "openai-codex"
-
   @impl true
   def mount(_params, %{"comparison_id" => comparison_id, "lane_id" => lane_id}, socket) do
     with {:ok, comparison} <- Comparison.get(comparison_id),
@@ -495,13 +493,16 @@ defmodule CatalystWeb.ComparisonLaneLive do
   end
 
   defp picker_value(provider_id, model_id) do
-    provider_id = provider_id || @legacy_provider_id
-
-    case Models.list() do
-      {:ok, models} -> Models.picker_value(models, provider_id, model_id)
+    with {:ok, provider_id} <- provider_id(provider_id, model_id),
+         {:ok, models} <- Models.list() do
+      Models.picker_value(models, provider_id, model_id)
+    else
       {:error, _reason} -> model_id
     end
   end
+
+  defp provider_id(provider_id, _model_id) when is_binary(provider_id), do: {:ok, provider_id}
+  defp provider_id(_legacy, model_id), do: Models.infer_provider(model_id)
 
   defp resolve_form_model(
          %{"provider_id" => provider_id, "model_id" => model_id},

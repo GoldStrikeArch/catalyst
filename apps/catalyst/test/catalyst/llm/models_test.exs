@@ -34,6 +34,13 @@ defmodule Catalyst.LLM.ModelsTest do
            )
   end
 
+  test "selects the highest-priority healthy catalog default" do
+    assert {:ok, %{provider_id: "openai-codex", model_id: model_id}} =
+             Models.default_selection()
+
+    assert is_binary(model_id) and model_id != ""
+  end
+
   test "selects unknown ids without losing them from the combined snapshot" do
     assert :ok = Registry.register_provider("fixture-api", fixture_config("fixture"))
     assert {:ok, snapshot} = Models.catalog_snapshot("fixture", "custom-model")
@@ -116,6 +123,9 @@ defmodule Catalyst.LLM.ModelsTest do
   test "listing reports every broken catalog when none remain" do
     put_catalog_timeout(10)
 
+    {:ok, previous_openai} = Registry.fetch_config("openai-codex-responses")
+    {:ok, previous_grok} = Registry.fetch_config("grok-subscription-chat-completions")
+
     assert :ok =
              Registry.register_provider(
                "openai-codex-responses",
@@ -129,8 +139,8 @@ defmodule Catalyst.LLM.ModelsTest do
              )
 
     on_exit(fn ->
-      Registry.unregister_provider("openai-codex-responses")
-      Registry.unregister_provider("grok-subscription-chat-completions")
+      Registry.register_provider("openai-codex-responses", previous_openai)
+      Registry.register_provider("grok-subscription-chat-completions", previous_grok)
     end)
 
     assert {:error, {:no_model_catalogs_available, failures}} = Models.list()

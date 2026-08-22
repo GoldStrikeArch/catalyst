@@ -12,19 +12,28 @@ defmodule CatalystWeb.Pages.PromptsPage do
   alias Catalyst.Prompt.Store
   alias Catalyst.SystemPrompt
 
-  @doc "Builds the prompt-file rows shown for the current Codex catalog."
+  @doc "Builds prompt-file rows for every provider represented in the current catalog."
   @spec panel_data([map()]) :: [map()]
   def panel_data(catalog) do
     [
-      row(:default, "Default system prompt", "Fallback for every model"),
-      row(
-        {:api, "openai-codex-responses"},
-        "All Codex models",
-        "Used when a model-specific file is absent"
-      )
-      | model_rows(catalog)
+      row(:default, "Default system prompt", "Fallback for every model")
+      | api_rows(catalog) ++ model_rows(catalog)
     ] ++
       [row(:append, "Append to every system prompt", "Added after whichever system base wins")]
+  end
+
+  defp api_rows(catalog) do
+    catalog
+    |> Enum.uniq_by(&Map.fetch!(&1, :api))
+    |> Enum.map(fn entry ->
+      provider = Map.get(entry, :provider_name) || Map.get(entry, :provider) || entry.api
+
+      row(
+        {:api, entry.api},
+        "All #{provider} models",
+        "Used when a model-specific file is absent"
+      )
+    end)
   end
 
   @doc "Renders the prompt editor."

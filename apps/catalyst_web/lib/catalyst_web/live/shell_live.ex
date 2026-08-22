@@ -793,21 +793,12 @@ defmodule CatalystWeb.ShellLive do
   defp login_fun(provider) do
     override =
       Application.get_env(:catalyst_web, :auth_login_fun) ||
-        legacy_login_fun(provider)
+        CatalystWeb.Auth.LegacyLogin.configured(provider)
 
     case override do
       fun when is_function(fun, 1) -> fn -> fun.(provider) end
       fun when is_function(fun, 0) -> fun
       nil -> fn -> Catalyst.Auth.login(provider) end
-    end
-  end
-
-  # Preserve the two provider-specific test/config hooks that predate auth
-  # descriptors. New providers use :auth_login_fun or their registered flow.
-  defp legacy_login_fun(provider) do
-    case provider == Catalyst.Auth.XAIOAuth.provider_id() do
-      true -> Application.get_env(:catalyst_web, :grok_login_fun)
-      false -> Application.get_env(:catalyst_web, :login_fun)
     end
   end
 

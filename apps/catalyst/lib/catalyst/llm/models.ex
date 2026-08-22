@@ -34,6 +34,15 @@ defmodule Catalyst.LLM.Models do
     end
   end
 
+  @doc "Return the default model selected by the highest-priority healthy catalog."
+  @spec default_selection() ::
+          {:ok, %{provider_id: String.t(), model_id: String.t()}} | {:error, term()}
+  def default_selection do
+    with {:ok, %{selected: selected}} <- aggregate(nil, nil) do
+      {:ok, %{provider_id: selected.provider, model_id: selected.id}}
+    end
+  end
+
   @doc "Read all catalogs and select `model_id` from `provider_id` consistently."
   @spec catalog_snapshot(String.t(), String.t()) :: {:ok, snapshot()} | {:error, term()}
   def catalog_snapshot(provider_id, model_id)
@@ -176,7 +185,7 @@ defmodule Catalyst.LLM.Models do
          {:ok, snapshot} <- read_catalog_snapshot(config, id) do
       entries = Enum.map(snapshot.models, &annotate(&1, api, config))
       chosen = selected_entry(api, selected_api, snapshot.selected, config)
-      {[entries | groups], chosen || selected, failures}
+      {[entries | groups], selected || chosen, failures}
     else
       {:error, reason} ->
         failure = %{api: api, provider: config.id, reason: reason}
@@ -231,6 +240,7 @@ defmodule Catalyst.LLM.Models do
   end
 
   defp selected_entry(api, api, selected, config), do: annotate(selected, api, config)
+  defp selected_entry(api, nil, selected, config), do: annotate(selected, api, config)
   defp selected_entry(_api, _selected_api, _selected, _config), do: nil
 
   defp finish_aggregate({_groups, nil, failures}, selected_api) when is_binary(selected_api) do
