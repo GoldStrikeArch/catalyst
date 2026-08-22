@@ -1,7 +1,7 @@
 defmodule Catalyst.PackTest do
   use ExUnit.Case, async: true
 
-  alias Catalyst.Pack.{Manifest, Registry, ReleasePlan}
+  alias Catalyst.Pack.{BootPlan, Manifest, Registry, ReleasePlan}
 
   describe "manifest validation" do
     test "accepts bounded declarative metadata" do
@@ -35,12 +35,20 @@ defmodule Catalyst.PackTest do
       assert {:error, {:invalid_pack_trust, :sandboxed}} =
                Manifest.new(%{id: "valid", version: "1.0.0", trust: :sandboxed})
 
-      assert {:error, {:invalid_pack_field, :processes, _values}} =
+      assert {:error, {:invalid_pack_processes, _values}} =
                Manifest.new(%{
                  id: "valid",
                  version: "1.0.0",
                  trust: :compiled_trusted,
                  processes: [%{start: fn -> :ok end}]
+               })
+
+      assert {:error, {:invalid_pack_processes, _values}} =
+               Manifest.new(%{
+                 id: "valid",
+                 version: "1.0.0",
+                 trust: :compiled_trusted,
+                 processes: [%{id: :process, child_spec: String, extra: true}]
                })
 
       assert {:error, {:invalid_release_contribution, _contribution}} =
@@ -75,6 +83,13 @@ defmodule Catalyst.PackTest do
 
       assert {:ok, faux} = Registry.fetch("catalyst.provider.faux")
       assert [%{kind: :llm_provider, api: "faux"}] = faux.services
+
+      assert {:ok, openai} = Registry.fetch("catalyst.provider.openai")
+
+      assert Enum.map(openai.processes, & &1.id) == [
+               Catalyst.LLM.OpenAICodex.CatalogCache,
+               Catalyst.LLM.OpenAICodex.ConnCache
+             ]
 
       assert {:ok, coding} = Registry.fetch("catalyst.tools.coding")
 
@@ -114,6 +129,54 @@ defmodule Catalyst.PackTest do
                "catalyst.workbench.default",
                "catalyst.ide.core"
              ]
+    end
+  end
+
+  describe "boot process plan" do
+    test "includes selected pack children in declaration order and excludes absent packs" do
+      assert {:ok, openai} = Registry.fetch("catalyst.provider.openai")
+      assert {:ok, entries} = BootPlan.build([openai])
+
+      assert Enum.map(entries, & &1.id) == [
+               Catalyst.LLM.OpenAICodex.CatalogCache,
+               Catalyst.LLM.OpenAICodex.ConnCache
+             ]
+
+      assert Enum.map(entries, & &1.pack_id) == [
+               "catalyst.provider.openai",
+               "catalyst.provider.openai"
+             ]
+
+      assert Enum.map(entries, & &1.child_spec.id) == Enum.map(entries, & &1.id)
+      assert {:ok, ^entries} = BootPlan.build([openai])
+      assert {:ok, []} = BootPlan.build([manifest("without-processes")])
+      assert is_pid(Process.whereis(Catalyst.LLM.OpenAICodex.CatalogCache))
+      assert is_pid(Process.whereis(Catalyst.LLM.OpenAICodex.ConnCache))
+    end
+
+    test "rejects process id collisions across selected packs" do
+      first =
+        manifest("first",
+          processes: [
+            %{
+              id: Catalyst.LLM.OpenAICodex.CatalogCache,
+              child_spec: Catalyst.LLM.OpenAICodex.CatalogCache
+            }
+          ]
+        )
+
+      second =
+        manifest("second",
+          processes: [
+            %{
+              id: Catalyst.LLM.OpenAICodex.CatalogCache,
+              child_spec: Catalyst.LLM.OpenAICodex.ConnCache
+            }
+          ]
+        )
+
+      assert {:error, {:duplicate_pack_process_ids, [Catalyst.LLM.OpenAICodex.CatalogCache]}} =
+               BootPlan.build([first, second])
     end
   end
 

@@ -64,6 +64,16 @@ defmodule Catalyst.Pack.Catalog do
             catalog_priority: 100
           }
         }
+      ],
+      processes: [
+        %{
+          id: Catalyst.LLM.OpenAICodex.CatalogCache,
+          child_spec: Catalyst.LLM.OpenAICodex.CatalogCache
+        },
+        %{
+          id: Catalyst.LLM.OpenAICodex.ConnCache,
+          child_spec: Catalyst.LLM.OpenAICodex.ConnCache
+        }
       ]
     }),
     Manifest.new!(%{

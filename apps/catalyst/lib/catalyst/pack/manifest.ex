@@ -6,7 +6,7 @@ defmodule Catalyst.Pack.Manifest do
   callbacks, so catalog and release-plan resolution remain deterministic.
   """
 
-  alias Catalyst.Pack.ReleaseContribution
+  alias Catalyst.Pack.{ProcessDeclaration, ReleaseContribution}
 
   @enforce_keys [:id, :version, :trust]
   defstruct id: nil,
@@ -33,7 +33,6 @@ defmodule Catalyst.Pack.Manifest do
     :services,
     :extension_points,
     :contributions,
-    :processes,
     :assets,
     :sidecars,
     :release_contributions
@@ -52,7 +51,7 @@ defmodule Catalyst.Pack.Manifest do
           services: [declaration()],
           extension_points: [declaration()],
           contributions: [declaration()],
-          processes: [declaration()],
+          processes: [ProcessDeclaration.t()],
           assets: [declaration()],
           sidecars: [declaration()],
           release_contributions: [declaration()],
@@ -99,6 +98,7 @@ defmodule Catalyst.Pack.Manifest do
     with :ok <- validate_id(manifest.id),
          :ok <- validate_version(manifest.version),
          :ok <- validate_declarations(manifest),
+         {:ok, processes} <- ProcessDeclaration.validate_all(manifest.processes),
          {:ok, release_contributions} <-
            ReleaseContribution.validate_all(manifest.release_contributions),
          {:ok, dependencies} <- normalize_dependencies(manifest.dependencies),
@@ -107,7 +107,8 @@ defmodule Catalyst.Pack.Manifest do
          :ok <- validate_trust(manifest.trust),
          manifest = %{
            manifest
-           | dependencies: dependencies,
+           | processes: processes,
+             dependencies: dependencies,
              release_contributions: release_contributions
          },
          :ok <- validate_size(manifest) do

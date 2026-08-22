@@ -9,7 +9,10 @@ defmodule Catalyst.Application do
   def start(_type, _args) do
     :ok = Catalyst.Product.initialize!()
     :ok = Catalyst.Debug.init()
+    pack_children = Catalyst.Pack.BootPlan.child_specs!(Catalyst.Product.composition())
 
+    # Pack children are resolved before the supervisor starts, so malformed or
+    # colliding compiled declarations fail without partially booting Catalyst.
     children = [
       {Phoenix.PubSub, name: Catalyst.PubSub},
       # Durable workflow runs are explicitly started or resumed. Boot discovery
@@ -39,10 +42,7 @@ defmodule Catalyst.Application do
       Catalyst.Tools.Registry,
       # Holds OAuth credentials, refreshes tokens on demand.
       Catalyst.Auth.TokenStore,
-      # Live Codex model metadata with monotonic freshness and single-flight refresh.
-      Catalyst.LLM.OpenAICodex.CatalogCache,
-      # Idle Codex websocket connections between runs (delta-upload state).
-      Catalyst.LLM.OpenAICodex.ConnCache,
+      pack_children,
       # Stable owner of the per-session screenshot-geometry ETS table. Kept
       # outside the Helper deliberately: a Helper crash must not destroy the
       # recorded viewports, or the next click silently falls back to the
@@ -105,6 +105,8 @@ defmodule Catalyst.Application do
         max_seconds: 5
       }
     ]
+
+    children = List.flatten(children)
 
     with {:ok, _sup} = ok <-
            Supervisor.start_link(children, strategy: :one_for_one, name: Catalyst.Supervisor) do
