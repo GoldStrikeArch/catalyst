@@ -2,8 +2,9 @@
 
 `rel/recovery_host` is a small process supervisor outside the Catalyst VM. It
 starts one release command, waits for the VM's boot-readiness handshake, and
-retries one failed boot with the last-known-good product profile and
-`CATALYST_SAFE_MODE=1`.
+retries one failed boot with `CATALYST_SAFE_MODE=1`. The retry uses the
+last-known-good product profile, or the built-in `coding-agent` profile when no
+valid last-known-good profile exists.
 
 ```sh
 rel/recovery_host start -- ./bin/catalyst_desktop start

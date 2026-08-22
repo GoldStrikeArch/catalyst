@@ -249,10 +249,10 @@ start() {
   last_good=$(read_bounded "$last_good_path" 2>/dev/null | tr -d '\r\n' || true)
 
   case "$last_good" in
-    '') last_good=$profile ;;
+    '') last_good=$DEFAULT_PROFILE ;;
   esac
 
-  valid_profile "$last_good" || last_good=$profile
+  valid_profile "$last_good" || last_good=$DEFAULT_PROFILE
   write_profile "$last_good"
   write_status "rollback:$first_status:$profile:$last_good"
   run_child "$last_good" 1 2 "$@"

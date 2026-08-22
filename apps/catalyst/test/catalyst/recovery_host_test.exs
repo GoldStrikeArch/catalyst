@@ -39,6 +39,20 @@ defmodule Catalyst.RecoveryHostTest do
     assert File.read!(Path.join(state, "count")) == "2\n"
   end
 
+  test "uses the default profile when a failed boot has no last-known-good profile", %{
+    home: home,
+    state: state
+  } do
+    File.write!(Path.join(home, "product_profile"), "unknown-but-valid\n")
+
+    assert {"", 0} = run_host(home, state, "rollback", "coding-agent")
+    assert File.read!(Path.join(home, "product_profile")) == "coding-agent\n"
+    assert File.read!(Path.join(state, "last_known_good_profile")) == "coding-agent\n"
+    assert File.read!(Path.join(state, "safe_mode")) == "1\n"
+    assert File.read!(Path.join(state, "boot_status")) == "stopped:0:coding-agent:1\n"
+    assert File.read!(Path.join(state, "count")) == "2\n"
+  end
+
   test "does not roll back a child that failed after proving readiness", %{
     home: home,
     state: state
