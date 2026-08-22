@@ -5,9 +5,9 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   alias Catalyst.Resources
   alias CatalystWeb.ShellLive.SessionLifecycle
-  alias CatalystWeb.UI.{Registry, SafeRender}
+  alias CatalystWeb.UI.SafeRender
   alias CatalystWeb.Workbench
-  alias CatalystWeb.Workbench.{IDEView, Workspace}
+  alias CatalystWeb.Workbench.{IDEView, RenderTarget, Workspace}
 
   @impl true
   def mount(_params, session, socket) do
@@ -79,6 +79,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
         id="workbench-host"
         data-workbench-owner={owner(@workbench_metadata)}
         data-workbench-generation={@workbench_metadata[:generation]}
+        data-workbench-target={target_id(@workbench_target)}
       >
         <%= case @workbench_error do %>
           <% nil -> %>
@@ -104,7 +105,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   defp finish_mount(handle, context, socket) do
     with {:ok, state, effects} <- Workbench.mount(handle, context),
-         {:ok, target} <- registered_target(handle, state),
+         {:ok, target} <- pin_target(handle, state),
          {:ok, forms} <- Workbench.forms(handle, state) do
       socket =
         assign(socket,
@@ -140,12 +141,11 @@ defmodule CatalystWeb.WorkbenchHostLive do
   defp apply_transition(socket, state, effects) do
     handle = socket.assigns.workbench_handle
 
-    with {:ok, target} <- registered_target(handle, state),
+    with :ok <- validate_pinned_target(handle, state, socket.assigns.workbench_target),
          {:ok, forms} <- Workbench.forms(handle, state) do
       socket
       |> assign(
         workbench_state: state,
-        workbench_target: target,
         workbench_forms: to_forms(forms),
         workbench_error: nil
       )
@@ -184,7 +184,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   defp restore_remount(socket, old_handle, new_handle, capsule, context) do
     with {:ok, state, effects} <- Workbench.restore(new_handle, capsule, context),
-         {:ok, target} <- registered_target(new_handle, state),
+         {:ok, target} <- pin_target(new_handle, state),
          {:ok, forms} <- Workbench.forms(new_handle, state) do
       socket =
         assign(socket,
@@ -210,13 +210,16 @@ defmodule CatalystWeb.WorkbenchHostLive do
     put_flash(socket, :error, "Could not apply active workbench: #{inspect(reason)}")
   end
 
-  defp registered_target(handle, state) do
+  defp pin_target(handle, state) do
     with {:ok, id} <- Workbench.render_target(handle, state),
-         {:ok, target} <- Registry.fetch_page(id) do
+         {:ok, target} <- RenderTarget.capture(id, handle.resolution) do
       {:ok, target}
-    else
-      :error -> {:error, :workbench_render_target_not_registered}
-      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_pinned_target(handle, state, target) do
+    with {:ok, id} <- Workbench.render_target(handle, state) do
+      RenderTarget.validate_id(target, id)
     end
   end
 
@@ -318,11 +321,16 @@ defmodule CatalystWeb.WorkbenchHostLive do
   end
 
   defp render_workbench(
-         %{workbench_target: {IDEView, :render}, workbench_metadata: %{owner: :builtin}} = assigns
+         %{
+           workbench_target: %RenderTarget{module: IDEView, function: :render},
+           workbench_metadata: %{owner: :builtin}
+         } = assigns
        ),
        do: IDEView.render(assigns)
 
-  defp render_workbench(%{workbench_target: {module, function}} = assigns) do
+  defp render_workbench(
+         %{workbench_target: %RenderTarget{module: module, function: function}} = assigns
+       ) do
     view_assigns =
       Map.take(assigns, [:workbench_state, :workbench_forms, :workbench_metadata])
 
@@ -364,4 +372,6 @@ defmodule CatalystWeb.WorkbenchHostLive do
   end
 
   defp owner(metadata), do: metadata |> Map.get(:owner, :unavailable) |> to_string()
+  defp target_id(%RenderTarget{id: id}), do: id
+  defp target_id(_unmounted), do: nil
 end

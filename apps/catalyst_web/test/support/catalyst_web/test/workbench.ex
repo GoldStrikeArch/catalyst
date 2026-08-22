@@ -21,6 +21,9 @@ defmodule CatalystWeb.Test.Workbench do
   end
 
   @impl true
+  def event("test:target", %{"target" => target}, state, _context) when is_binary(target),
+    do: {:ok, %{state | target: target}, []}
+
   defdelegate event(event, params, state, context), to: CatalystWeb.Workbench.IDE
 
   @impl true

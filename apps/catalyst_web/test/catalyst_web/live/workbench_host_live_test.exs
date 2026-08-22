@@ -7,6 +7,7 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
   alias Catalyst.Extension.Manifest
   alias Catalyst.ExtensionAPI
   alias Catalyst.Runtime.{ExtensionPoints, GenerationStore, Generations, Leases, PermissionPolicy}
+  alias CatalystWeb.UI.Registry
   alias CatalystWeb.Workbench
 
   defmodule DenyWrites do
@@ -119,6 +120,72 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
     second_conn = build_conn() |> init_test_session(%{"workbench_workspace" => root})
     {:ok, second_view, _html} = live(second_conn, "/ide")
     assert has_element?(second_view, "#command-output", "test.workbench-b")
+  end
+
+  test "a mount pins its render descriptor until an explicit generation remount", %{
+    conn: conn,
+    root: root
+  } do
+    target_a_owner = "workbench_target_a_#{System.unique_integer([:positive])}"
+    target_b_owner = "workbench_target_b_#{System.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      Registry.unregister_owner(target_a_owner)
+      Registry.unregister_owner(target_b_owner)
+    end)
+
+    assert :ok =
+             Registry.register_page("ide", CatalystWeb.Test.WorkbenchTargetA,
+               owner: target_a_owner
+             )
+
+    assert {:ok, _first_generation} =
+             Generations.install("workbench_source", [manifest("test.workbench-a")])
+
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/ide")
+    wait_until(fn -> has_element?(view, "#workbench-target-a[data-busy='0']") end)
+
+    assert :ok =
+             Registry.register_page("ide", CatalystWeb.Test.WorkbenchTargetB,
+               owner: target_b_owner
+             )
+
+    view |> element("#workbench-target-a-transition") |> render_click()
+    assert has_element?(view, "#workbench-target-a")
+    refute has_element?(view, "#workbench-target-b")
+
+    assert {:ok, _second_generation} =
+             Generations.install("workbench_source", [manifest("test.workbench-b")])
+
+    view |> element("#workbench-target-a-remount") |> render_click()
+    assert has_element?(view, "#workbench-target-b")
+    refute has_element?(view, "#workbench-target-a")
+    assert has_element?(view, "#workbench-host[data-workbench-owner='test.workbench-b']")
+  end
+
+  test "a mounted workbench fails closed when its state selects another target id", %{
+    conn: conn,
+    root: root
+  } do
+    target_owner = "workbench_target_change_#{System.unique_integer([:positive])}"
+    on_exit(fn -> Registry.unregister_owner(target_owner) end)
+
+    assert :ok =
+             Registry.register_page("ide", CatalystWeb.Test.WorkbenchTargetA, owner: target_owner)
+
+    assert {:ok, _generation} =
+             Generations.install("workbench_source", [manifest("test.workbench-a")])
+
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/ide")
+    wait_until(fn -> has_element?(view, "#workbench-target-a[data-busy='0']") end)
+
+    view |> element("#workbench-target-a-change") |> render_click()
+
+    assert has_element?(view, "#workbench-error")
+    assert has_element?(view, "#workbench-error-reason", "workbench_render_target_changed")
+    refute has_element?(view, "#workbench-target-a")
   end
 
   test "a mounted host atomically restores into the active workbench", %{conn: conn, root: root} do

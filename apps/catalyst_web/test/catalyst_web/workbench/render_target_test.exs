@@ -1,0 +1,51 @@
+defmodule CatalystWeb.Workbench.RenderTargetTest do
+  use CatalystWeb.ConnCase, async: false
+
+  alias CatalystWeb.UI.Registry
+  alias CatalystWeb.Workbench
+  alias CatalystWeb.Workbench.RenderTarget
+
+  setup do
+    owner = "render_target_test_#{System.unique_integer([:positive])}"
+    on_exit(fn -> Registry.unregister_owner(owner) end)
+    %{owner: owner}
+  end
+
+  test "captures an immutable effective descriptor", %{owner: owner} do
+    assert :ok =
+             Registry.register_page("pinned-target", CatalystWeb.Test.WorkbenchTargetA,
+               owner: owner
+             )
+
+    assert {:ok, resolution} = Workbench.resolve()
+    assert {:ok, target} = RenderTarget.capture("pinned-target", resolution)
+
+    assert target.id == "pinned-target"
+    assert target.module == CatalystWeb.Test.WorkbenchTargetA
+    assert target.function == :render
+    assert target.owner == owner
+    assert target.snapshot_id == resolution.snapshot_id
+
+    assert :ok =
+             Registry.register_page("pinned-target", CatalystWeb.Test.WorkbenchTargetB,
+               owner: owner
+             )
+
+    assert target.module == CatalystWeb.Test.WorkbenchTargetA
+    assert {:ok, replacement} = RenderTarget.capture("pinned-target", resolution)
+    assert replacement.module == CatalystWeb.Test.WorkbenchTargetB
+  end
+
+  test "fails closed for missing or non-renderable descriptors", %{owner: owner} do
+    assert {:ok, resolution} = Workbench.resolve()
+
+    assert {:error, :workbench_render_target_not_registered} =
+             RenderTarget.capture("missing-target", resolution)
+
+    assert :ok =
+             Registry.register_page("not-renderable", CatalystWeb.Test.Workbench, owner: owner)
+
+    assert {:error, {:workbench_render_target_unavailable, "not-renderable", :undefined}} =
+             RenderTarget.capture("not-renderable", resolution)
+  end
+end
