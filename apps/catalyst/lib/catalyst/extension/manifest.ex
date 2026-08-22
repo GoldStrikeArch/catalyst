@@ -23,6 +23,7 @@ defmodule Catalyst.Extension.Manifest do
             health_checks: [],
             migrations: [],
             capabilities: [],
+            trust: :local_trusted,
             metadata: %{}
 
   @type dependency :: %{id: String.t(), requirement: String.t()}
@@ -39,6 +40,7 @@ defmodule Catalyst.Extension.Manifest do
           health_checks: [map()],
           migrations: [map()],
           capabilities: [atom()],
+          trust: Catalyst.Extension.Trust.t(),
           metadata: map()
         }
 

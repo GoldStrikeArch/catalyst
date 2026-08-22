@@ -38,6 +38,23 @@ defmodule Catalyst.ExtensionManifestTest do
     assert manifest.api == 2
     assert manifest.requires == [%{id: "test.base", requirement: "~> 1.0"}]
     assert manifest.capabilities == [:network]
+    assert manifest.trust == :local_trusted
+  end
+
+  test "records the execution trust boundary explicitly" do
+    assert {:ok, isolated} =
+             Manifest.new(%{
+               id: "test.isolated",
+               version: "1.0.0",
+               trust: :isolated_worker
+             })
+
+    assert isolated.trust == :isolated_worker
+    assert Catalyst.Extension.Trust.isolated?(isolated.trust)
+    refute Catalyst.Extension.Trust.unrestricted?(isolated.trust)
+
+    assert {:error, {:invalid_manifest_trust, :sandboxed}} =
+             Manifest.new(%{id: "test.invalid", version: "1.0.0", trust: :sandboxed})
   end
 
   test "rejects invalid and unknown manifest data" do

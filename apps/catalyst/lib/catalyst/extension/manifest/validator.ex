@@ -6,7 +6,7 @@ defmodule Catalyst.Extension.Manifest.Validator do
   candidate graph construction belong to `Catalyst.Runtime.Candidate.Builder`.
   """
 
-  alias Catalyst.Extension.Manifest
+  alias Catalyst.Extension.{Manifest, Trust}
 
   @fields [
     :api,
@@ -20,6 +20,7 @@ defmodule Catalyst.Extension.Manifest.Validator do
     :health_checks,
     :migrations,
     :capabilities,
+    :trust,
     :metadata
   ]
 
@@ -51,6 +52,7 @@ defmodule Catalyst.Extension.Manifest.Validator do
          {:ok, requires} <- normalize_requires(Map.get(manifest, :requires, [])),
          :ok <- validate_declarations(manifest),
          {:ok, capabilities} <- normalize_capabilities(Map.get(manifest, :capabilities, [])),
+         :ok <- Trust.validate(Map.get(manifest, :trust, :local_trusted)),
          :ok <- validate_metadata(Map.get(manifest, :metadata, %{})) do
       {:ok,
        struct!(Manifest, %{
@@ -65,6 +67,7 @@ defmodule Catalyst.Extension.Manifest.Validator do
          health_checks: Map.get(manifest, :health_checks, []),
          migrations: Map.get(manifest, :migrations, []),
          capabilities: capabilities,
+         trust: Map.get(manifest, :trust, :local_trusted),
          metadata: Map.get(manifest, :metadata, %{})
        })}
     end
