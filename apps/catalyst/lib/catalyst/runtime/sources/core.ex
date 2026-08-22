@@ -16,6 +16,7 @@ defmodule Catalyst.Runtime.Sources.Core do
     Context,
     ContractRef,
     Contribution,
+    PermissionPolicy,
     RunEngine,
     Scope,
     ServiceKey,
@@ -45,6 +46,7 @@ defmodule Catalyst.Runtime.Sources.Core do
   defp service_claims(context) do
     RunEngine.all_claims(context) ++
       SessionEngine.claims() ++
+      PermissionPolicy.claims() ++
       provider_claims() ++ prompt_policy_claims() ++ context_policy_claims()
   end
 

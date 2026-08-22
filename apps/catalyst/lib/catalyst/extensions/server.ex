@@ -390,6 +390,18 @@ defmodule Catalyst.Extensions.Server do
     :ok =
       Catalyst.Runtime.ExtensionPoints.register_host(
         %{
+          id: "agent.permission_policy",
+          cardinality: :many,
+          contract: Catalyst.Contracts.PermissionPolicy.V1.ref(),
+          service: {"agent", "permission_policy"},
+          default_binding: {:pin, :action}
+        },
+        nil
+      )
+
+    :ok =
+      Catalyst.Runtime.ExtensionPoints.register_host(
+        %{
           id: "agent.session_engine",
           cardinality: :many,
           contract: Catalyst.Contracts.SessionEngine.V1.ref(),

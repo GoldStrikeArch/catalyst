@@ -14,6 +14,7 @@ defmodule Catalyst.Runtime.CandidateStager do
     CandidateProcesses,
     ExtensionPoints,
     HealthChecks,
+    PermissionPolicy,
     RunEngine,
     SessionEngine
   }
@@ -46,7 +47,10 @@ defmodule Catalyst.Runtime.CandidateStager do
 
   defp existing_claims do
     ExtensionPoints.base_claims()
-    |> Kernel.++(RunEngine.unmanaged_claims() ++ SessionEngine.unmanaged_claims())
+    |> Kernel.++(
+      RunEngine.unmanaged_claims() ++
+        SessionEngine.unmanaged_claims() ++ PermissionPolicy.unmanaged_claims()
+    )
     |> Enum.uniq_by(&Catalyst.Runtime.Claim.stable_key/1)
   end
 

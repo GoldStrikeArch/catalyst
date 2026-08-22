@@ -11,6 +11,7 @@ defmodule Catalyst.Agent.ToolRunner do
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Hooks, Message}
   alias Catalyst.Content.Text
+  alias Catalyst.Runtime.PermissionPolicy
   alias Catalyst.Session.RunConfig
   alias Catalyst.Tools.{Context, Registry, Truncate}
 
@@ -166,11 +167,24 @@ defmodule Catalyst.Agent.ToolRunner do
   end
 
   defp run_resolved_tool(entry, args, tool_call, hook_ctx, config, emit) do
+    case authorize_tool(hook_ctx, config) do
+      {:deny, reason} ->
+        blocked_tool_result(reason)
+
+      {:challenge, challenge} ->
+        blocked_tool_result({:permission_challenge, challenge})
+
+      :allow ->
+        run_hooked_tool(entry, args, tool_call, hook_ctx, config, emit)
+    end
+  end
+
+  defp run_hooked_tool(entry, args, tool_call, hook_ctx, config, emit) do
     case before_tool_call(hook_ctx, config) do
       {:block, reason} ->
         blocked_tool_result(reason)
 
-      _ ->
+      _continue ->
         ctx = build_execution_context(tool_call, config, emit)
 
         execute_tool(entry, args, ctx)
@@ -220,6 +234,26 @@ defmodule Catalyst.Agent.ToolRunner do
       snapshot when is_map(snapshot) -> Hooks.before_tool_call(hook_ctx, snapshot)
       _missing -> Hooks.before_tool_call(hook_ctx)
     end
+  end
+
+  defp authorize_tool(hook_ctx, config) do
+    principal = %{
+      type: :agent,
+      session_id: session_id(config),
+      root_session_id: Map.get(config, :root_session_id, session_id(config)),
+      agent_depth: Map.get(config, :agent_depth, 0)
+    }
+
+    action = %{
+      type: :tool_call,
+      name: hook_ctx.name,
+      call_id: hook_ctx.call_id,
+      arguments: hook_ctx.args
+    }
+
+    resource = %{type: :tool, name: hook_ctx.name}
+    context = %{cwd: hook_ctx.cwd}
+    PermissionPolicy.authorize(action, principal, resource, context)
   end
 
   defp apply_after_tool_hook(raw_result, hook_ctx, config) do
