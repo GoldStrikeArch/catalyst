@@ -480,6 +480,7 @@ defmodule Catalyst.Extensions do
           owner: String.t(),
           path: Path.t() | nil,
           managed?: boolean(),
+          guarantees: [Catalyst.Runtime.ImplementationGuarantee.t()],
           tools: [String.t()],
           modules: [module()],
           metadata: map(),
@@ -503,7 +504,8 @@ defmodule Catalyst.Extensions do
   @doc """
   Bounded, UI-safe summary of the extension runtime: boot status, the current
   runtime generation, and every live owner — including degraded owners and
-  their `purge_failures` — with a per-owner process count.
+  their `purge_failures` — with observable implementation guarantees and a
+  per-owner process count.
 
   Process counts are computed in one supervised task with a deadline
   (`config :catalyst, :extensions_snapshot_timeout`, default 1000 ms), because
@@ -516,12 +518,21 @@ defmodule Catalyst.Extensions do
   def snapshot do
     owners = list_loaded()
     counts = bounded_process_counts(Enum.map(owners, & &1.owner))
+    managed_owners = Catalyst.Runtime.GenerationStore.owners()
 
     %{
       boot_status: boot_status(),
       safe_mode?: safe_mode?(),
       generation: generation_token(),
-      owners: Enum.map(owners, &Map.put(&1, :process_count, Map.get(counts, &1.owner, :unknown)))
+      owners:
+        Enum.map(owners, fn owner ->
+          owner
+          |> Map.put(:process_count, Map.get(counts, owner.owner, :unknown))
+          |> Map.put(
+            :guarantees,
+            Catalyst.Runtime.ImplementationGuarantee.owner(owner.owner, managed_owners)
+          )
+        end)
     }
   end
 

@@ -550,6 +550,14 @@ and executes it only in a candidate-owned external Elixir VM. That boundary isol
 and host code loading, but it is not an OS sandbox and can still access the current user's files
 and network.
 
+`runtime_graph` and the Extensions panel report the guarantee derived from the
+active invocation target, independently of the manifest trust label:
+artifact-qualified local code, an external worker, a sovereign local process,
+or weak same-name local code. Imperative API-v1 and raw extensions are marked
+raw/legacy opaque because their side effects cannot be described completely.
+These labels describe code identity and invocation boundaries, not resource
+sandboxing.
+
 An extension module may also export an optional **`metadata/0`** returning
 `%{name: "…", description: "…"}` — it is shown on the Extensions panel so humans can
 tell at a glance what an installed extension does.

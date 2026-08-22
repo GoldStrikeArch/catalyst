@@ -27,6 +27,7 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
     assert text =~ "processes="
     assert text =~ "capabilities="
     assert text =~ "migrations="
+    assert text =~ "guarantee=:same_name_local"
     assert result.details.claim_count > 0
     assert result.details.contribution_count > 0
     assert is_integer(result.details.generation_count)
@@ -35,6 +36,7 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
     assert is_integer(result.details.process_count)
     assert is_integer(result.details.capability_count)
     assert is_integer(result.details.migration_count)
+    assert result.details.guarantee_counts[:same_name_local] > 0
     assert byte_size(result.details.snapshot_id) == 64
   end
 

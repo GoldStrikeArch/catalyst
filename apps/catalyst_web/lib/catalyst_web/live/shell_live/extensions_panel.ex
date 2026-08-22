@@ -10,8 +10,9 @@ defmodule CatalystWeb.ShellLive.ExtensionsPanel do
 
   Owner data comes from the bounded `Catalyst.Extensions.snapshot/0`: per-owner
   process counts are computed off-process with a deadline (degrading to
-  `:unknown`), and no extension-authored code (`Processes.list/1`,
-  `mod.name/0`) runs on the caller's data path.
+  `:unknown`), implementation guarantees come from active invocation targets,
+  and no extension-authored code (`Processes.list/1`, `mod.name/0`) runs on the
+  caller's data path.
   """
 
   alias Catalyst.{Extensions, Hooks, Model}
@@ -25,8 +26,8 @@ defmodule CatalystWeb.ShellLive.ExtensionsPanel do
 
   @doc """
   Snapshot of the extension system for rendering: loaded/disabled extensions
-  (loaded entries carry `:status`, `:purge_failures`, and a bounded
-  `:process_count`) and the live contents of every registry. Cheap enough to
+  (loaded entries carry `:status`, `:purge_failures`, `:guarantees`, and a
+  bounded `:process_count`) and the live contents of every registry. Cheap enough to
   rebuild on each navigation/action.
   """
   @spec build(Model.t() | nil, keyword() | map(), map()) :: map()

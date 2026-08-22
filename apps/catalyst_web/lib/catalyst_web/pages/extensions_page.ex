@@ -188,6 +188,14 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
             >
               {ext.process_count} process(es)
             </span>
+            <span
+              :for={guarantee <- ext.guarantees}
+              class="rounded-full bg-info/10 px-2 py-0.5 text-xs text-info"
+              title={Catalyst.Runtime.ImplementationGuarantee.description(guarantee)}
+              data-ext-guarantee={guarantee}
+            >
+              {Catalyst.Runtime.ImplementationGuarantee.label(guarantee)}
+            </span>
 
             <span class="flex-1"></span>
 

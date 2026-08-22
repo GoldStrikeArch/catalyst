@@ -18,6 +18,7 @@ defmodule Catalyst.Tools.RuntimeGraph do
     Contribution,
     Generation,
     Generations,
+    ImplementationGuarantee,
     Lease,
     Leases,
     Resolver,
@@ -76,6 +77,11 @@ defmodule Catalyst.Tools.RuntimeGraph do
           process_count: generation_process_count(generations),
           capability_count: generation_declaration_count(generations, :capabilities),
           migration_count: generation_declaration_count(generations, :migrations),
+          guarantee_counts:
+            Enum.frequencies_by(
+              graph.claims,
+              &ImplementationGuarantee.classify(&1.implementation)
+            ),
           truncation: truncation
         })
 
@@ -173,7 +179,9 @@ defmodule Catalyst.Tools.RuntimeGraph do
   defp claim_line(%Claim{} = claim) do
     "  - #{claim_identity(claim)} owner=#{inspect(claim.owner)} " <>
       "scope=#{inspect(claim.scope.constraints)} priority=#{claim.priority} " <>
-      "binding=#{inspect(claim.binding)} provenance=#{inspect(claim.provenance)}\n"
+      "binding=#{inspect(claim.binding)} " <>
+      "guarantee=#{inspect(ImplementationGuarantee.classify(claim.implementation))} " <>
+      "provenance=#{inspect(claim.provenance)}\n"
   end
 
   defp claim_identity(%Claim{} = claim) do

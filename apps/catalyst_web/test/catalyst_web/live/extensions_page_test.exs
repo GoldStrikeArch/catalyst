@@ -49,6 +49,12 @@ defmodule CatalystWeb.ExtensionsPageTest do
     assert has_element?(view, card, "panel_probe")
     assert has_element?(view, card <> " button", "Disable")
 
+    assert has_element?(
+             view,
+             card <> ~s( [data-ext-guarantee="raw_legacy_opaque"]),
+             "raw / legacy opaque"
+           )
+
     # Registry introspection: built-in tools, providers, and pages all listed.
     assert has_element?(view, "#live-registries", "Live registries")
     assert has_element?(view, "#live-registries", "built-in")
@@ -198,6 +204,7 @@ defmodule CatalystWeb.ExtensionsPageTest do
     # Owner entries carry the snapshot/0 shape: degraded status + bounded count.
     assert probe.status == :ok
     assert probe.purge_failures == []
+    assert probe.guarantees == [:raw_legacy_opaque]
     assert is_integer(probe.process_count) or probe.process_count == :unknown
 
     # Tool rows come from the registry table (never extension name/0 calls),
@@ -212,6 +219,7 @@ defmodule CatalystWeb.ExtensionsPageTest do
       owner: "degraded_probe",
       path: nil,
       managed?: false,
+      guarantees: [:raw_legacy_opaque],
       tools: [],
       modules: [],
       metadata: %{},
@@ -231,6 +239,7 @@ defmodule CatalystWeb.ExtensionsPageTest do
     badge = doc |> LazyHTML.query(~s([data-degraded-owner="degraded_probe"])) |> LazyHTML.text()
 
     assert badge =~ "degraded"
+    assert card_text =~ "raw / legacy opaque"
     assert card_text =~ "a previous purge left residue"
     assert card_text =~ "Catalyst.Hooks.unregister/1"
   end
