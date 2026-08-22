@@ -2,7 +2,8 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
   use ExUnit.Case, async: false
 
   alias Catalyst.Content
-  alias Catalyst.Runtime.ReadModel
+  alias Catalyst.Extension.Manifest
+  alias Catalyst.Runtime.{Generations, ReadModel}
   alias Catalyst.Tools.RuntimeGraph
 
   setup do
@@ -61,6 +62,33 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
     assert [%Content.Text{text: combined_view}] = combined.content
     assert combined_view =~ "Resolution: {:error, :no_matching_claim}"
     refute combined_view =~ "Catalyst.Agent.Loop"
+  end
+
+  test "reports generation owners, capabilities, and migration declarations" do
+    manifest =
+      Manifest.new!(%{
+        id: "runtime-graph-footprint",
+        version: "1.0.0",
+        capabilities: [:filesystem],
+        migrations: [
+          %{id: "workspace-state", from: 0, to: 1, strategy: :new_instances_only}
+        ]
+      })
+
+    assert {:ok, generation} = Generations.install("runtime-graph-owner", [manifest])
+
+    on_exit(fn ->
+      :ok = Generations.clear()
+    end)
+
+    result = RuntimeGraph.execute(%{}, context())
+    assert [%Content.Text{text: text}] = result.content
+    assert text =~ Catalyst.Runtime.ActivationId.to_wire(generation.id)
+    assert text =~ ~s(owners=["runtime-graph-owner"])
+    assert text =~ "capabilities=[:filesystem]"
+    assert text =~ ~s(migrations=["workspace-state"])
+    assert result.details.capability_count == 1
+    assert result.details.migration_count == 1
   end
 
   test "invalid service keys raise a bounded tool error" do
