@@ -16,7 +16,25 @@ defmodule Catalyst.Product do
 
   @doc "Return the configured product profile module."
   @spec profile() :: profile()
-  def profile, do: Application.get_env(:catalyst, :product_profile, Catalyst.Product.Default)
+  def profile do
+    case Application.fetch_env(:catalyst, :product_profile) do
+      {:ok, profile} -> profile
+      :error -> Catalyst.Product.Selection.active().module
+    end
+  end
+
+  @doc "Describe the active product profile and how it was selected."
+  @spec active() :: %{id: String.t(), module: module(), source: atom()}
+  def active do
+    case Application.fetch_env(:catalyst, :product_profile) do
+      {:ok, profile} -> %{id: profile.id(), module: profile, source: :application}
+      :error -> Catalyst.Product.Selection.active()
+    end
+  end
+
+  @doc "Persist an allow-listed product profile for the next boot."
+  @spec select(String.t()) :: {:ok, :restart_required} | {:error, term()}
+  defdelegate select(id), to: Catalyst.Product.Selection
 
   @doc "Return the configured product identifier."
   @spec id() :: String.t()

@@ -37,6 +37,10 @@ defmodule Catalyst.Paths do
   @spec runtime_assets() :: Path.t()
   def runtime_assets, do: join("runtime-assets")
 
+  @doc "Durable selected product-profile id."
+  @spec product_profile() :: Path.t()
+  def product_profile, do: join("product_profile")
+
   @doc "Default session-store root."
   @spec sessions() :: Path.t()
   def sessions, do: join("sessions")
