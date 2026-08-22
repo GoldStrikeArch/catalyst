@@ -14,60 +14,6 @@ defmodule Catalyst.Tools.Registry do
 
   alias Catalyst.Tasks
 
-  alias Catalyst.Tools.{
-    Read,
-    Write,
-    Edit,
-    Ls,
-    Bash,
-    Ripgrep,
-    Fd,
-    Sd,
-    AstGrep,
-    Computer,
-    DevelopTool,
-    InstallExtension,
-    ReloadTool,
-    RollbackTool,
-    ReadLog,
-    RuntimeGraph,
-    ListAgents,
-    SpawnAgent,
-    AppleScript,
-    OpenApp,
-    ListApps,
-    Clipboard,
-    Fetch,
-    ShellSession
-  }
-
-  @default [
-    Read,
-    Ls,
-    Ripgrep,
-    Fd,
-    Bash,
-    Write,
-    Edit,
-    Sd,
-    AstGrep,
-    Computer,
-    DevelopTool,
-    InstallExtension,
-    ReloadTool,
-    RollbackTool,
-    ReadLog,
-    RuntimeGraph,
-    ListAgents,
-    SpawnAgent,
-    Fetch,
-    AppleScript,
-    OpenApp,
-    ListApps,
-    Clipboard,
-    ShellSession
-  ]
-
   @metadata_timeout 1_000
   @cache_prefix {__MODULE__, :definition}
 
@@ -98,7 +44,7 @@ defmodule Catalyst.Tools.Registry do
 
   @doc "The default tool module list."
   @spec default_tools() :: [module()]
-  def default_tools, do: @default
+  def default_tools, do: Catalyst.Product.tools()
 
   @doc """
   Map of tool name => validated entry for the given tool list.
@@ -107,7 +53,7 @@ defmodule Catalyst.Tools.Registry do
   map (and calling each tool's `name/0`) on every lookup.
   """
   @spec index([module()]) :: index()
-  def index(tools \\ @default) do
+  def index(tools \\ default_tools()) do
     Enum.reduce(tools, %{}, fn module, index ->
       case cached_entry(module) do
         {:ok, entry} -> Map.put(index, entry.definition.name, entry)
@@ -289,7 +235,7 @@ defmodule Catalyst.Tools.Registry do
   @spec to_provider_tools([module()] | index()) :: [
           %{name: String.t(), description: String.t(), parameters: map()}
         ]
-  def to_provider_tools(tools \\ @default)
+  def to_provider_tools(tools \\ default_tools())
 
   def to_provider_tools(tools) when is_list(tools) do
     Enum.flat_map(tools, fn module ->
@@ -316,7 +262,7 @@ defmodule Catalyst.Tools.Registry do
 
   @impl true
   def init(_opts) do
-    case validate_defaults(@default) do
+    case validate_defaults(default_tools()) do
       :ok -> {:ok, %{}}
       {:error, reason} -> {:stop, reason}
     end
