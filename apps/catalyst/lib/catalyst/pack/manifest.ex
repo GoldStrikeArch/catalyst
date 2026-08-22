@@ -6,6 +6,8 @@ defmodule Catalyst.Pack.Manifest do
   callbacks, so catalog and release-plan resolution remain deterministic.
   """
 
+  alias Catalyst.Pack.ReleaseContribution
+
   @enforce_keys [:id, :version, :trust]
   defstruct id: nil,
             version: nil,
@@ -97,11 +99,17 @@ defmodule Catalyst.Pack.Manifest do
     with :ok <- validate_id(manifest.id),
          :ok <- validate_version(manifest.version),
          :ok <- validate_declarations(manifest),
+         {:ok, release_contributions} <-
+           ReleaseContribution.validate_all(manifest.release_contributions),
          {:ok, dependencies} <- normalize_dependencies(manifest.dependencies),
          :ok <- validate_enum_list(:hosts, manifest.hosts, @hosts),
          :ok <- validate_enum_list(:platforms, manifest.platforms, @platforms),
          :ok <- validate_trust(manifest.trust),
-         manifest = %{manifest | dependencies: dependencies},
+         manifest = %{
+           manifest
+           | dependencies: dependencies,
+             release_contributions: release_contributions
+         },
          :ok <- validate_size(manifest) do
       {:ok, manifest}
     end

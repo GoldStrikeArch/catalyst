@@ -86,8 +86,6 @@ defmodule Catalyst.Umbrella.MixProject do
     ]
   end
 
-  @fast_tools ~w(rg fd sd ast-grep)
-
   # Deterministic packaging preflight (desktop release). Every input the
   # bundling steps below copy into the release must exist on the build host,
   # otherwise the app would assemble fine but ship without runtime asset
@@ -104,8 +102,9 @@ defmodule Catalyst.Umbrella.MixProject do
         {tailwind_bin(),
          "tailwind standalone binary under #{build_root()} (run `mix assets.setup`)"}
       ] ++
-        for exe <- @fast_tools do
-          {System.find_executable(exe), "fast tool `#{exe}` on PATH"}
+        for executable <- release_executables!(release) do
+          {System.find_executable(executable.source),
+           "executable `#{executable.source}` from pack #{executable.pack_id} on PATH"}
         end ++ computer_helper_checks()
 
     case for {nil, label} <- checks, do: label do
@@ -346,22 +345,47 @@ defmodule Catalyst.Umbrella.MixProject do
     end
   end
 
-  # Bundle the fast-tool binaries (rg/fd/sd/ast-grep) into the core app's priv/bin
-  # so grep/find/replace/ast_grep work in the packaged app (a GUI .app has a minimal
-  # PATH). release_preflight!/1 already verified they exist on the build host.
+  # Bundle pack-declared executables into the core app. The release plan owns
+  # target validation and collision detection; preflight verified every source.
   defp bundle_fast_tools(release) do
-    bindir = release |> core_dir() |> Path.join("priv/bin")
-    File.mkdir_p!(bindir)
-
-    for exe <- @fast_tools do
+    for executable <- release_executables!(release) do
       src =
-        System.find_executable(exe) ||
-          raise "bundle_fast_tools: `#{exe}` disappeared from PATH after preflight"
+        System.find_executable(executable.source) ||
+          raise "bundle_fast_tools: `#{executable.source}` disappeared from PATH after preflight"
 
-      cp_bin!(src, Path.join(bindir, exe))
+      dest = release |> core_dir() |> Path.join(executable.target)
+      File.mkdir_p!(Path.dirname(dest))
+      cp_bin!(src, dest)
     end
 
     :ok
+  end
+
+  defp release_executables!(release) do
+    {product, host} = release_product!(release.name)
+    platform = release_platform()
+
+    case Catalyst.Pack.ReleasePlan.for_target(product.spec(), host, platform) do
+      {:ok, plan} ->
+        for %{pack_id: pack_id, declaration: %{kind: :executable} = declaration} <-
+              plan.contributions,
+            do: Map.put(declaration, :pack_id, pack_id)
+
+      {:error, reason} ->
+        raise "invalid pack release plan for #{release.name}: #{inspect(reason)}"
+    end
+  end
+
+  defp release_product!(:catalyst_desktop), do: {Catalyst.Product.Default, :desktop}
+  defp release_product!(:catalyst_cli), do: {Catalyst.Product.MinimalCLI, :cli}
+  defp release_product!(name), do: raise("unknown Catalyst release target: #{inspect(name)}")
+
+  defp release_platform do
+    case :os.type() do
+      {:unix, :darwin} -> :darwin
+      {:win32, _name} -> :windows
+      _other -> :linux
+    end
   end
 
   defp cp_bin!(src, dest) do

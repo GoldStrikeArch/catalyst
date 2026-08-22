@@ -93,7 +93,16 @@ defmodule Catalyst.Pack.Catalog do
       version: @version,
       trust: :compiled_trusted,
       dependencies: ["catalyst.meta-runtime", "catalyst.agent.default"],
-      hosts: @all_hosts
+      hosts: @all_hosts,
+      release_contributions:
+        Enum.map(~w(rg fd sd ast-grep), fn executable ->
+          %{
+            kind: :executable,
+            id: executable,
+            source: executable,
+            target: "priv/bin/#{executable}"
+          }
+        end)
     }),
     Manifest.new!(%{
       id: "catalyst.tools.self-development",
