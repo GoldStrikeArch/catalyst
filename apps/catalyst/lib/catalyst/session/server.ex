@@ -26,12 +26,11 @@ defmodule Catalyst.Session.Server do
     Manager,
     RunConfig,
     RunContext,
-    Snapshot,
-    Store
+    Snapshot
   }
 
   alias Catalyst.Session.Server.State
-  alias Catalyst.Runtime.SessionEngine
+  alias Catalyst.Runtime.{SessionEngine, TranscriptStore}
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
 
   # ---- public API -----------------------------------------------------------
@@ -129,28 +128,33 @@ defmodule Catalyst.Session.Server do
     id = Keyword.fetch!(opts, :id)
 
     with {:ok, cwd} <- session_cwd(opts),
-         {:ok, store} <- open_store(cwd, opts),
-         {:ok, session_engine_handle} <-
-           SessionEngine.resolve_and_pin(session_id: id) do
-      state = %State{
-        id: id,
-        cwd: cwd,
-        system_prompt: Keyword.get(opts, :system_prompt),
-        model: Keyword.get(opts, :model),
-        provider: Keyword.get(opts, :provider),
-        # Default to the live extension set (built-ins + runtime-loaded tools),
-        # resolved per turn by the loop. Pass an explicit list to pin tools.
-        tools: Keyword.get(opts, :tools, :extensions),
-        opts: initial_session_opts(opts),
-        store: store,
-        session_engine_handle: session_engine_handle,
-        session_engine_metadata: SessionEngine.metadata(session_engine_handle.resolution),
-        parent_id: Keyword.get(opts, :parent_id),
-        root_session_id: Keyword.get(opts, :root_session_id, id),
-        agent_depth: Keyword.get(opts, :agent_depth, 0)
-      }
+         {:ok, session_engine_handle} <- SessionEngine.resolve_and_pin(session_id: id) do
+      case open_store(cwd, opts) do
+        {:ok, store} ->
+          state = %State{
+            id: id,
+            cwd: cwd,
+            system_prompt: Keyword.get(opts, :system_prompt),
+            model: Keyword.get(opts, :model),
+            provider: Keyword.get(opts, :provider),
+            # Default to the live extension set (built-ins + runtime-loaded tools),
+            # resolved per turn by the loop. Pass an explicit list to pin tools.
+            tools: Keyword.get(opts, :tools, :extensions),
+            opts: initial_session_opts(opts),
+            store: store,
+            session_engine_handle: session_engine_handle,
+            session_engine_metadata: SessionEngine.metadata(session_engine_handle.resolution),
+            parent_id: Keyword.get(opts, :parent_id),
+            root_session_id: Keyword.get(opts, :root_session_id, id),
+            agent_depth: Keyword.get(opts, :agent_depth, 0)
+          }
 
-      {:ok, state, {:continue, :load_state}}
+          {:ok, state, {:continue, :load_state}}
+
+        {:error, reason} ->
+          release_session_engine(session_engine_handle)
+          {:stop, reason}
+      end
     else
       {:error, reason} -> {:stop, reason}
     end
@@ -161,7 +165,7 @@ defmodule Catalyst.Session.Server do
     # One disk fold restores both the transcript and the independent session
     # settings. Persisted changes win over caller defaults, including explicit
     # nil tombstones used to clear a previously selected model/effort.
-    case Store.load_state(state.store.path) do
+    case TranscriptStore.load_state(state.store) do
       {:ok, loaded} ->
         # The previous incarnation may have died mid-run (graceful stop, VM crash)
         # after persisting an assistant message whose tool calls never got results.
@@ -286,7 +290,7 @@ defmodule Catalyst.Session.Server do
     # The reset marker is authoritative state, like a compaction replacement.
     # Append it before killing the run or changing memory: on failure the live
     # session continues unchanged and restart cannot resurrect cleared history.
-    case Store.append_reset(state.store) do
+    case TranscriptStore.append_reset(state.store) do
       :ok ->
         {:reply, :ok, install_reset(state)}
 
@@ -380,6 +384,7 @@ defmodule Catalyst.Session.Server do
     shutdown_terminating_run(state.run)
     cleanup_run_resources(state)
     RunConfig.cleanup_session(state)
+    TranscriptStore.close(state.store)
     release_session_engine(state.session_engine_handle)
     :ok
   end
@@ -514,9 +519,11 @@ defmodule Catalyst.Session.Server do
     store_opts =
       Keyword.take(opts, [:id, :parent_id, :root_session_id, :agent_depth])
 
+    context = [session_id: Keyword.fetch!(opts, :id)]
+
     case Keyword.get(opts, :create) do
-      :exclusive -> Store.create_new(cwd, store_opts)
-      _resume_or_create -> Store.open(cwd, store_opts)
+      :exclusive -> TranscriptStore.create_new(cwd, store_opts, context)
+      _resume_or_create -> TranscriptStore.open(cwd, store_opts, context)
     end
   end
 
@@ -557,10 +564,11 @@ defmodule Catalyst.Session.Server do
 
   defp restore_system_prompt(default, _settings), do: default
 
-  defp persist(state, %Event.MessageEnd{message: m}), do: Store.append_message(state.store, m)
+  defp persist(state, %Event.MessageEnd{message: m}),
+    do: TranscriptStore.append_message(state.store, m)
 
   defp persist(state, %Event.ContextCompacted{} = event),
-    do: Store.append_compaction(state.store, event)
+    do: TranscriptStore.append_compaction(state.store, event)
 
   defp persist(_state, _event), do: :ok
 
@@ -575,7 +583,7 @@ defmodule Catalyst.Session.Server do
       results ->
         Enum.each(results, fn result ->
           append_best_effort(state, :transcript_repair, fn ->
-            Store.append_message(state.store, result)
+            TranscriptStore.append_message(state.store, result)
           end)
         end)
 
@@ -647,7 +655,7 @@ defmodule Catalyst.Session.Server do
     msg = session_engine_failure_message(state, reason)
 
     append_best_effort(state, :failure_message, fn ->
-      Store.append_message(state.store, msg)
+      TranscriptStore.append_message(state.store, msg)
     end)
 
     state = clear_failed_run(state, msg)
@@ -667,7 +675,7 @@ defmodule Catalyst.Session.Server do
       results ->
         Enum.each(results, fn result ->
           append_best_effort(state, :aborted_tool_result, fn ->
-            Store.append_message(state.store, result)
+            TranscriptStore.append_message(state.store, result)
           end)
 
           synthetic_and_broadcast(state, %Event.MessageEnd{message: result})
@@ -898,7 +906,7 @@ defmodule Catalyst.Session.Server do
   # loader keeps decoding legacy model_change/thinking_level_change records.
   defp persist_settings_snapshot(old, new) do
     case persisted_settings(old) != persisted_settings(new) do
-      true -> Store.append_settings_snapshot(new.store, persisted_settings(new))
+      true -> TranscriptStore.append_settings_snapshot(new.store, persisted_settings(new))
       false -> :ok
     end
   end

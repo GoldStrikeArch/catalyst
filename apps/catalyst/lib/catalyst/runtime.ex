@@ -19,7 +19,8 @@ defmodule Catalyst.Runtime do
     Resolver,
     RunEngine,
     SessionEngine,
-    ServiceKey
+    ServiceKey,
+    TranscriptStore
   }
 
   @doc "Resolve arbitrary claims through the pure Runtime Graph resolver."
@@ -71,6 +72,15 @@ defmodule Catalyst.Runtime do
   @doc "Explain the effective session engine without starting a session."
   @spec explain_session_engine(Context.t() | map() | keyword()) :: Explanation.t()
   defdelegate explain_session_engine(context \\ %{}), to: SessionEngine, as: :explain
+
+  @doc "Resolve the effective transcript store for a newly started session."
+  @spec resolve_transcript_store(Context.t() | map() | keyword()) ::
+          {:ok, Resolution.t()} | {:error, term()}
+  defdelegate resolve_transcript_store(context \\ %{}), to: TranscriptStore, as: :resolve
+
+  @doc "Explain the effective transcript store without opening a session."
+  @spec explain_transcript_store(Context.t() | map() | keyword()) :: Explanation.t()
+  defdelegate explain_transcript_store(context \\ %{}), to: TranscriptStore, as: :explain
 
   @doc "Return the active managed runtime generation."
   @spec active_generation() :: Generation.t() | nil

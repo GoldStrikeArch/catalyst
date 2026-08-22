@@ -20,7 +20,8 @@ defmodule Catalyst.Runtime.Sources.Core do
     RunEngine,
     Scope,
     ServiceKey,
-    SessionEngine
+    SessionEngine,
+    TranscriptStore
   }
 
   alias Catalyst.Tools.Registry, as: ToolRegistry
@@ -47,6 +48,7 @@ defmodule Catalyst.Runtime.Sources.Core do
     RunEngine.all_claims(context) ++
       SessionEngine.claims() ++
       PermissionPolicy.claims() ++
+      TranscriptStore.claims() ++
       provider_claims() ++ prompt_policy_claims() ++ context_policy_claims()
   end
 

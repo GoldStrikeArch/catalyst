@@ -3,7 +3,7 @@ defmodule Catalyst.Session.Server.State do
 
   alias Catalyst.{Message, Model}
   alias Catalyst.Runtime.Handle
-  alias Catalyst.Session.Store
+  alias Catalyst.Session.TranscriptStore.Handle, as: StoreHandle
 
   @type queued_input :: {:steering | :follow_up, Message.User.t()}
   @type run_resource :: map()
@@ -16,7 +16,7 @@ defmodule Catalyst.Session.Server.State do
           provider: module() | String.t() | nil,
           tools: term(),
           opts: keyword(),
-          store: Store.handle(),
+          store: StoreHandle.t(),
           session_engine_handle: Handle.t(),
           session_engine_metadata: map(),
           parent_id: String.t() | nil,

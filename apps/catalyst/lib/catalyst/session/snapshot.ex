@@ -30,6 +30,7 @@ defmodule Catalyst.Session.Snapshot do
       opts: state.opts || [],
       system_prompt: state.system_prompt,
       session_engine: state.session_engine_metadata,
+      transcript_store: transcript_store_metadata(state.store),
       run_metadata: visible_run_metadata(state),
       store_path: state.store.path,
       error_message: state.error_message
@@ -52,6 +53,9 @@ defmodule Catalyst.Session.Snapshot do
     do: current
 
   defp visible_run_metadata(state), do: state.last_successful_run_metadata
+
+  defp transcript_store_metadata(%{metadata: metadata}) when is_map(metadata), do: metadata
+  defp transcript_store_metadata(_legacy_handle), do: nil
 
   defp project_streaming(%{streaming_message: nil}), do: nil
 
