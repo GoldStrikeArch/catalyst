@@ -2,6 +2,7 @@ defmodule Catalyst.Session.Server.State do
   @moduledoc false
 
   alias Catalyst.{Message, Model}
+  alias Catalyst.Runtime.Handle
   alias Catalyst.Session.Store
 
   @type queued_input :: {:steering | :follow_up, Message.User.t()}
@@ -16,6 +17,8 @@ defmodule Catalyst.Session.Server.State do
           tools: term(),
           opts: keyword(),
           store: Store.handle(),
+          session_engine_handle: Handle.t(),
+          session_engine_metadata: map(),
           parent_id: String.t() | nil,
           root_session_id: String.t(),
           run: Task.t() | nil,
@@ -47,6 +50,8 @@ defmodule Catalyst.Session.Server.State do
     :tools,
     :opts,
     :store,
+    :session_engine_handle,
+    :session_engine_metadata,
     :parent_id,
     :root_session_id,
     :run,

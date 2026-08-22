@@ -18,6 +18,7 @@ defmodule Catalyst.Runtime do
     Resolution,
     Resolver,
     RunEngine,
+    SessionEngine,
     ServiceKey
   }
 
@@ -61,6 +62,15 @@ defmodule Catalyst.Runtime do
   @spec explain_run_engine(keyword() | map(), Context.t() | map() | keyword()) ::
           {:ok, Explanation.t()} | {:error, term()}
   defdelegate explain_run_engine(opts, context \\ %{}), to: RunEngine, as: :explain
+
+  @doc "Resolve the effective session engine for a newly started session."
+  @spec resolve_session_engine(Context.t() | map() | keyword()) ::
+          {:ok, Resolution.t()} | {:error, term()}
+  defdelegate resolve_session_engine(context \\ %{}), to: SessionEngine, as: :resolve
+
+  @doc "Explain the effective session engine without starting a session."
+  @spec explain_session_engine(Context.t() | map() | keyword()) :: Explanation.t()
+  defdelegate explain_session_engine(context \\ %{}), to: SessionEngine, as: :explain
 
   @doc "Return the active managed runtime generation."
   @spec active_generation() :: Generation.t() | nil

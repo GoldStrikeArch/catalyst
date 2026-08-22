@@ -20,9 +20,10 @@ defmodule Catalyst.Session.Server do
   alias Catalyst.{Message, Tasks}
 
   alias Catalyst.Session.{
+    EngineState,
+    EventEnvelope,
     EventSink,
     Manager,
-    Reducer,
     RunConfig,
     RunContext,
     Snapshot,
@@ -30,6 +31,7 @@ defmodule Catalyst.Session.Server do
   }
 
   alias Catalyst.Session.Server.State
+  alias Catalyst.Runtime.SessionEngine
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
 
   # ---- public API -----------------------------------------------------------
@@ -127,7 +129,9 @@ defmodule Catalyst.Session.Server do
     id = Keyword.fetch!(opts, :id)
 
     with {:ok, cwd} <- session_cwd(opts),
-         {:ok, store} <- open_store(cwd, opts) do
+         {:ok, store} <- open_store(cwd, opts),
+         {:ok, session_engine_handle} <-
+           SessionEngine.resolve_and_pin(session_id: id) do
       state = %State{
         id: id,
         cwd: cwd,
@@ -139,6 +143,8 @@ defmodule Catalyst.Session.Server do
         tools: Keyword.get(opts, :tools, :extensions),
         opts: initial_session_opts(opts),
         store: store,
+        session_engine_handle: session_engine_handle,
+        session_engine_metadata: SessionEngine.metadata(session_engine_handle.resolution),
         parent_id: Keyword.get(opts, :parent_id),
         root_session_id: Keyword.get(opts, :root_session_id, id),
         agent_depth: Keyword.get(opts, :agent_depth, 0)
@@ -374,6 +380,7 @@ defmodule Catalyst.Session.Server do
     shutdown_terminating_run(state.run)
     cleanup_run_resources(state)
     RunConfig.cleanup_session(state)
+    release_session_engine(state.session_engine_handle)
     :ok
   end
 
@@ -561,7 +568,7 @@ defmodule Catalyst.Session.Server do
   # previous incarnation. No broadcast: this runs in handle_continue before
   # the server processes mailbox messages.
   defp repair_transcript(state) do
-    case Reducer.aborted_tool_results(state, :interrupted) do
+    case session_engine_aborted_tool_results(state, :interrupted) do
       [] ->
         state
 
@@ -604,14 +611,14 @@ defmodule Catalyst.Session.Server do
   end
 
   defp accept_committed_event(state, event) do
-    state = Reducer.reduce(event, state)
+    state = session_engine_event(state, event)
     :ok = EventSink.committed(event, state.id)
     broadcast(state, event)
     track_agent_end(state, event)
   end
 
   defp accept_run_event(state, event) do
-    state = Reducer.reduce(event, state)
+    state = session_engine_event(state, event)
     broadcast(state, event)
     track_agent_end(state, event)
   end
@@ -637,7 +644,7 @@ defmodule Catalyst.Session.Server do
 
     state = complete_orphaned_tool_calls(state, reason)
 
-    msg = Reducer.failure_message(state, reason)
+    msg = session_engine_failure_message(state, reason)
 
     append_best_effort(state, :failure_message, fn ->
       Store.append_message(state.store, msg)
@@ -653,7 +660,7 @@ defmodule Catalyst.Session.Server do
   # was already persisted, and a transcript with a tool call but no result is
   # rejected by the provider on every subsequent request.
   defp complete_orphaned_tool_calls(state, reason) do
-    case Reducer.aborted_tool_results(state, reason) do
+    case session_engine_aborted_tool_results(state, reason) do
       [] ->
         state
 
@@ -915,6 +922,37 @@ defmodule Catalyst.Session.Server do
       _absent_or_invalid -> nil
     end
   end
+
+  defp session_engine_event(%State{} = state, event) do
+    envelope = EventEnvelope.new(event, state.id, current_run_id(state))
+
+    state
+    |> EngineState.from_server()
+    |> then(&SessionEngine.event(state.session_engine_handle, envelope, &1))
+    |> then(&EngineState.merge_into_server(state, &1))
+  end
+
+  defp session_engine_aborted_tool_results(%State{} = state, reason) do
+    SessionEngine.aborted_tool_results(
+      state.session_engine_handle,
+      EngineState.from_server(state),
+      reason
+    )
+  end
+
+  defp session_engine_failure_message(%State{} = state, reason) do
+    SessionEngine.failure_message(
+      state.session_engine_handle,
+      EngineState.from_server(state),
+      reason
+    )
+  end
+
+  defp current_run_id(%State{run_ref: run_ref}) when is_reference(run_ref), do: inspect(run_ref)
+  defp current_run_id(%State{}), do: nil
+
+  defp release_session_engine(nil), do: :ok
+  defp release_session_engine(handle), do: SessionEngine.release(handle)
 
   defp finish_successful_run(state) do
     state = cleanup_run_resources(state)

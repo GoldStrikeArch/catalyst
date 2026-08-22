@@ -29,6 +29,7 @@ defmodule Catalyst.Session.Snapshot do
       # reattaching UI can restore its controls.
       opts: state.opts || [],
       system_prompt: state.system_prompt,
+      session_engine: state.session_engine_metadata,
       run_metadata: visible_run_metadata(state),
       store_path: state.store.path,
       error_message: state.error_message

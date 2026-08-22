@@ -32,7 +32,7 @@ defmodule Catalyst.Runtime.ExtensionPoints do
         }
 
   @doc "Register or refresh a host-owned extension point and activation handler."
-  @spec register_host(map() | keyword(), ExtensionPoint.handler(), term()) ::
+  @spec register_host(map() | keyword(), ExtensionPoint.handler() | nil, term()) ::
           :ok | {:error, term()}
   def register_host(spec, handler, owner \\ :host) do
     with {:ok, point} <- ExtensionPoint.new(spec, owner, {:host, owner}, handler) do

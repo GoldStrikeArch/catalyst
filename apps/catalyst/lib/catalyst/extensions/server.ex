@@ -388,6 +388,18 @@ defmodule Catalyst.Extensions.Server do
 
   defp wire_core_kinds do
     :ok =
+      Catalyst.Runtime.ExtensionPoints.register_host(
+        %{
+          id: "agent.session_engine",
+          cardinality: :many,
+          contract: Catalyst.Contracts.SessionEngine.V1.ref(),
+          service: {"agent", "session_engine"},
+          default_binding: {:pin, :session}
+        },
+        nil
+      )
+
+    :ok =
       ExtensionAPI.register_extension_point(
         %{id: "agent.tool", cardinality: :many},
         {Catalyst.Extensions, :activate_tool_contribution}

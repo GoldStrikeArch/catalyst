@@ -10,7 +10,18 @@ defmodule Catalyst.Runtime.Sources.Core do
   alias Catalyst.Context.Registry, as: ContextRegistry
   alias Catalyst.LLM.Registry, as: ProviderRegistry
   alias Catalyst.Prompt.Registry, as: PromptRegistry
-  alias Catalyst.Runtime.{Claim, Context, ContractRef, Contribution, RunEngine, Scope, ServiceKey}
+
+  alias Catalyst.Runtime.{
+    Claim,
+    Context,
+    ContractRef,
+    Contribution,
+    RunEngine,
+    Scope,
+    ServiceKey,
+    SessionEngine
+  }
+
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @doc "Capture core service claims and additive contributions."
@@ -33,6 +44,7 @@ defmodule Catalyst.Runtime.Sources.Core do
 
   defp service_claims(context) do
     RunEngine.all_claims(context) ++
+      SessionEngine.claims() ++
       provider_claims() ++ prompt_policy_claims() ++ context_policy_claims()
   end
 
