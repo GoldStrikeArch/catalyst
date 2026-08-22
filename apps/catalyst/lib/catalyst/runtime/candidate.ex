@@ -9,12 +9,21 @@ defmodule Catalyst.Runtime.Candidate do
   """
 
   alias Catalyst.Extension.Manifest
-  alias Catalyst.Runtime.{Claim, Contribution, ExtensionPoint, GenerationId}
+
+  alias Catalyst.Runtime.{
+    ActivationId,
+    ArtifactId,
+    Claim,
+    Contribution,
+    ExtensionPoint,
+    GenerationId
+  }
 
   @enforce_keys [
     :id,
     :parent,
     :manifests,
+    :artifacts,
     :claims,
     :extension_points,
     :contributions,
@@ -25,12 +34,14 @@ defmodule Catalyst.Runtime.Candidate do
     :digest
   ]
 
-  defstruct @enforce_keys ++ [status: :planned]
+  defstruct @enforce_keys ++ [activation_id: nil, status: :planned]
 
   @type t :: %__MODULE__{
           id: GenerationId.t(),
-          parent: GenerationId.t() | nil,
+          parent: ActivationId.t() | nil,
+          activation_id: ActivationId.t() | nil,
           manifests: [Manifest.t()],
+          artifacts: [ArtifactId.t()],
           claims: [Claim.t()],
           extension_points: [ExtensionPoint.t()],
           contributions: [Contribution.t()],

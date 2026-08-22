@@ -7,14 +7,14 @@ defmodule Catalyst.Runtime.GenerationStore do
   contributions switch together.
   """
 
-  alias Catalyst.Runtime.{Candidate, Claim, Generation, GenerationId}
+  alias Catalyst.Runtime.{ActivationId, Candidate, Claim, Generation}
 
   @state_key {__MODULE__, :state}
   @state_lock {__MODULE__, :state_lock}
 
   @type state :: %{
-          active: GenerationId.t() | nil,
-          previous: GenerationId.t() | nil,
+          active: ActivationId.t() | nil,
+          previous: ActivationId.t() | nil,
           generations: %{optional(String.t()) => Generation.t()},
           owners: %{optional(String.t()) => [Catalyst.Extension.Manifest.t()]}
         }
@@ -26,7 +26,7 @@ defmodule Catalyst.Runtime.GenerationStore do
 
     case current.active do
       nil -> nil
-      id -> Map.get(current.generations, GenerationId.to_wire(id))
+      id -> Map.get(current.generations, ActivationId.to_wire(id))
     end
   end
 
@@ -40,7 +40,7 @@ defmodule Catalyst.Runtime.GenerationStore do
   end
 
   @doc "Return the active generation identity."
-  @spec active_id() :: GenerationId.t() | nil
+  @spec active_id() :: ActivationId.t() | nil
   def active_id, do: state().active
 
   @doc "Return the source-owner manifest composition of the active generation."
@@ -56,9 +56,9 @@ defmodule Catalyst.Runtime.GenerationStore do
   end
 
   @doc "Fetch one retained generation by identity."
-  @spec fetch(GenerationId.t()) :: {:ok, Generation.t()} | :error
-  def fetch(%GenerationId{} = id) do
-    Map.fetch(state().generations, GenerationId.to_wire(id))
+  @spec fetch(ActivationId.t()) :: {:ok, Generation.t()} | :error
+  def fetch(%ActivationId{} = id) do
+    Map.fetch(state().generations, ActivationId.to_wire(id))
   end
 
   @doc false
@@ -72,7 +72,8 @@ defmodule Catalyst.Runtime.GenerationStore do
       candidate = ready_candidate(candidate)
 
       generation = %Generation{
-        id: candidate.id,
+        id: candidate.activation_id,
+        graph_id: candidate.id,
         parent: candidate.parent,
         candidate: candidate,
         owners: owners,
@@ -82,9 +83,10 @@ defmodule Catalyst.Runtime.GenerationStore do
       }
 
       next = %{
-        active: candidate.id,
+        active: candidate.activation_id,
         previous: current.active,
-        generations: Map.put(generations, GenerationId.to_wire(candidate.id), generation),
+        generations:
+          Map.put(generations, ActivationId.to_wire(candidate.activation_id), generation),
         owners: owners
       }
 
@@ -101,7 +103,8 @@ defmodule Catalyst.Runtime.GenerationStore do
       now = DateTime.utc_now()
 
       generation = %Generation{
-        id: candidate.id,
+        id: candidate.activation_id,
+        graph_id: candidate.id,
         parent: candidate.parent,
         candidate: candidate,
         owners: owners,
@@ -120,8 +123,8 @@ defmodule Catalyst.Runtime.GenerationStore do
   end
 
   @doc false
-  @spec deactivate(GenerationId.t(), term()) :: :ok
-  def deactivate(%GenerationId{} = expected_id, reason) do
+  @spec deactivate(ActivationId.t(), term()) :: :ok
+  def deactivate(%ActivationId{} = expected_id, reason) do
     :global.trans(@state_lock, fn ->
       current = state()
       deactivate_expected(current, expected_id, reason)
@@ -130,8 +133,23 @@ defmodule Catalyst.Runtime.GenerationStore do
   end
 
   @doc false
-  @spec retire(GenerationId.t(), term()) :: :ok
-  def retire(%GenerationId{} = id, reason) do
+  @spec fail(ActivationId.t(), term()) :: :ok
+  def fail(%ActivationId{} = id, reason) do
+    :global.trans(@state_lock, fn ->
+      current = state()
+
+      case current.active == id do
+        true -> deactivate_expected(current, id, reason)
+        false -> fail_expected(current, id, reason)
+      end
+
+      :ok
+    end)
+  end
+
+  @doc false
+  @spec retire(ActivationId.t(), term()) :: :ok
+  def retire(%ActivationId{} = id, reason) do
     :global.trans(@state_lock, fn ->
       current = state()
       retire_expected(current, id, reason)
@@ -156,17 +174,17 @@ defmodule Catalyst.Runtime.GenerationStore do
   defp active_generation(%{active: nil}), do: nil
 
   defp active_generation(%{active: id, generations: generations}),
-    do: Map.get(generations, GenerationId.to_wire(id))
+    do: Map.get(generations, ActivationId.to_wire(id))
 
   defp begin_retirement(generations, nil, _now), do: generations
 
   defp begin_retirement(generations, generation, now) do
     retiring = %{generation | status: :retiring, retiring_at: now}
-    Map.put(generations, GenerationId.to_wire(generation.id), retiring)
+    Map.put(generations, ActivationId.to_wire(generation.id), retiring)
   end
 
   defp put_rejected(generations, generation) do
-    key = GenerationId.to_wire(generation.id)
+    key = ActivationId.to_wire(generation.id)
 
     case Map.get(generations, key) do
       %Generation{status: status} when status in [:active, :retiring] -> generations
@@ -181,11 +199,12 @@ defmodule Catalyst.Runtime.GenerationStore do
           failed = %{
             generation
             | status: :failed,
-              retired_at: DateTime.utc_now(),
+              retiring_at: DateTime.utc_now(),
+              retired_at: nil,
               reason: reason
           }
 
-          Map.put(current.generations, GenerationId.to_wire(expected_id), failed)
+          Map.put(current.generations, ActivationId.to_wire(expected_id), failed)
 
         nil ->
           current.generations
@@ -201,8 +220,31 @@ defmodule Catalyst.Runtime.GenerationStore do
 
   defp deactivate_expected(_current, _expected_id, _reason), do: :ok
 
+  defp fail_expected(current, id, reason) do
+    key = ActivationId.to_wire(id)
+
+    case Map.get(current.generations, key) do
+      %Generation{} = generation ->
+        failed = %{
+          generation
+          | status: :failed,
+            retiring_at: generation.retiring_at || DateTime.utc_now(),
+            retired_at: nil,
+            reason: reason
+        }
+
+        :persistent_term.put(
+          @state_key,
+          %{current | generations: Map.put(current.generations, key, failed)}
+        )
+
+      nil ->
+        :ok
+    end
+  end
+
   defp retire_expected(current, id, reason) do
-    key = GenerationId.to_wire(id)
+    key = ActivationId.to_wire(id)
 
     case Map.get(current.generations, key) do
       %Generation{status: :retiring} = generation ->
@@ -218,13 +260,25 @@ defmodule Catalyst.Runtime.GenerationStore do
           %{current | generations: Map.put(current.generations, key, retired)}
         )
 
+      %Generation{status: :failed} = generation ->
+        failed = %{
+          generation
+          | retired_at: DateTime.utc_now(),
+            reason: generation.reason || reason
+        }
+
+        :persistent_term.put(
+          @state_key,
+          %{current | generations: Map.put(current.generations, key, failed)}
+        )
+
       _not_retiring ->
         :ok
     end
   end
 
   defp ready_candidate(candidate) do
-    generation = GenerationId.to_wire(candidate.id)
+    generation = ActivationId.to_wire(candidate.activation_id)
 
     claims =
       Enum.map(candidate.claims, fn %Claim{} = claim ->

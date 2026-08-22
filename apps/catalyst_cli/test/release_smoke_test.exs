@@ -70,6 +70,7 @@ defmodule CatalystCli.ReleaseSmokeTest do
   defp release_turn_eval do
     ~S'''
     {:ok, _apps} = Application.ensure_all_started(:catalyst)
+    :ok = Catalyst.Extensions.await_ready(5_000)
     home = Path.expand(System.fetch_env!("CATALYST_HOME"))
 
     paths = [

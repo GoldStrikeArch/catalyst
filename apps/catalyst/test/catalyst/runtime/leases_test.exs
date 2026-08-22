@@ -3,7 +3,7 @@ defmodule Catalyst.Runtime.LeasesTest do
 
   import Catalyst.EnvCase, only: [wait_until: 1]
 
-  alias Catalyst.Runtime.{GenerationId, Leases}
+  alias Catalyst.Runtime.{ActivationId, Leases}
 
   setup do
     :ok = Leases.revoke_all()
@@ -63,6 +63,5 @@ defmodule Catalyst.Runtime.LeasesTest do
     assert Leases.list() == []
   end
 
-  defp generation(character),
-    do: GenerationId.candidate(String.duplicate(character, 64))
+  defp generation(_character), do: ActivationId.new()
 end

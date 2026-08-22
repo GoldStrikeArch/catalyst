@@ -159,7 +159,7 @@ defmodule Catalyst.Runtime.ExtensionPoints do
          generic_contributions: length(active_contributions),
          generic_claims: length(active_claims),
          hidden_orphans: orphan_count(current, active_contributions, active_claims),
-         active_generation: generation && Catalyst.Runtime.GenerationId.to_wire(generation)
+         active_generation: generation && Catalyst.Runtime.ActivationId.to_wire(generation)
        }
      }}
   end

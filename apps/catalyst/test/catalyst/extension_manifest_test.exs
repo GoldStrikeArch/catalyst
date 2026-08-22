@@ -3,6 +3,7 @@ defmodule Catalyst.ExtensionManifestTest do
 
   alias Catalyst.Extension
   alias Catalyst.Extension.Manifest
+  alias Catalyst.Runtime.{ArtifactId, ImplementationRef}
 
   defmodule LegacyExtension do
     use Catalyst.Extension
@@ -79,5 +80,27 @@ defmodule Catalyst.ExtensionManifestTest do
       end
       """)
     end
+  end
+
+  test "digest normalization removes physical targets nested inside structs" do
+    artifact = ArtifactId.new()
+    first = ImplementationRef.local(:logical, :first_physical_target, artifact)
+    second = ImplementationRef.local(:logical, :second_physical_target, artifact)
+
+    first_manifest =
+      Manifest.new!(%{
+        id: "test.nested-implementation-ref",
+        version: "1.0.0",
+        metadata: %{wrapper: %URI{query: first}}
+      })
+
+    second_manifest =
+      Manifest.new!(%{
+        id: "test.nested-implementation-ref",
+        version: "1.0.0",
+        metadata: %{wrapper: %URI{query: second}}
+      })
+
+    assert Manifest.digest_term(first_manifest) == Manifest.digest_term(second_manifest)
   end
 end

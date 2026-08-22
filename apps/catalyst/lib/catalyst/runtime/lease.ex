@@ -2,11 +2,11 @@ defmodule Catalyst.Runtime.Lease do
   @moduledoc """
   Process-owned lease retaining one managed runtime generation.
 
-  A lease pins generation lifecycle, not exact BEAM code. Generation-qualified
-  physical modules remain a later runtime milestone.
+  A lease pins one unique activation lifecycle. Exact BEAM retention additionally
+  requires the activation's artifact set to remain loaded until this lease drains.
   """
 
-  alias Catalyst.Runtime.GenerationId
+  alias Catalyst.Runtime.ActivationId
 
   @enforce_keys [:ref, :generation, :owner, :binding, :acquired_at]
   defstruct @enforce_keys
@@ -15,7 +15,7 @@ defmodule Catalyst.Runtime.Lease do
 
   @type t :: %__MODULE__{
           ref: reference(),
-          generation: GenerationId.t(),
+          generation: ActivationId.t(),
           owner: pid(),
           binding: binding(),
           acquired_at: DateTime.t()

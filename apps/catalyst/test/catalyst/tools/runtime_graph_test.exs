@@ -22,10 +22,12 @@ defmodule Catalyst.Tools.RuntimeGraphTest do
     assert text =~ "agent.tool/\"runtime_graph\""
     assert text =~ "Generations:"
     assert text =~ "Leases:"
+    assert text =~ "Artifacts:"
     assert result.details.claim_count > 0
     assert result.details.contribution_count > 0
     assert is_integer(result.details.generation_count)
     assert is_integer(result.details.lease_count)
+    assert is_integer(result.details.artifact_count)
     assert byte_size(result.details.snapshot_id) == 64
   end
 

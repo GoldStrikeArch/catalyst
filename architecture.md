@@ -718,12 +718,22 @@ The first execution pilot is `agent.run_engine`: `Session.RunContext` resolves i
 boundary and records service/owner/provenance/snapshot metadata. Workflow explanations include the
 valid runtime → application/ACP → template → configured-loop → built-in chain. Resolution remains
 process-free for previews and explanation; an executing managed run upgrades it to a monitored
-`Runtime.Handle` with a `:run` lease. Activating a replacement marks the old generation
+`Runtime.Handle` with a `:run` lease. Activating a replacement marks the old activation
 `:retiring`; its candidate process subtree remains alive until the final lease is released, while
-all new runs resolve the new active generation. `runtime_graph` reports active/retiring/retired
-generations and their leases. These are lifecycle leases, **not exact-code retention**:
-generation-scoped physical modules, drain deadlines, and state handoff remain future work. Raw
-trusted BEAM overrides also remain opaque and cannot promise complete graph introspection.
+all new runs resolve the new active activation. Deterministic graph IDs, unique activation IDs, and
+compiled-artifact IDs are distinct. Handles separate logical implementation identity from their
+physical execution target. `runtime_graph` reports active/retiring/retired activations and their
+leases and retained artifacts. Declarative API-v2 source may explicitly opt into
+`code: :generation`: the loader compiles top-level modules into an artifact-qualified namespace,
+validates that every emitted module belongs to the artifact mapping, stages service implementation
+references with the candidate, and retains old physical modules until every referring activation
+drains. Process-subtree and coordinator failures fail closed for new resolution without revoking
+surviving run leases. Artifact and lease ownership survives runtime-chain restarts; byte-identical
+source reuses its artifact namespace and activation. Rejected candidates and drained activations
+purge their artifacts. This first loader path is intentionally limited to service declarations;
+artifact-bound processes, health checks, contributions, migrations, drain deadlines, peer-node
+compilation, and state handoff remain future work. Raw trusted BEAM overrides also remain opaque and
+cannot promise complete graph introspection.
 
 The extension ontology is no longer closed in `Catalyst.ExtensionAPI`. Host subsystems declare
 schema-aware `Runtime.ExtensionPoint` values with stable `{module, function}` activation handlers,

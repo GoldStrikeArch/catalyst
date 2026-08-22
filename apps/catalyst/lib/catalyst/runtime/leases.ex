@@ -9,7 +9,9 @@ defmodule Catalyst.Runtime.Leases do
 
   use GenServer
 
-  alias Catalyst.Runtime.{GenerationId, Lease}
+  alias Catalyst.Runtime.{ActivationId, Lease}
+
+  @state_key {__MODULE__, :leases}
 
   @type snapshot_result :: {:ok, [Lease.t()]} | {:error, term()}
 
@@ -20,9 +22,9 @@ defmodule Catalyst.Runtime.Leases do
   end
 
   @doc false
-  @spec acquire(GenerationId.t(), pid(), Lease.binding()) ::
+  @spec acquire(ActivationId.t(), pid(), Lease.binding()) ::
           {:ok, Lease.t()} | {:error, term()}
-  def acquire(%GenerationId{} = generation, owner, binding)
+  def acquire(%ActivationId{} = generation, owner, binding)
       when is_pid(owner) and is_atom(binding) do
     GenServer.call(__MODULE__, {:acquire, generation, owner, binding})
   end
@@ -50,13 +52,13 @@ defmodule Catalyst.Runtime.Leases do
   end
 
   @doc "Count active leases for one generation."
-  @spec count(GenerationId.t()) :: non_neg_integer()
-  def count(%GenerationId{} = generation),
+  @spec count(ActivationId.t()) :: non_neg_integer()
+  def count(%ActivationId{} = generation),
     do: GenServer.call(__MODULE__, {:count, generation})
 
   @doc false
-  @spec revoke_generation(GenerationId.t()) :: :ok
-  def revoke_generation(%GenerationId{} = generation),
+  @spec revoke_generation(ActivationId.t()) :: :ok
+  def revoke_generation(%ActivationId{} = generation),
     do: GenServer.call(__MODULE__, {:revoke_generation, generation})
 
   @doc false
@@ -64,7 +66,15 @@ defmodule Catalyst.Runtime.Leases do
   def revoke_all, do: GenServer.call(__MODULE__, :revoke_all)
 
   @impl true
-  def init(:ok), do: {:ok, empty_state()}
+  def init(:ok) do
+    state =
+      persisted_leases()
+      |> Map.values()
+      |> Enum.filter(fn lease -> Process.alive?(lease.owner) end)
+      |> Enum.reduce(empty_state(), &put_lease(&2, &1))
+
+    {:ok, persist(state)}
+  end
 
   @impl true
   def handle_call({:acquire, generation, owner, binding}, _from, state) do
@@ -78,7 +88,8 @@ defmodule Catalyst.Runtime.Leases do
           acquired_at: DateTime.utc_now()
         }
 
-        {:reply, {:ok, lease}, put_lease(state, lease)}
+        next = put_lease(state, lease)
+        {:reply, {:ok, lease}, persist(next)}
 
       false ->
         {:reply, {:error, :lease_owner_not_alive}, state}
@@ -88,7 +99,7 @@ defmodule Catalyst.Runtime.Leases do
   def handle_call({:release, ref}, _from, state) do
     {state, generations} = drop_refs(state, [ref])
     notify_drained(generations, state)
-    {:reply, :ok, state}
+    {:reply, :ok, persist(state)}
   end
 
   def handle_call(:list, _from, state) do
@@ -112,7 +123,7 @@ defmodule Catalyst.Runtime.Leases do
       end)
 
     {state, _generations} = drop_refs(state, refs)
-    {:reply, :ok, state}
+    {:reply, :ok, persist(state)}
   end
 
   def handle_call(:revoke_all, _from, state) do
@@ -120,7 +131,7 @@ defmodule Catalyst.Runtime.Leases do
       Process.demonitor(monitor, [:flush])
     end)
 
-    {:reply, :ok, empty_state()}
+    {:reply, :ok, persist(empty_state())}
   end
 
   @impl true
@@ -131,7 +142,7 @@ defmodule Catalyst.Runtime.Leases do
         state = %{state | monitors: monitors}
         {state, generations} = drop_refs(state, refs)
         notify_drained(generations, state)
-        {:noreply, state}
+        {:noreply, persist(state)}
 
       {nil, _monitors} ->
         {:noreply, state}
@@ -217,5 +228,17 @@ defmodule Catalyst.Runtime.Leases do
 
   defp generation_count(state, generation) do
     Enum.count(state.leases, fn {_ref, lease} -> lease.generation == generation end)
+  end
+
+  defp persist(state) do
+    :persistent_term.put(@state_key, state.leases)
+    state
+  end
+
+  defp persisted_leases do
+    case :persistent_term.get(@state_key, %{}) do
+      leases when is_map(leases) -> leases
+      _invalid -> %{}
+    end
   end
 end

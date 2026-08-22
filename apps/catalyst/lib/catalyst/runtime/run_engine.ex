@@ -17,6 +17,7 @@ defmodule Catalyst.Runtime.RunEngine do
     ExtensionPoints,
     Generations,
     Handle,
+    ImplementationRef,
     Resolution,
     Resolver,
     Scope,
@@ -161,7 +162,7 @@ defmodule Catalyst.Runtime.RunEngine do
       scope: claim.scope.constraints,
       binding: claim.binding,
       provenance: claim.provenance,
-      implementation: claim.implementation
+      implementation: ImplementationRef.logical(claim.implementation)
     }
 
     case Map.get(claim.metadata, :runtime_generation) do
@@ -244,7 +245,8 @@ defmodule Catalyst.Runtime.RunEngine do
       {:ok,
        %{
          name: name,
-         module: claim.implementation,
+         module: ImplementationRef.target(claim.implementation),
+         logical_module: ImplementationRef.logical(claim.implementation),
          source: {:generation, generation, claim.owner}
        }}
     end

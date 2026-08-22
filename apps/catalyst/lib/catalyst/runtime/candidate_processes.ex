@@ -7,7 +7,7 @@ defmodule Catalyst.Runtime.CandidateProcesses do
   generation replaces it. Process declarations are started with a bounded wait.
   """
 
-  alias Catalyst.Runtime.{Candidate, GenerationId}
+  alias Catalyst.Runtime.{ActivationId, Candidate}
   alias Catalyst.Tasks
 
   @registry Catalyst.Runtime.CandidateProcessRegistry
@@ -20,8 +20,8 @@ defmodule Catalyst.Runtime.CandidateProcesses do
 
   @doc "Start and fully populate a candidate-owned process subtree."
   @spec start(Candidate.t()) :: {:ok, pid()} | {:error, term()}
-  def start(%Candidate{} = candidate) do
-    with {:ok, supervisor} <- start_supervisor(candidate.id, @stale_retries) do
+  def start(%Candidate{activation_id: %ActivationId{} = activation_id} = candidate) do
+    with {:ok, supervisor} <- start_supervisor(activation_id, @stale_retries) do
       case start_declarations(supervisor, candidate.processes, []) do
         :ok ->
           {:ok, supervisor}
@@ -34,8 +34,8 @@ defmodule Catalyst.Runtime.CandidateProcesses do
   end
 
   @doc "Whether the process subtree for `id` is currently alive."
-  @spec alive?(GenerationId.t()) :: boolean()
-  def alive?(%GenerationId{} = id) do
+  @spec alive?(ActivationId.t()) :: boolean()
+  def alive?(%ActivationId{} = id) do
     case lookup(id) do
       {:ok, pid} -> Process.alive?(pid)
       :error -> false
@@ -43,8 +43,8 @@ defmodule Catalyst.Runtime.CandidateProcesses do
   end
 
   @doc "Return direct children of the candidate process subtree."
-  @spec list(GenerationId.t()) :: [pid()]
-  def list(%GenerationId{} = id) do
+  @spec list(ActivationId.t()) :: [pid()]
+  def list(%ActivationId{} = id) do
     case lookup(id) do
       {:ok, supervisor} -> safe_children(supervisor)
       :error -> []
@@ -52,10 +52,10 @@ defmodule Catalyst.Runtime.CandidateProcesses do
   end
 
   @doc "Brutally stop and join one candidate subtree without trusting child shutdown values."
-  @spec stop(GenerationId.t() | pid() | nil) :: :ok | {:error, term()}
+  @spec stop(ActivationId.t() | pid() | nil) :: :ok | {:error, term()}
   def stop(nil), do: :ok
 
-  def stop(%GenerationId{} = id) do
+  def stop(%ActivationId{} = id) do
     case lookup(id) do
       {:ok, pid} -> stop(pid)
       :error -> :ok
@@ -112,10 +112,10 @@ defmodule Catalyst.Runtime.CandidateProcesses do
   end
 
   defp start_supervisor(id, retries) do
-    name = {:via, Registry, {@registry, GenerationId.to_wire(id)}}
+    name = {:via, Registry, {@registry, ActivationId.to_wire(id)}}
 
     spec = %{
-      id: {:candidate, GenerationId.to_wire(id)},
+      id: {:candidate, ActivationId.to_wire(id)},
       start: {DynamicSupervisor, :start_link, [[name: name, strategy: :one_for_one]]},
       restart: :temporary,
       type: :supervisor
@@ -189,7 +189,7 @@ defmodule Catalyst.Runtime.CandidateProcesses do
   end
 
   defp lookup(id) do
-    case Registry.lookup(@registry, GenerationId.to_wire(id)) do
+    case Registry.lookup(@registry, ActivationId.to_wire(id)) do
       [{pid, _value}] -> {:ok, pid}
       [] -> :error
     end

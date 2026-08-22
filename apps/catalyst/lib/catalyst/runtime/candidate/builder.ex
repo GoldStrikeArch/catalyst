@@ -10,6 +10,8 @@ defmodule Catalyst.Runtime.Candidate.Builder do
   alias Catalyst.Extension.Manifest
 
   alias Catalyst.Runtime.{
+    ActivationId,
+    Artifacts,
     Candidate,
     Claim,
     ContractRef,
@@ -45,7 +47,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
 
     * `:extension_points` — base-generation points available to declarations;
     * `:available_manifests` — installed manifests satisfying dependencies;
-    * `:parent` — optional parent `GenerationId`.
+    * `:parent` — optional parent `ActivationId`.
   """
   @spec build([Manifest.t() | map() | keyword()], keyword()) ::
           {:ok, Candidate.t()} | {:error, term()}
@@ -75,9 +77,11 @@ defmodule Catalyst.Runtime.Candidate.Builder do
          {:ok, health_checks} <- build_health_checks(manifests),
          {:ok, migrations} <- build_migrations(manifests),
          capabilities = build_capabilities(manifests),
+         artifacts = Artifacts.referenced_ids(manifests),
          {:ok, parent} <- normalize_parent(Keyword.get(opts, :parent)) do
       candidate(
         manifests,
+        artifacts,
         declared_points,
         all_points,
         claims,
@@ -498,6 +502,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
 
   defp candidate(
          manifests,
+         artifacts,
          declared_points,
          all_points,
          claims,
@@ -513,7 +518,6 @@ defmodule Catalyst.Runtime.Candidate.Builder do
 
     digest =
       candidate_digest(%{
-        parent: parent,
         manifests: manifests,
         declared_points: declared_points,
         available_points: all_points,
@@ -530,6 +534,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
        id: GenerationId.candidate(digest),
        parent: parent,
        manifests: manifests,
+       artifacts: artifacts,
        claims: claims,
        extension_points: declared_points,
        contributions: contributions,
@@ -543,7 +548,6 @@ defmodule Catalyst.Runtime.Candidate.Builder do
 
   defp candidate_digest(parts) do
     %{
-      parent: parts.parent,
       manifests: Enum.map(parts.manifests, &Manifest.digest_term/1),
       extension_points: Enum.map(parts.declared_points, &point_digest_term/1),
       available_points: Enum.map(parts.available_points, &point_reference/1),
@@ -680,6 +684,9 @@ defmodule Catalyst.Runtime.Candidate.Builder do
   defp runtime_specific_term(value) when is_tuple(value),
     do: value |> Tuple.to_list() |> runtime_specific_term()
 
+  defp runtime_specific_term(%_struct{} = value),
+    do: value |> Map.from_struct() |> runtime_specific_term()
+
   defp runtime_specific_term(value) when is_map(value) do
     Enum.find_value(value, :none, fn {key, entry} ->
       runtime_term_result(key) || runtime_term_result(entry)
@@ -727,7 +734,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
   defp unique_owned_declarations({:error, _reason} = error, _kind), do: error
 
   defp normalize_parent(nil), do: {:ok, nil}
-  defp normalize_parent(%GenerationId{} = parent), do: {:ok, parent}
+  defp normalize_parent(%ActivationId{} = parent), do: {:ok, parent}
   defp normalize_parent(parent), do: {:error, {:invalid_candidate_parent, parent}}
 
   defp manifest_provenance(manifest, kind, index),

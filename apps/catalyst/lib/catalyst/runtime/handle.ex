@@ -6,17 +6,19 @@ defmodule Catalyst.Runtime.Handle do
   therefore produce handles whose `lease` and `generation` fields are `nil`.
   """
 
-  alias Catalyst.Runtime.{Lease, Leases, Resolution}
+  alias Catalyst.Runtime.{ActivationId, ImplementationRef, Lease, Leases, Resolution}
 
-  @enforce_keys [:resolution, :implementation, :owner, :binding]
-  defstruct @enforce_keys ++ [generation: nil, lease: nil]
+  @enforce_keys [:resolution, :logical_implementation, :implementation, :owner, :binding]
+  defstruct @enforce_keys ++ [generation: nil, artifact: nil, lease: nil]
 
   @type t :: %__MODULE__{
           resolution: Resolution.t(),
+          logical_implementation: term(),
           implementation: module() | term(),
           owner: term(),
           binding: Catalyst.Runtime.Claim.binding(),
-          generation: Catalyst.Runtime.GenerationId.t() | nil,
+          generation: ActivationId.t() | nil,
+          artifact: Catalyst.Runtime.ArtifactId.t() | nil,
           lease: Lease.t() | nil
         }
 
@@ -25,10 +27,12 @@ defmodule Catalyst.Runtime.Handle do
   def new(%Resolution{} = resolution, lease) do
     %__MODULE__{
       resolution: resolution,
-      implementation: resolution.claim.implementation,
+      logical_implementation: ImplementationRef.logical(resolution.claim.implementation),
+      implementation: ImplementationRef.target(resolution.claim.implementation),
       owner: resolution.claim.owner,
       binding: resolution.binding,
       generation: generation(lease),
+      artifact: artifact(resolution.claim.implementation),
       lease: lease
     }
   end
@@ -40,4 +44,7 @@ defmodule Catalyst.Runtime.Handle do
 
   defp generation(nil), do: nil
   defp generation(%Lease{generation: generation}), do: generation
+
+  defp artifact(%ImplementationRef{artifact: artifact}), do: artifact
+  defp artifact(_implementation), do: nil
 end

@@ -13,6 +13,7 @@ defmodule Catalyst.Extensions.Contribution do
             beams: %{},
             ext_mods: [],
             manifests: [],
+            artifact: nil,
             tool_mods: [],
             tool_names: [],
             metadata: %{}
@@ -22,6 +23,7 @@ defmodule Catalyst.Extensions.Contribution do
           beams: %{module() => binary()},
           ext_mods: [module()],
           manifests: [Catalyst.Extension.Manifest.t()],
+          artifact: Catalyst.Runtime.ArtifactSet.t() | nil,
           tool_mods: [module()],
           tool_names: [String.t()],
           metadata: map()

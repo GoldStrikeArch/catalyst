@@ -177,6 +177,10 @@ defmodule Catalyst.Application do
         DynamicSupervisor,
         name: Catalyst.Runtime.CandidateProcessSupervisor, strategy: :one_for_one
       },
+      # Owns generation-qualified BEAM artifacts independently from candidate
+      # process trees. It purges rejected artifacts and retains superseded code
+      # until the final activation lease drains.
+      Catalyst.Runtime.Artifacts,
       # Monitors run-bound generation leases independently from the lifecycle
       # coordinator. A lease-server crash restarts the coordinator and extension
       # loader after it, rebuilding a fail-closed managed runtime.

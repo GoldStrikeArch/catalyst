@@ -9,6 +9,7 @@ defmodule Catalyst.Extension.Manifest do
   """
 
   alias Catalyst.Extension.Manifest.Validator
+  alias Catalyst.Runtime.ImplementationRef
 
   @enforce_keys [:api, :id, :version]
   defstruct api: 2,
@@ -61,5 +62,33 @@ defmodule Catalyst.Extension.Manifest do
 
   @doc "Stable data used when digesting a candidate generation."
   @spec digest_term(t()) :: map()
-  def digest_term(%__MODULE__{} = manifest), do: Map.from_struct(manifest)
+  def digest_term(%__MODULE__{} = manifest) do
+    manifest
+    |> Map.from_struct()
+    |> logical_term()
+  end
+
+  defp logical_term(%ImplementationRef{} = reference),
+    do: ImplementationRef.digest_term(reference)
+
+  defp logical_term(%_struct{} = value) do
+    value
+    |> Map.from_struct()
+    |> logical_term()
+  end
+
+  defp logical_term(value) when is_list(value), do: Enum.map(value, &logical_term/1)
+
+  defp logical_term(value) when is_tuple(value) do
+    value
+    |> Tuple.to_list()
+    |> Enum.map(&logical_term/1)
+    |> List.to_tuple()
+  end
+
+  defp logical_term(value) when is_map(value) do
+    Map.new(value, fn {key, item} -> {logical_term(key), logical_term(item)} end)
+  end
+
+  defp logical_term(value), do: value
 end

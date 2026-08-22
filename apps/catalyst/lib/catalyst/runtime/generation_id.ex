@@ -1,15 +1,16 @@
 defmodule Catalyst.Runtime.GenerationId do
   @moduledoc """
-  Stable identity of a planned or activated runtime generation.
+  Stable identity of a normalized runtime graph.
 
-  Candidate identities are deterministic digests of their normalized graph and
-  parent generation. Durable last-known-good pointers remain Recovery Host work.
+  Graph identities are deterministic digests of normalized declarations. A
+  separate `Catalyst.Runtime.ActivationId` identifies each attempt to stage and
+  publish that graph.
   """
 
   @enforce_keys [:kind, :value]
   defstruct @enforce_keys
 
-  @type kind :: :candidate | :active
+  @type kind :: :candidate
   @type t :: %__MODULE__{kind: kind(), value: String.t() | non_neg_integer()}
 
   @doc "Build the deterministic identity for a candidate digest."

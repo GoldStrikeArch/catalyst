@@ -6,9 +6,9 @@ defmodule Catalyst.Runtime.Generation do
   `Catalyst.Runtime.GenerationStore` is the authority used by runtime readers.
   """
 
-  alias Catalyst.Runtime.{Candidate, GenerationId}
+  alias Catalyst.Runtime.{ActivationId, Candidate, GenerationId}
 
-  @enforce_keys [:id, :candidate, :owners, :status, :inserted_at]
+  @enforce_keys [:id, :graph_id, :candidate, :owners, :status, :inserted_at]
   defstruct @enforce_keys ++
               [
                 parent: nil,
@@ -23,12 +23,13 @@ defmodule Catalyst.Runtime.Generation do
   @type status :: :active | :retiring | :retired | :rejected | :failed
 
   @type t :: %__MODULE__{
-          id: GenerationId.t(),
+          id: ActivationId.t(),
+          graph_id: GenerationId.t(),
           candidate: Candidate.t(),
           owners: %{optional(String.t()) => [Catalyst.Extension.Manifest.t()]},
           status: status(),
           inserted_at: DateTime.t(),
-          parent: GenerationId.t() | nil,
+          parent: ActivationId.t() | nil,
           activated_at: DateTime.t() | nil,
           retiring_at: DateTime.t() | nil,
           retired_at: DateTime.t() | nil,

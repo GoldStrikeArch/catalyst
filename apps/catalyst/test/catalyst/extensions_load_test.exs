@@ -2,19 +2,40 @@ defmodule Catalyst.ExtensionsLoadTest do
   # async: false — Extensions is global, shared, mutable state.
   use ExUnit.Case, async: false
 
-  import Catalyst.EnvCase, only: [put_env: 2]
+  import Catalyst.EnvCase, only: [put_env: 2, wait_until: 1]
   import Catalyst.ExtensionsFixtures
   import ExUnit.CaptureLog
 
   alias Catalyst.{Content, Message, Model}
   alias Catalyst.Agent.Loop
+  alias Catalyst.Extension.Manifest
   alias Catalyst.Extensions
   alias Catalyst.ExtensionsFixtures.SetupOnlyTool
-  alias Catalyst.Runtime.GenerationStore
+
+  alias Catalyst.Runtime.{
+    Artifacts,
+    CandidateProcesses,
+    GenerationStore,
+    Generations,
+    Leases,
+    RunEngine
+  }
+
   alias Catalyst.Tools.DevelopTool
 
   setup do
     setup_extensions_dir()
+  end
+
+  defmodule BlockingHealth do
+    def check do
+      parent = :persistent_term.get({__MODULE__, :parent})
+      send(parent, {:blocking_health, self()})
+
+      receive do
+        :release -> :ok
+      end
+    end
   end
 
   test "the built-ins (incl. develop_tool) are seeded" do
@@ -68,6 +89,171 @@ defmodule Catalyst.ExtensionsLoadTest do
 
     info = Enum.find(Extensions.list_loaded(), &(&1.owner == "declarative_probe"))
     assert info.metadata == %{name: "Declarative Probe"}
+  end
+
+  test "generation-qualified API-v2 reload retains pinned code until its run drains" do
+    owner = "generation_artifact_probe"
+    workflow = "generation-artifact-probe"
+    path = write_ext(owner, generation_artifact_source(:first, workflow))
+    on_exit(fn -> Extensions.uninstall(owner) end)
+
+    assert {:ok, first_summary} = Extensions.load_file(path)
+    assert first_summary.activation == :active
+
+    assert {:ok, first_resolution} = RunEngine.resolve(workflow: workflow)
+    assert {:ok, first_pinned} = RunEngine.pin(first_resolution)
+    first_target = first_pinned.handle.implementation
+    assert first_target.marker() == :first
+
+    File.write!(path, generation_artifact_source(:second, workflow))
+    assert {:ok, second_summary} = Extensions.load_file(path)
+    assert second_summary.activation == :active
+
+    assert {:ok, second_resolution} = RunEngine.resolve(workflow: workflow)
+    assert {:ok, second_pinned} = RunEngine.pin(second_resolution)
+    second_target = second_pinned.handle.implementation
+
+    assert second_target.marker() == :second
+    assert first_target != second_target
+    assert first_target.marker() == :first
+    assert :code.is_loaded(first_target) != false
+
+    assert :ok = RunEngine.release(first_pinned)
+    _state = :sys.get_state(Generations)
+    assert :code.is_loaded(first_target) == false
+    assert :code.is_loaded(second_target) != false
+    assert {:ok, [_active_artifact]} = Artifacts.snapshot()
+
+    assert :ok = RunEngine.release(second_pinned)
+  end
+
+  test "byte-identical generation reload reuses its artifact and activation" do
+    owner = "generation_artifact_noop_probe"
+    workflow = "generation-artifact-noop-probe"
+    path = write_ext(owner, generation_artifact_source(:unchanged, workflow))
+    on_exit(fn -> Extensions.uninstall(owner) end)
+
+    assert {:ok, first_summary} = Extensions.load_file(path)
+    assert {:ok, first_artifacts} = Artifacts.snapshot()
+
+    assert {:ok, second_summary} = Extensions.load_file(path)
+    assert {:ok, second_artifacts} = Artifacts.snapshot()
+
+    assert second_summary.generation == first_summary.generation
+    assert Enum.map(second_artifacts, & &1.id) == Enum.map(first_artifacts, & &1.id)
+  end
+
+  test "generation process failure retains pinned artifact code until its run drains" do
+    owner = "generation_artifact_failure_probe"
+    workflow = "generation-artifact-failure-probe"
+    path = write_ext(owner, generation_artifact_source(:retained_after_failure, workflow))
+    on_exit(fn -> Extensions.uninstall(owner) end)
+
+    assert {:ok, _summary} = Extensions.load_file(path)
+    assert {:ok, resolution} = RunEngine.resolve(workflow: workflow)
+    assert {:ok, pinned} = RunEngine.pin(resolution)
+    target = pinned.handle.implementation
+    activation = GenerationStore.active_id()
+
+    assert :ok = CandidateProcesses.stop(activation)
+    wait_until(fn -> GenerationStore.active_id() == nil end)
+
+    assert Leases.count(activation) == 1
+    assert :code.is_loaded(target) != false
+    assert target.marker() == :retained_after_failure
+
+    assert :ok = RunEngine.release(pinned)
+    _state = :sys.get_state(Generations)
+    assert :code.is_loaded(target) == false
+  end
+
+  test "artifact-manager restart retains code held by a surviving run lease" do
+    owner = "generation_artifact_restart_probe"
+    workflow = "generation-artifact-restart-probe"
+    path = write_ext(owner, generation_artifact_source(:retained_after_restart, workflow))
+    on_exit(fn -> Extensions.uninstall(owner) end)
+
+    assert {:ok, _summary} = Extensions.load_file(path)
+    assert {:ok, resolution} = RunEngine.resolve(workflow: workflow)
+    assert {:ok, pinned} = RunEngine.pin(resolution)
+    target = pinned.handle.implementation
+    activation = pinned.handle.lease.generation
+    File.rm!(path)
+
+    old_artifacts = Process.whereis(Artifacts)
+    monitor = Process.monitor(old_artifacts)
+    Process.exit(old_artifacts, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^old_artifacts, :killed}
+
+    wait_until(fn ->
+      artifacts = Process.whereis(Artifacts)
+      leases = Process.whereis(Leases)
+      generations = Process.whereis(Generations)
+      is_pid(artifacts) and artifacts != old_artifacts and is_pid(leases) and is_pid(generations)
+    end)
+
+    _state = :sys.get_state(Generations)
+    assert Leases.count(activation) == 1
+    assert :code.is_loaded(target) != false
+    assert target.marker() == :retained_after_restart
+
+    assert :ok = RunEngine.release(pinned)
+    _state = :sys.get_state(Generations)
+    assert :code.is_loaded(target) == false
+  end
+
+  test "bulk activation failure discards generation artifacts that were never staged" do
+    owner = "generation_bulk_rollback_probe"
+    path = write_ext(owner, generation_artifact_source(:bulk_rollback, "bulk-rollback"))
+    on_exit(fn -> Extensions.uninstall(owner) end)
+    assert File.exists?(path)
+    assert {:ok, before} = Artifacts.snapshot()
+    :persistent_term.put({BlockingHealth, :parent}, self())
+    on_exit(fn -> :persistent_term.erase({BlockingHealth, :parent}) end)
+
+    blocking =
+      Manifest.new!(%{
+        id: "test.blocking-composition",
+        version: "1.0.0",
+        health_checks: [
+          %{
+            id: "blocking",
+            module: BlockingHealth,
+            function: :check,
+            args: [],
+            timeout: 5_000
+          }
+        ]
+      })
+
+    task = Task.async(fn -> Generations.install("blocking-composition", [blocking]) end)
+    assert_receive {:blocking_health, health_check}, 1_000
+
+    result = Extensions.load_all()
+    {:ok, after_rollback} = Artifacts.snapshot()
+    send(health_check, :release)
+    activation_result = Task.await(task, 5_000)
+    cleanup_result = Generations.remove_owner("blocking-composition")
+
+    assert {:ok, %{failed: failed}} = result
+
+    assert {_, {:candidate_activation_failed, :generation_activation_in_progress}} =
+             Enum.find(failed, fn {failed_path, _reason} -> failed_path == path end)
+
+    assert Enum.map(after_rollback, & &1.id) == Enum.map(before, & &1.id)
+    assert {:ok, _generation} = activation_result
+    assert :ok = cleanup_result
+  end
+
+  test "bulk loading returns a tagged error while the extension runtime is unavailable" do
+    server = Process.whereis(Extensions)
+    assert Process.unregister(Extensions)
+
+    try do
+      assert {:error, :extension_runtime_unavailable} = Extensions.load_all()
+    after
+      assert Process.register(server, Extensions)
+    end
   end
 
   test "a rejected API-v2 candidate does not replace the active generation" do
@@ -798,6 +984,35 @@ defmodule Catalyst.ExtensionsLoadTest do
 
     assert {:ok, _} = Extensions.load_file(hanging)
     assert Enum.find(Extensions.list_loaded(), &(&1.owner == "hanging_metadata")).metadata == %{}
+  end
+
+  defp generation_artifact_source(marker, workflow) do
+    """
+    defmodule Catalyst.Ext.GenerationArtifactEngine do
+      @behaviour Catalyst.Workflow
+
+      @impl true
+      def run(_prompts, context, _config, _emit), do: {:ok, [], context}
+
+      def marker, do: #{inspect(marker)}
+    end
+
+    defmodule Catalyst.Ext.GenerationArtifactProbe do
+      use Catalyst.Extension, api: 2, code: :generation
+
+      manifest %{
+        id: "test.generation-artifact-probe",
+        version: "1.0.0",
+        services: [
+          %{
+            key: {"agent", "run_engine", "named:#{workflow}"},
+            contract: {"catalyst.agent-run-engine", 1},
+            implementation: Catalyst.Ext.GenerationArtifactEngine
+          }
+        ]
+      }
+    end
+    """
   end
 
   defp removal_guard_source do

@@ -6,7 +6,7 @@ defmodule Catalyst.Runtime.Claim do
   storage and lifecycle ownership remain subsystem-specific during phase one.
   """
 
-  alias Catalyst.Runtime.{ContractRef, Scope, ServiceKey}
+  alias Catalyst.Runtime.{ContractRef, ImplementationRef, Scope, ServiceKey}
 
   @enforce_keys [
     :key,
@@ -47,7 +47,7 @@ defmodule Catalyst.Runtime.Claim do
       claim.priority,
       inspect(claim.owner),
       inspect(claim.provenance),
-      inspect(claim.implementation),
+      inspect(ImplementationRef.digest_term(claim.implementation)),
       inspect(claim.binding),
       inspect(claim.health),
       inspect(claim.metadata)

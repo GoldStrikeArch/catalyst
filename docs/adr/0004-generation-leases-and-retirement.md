@@ -30,8 +30,10 @@ publishes and retires it.
 6. A retiring generation's candidate process subtree remains alive while any
    lease exists.
 7. Releasing the final lease retires the generation and stops its subtree.
-8. Safe-mode clearing and active-generation failure may revoke leases
-   immediately to preserve fail-closed recovery.
+8. Safe-mode clearing and active-generation failure remove the generation from
+   new resolution immediately, but do not revoke leases owned by surviving
+   operations. Failed generations retain exact-code artifacts until those leases
+   drain.
 9. Generation introspection reports lifecycle status and current lease count.
 10. `agent.run_engine` is the first consumer. A session run owns a `:run` lease
     from successful `RunContext` construction through the supervised run-task
@@ -39,17 +41,19 @@ publishes and retires it.
 
 ## Guarantee Boundary
 
-This decision retains generation lifecycle and candidate-owned processes. It
-does **not** yet guarantee exact old BEAM code:
+This decision retains activation lifecycle and candidate-owned processes. It
+does **not** by itself guarantee exact old BEAM code:
 
-- managed modules still use their source module names;
+- ordinary managed modules still use their source module names;
 - loading a replacement may install new code under the same name;
 - raw trusted module shadowing remains immediate and opaque;
 - there is no drain deadline or forced-retirement policy yet.
 
-Exact code retention requires generation-qualified physical modules or an
-isolated execution boundary. That work remains the next generation-runtime
-milestone.
+ADR-0005 separates graph, activation, and artifact identities. Explicitly
+opted-in API-v2 service implementations now use generation-qualified physical
+modules whose artifact lifetime follows these leases. Ordinary managed modules,
+raw overrides, and declaration kinds not yet bound through implementation
+references retain the weaker guarantee above.
 
 ## Consequences
 
@@ -60,7 +64,8 @@ milestone.
   leases.
 - The generation coordinator and lease server form separate supervision
   responsibilities: coordination serializes transitions; the lease server owns
-  monitors.
-- Restarting the lease server restarts the coordinator and extension loader
-  through the existing `:rest_for_one` supervision group, rebuilding managed
-  state fail closed.
+  monitors and persists the minimal lease records needed to rebuild them.
+- Restarting the artifact or lease server restarts the coordinator and extension
+  loader through the existing `:rest_for_one` supervision group. New resolution
+  fails closed while surviving lease owners retain their exact code until normal
+  release or owner exit.

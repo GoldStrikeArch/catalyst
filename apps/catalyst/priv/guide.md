@@ -455,6 +455,38 @@ workspace/session scope is active. All definitions, contributions, and claims ar
 purging a point owner hides dependent contributions without deleting another owner's data, so
 they reactivate if a compatible point returns.
 
+Declarative API-v2 extensions that replace a service can opt into exact-code retention:
+
+```text
+defmodule Catalyst.Ext.MyEngineExtension do
+  use Catalyst.Extension, api: 2, code: :generation
+
+  manifest %{
+    id: "my-engine",
+    version: "1.0.0",
+    services: [
+      %{
+        key: {"agent", "run_engine", "named:my-engine"},
+        contract: {"catalyst.agent-run-engine", 1},
+        implementation: Catalyst.Ext.MyEngine
+      }
+    ]
+  }
+end
+```
+
+In this mode Catalyst gives every top-level module an artifact-qualified physical name. A run
+pins that physical implementation, so reloading the file does not change code underneath the
+active run; the old modules are purged after its generation lease drains, including when the
+generation's process subtree or runtime coordinator restarts. Reloading byte-identical source
+reuses the same artifact and activation. This mode currently accepts literal top-level modules,
+ordinary aliases, and service declarations only. It rejects dynamic/nested modules, curly aliases,
+protocols, implementations, and other module output outside the declared artifact mapping. Use
+ordinary API-v2 loading for extension points, contributions, processes, health checks, or
+migrations until their artifact contracts are defined. High-churn generated extensions should
+also avoid this trusted main-VM mode for now because BEAM module-name atoms are not
+garbage-collected; full compile isolation requires the planned disposable peer-node worker.
+
 An extension module may also export an optional **`metadata/0`** returning
 `%{name: "…", description: "…"}` — it is shown on the Extensions panel so humans can
 tell at a glance what an installed extension does.

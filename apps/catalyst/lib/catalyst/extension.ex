@@ -77,10 +77,14 @@ defmodule Catalyst.Extension do
         end
 
       2 ->
-        quote do
+        code_mode = extension_code_mode!(Keyword.get(opts, :code, :legacy))
+
+        quote bind_quoted: [code_mode: code_mode] do
           Module.register_attribute(__MODULE__, :catalyst_extension_api, persist: true)
+          Module.register_attribute(__MODULE__, :catalyst_extension_code, persist: true)
           Module.register_attribute(__MODULE__, :catalyst_extension_manifest, persist: true)
           @catalyst_extension_api 2
+          @catalyst_extension_code code_mode
           @before_compile Catalyst.Extension
           import Catalyst.Extension, only: [manifest: 1]
         end
@@ -144,6 +148,21 @@ defmodule Catalyst.Extension do
   def manifest_module?(module) do
     Code.ensure_loaded?(module) and api_version(module) == 2 and
       match?({:ok, _}, manifest_of(module))
+  end
+
+  @doc """
+  Return the API-v2 code-loading mode.
+
+  `:legacy` uses ordinary BEAM shadowing. `:generation` opts a declarative
+  extension into artifact-qualified physical modules retained by runtime
+  generation leases.
+  """
+  @spec code_mode(module()) :: :legacy | :generation
+  def code_mode(module) do
+    case persisted_attribute(module, :catalyst_extension_code) do
+      :generation -> :generation
+      _other -> :legacy
+    end
   end
 
   @doc "True if `module` is a loaded API-v1 or API-v2 extension."
@@ -225,6 +244,12 @@ defmodule Catalyst.Extension do
 
   defp metadata_timeout do
     Application.get_env(:catalyst, :extension_metadata_timeout, @metadata_timeout)
+  end
+
+  defp extension_code_mode!(mode) when mode in [:legacy, :generation], do: mode
+
+  defp extension_code_mode!(mode) do
+    raise ArgumentError, "unsupported Catalyst extension code mode: #{inspect(mode)}"
   end
 
   defp persisted_attribute(module, name) do

@@ -14,11 +14,12 @@ defmodule Catalyst.Runtime.Generations do
   alias Catalyst.Extension.Manifest
 
   alias Catalyst.Runtime.{
+    ActivationId,
+    Artifacts,
     Candidate,
     CandidateProcesses,
     CandidateStager,
     Generation,
-    GenerationId,
     GenerationStore,
     Leases,
     Resolution
@@ -98,7 +99,7 @@ defmodule Catalyst.Runtime.Generations do
   @impl true
   def init(:ok) do
     CandidateProcesses.stop_all()
-    Leases.revoke_all()
+    release_unleased_artifacts()
     GenerationStore.clear()
     {:ok, %{operation: nil, monitors: %{}}}
   end
@@ -107,8 +108,8 @@ defmodule Catalyst.Runtime.Generations do
   def handle_call(:clear, _from, state) do
     state = cancel_operation(state)
     state = demonitor_all(state)
-    Leases.revoke_all()
     CandidateProcesses.stop_all()
+    release_unleased_artifacts()
     GenerationStore.clear()
     {:reply, :ok, state}
   end
@@ -141,6 +142,7 @@ defmodule Catalyst.Runtime.Generations do
         {:DOWN, reference, :process, _pid, reason},
         %{operation: %{task: %{ref: reference}}} = state
       ) do
+    cleanup_operation_artifacts(state.operation)
     GenServer.reply(state.operation.from, {:error, {:candidate_staging_exit, reason}})
     {:noreply, %{state | operation: nil}}
   end
@@ -152,8 +154,7 @@ defmodule Catalyst.Runtime.Generations do
 
       {%{generation_id: generation_id}, monitors} ->
         state = %{state | monitors: monitors}
-        handle_generation_exit(generation_id, reason)
-        {:noreply, state}
+        {:noreply, handle_generation_exit(generation_id, reason, state)}
     end
   end
 
@@ -197,8 +198,19 @@ defmodule Catalyst.Runtime.Generations do
 
   defp start_operation(from, owners, state) do
     parent = GenerationStore.active_id()
-    task = Tasks.async(fn -> CandidateStager.stage(owners, parent) end)
-    operation = %{from: from, owners: owners, parent: parent, task: task}
+    activation_id = ActivationId.new()
+    artifact_ids = Artifacts.referenced_ids(Map.values(owners))
+    task = Tasks.async(fn -> CandidateStager.stage(owners, parent, activation_id) end)
+
+    operation = %{
+      from: from,
+      owners: owners,
+      parent: parent,
+      activation_id: activation_id,
+      artifact_ids: artifact_ids,
+      task: task
+    }
+
     {:noreply, %{state | operation: operation}}
   end
 
@@ -209,12 +221,14 @@ defmodule Catalyst.Runtime.Generations do
 
       {false, _alive?} ->
         CandidateProcesses.stop(supervisor)
+        cleanup_operation_artifacts(operation)
         GenServer.reply(operation.from, {:error, :stale_candidate_parent})
         state
 
       {true, false} ->
         reason = :candidate_processes_exited_before_activation
         CandidateProcesses.stop(supervisor)
+        cleanup_operation_artifacts(operation)
         GenerationStore.reject(candidate, operation.owners, reason)
         GenServer.reply(operation.from, {:error, reason})
         state
@@ -222,12 +236,14 @@ defmodule Catalyst.Runtime.Generations do
   end
 
   defp finish_operation({:error, reason, %Candidate{} = candidate}, operation, state) do
+    cleanup_operation_artifacts(operation)
     GenerationStore.reject(candidate, operation.owners, reason)
     GenServer.reply(operation.from, {:error, reason})
     state
   end
 
   defp finish_operation({:error, reason}, operation, state) do
+    cleanup_operation_artifacts(operation)
     GenServer.reply(operation.from, {:error, reason})
     state
   end
@@ -236,7 +252,7 @@ defmodule Catalyst.Runtime.Generations do
     old_id = GenerationStore.active_id()
     {:ok, generation, _previous} = GenerationStore.publish(candidate, operation.owners)
     state = monitor_generation(state, generation.id, supervisor)
-    state = retire_superseded(old_id, candidate.id, mode, state)
+    state = retire_superseded(old_id, generation.id, mode, state)
     GenServer.reply(operation.from, {:ok, generation})
     state
   end
@@ -250,13 +266,18 @@ defmodule Catalyst.Runtime.Generations do
     end
   end
 
-  defp retire_if_drained(%GenerationId{} = generation_id, state) do
+  defp retire_if_drained(%ActivationId{} = generation_id, state) do
     case {GenerationStore.fetch(generation_id), Leases.count(generation_id)} do
-      {{:ok, %Generation{status: :retiring}}, 0} ->
+      {{:ok, %Generation{status: status}}, 0} when status in [:retiring, :failed] ->
         supervisor = generation_supervisor(state, generation_id)
         state = demonitor_generation(state, generation_id)
         GenerationStore.retire(generation_id, :drained)
         stop_retired_generation(generation_id, supervisor)
+        Artifacts.release_activation(generation_id)
+        state
+
+      {:error, 0} ->
+        Artifacts.release_activation(generation_id)
         state
 
       _not_ready ->
@@ -271,7 +292,7 @@ defmodule Catalyst.Runtime.Generations do
 
       requested ->
         case GenerationStore.active_id() do
-          %GenerationId{} = active ->
+          %ActivationId{} = active ->
             acquire_matching_lease(active, requested, resolution.binding, owner)
 
           nil ->
@@ -281,9 +302,9 @@ defmodule Catalyst.Runtime.Generations do
   end
 
   defp acquire_matching_lease(active, requested, binding, owner) do
-    case GenerationId.to_wire(active) == requested do
+    case ActivationId.to_wire(active) == requested do
       true -> Leases.acquire(active, owner, binding_lifetime(binding))
-      false -> {:error, {:stale_runtime_generation, requested, GenerationId.to_wire(active)}}
+      false -> {:error, {:stale_runtime_generation, requested, ActivationId.to_wire(active)}}
     end
   end
 
@@ -326,7 +347,7 @@ defmodule Catalyst.Runtime.Generations do
     %{state | monitors: %{}}
   end
 
-  defp handle_generation_exit(generation_id, reason) do
+  defp handle_generation_exit(generation_id, reason, state) do
     case GenerationStore.active_id() == generation_id do
       true ->
         Logger.error("active runtime generation process subtree exited",
@@ -334,13 +355,36 @@ defmodule Catalyst.Runtime.Generations do
           reason: inspect(reason)
         )
 
-        Leases.revoke_generation(generation_id)
-        GenerationStore.deactivate(generation_id, {:candidate_process_exit, reason})
-
       false ->
-        Leases.revoke_generation(generation_id)
-        GenerationStore.retire(generation_id, {:candidate_process_exit, reason})
+        :ok
     end
+
+    GenerationStore.fail(generation_id, {:candidate_process_exit, reason})
+    retire_if_drained(generation_id, state)
+  end
+
+  defp release_unleased_artifacts do
+    case Artifacts.snapshot() do
+      {:ok, artifacts} ->
+        artifacts
+        |> Enum.flat_map(&MapSet.to_list(&1.activations))
+        |> Enum.uniq()
+        |> Enum.each(&release_if_unleased/1)
+
+      {:error, _reason} ->
+        :ok
+    end
+
+    Artifacts.clear()
+  end
+
+  defp release_if_unleased(activation) do
+    case Leases.count(activation) do
+      0 -> Artifacts.release_activation(activation)
+      _retained -> :ok
+    end
+  catch
+    :exit, _reason -> :ok
   end
 
   defp cancel_operation(%{operation: nil} = state), do: state
@@ -348,6 +392,7 @@ defmodule Catalyst.Runtime.Generations do
   defp cancel_operation(%{operation: operation} = state) do
     Task.shutdown(operation.task, :brutal_kill)
     Process.demonitor(operation.task.ref, [:flush])
+    cleanup_operation_artifacts(operation)
     GenServer.reply(operation.from, {:error, :generation_activation_cancelled})
     %{state | operation: nil}
   end
@@ -361,10 +406,15 @@ defmodule Catalyst.Runtime.Generations do
 
       {:error, reason} ->
         Logger.warning("could not schedule retired generation cleanup",
-          generation: GenerationId.to_wire(generation_id),
+          generation: ActivationId.to_wire(generation_id),
           reason: inspect(reason)
         )
     end
+  end
+
+  defp cleanup_operation_artifacts(operation) do
+    Artifacts.release_activation(operation.activation_id)
+    Artifacts.discard(operation.artifact_ids)
   end
 
   defp with_lease_count(%Generation{} = generation, {:ok, leases}) do

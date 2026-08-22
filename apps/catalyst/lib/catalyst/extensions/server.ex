@@ -243,6 +243,12 @@ defmodule Catalyst.Extensions.Server do
     {:reply, collisions, %{state | setup_collisions: remaining}}
   end
 
+  def handle_call(:await_ready, _from, %{bootstrap: :complete} = state),
+    do: {:reply, :ok, state}
+
+  def handle_call(:await_ready, from, state),
+    do: {:noreply, %{state | ready_waiters: [from | state.ready_waiters]}}
+
   def handle_call({:purge_gone, live_owners}, _from, state) do
     state =
       state.modules
@@ -447,7 +453,8 @@ defmodule Catalyst.Extensions.Server do
 
   defp complete_bootstrap(state) do
     :ok = Hooks.mark_runtime_ready(state.hook_generation)
-    %{state | bootstrap: :complete}
+    Enum.each(state.ready_waiters, &GenServer.reply(&1, :ok))
+    %{state | bootstrap: :complete, ready_waiters: []}
   end
 
   defp run_reseeders_bounded do

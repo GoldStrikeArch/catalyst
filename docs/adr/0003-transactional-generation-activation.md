@@ -93,7 +93,8 @@ transactionality claim.
 
 ## Deferred Work
 
-- generation-scoped physical module names;
+- artifact binding beyond service implementations for the generation-qualified
+  loader introduced by ADR-0005;
 - drain deadlines, forced retirement, and delayed module purge beyond the
   lifecycle leases introduced by ADR-0004;
 - post-activation rollback to a retained process generation;
@@ -112,5 +113,6 @@ transactionality claim.
 - Runtime introspection can report active, retired, and rejected generations.
 - The existing extension loader remains responsible for source, module, and
   owner rollback around generation activation.
-- Exact-code continuity remains the responsibility of the next generation
-  leasing phase.
+- Lifecycle continuity is defined by ADR-0004. Exact-code identity, service-only
+  artifact retention, and its remaining extension boundaries are defined by
+  ADR-0005.

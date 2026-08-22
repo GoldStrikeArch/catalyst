@@ -358,6 +358,20 @@ defmodule Catalyst.Extensions do
   def boot_status, do: :persistent_term.get({__MODULE__, :boot_status}, :ok)
 
   @doc """
+  Wait until extension bootstrap has published a stable synchronous-hook generation.
+
+  This is primarily a host startup barrier. Agent execution remains fail closed
+  with `:extension_runtime_recovering` until the barrier opens.
+  """
+  @spec await_ready(timeout()) :: :ok | {:error, :timeout | :unavailable}
+  def await_ready(timeout \\ 5_000) when is_integer(timeout) and timeout > 0 do
+    GenServer.call(__MODULE__, :await_ready, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+    :exit, _reason -> {:error, :unavailable}
+  end
+
+  @doc """
   Record that this boot is ending by user intent, not a crash.
 
   Quitting inside the BootGuard stabilization window otherwise leaves the

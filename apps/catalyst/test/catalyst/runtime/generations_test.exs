@@ -8,11 +8,13 @@ defmodule Catalyst.Runtime.GenerationsTest do
   alias Catalyst.Runtime
 
   alias Catalyst.Runtime.{
+    ArtifactId,
     CandidateProcesses,
     ContractRef,
     ExtensionPoints,
     GenerationStore,
     Generations,
+    ImplementationRef,
     Leases,
     ServiceKey
   }
@@ -144,7 +146,7 @@ defmodule Catalyst.Runtime.GenerationsTest do
              Enum.find(Generations.list(), &(&1.id == first_generation.id))
   end
 
-  test "a deterministic candidate id cannot replace a leased retiring instance" do
+  test "the same graph can reactivate without replacing a leased retiring activation" do
     first = healthy_manifest("test.generation.retained-instance")
     assert {:ok, first_generation} = Generations.install("retained_source", [first])
     assert {:ok, lease} = Leases.acquire(first_generation.id, self(), :run)
@@ -154,11 +156,11 @@ defmodule Catalyst.Runtime.GenerationsTest do
     assert :ok = CandidateProcesses.stop(second_generation.id)
     wait_until(fn -> GenerationStore.active_id() == nil end)
 
-    assert {:error, {:generation_instance_retained, retained_id, :retiring, 1}} =
-             Generations.install("retained_source", [first])
-
-    assert retained_id == Catalyst.Runtime.GenerationId.to_wire(first_generation.id)
+    assert {:ok, replacement} = Generations.install("retained_source", [first])
+    assert replacement.graph_id == first_generation.graph_id
+    assert replacement.id != first_generation.id
     assert CandidateProcesses.alive?(first_generation.id)
+    assert CandidateProcesses.alive?(replacement.id)
     assert Leases.count(first_generation.id) == 1
 
     assert %{status: :retiring} =
@@ -172,16 +174,25 @@ defmodule Catalyst.Runtime.GenerationsTest do
     manifest = healthy_manifest("test.generation.one")
 
     assert {:ok, generation} = Generations.install("source_one", [manifest])
+    assert {:ok, lease} = Leases.acquire(generation.id, self(), :run)
     assert :ok = CandidateProcesses.stop(generation.id)
     wait_until(fn -> GenerationStore.active_id() == nil end)
 
     assert GenerationStore.active_id() == nil
     refute Enum.any?(ExtensionPoints.list_claims(), &(&1.owner == manifest.id))
+    assert Leases.count(generation.id) == 1
 
     failed = Enum.find(Generations.list(), &(&1.id == generation.id))
     assert failed.status == :failed
+    assert failed.retired_at == nil
     assert {:candidate_process_exit, _reason} = failed.reason
     assert GenerationStore.owners() == %{}
+
+    assert :ok = Leases.release(lease)
+
+    wait_until(fn ->
+      Enum.find(Generations.list(), &(&1.id == generation.id)).retired_at != nil
+    end)
   end
 
   test "a failed health check leaves the prior generation active" do
@@ -204,6 +215,33 @@ defmodule Catalyst.Runtime.GenerationsTest do
     rejected_generation = Enum.find(Generations.list(), &(&1.status == :rejected))
     assert rejected_generation.reason == {:health_check_failed, "unhealthy", :unhealthy}
     assert CandidateProcesses.list(rejected_generation.id) == []
+  end
+
+  test "artifact attachment failure is retained as a rejected generation" do
+    artifact_id = ArtifactId.new()
+
+    manifest =
+      manifest("test.generation.unknown-artifact",
+        services: [
+          %{
+            key: ServiceKey.new!("test", "generation_engine"),
+            contract: @contract,
+            implementation:
+              ImplementationRef.local(__MODULE__.Engine, __MODULE__.Engine, artifact_id)
+          }
+        ]
+      )
+
+    assert {:error, {:unknown_artifact, artifact_wire}} =
+             Generations.install("unknown_artifact_source", [manifest])
+
+    rejected =
+      Enum.find(Generations.list(), fn generation ->
+        generation.status == :rejected and
+          Map.has_key?(generation.owners, "unknown_artifact_source")
+      end)
+
+    assert rejected.reason == {:unknown_artifact, artifact_wire}
   end
 
   test "a timed-out health check leaves the prior generation active" do
@@ -322,10 +360,10 @@ defmodule Catalyst.Runtime.GenerationsTest do
     end)
   end
 
-  test "clear revokes leases and stops active and retiring process subtrees" do
+  test "clear retains leases while stopping active and retiring process subtrees" do
     first = healthy_manifest("test.generation.clear-leased")
     assert {:ok, first_generation} = Generations.install("clear_source", [first])
-    assert {:ok, _lease} = Leases.acquire(first_generation.id, self(), :run)
+    assert {:ok, lease} = Leases.acquire(first_generation.id, self(), :run)
 
     second = healthy_manifest("test.generation.clear-active")
     assert {:ok, second_generation} = Generations.install("clear_source", [second])
@@ -337,12 +375,15 @@ defmodule Catalyst.Runtime.GenerationsTest do
     assert :ok = Generations.clear()
     assert GenerationStore.active_id() == nil
     assert GenerationStore.owners() == %{}
-    assert Leases.list() == []
+    assert Leases.count(first_generation.id) == 1
 
     wait_until(fn ->
       not CandidateProcesses.alive?(first_generation.id) and
         not CandidateProcesses.alive?(second_generation.id)
     end)
+
+    assert :ok = Leases.release(lease)
+    assert Leases.list() == []
   end
 
   test "removing an owner atomically exposes the remaining composition" do
@@ -377,7 +418,7 @@ defmodule Catalyst.Runtime.GenerationsTest do
     assert resolved.resolution.claim.owner == run_engine.id
 
     assert resolved.selection.source ==
-             {:generation, Catalyst.Runtime.GenerationId.to_wire(generation.id), run_engine.id}
+             {:generation, Catalyst.Runtime.ActivationId.to_wire(generation.id), run_engine.id}
 
     assert {:ok, pinned} = Catalyst.Runtime.RunEngine.pin(resolved)
     assert pinned.handle.generation == generation.id
@@ -436,7 +477,7 @@ defmodule Catalyst.Runtime.GenerationsTest do
              Catalyst.Runtime.RunEngine.pin(resolved)
 
     assert requested != active
-    assert active == Catalyst.Runtime.GenerationId.to_wire(current.id)
+    assert active == Catalyst.Runtime.ActivationId.to_wire(current.id)
     assert Leases.list() == []
   end
 

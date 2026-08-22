@@ -1,0 +1,265 @@
+defmodule Catalyst.Extensions.GenerationCompilerTest do
+  use ExUnit.Case, async: false
+
+  alias Catalyst.Extensions.{GenerationCompiler, Loader}
+
+  alias Catalyst.Runtime.{
+    ArtifactSet,
+    Artifacts,
+    GenerationStore,
+    Generations,
+    ImplementationRef,
+    RunEngine
+  }
+
+  @owner "generation_compiler_test"
+
+  setup do
+    :ok = Generations.clear()
+
+    on_exit(fn ->
+      :ok = Generations.clear()
+    end)
+
+    :ok
+  end
+
+  test "same logical run engine can execute through two exact physical artifacts" do
+    first = compile_artifact!(:first)
+    second = compile_artifact!(:second)
+
+    assert :ok = Artifacts.register(first)
+    assert :ok = Artifacts.register(second)
+
+    [first_manifest] = GenerationCompiler.manifests(first)
+    [second_manifest] = GenerationCompiler.manifests(second)
+
+    first_ref = first_manifest.services |> hd() |> Map.fetch!(:implementation)
+    second_ref = second_manifest.services |> hd() |> Map.fetch!(:implementation)
+
+    assert %ImplementationRef{logical: logical, target: first_target} = first_ref
+    assert %ImplementationRef{logical: ^logical, target: second_target} = second_ref
+    assert first_target != second_target
+    assert first_target.marker() == :first
+    assert second_target.marker() == :second
+
+    assert {:ok, first_generation} = Generations.install(@owner, [first_manifest])
+    assert {:ok, first_resolution} = RunEngine.resolve([])
+    assert {:ok, first_pinned} = RunEngine.pin(first_resolution)
+
+    assert first_pinned.handle.logical_implementation == logical
+    assert first_pinned.handle.implementation == first_target
+
+    assert {:ok, second_generation} = Generations.install(@owner, [second_manifest])
+    assert {:ok, second_resolution} = RunEngine.resolve([])
+    assert {:ok, second_pinned} = RunEngine.pin(second_resolution)
+
+    assert first_generation.graph_id == second_generation.graph_id
+    assert first_generation.id != second_generation.id
+    assert first_pinned.handle.implementation.marker() == :first
+    assert second_pinned.handle.implementation.marker() == :second
+
+    assert %{status: :retiring} =
+             Enum.find(Generations.list(), &(&1.id == first_generation.id))
+
+    assert GenerationStore.active_id() == second_generation.id
+    assert :ok = RunEngine.release(first_pinned)
+    assert :ok = RunEngine.release(second_pinned)
+  end
+
+  test "rejects nested modules instead of assigning ambiguous logical names" do
+    path =
+      write_source("""
+      defmodule GenerationCompilerNested do
+        defmodule Inner do
+        end
+      end
+      """)
+
+    assert {:error, :nested_or_dynamic_modules_not_supported} =
+             GenerationCompiler.compile_file(path)
+  end
+
+  test "rejects dynamic module names with a tagged error" do
+    path =
+      write_source("""
+      defmodule Module.concat([GenerationCompilerDynamic, Target]) do
+      end
+      """)
+
+    assert {:error, :nested_or_dynamic_modules_not_supported} =
+             GenerationCompiler.compile_file(path)
+  end
+
+  test "rejects protocol emitters before they can escape the artifact namespace" do
+    path =
+      write_source("""
+      defprotocol GenerationCompilerEscapedProtocol do
+        def marker(value)
+      end
+      """)
+
+    assert {:error, {:generation_artifact_module_emitters_not_supported, [{:defprotocol, 1}]}} =
+             GenerationCompiler.compile_file(path)
+
+    refute Code.ensure_loaded?(GenerationCompilerEscapedProtocol)
+  end
+
+  test "rejects and purges modules emitted outside the artifact mapping" do
+    path =
+      write_source("""
+      defmodule GenerationCompilerEmitter do
+        defmacro emit do
+          quote do
+            defmodule unquote(GenerationCompilerMacroEscape) do
+            end
+          end
+        end
+      end
+
+      defmodule GenerationCompilerEmitterHost do
+        require GenerationCompilerEmitter
+        GenerationCompilerEmitter.emit()
+      end
+      """)
+
+    assert {:error, {:artifact_module_mismatch, [GenerationCompilerMacroEscape], []}} =
+             GenerationCompiler.compile_file(path)
+
+    refute Code.ensure_loaded?(GenerationCompilerMacroEscape)
+  end
+
+  test "preserves ordinary aliases when rewriting artifact-local modules" do
+    path =
+      write_source("""
+      defmodule GenerationCompilerAlias.Engine do
+        def marker, do: :aliased
+      end
+
+      defmodule GenerationCompilerAlias.Extension do
+        alias GenerationCompilerAlias.Engine
+        use Catalyst.Extension, api: 2, code: :generation
+
+        manifest %{
+          id: "test.generation-alias",
+          version: "1.0.0",
+          services: [
+            %{
+              key: {"agent", "run_engine", "named:generation-alias"},
+              contract: {"catalyst.agent-run-engine", 1},
+              implementation: Engine
+            }
+          ]
+        }
+      end
+      """)
+
+    assert {:ok, artifact} = GenerationCompiler.compile_file(path)
+    assert :ok = Artifacts.register(artifact)
+    on_exit(fn -> Artifacts.discard([artifact.id]) end)
+    assert {:ok, target} = ArtifactSet.target(artifact, GenerationCompilerAlias.Engine)
+    assert target.marker() == :aliased
+
+    [manifest] = GenerationCompiler.manifests(artifact)
+    implementation = manifest.services |> hd() |> Map.fetch!(:implementation)
+    assert implementation.target == target
+  end
+
+  test "recognizes an aliased generation-mode use but ignores quoted examples" do
+    aliased =
+      write_source("""
+      defmodule GenerationCompilerAliasedUse do
+        alias Catalyst.Extension
+        use Extension, api: 2, code: :generation
+
+        manifest %{id: "test.aliased-use", version: "1.0.0"}
+      end
+      """)
+
+    quoted =
+      write_source("""
+      defmodule GenerationCompilerQuotedUse do
+        @example quote do
+          use Catalyst.Extension, api: 2, code: :generation
+        end
+      end
+      """)
+
+    assert GenerationCompiler.generation_managed_file?(aliased)
+    refute GenerationCompiler.generation_managed_file?(quoted)
+
+    assert {:error, :generation_artifact_requires_local_service, emitted} =
+             Loader.compile(aliased)
+
+    assert emitted != []
+  end
+
+  test "reuses the physical namespace for byte-identical source" do
+    path =
+      write_source("""
+      defmodule GenerationCompilerStableArtifact do
+        def marker, do: :stable
+      end
+      """)
+
+    assert {:ok, first} = GenerationCompiler.compile_file(path)
+    assert :ok = Artifacts.register(first)
+    assert {:ok, second} = GenerationCompiler.compile_file(path)
+
+    assert second.id == first.id
+    assert second.modules == first.modules
+  end
+
+  test "candidate validation failure discards its pending artifact" do
+    artifact = compile_artifact!(:rejected)
+    physical = artifact |> ArtifactSet.physical_modules() |> List.first()
+    assert :ok = Artifacts.register(artifact)
+    [manifest] = GenerationCompiler.manifests(artifact)
+
+    assert {:error, {:duplicate_manifest_ids, ["test.generation-compiler"]}} =
+             Generations.install(@owner, [manifest, manifest])
+
+    assert {:ok, []} = Artifacts.snapshot()
+    assert :code.is_loaded(physical) == false
+  end
+
+  defp compile_artifact!(marker) do
+    path =
+      write_source("""
+      defmodule GenerationCompilerEngine do
+        def marker, do: #{inspect(marker)}
+      end
+
+      defmodule GenerationCompilerExtension do
+        use Catalyst.Extension, api: 2, code: :generation
+
+        manifest %{
+          id: "test.generation-compiler",
+          version: "1.0.0",
+          services: [
+            %{
+              key: {"agent", "run_engine", "default"},
+              contract: {"catalyst.agent-run-engine", 1},
+              implementation: GenerationCompilerEngine
+            }
+          ]
+        }
+      end
+      """)
+
+    assert {:ok, %ArtifactSet{} = artifact} = GenerationCompiler.compile_file(path)
+    artifact
+  end
+
+  defp write_source(source) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "catalyst-generation-compiler-#{System.unique_integer([:positive])}.exs"
+      )
+
+    File.write!(path, source)
+    on_exit(fn -> File.rm(path) end)
+    path
+  end
+end

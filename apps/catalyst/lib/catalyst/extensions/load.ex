@@ -21,7 +21,7 @@ defmodule Catalyst.Extensions.Load do
     Versioning
   }
 
-  alias Catalyst.Runtime.{GenerationId, Generations, GenerationStore}
+  alias Catalyst.Runtime.{ActivationId, Artifacts, Generations, GenerationStore}
 
   @server Catalyst.Extensions
   @default_server_call_timeout 30_000
@@ -216,11 +216,12 @@ defmodule Catalyst.Extensions.Load do
     live_owners = MapSet.new(paths, &Sources.owner/1)
     previous_owners = GenerationStore.owners()
     retained_owners = Map.take(previous_owners, MapSet.to_list(live_owners))
-    :ok = server_call({:purge_gone, live_owners})
 
-    {plans, failed} = compile_paths(paths)
-    desired_owners = apply_manifest_plans(retained_owners, plans)
-    finish_bulk_activation(plans, failed, previous_owners, desired_owners)
+    with :ok <- available_server_call({:purge_gone, live_owners}) do
+      {plans, failed} = compile_paths(paths)
+      desired_owners = apply_manifest_plans(retained_owners, plans)
+      finish_bulk_activation(plans, failed, previous_owners, desired_owners)
+    end
   end
 
   defp compile_paths(paths) do
@@ -273,6 +274,7 @@ defmodule Catalyst.Extensions.Load do
     Enum.reduce(plans, {[], []}, fn plan, {loaded, failed} ->
       case managed_plan?(plan, previous_owners) do
         true ->
+          discard_plan_artifact(plan)
           reason = rollback_plan(plan, activation_error)
           {loaded, [{plan.path, reason} | failed]}
 
@@ -319,6 +321,7 @@ defmodule Catalyst.Extensions.Load do
 
       false ->
         :ok = server_call({:purge_rejected_compile, contribution.modules})
+        discard_artifact(contribution)
         {:error, :stale_extension_generation}
     end
   end
@@ -332,6 +335,7 @@ defmodule Catalyst.Extensions.Load do
 
       {:error, _reason} = error ->
         :ok = server_call({:purge_rejected_compile, contribution.modules})
+        discard_artifact(contribution)
         error
     end
   end
@@ -347,6 +351,7 @@ defmodule Catalyst.Extensions.Load do
         finish_activation(owner, path, contribution, summary, setup_status, prior, mode)
 
       collision ->
+        discard_artifact(contribution)
         {:error, rollback_plan(%{owner: owner, prior: prior}, collision)}
     end
   end
@@ -365,6 +370,7 @@ defmodule Catalyst.Extensions.Load do
        owner: owner,
        path: path,
        manifests: contribution.manifests,
+       artifact: contribution.artifact,
        prior: prior,
        summary: annotate_setup_status(summary, setup_status)
      }}
@@ -380,6 +386,7 @@ defmodule Catalyst.Extensions.Load do
 
       {:error, reason} ->
         activation_error = {:candidate_activation_failed, reason}
+        discard_artifact(contribution)
         {:error, rollback_plan(%{owner: owner, prior: prior}, activation_error)}
     end
   end
@@ -398,7 +405,7 @@ defmodule Catalyst.Extensions.Load do
   defp annotate_generation(summary, generation) do
     summary
     |> Map.put(:activation, :active)
-    |> Map.put(:generation, GenerationId.to_wire(generation.id))
+    |> Map.put(:generation, ActivationId.to_wire(generation.id))
   end
 
   defp ensure_distinct_owners(paths) do
@@ -521,6 +528,12 @@ defmodule Catalyst.Extensions.Load do
     end
   end
 
+  defp discard_artifact(%Contribution{artifact: nil}), do: :ok
+  defp discard_artifact(%Contribution{artifact: artifact}), do: Artifacts.discard([artifact.id])
+
+  defp discard_plan_artifact(%{artifact: nil}), do: :ok
+  defp discard_plan_artifact(%{artifact: artifact}), do: Artifacts.discard([artifact.id])
+
   defp commit_lifecycle_change(paths, message) do
     Versioning.ensure_repo(Sources.dir())
 
@@ -555,6 +568,18 @@ defmodule Catalyst.Extensions.Load do
 
   defp disabled_file_for(owner),
     do: Sources.find(Sources.disabled_files(), owner, &Sources.disabled_owner/1)
+
+  defp available_server_call(message) do
+    case Process.whereis(@server) do
+      nil ->
+        {:error, :extension_runtime_unavailable}
+
+      _pid ->
+        server_call(message)
+    end
+  catch
+    :exit, _reason -> {:error, :extension_runtime_unavailable}
+  end
 
   defp server_call(message), do: GenServer.call(@server, message, server_call_timeout())
 end

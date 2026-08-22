@@ -12,7 +12,8 @@ defmodule Catalyst.Extensions.Loader do
   require Logger
 
   alias Catalyst.{Extension, ExtensionAPI, Tasks}
-  alias Catalyst.Extensions.{CompilerTracer, Contribution}
+  alias Catalyst.Extensions.{CompilerTracer, Contribution, GenerationCompiler}
+  alias Catalyst.Runtime.{ArtifactSet, Artifacts}
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @compile_timeout 30_000
@@ -24,16 +25,112 @@ defmodule Catalyst.Extensions.Loader do
   @doc "Compile and classify one source file within a bounded task."
   @spec compile(Path.t()) :: {:ok, contribution()} | {:error, term(), [module()]}
   def compile(path) do
+    case generation_managed_file?(path) do
+      {:ok, true} ->
+        compile_generation(path)
+
+      {:ok, false} ->
+        compile_legacy(path)
+
+      {:error, reason} ->
+        {:error, reason, []}
+    end
+  end
+
+  defp generation_managed_file?(path) do
+    task = Tasks.async(fn -> GenerationCompiler.generation_managed_file?(path) end)
+
+    case Tasks.await(task, compile_timeout()) do
+      {:ok, managed?} -> {:ok, managed?}
+      {:exit, reason} -> {:error, {:generation_mode_exit, reason}}
+      :timeout -> {:error, :timeout}
+    end
+  end
+
+  defp compile_legacy(path) do
     case compile_tracked(path) do
       {:ok, contribution, trace_ref} ->
         CompilerTracer.acknowledge(trace_ref)
-        {:ok, contribution}
+
+        case generation_mode_modules(contribution.ext_mods) do
+          [] ->
+            {:ok, contribution}
+
+          modules ->
+            {:error, {:generation_mode_requires_managed_compile, modules}, contribution.modules}
+        end
 
       {:error, reason, emitted_modules, trace_ref} ->
         CompilerTracer.acknowledge(trace_ref)
         {:error, reason, emitted_modules}
     end
   end
+
+  defp compile_generation(path) do
+    case compile_generation_tracked(path) do
+      {:ok, contribution, trace_ref} ->
+        CompilerTracer.acknowledge(trace_ref)
+        register_artifact(contribution)
+
+      {:error, reason, emitted_modules, trace_ref} ->
+        CompilerTracer.acknowledge(trace_ref)
+        {:error, reason, emitted_modules}
+    end
+  end
+
+  defp compile_generation_tracked(path) do
+    with_compiler_options(fn ->
+      collector = self()
+      trace_ref = make_ref()
+      gate = make_ref()
+
+      task =
+        Tasks.async(fn ->
+          receive do
+            {^gate, :compile} ->
+              CompilerTracer.start(collector, trace_ref)
+
+              try do
+                GenerationCompiler.compile_managed_file(path)
+              after
+                CompilerTracer.stop()
+              end
+          end
+        end)
+
+      :ok = CompilerTracer.reserve(trace_ref, task.pid)
+      send(task.pid, {gate, :compile})
+      outcome = Tasks.await(task, compile_timeout())
+      emitted_modules = CompilerTracer.collect(trace_ref)
+
+      case outcome do
+        {:ok, {:ok, contribution}} ->
+          {:ok, contribution, trace_ref}
+
+        {:ok, {:error, reason, modules}} ->
+          {:error, reason, Enum.uniq(modules ++ emitted_modules), trace_ref}
+
+        {:exit, reason} ->
+          {:error, {:exit, reason}, emitted_modules, trace_ref}
+
+        :timeout ->
+          {:error, :timeout, emitted_modules, trace_ref}
+      end
+    end)
+  end
+
+  defp register_artifact(%Contribution{artifact: artifact} = contribution) do
+    case Artifacts.register(artifact) do
+      :ok ->
+        {:ok, contribution}
+
+      {:error, reason} ->
+        {:error, reason, ArtifactSet.physical_modules(artifact)}
+    end
+  end
+
+  defp generation_mode_modules(modules),
+    do: Enum.filter(modules, &(Catalyst.Extension.code_mode(&1) == :generation))
 
   @doc false
   @spec compile_tracked(Path.t()) ::
