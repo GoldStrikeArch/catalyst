@@ -73,7 +73,7 @@ defmodule Catalyst.Extensions.GenerationCompiler do
       {:ok, artifact} ->
         case managed_contribution(artifact) do
           {:ok, contribution} -> {:ok, contribution}
-          {:error, reason} -> {:error, reason, []}
+          {:error, reason} -> {:error, reason, ArtifactSet.physical_modules(artifact)}
         end
 
       {:error, reason} ->
@@ -127,6 +127,7 @@ defmodule Catalyst.Extensions.GenerationCompiler do
     manifests = manifests(artifact)
 
     with :ok <- require_manifest_source(artifact, extension_modules),
+         :ok <- validate_embedded_trust(artifact, manifests),
          :ok <- reject_imperative_modules(imperative_modules),
          :ok <- reject_tool_modules(tool_modules),
          :ok <- validate_supported_manifests(manifests),
@@ -165,6 +166,18 @@ defmodule Catalyst.Extensions.GenerationCompiler do
 
   defp require_manifest_source(%ArtifactSet{manifests: [_ | _]}, modules),
     do: {:error, {:external_manifest_embedded_extensions_not_supported, modules}}
+
+  defp validate_embedded_trust(%ArtifactSet{manifests: [_ | _]}, _manifests), do: :ok
+
+  defp validate_embedded_trust(%ArtifactSet{manifests: []}, manifests) do
+    case Enum.find(manifests, &(not Catalyst.Extension.Trust.unrestricted?(&1.trust))) do
+      nil ->
+        :ok
+
+      manifest ->
+        {:error, {:isolated_trust_requires_external_manifest, manifest.id, manifest.trust}}
+    end
+  end
 
   defp reject_imperative_modules([]), do: :ok
 

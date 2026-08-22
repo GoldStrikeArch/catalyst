@@ -7,7 +7,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
   extension callbacks, starts no processes, and publishes no generation pointer.
   """
 
-  alias Catalyst.Extension.Manifest
+  alias Catalyst.Extension.{Manifest, Trust}
 
   alias Catalyst.Runtime.{
     ActivationId,
@@ -56,6 +56,7 @@ defmodule Catalyst.Runtime.Candidate.Builder do
 
   def build(manifests, opts) when is_list(manifests) and is_list(opts) do
     with {:ok, manifests} <- normalize_manifests(manifests),
+         :ok <- validate_activation_trust(manifests),
          :ok <- validate_manifest_ids(manifests),
          {:ok, available_manifests} <-
            normalize_manifests(Keyword.get(opts, :available_manifests, [])),
@@ -114,6 +115,13 @@ defmodule Catalyst.Runtime.Candidate.Builder do
     case duplicate_by(manifests, & &1.id) do
       [] -> :ok
       duplicates -> {:error, {:duplicate_manifest_ids, duplicates}}
+    end
+  end
+
+  defp validate_activation_trust(manifests) do
+    case Enum.find(manifests, &(not Trust.unrestricted?(&1.trust))) do
+      nil -> :ok
+      manifest -> {:error, {:isolated_runtime_transport_required, manifest.id, manifest.trust}}
     end
   end
 

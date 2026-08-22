@@ -293,6 +293,39 @@ defmodule Catalyst.Extensions.GenerationCompilerTest do
     assert emitted != []
   end
 
+  test "embedded manifests cannot claim isolated trust after compiling in the host VM" do
+    path =
+      write_source("""
+      defmodule GenerationCompilerEmbeddedIsolatedEngine do
+        def marker, do: :isolated
+      end
+
+      defmodule GenerationCompilerEmbeddedIsolatedExtension do
+        use Catalyst.Extension, api: 2, code: :generation
+
+        manifest %{
+          id: "test.embedded-isolated",
+          version: "1.0.0",
+          trust: :isolated_worker,
+          services: [
+            %{
+              key: {"agent", "run_engine", "default"},
+              contract: {"catalyst.agent-run-engine", 1},
+              implementation: GenerationCompilerEmbeddedIsolatedEngine
+            }
+          ]
+        }
+      end
+      """)
+
+    assert {:error,
+            {:isolated_trust_requires_external_manifest, "test.embedded-isolated",
+             :isolated_worker}, emitted} = Loader.compile(path)
+
+    assert emitted != []
+    assert Enum.all?(emitted, &(:code.is_loaded(&1) == false))
+  end
+
   test "reuses the physical namespace for byte-identical source" do
     path =
       write_source("""

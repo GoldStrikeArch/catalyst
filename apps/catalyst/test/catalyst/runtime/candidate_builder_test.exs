@@ -101,6 +101,14 @@ defmodule Catalyst.Runtime.Candidate.BuilderTest do
     assert is_function(function)
   end
 
+  test "isolated trust cannot claim a local candidate target" do
+    isolated =
+      manifest("test.isolated", trust: :isolated_worker, services: [service()])
+
+    assert {:error, {:isolated_runtime_transport_required, "test.isolated", :isolated_worker}} =
+             Builder.build([isolated], extension_points: [run_engine_point()])
+  end
+
   defp manifest(id, declarations) do
     declarations
     |> Map.new()
