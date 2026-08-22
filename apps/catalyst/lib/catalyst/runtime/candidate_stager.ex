@@ -17,6 +17,7 @@ defmodule Catalyst.Runtime.CandidateStager do
     PermissionPolicy,
     RunEngine,
     SessionEngine,
+    SessionFactory,
     TranscriptStore
   }
 
@@ -69,6 +70,7 @@ defmodule Catalyst.Runtime.CandidateStager do
     ExtensionPoints.base_claims()
     |> Kernel.++(
       RunEngine.unmanaged_claims() ++
+        SessionFactory.unmanaged_claims() ++
         SessionEngine.unmanaged_claims() ++
         PermissionPolicy.unmanaged_claims() ++ TranscriptStore.unmanaged_claims()
     )

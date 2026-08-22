@@ -11,6 +11,7 @@ defmodule Catalyst.Runtime.SessionEngine do
   alias Catalyst.Runtime.{Claim, Context, ContractRef, ExtensionPoints, Generations}
 
   alias Catalyst.Runtime.{Handle, ImplementationRef, Resolution, Resolver, Scope, ServiceKey}
+  alias Catalyst.Runtime.Transport
   alias Catalyst.Session.{EngineState, EventEnvelope}
 
   @doc "Resolve the effective default session engine."
@@ -61,27 +62,20 @@ defmodule Catalyst.Runtime.SessionEngine do
   @doc "Fold one versioned event through the pinned engine target."
   @spec event(Handle.t(), EventEnvelope.t(), EngineState.t()) :: EngineState.t()
   def event(%Handle{} = handle, %EventEnvelope{} = envelope, %EngineState{} = state) do
-    case ImplementationRef.transport(handle.resolution.claim.implementation) do
-      :local ->
-        %EngineState{} = handle.implementation.event(envelope, state)
-    end
+    %EngineState{} = Transport.invoke(handle, :event, [envelope, state])
   end
 
   @doc "Build orphan repair results through the pinned engine target."
   @spec aborted_tool_results(Handle.t(), EngineState.t(), term()) ::
           [Catalyst.Message.ToolResult.t()]
   def aborted_tool_results(%Handle{} = handle, %EngineState{} = state, reason) do
-    case ImplementationRef.transport(handle.resolution.claim.implementation) do
-      :local -> handle.implementation.aborted_tool_results(state, reason)
-    end
+    Transport.invoke(handle, :aborted_tool_results, [state, reason])
   end
 
   @doc "Build a failure message through the pinned engine target."
   @spec failure_message(Handle.t(), EngineState.t(), term()) :: Catalyst.Message.Assistant.t()
   def failure_message(%Handle{} = handle, %EngineState{} = state, reason) do
-    case ImplementationRef.transport(handle.resolution.claim.implementation) do
-      :local -> handle.implementation.failure_message(state, reason)
-    end
+    Transport.invoke(handle, :failure_message, [state, reason])
   end
 
   @doc "Snapshot engine-owned state through a pinned source handle."
@@ -90,9 +84,7 @@ defmodule Catalyst.Runtime.SessionEngine do
     with :ok <- ensure_handoff_callback(handle, :snapshot),
          result <-
            safe_handoff_callback(:snapshot, fn ->
-             case ImplementationRef.transport(handle.resolution.claim.implementation) do
-               :local -> handle.implementation.snapshot(state)
-             end
+             Transport.invoke(handle, :snapshot, [state])
            end) do
       validate_snapshot(result)
     end
@@ -104,9 +96,7 @@ defmodule Catalyst.Runtime.SessionEngine do
     with :ok <- ensure_handoff_callback(handle, :restore),
          result <-
            safe_handoff_callback(:restore, fn ->
-             case ImplementationRef.transport(handle.resolution.claim.implementation) do
-               :local -> handle.implementation.restore(snapshot)
-             end
+             Transport.invoke(handle, :restore, [snapshot])
            end) do
       validate_restored_state(result)
     end
@@ -189,6 +179,16 @@ defmodule Catalyst.Runtime.SessionEngine do
   catch
     kind, reason -> {:error, {:session_engine_handoff_exception, operation, {kind, reason}}}
   end
+
+  defp ensure_handoff_callback(
+         %Handle{
+           resolution: %Resolution{
+             claim: %Claim{implementation: %ImplementationRef{transport: :process}}
+           }
+         },
+         _callback
+       ),
+       do: :ok
 
   defp ensure_handoff_callback(%Handle{implementation: implementation}, callback) do
     case Code.ensure_loaded(implementation) do

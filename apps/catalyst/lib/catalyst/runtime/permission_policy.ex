@@ -8,7 +8,7 @@ defmodule Catalyst.Runtime.PermissionPolicy do
 
   alias Catalyst.Contracts.PermissionPolicy.V1
   alias Catalyst.Runtime.{Claim, Context, ContractRef, ExtensionPoints, Generations}
-  alias Catalyst.Runtime.{Handle, ImplementationRef, Resolution, Resolver, Scope, ServiceKey}
+  alias Catalyst.Runtime.{Handle, Resolution, Resolver, Scope, ServiceKey, Transport}
   alias Catalyst.Tasks
 
   @default_timeout 10_000
@@ -99,9 +99,7 @@ defmodule Catalyst.Runtime.PermissionPolicy do
   end
 
   defp invoke(%Handle{} = handle, action, principal, resource, context) do
-    case ImplementationRef.transport(handle.resolution.claim.implementation) do
-      :local -> handle.implementation.authorize(action, principal, resource, context)
-    end
+    Transport.invoke(handle, :authorize, [action, principal, resource, context])
   end
 
   defp normalize_decision({:ok, :allow}), do: :allow

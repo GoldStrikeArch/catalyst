@@ -21,7 +21,8 @@ defmodule Catalyst.Runtime.RunEngine do
     Resolution,
     Resolver,
     Scope,
-    ServiceKey
+    ServiceKey,
+    Transport
   }
 
   alias Catalyst.Workflow.Registry
@@ -73,9 +74,7 @@ defmodule Catalyst.Runtime.RunEngine do
   @spec invoke(Handle.t(), [Catalyst.Message.t()], map(), map(), Workflow.emitter()) ::
           Workflow.result()
   def invoke(%Handle{} = handle, prompts, context, config, emit) do
-    case ImplementationRef.transport(handle.resolution.claim.implementation) do
-      :local -> handle.implementation.run(prompts, context, config, emit)
-    end
+    Transport.invoke(handle, :run, [prompts, context, config, emit])
   end
 
   @doc "Explain the effective run-engine selection without starting a run."

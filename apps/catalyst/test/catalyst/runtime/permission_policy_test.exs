@@ -7,7 +7,7 @@ defmodule Catalyst.Runtime.PermissionPolicyTest do
   alias Catalyst.Content
   alias Catalyst.Contracts.PermissionPolicy.V1
   alias Catalyst.ExtensionAPI
-  alias Catalyst.Runtime.{ExtensionPoints, PermissionPolicy}
+  alias Catalyst.Runtime.{ExtensionPoints, ImplementationRef, PermissionPolicy}
 
   defmodule DenyPolicy do
     @behaviour Catalyst.Contracts.PermissionPolicy.V1
@@ -114,6 +114,27 @@ defmodule Catalyst.Runtime.PermissionPolicyTest do
                %{type: :tool},
                %{cwd: "."}
              )
+  end
+
+  test "a sovereign process can implement the permission service", %{owner: owner} do
+    start_supervised!({Catalyst.Test.RuntimeProcessPolicy, self()})
+
+    implementation =
+      ImplementationRef.process(
+        :test_process_policy,
+        Catalyst.Test.RuntimeProcessPolicy,
+        :permission_policy_v1
+      )
+
+    claim(owner, implementation)
+
+    action = %{type: :tool_call}
+    principal = %{type: :agent, session_id: "session"}
+    resource = %{type: :tool}
+    context = %{cwd: "."}
+
+    assert :allow = PermissionPolicy.authorize(action, principal, resource, context)
+    assert_receive {:process_policy_request, [^action, ^principal, ^resource, ^context]}
   end
 
   defp claim(owner, implementation) do

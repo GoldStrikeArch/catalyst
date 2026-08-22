@@ -20,7 +20,8 @@ defmodule Catalyst.Runtime.TranscriptStore do
     Resolution,
     Resolver,
     Scope,
-    ServiceKey
+    ServiceKey,
+    Transport
   }
 
   alias Catalyst.Session.TranscriptStore.Handle, as: StoreHandle
@@ -187,9 +188,7 @@ defmodule Catalyst.Runtime.TranscriptStore do
   end
 
   defp invoke(%Handle{} = handle, function, args) do
-    case ImplementationRef.transport(handle.resolution.claim.implementation) do
-      :local -> apply(handle.implementation, function, args)
-    end
+    Transport.invoke(handle, function, args)
   end
 
   defp managed_claims do

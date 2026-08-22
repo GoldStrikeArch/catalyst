@@ -21,7 +21,8 @@ defmodule CatalystWeb.Workbench do
     Resolution,
     Resolver,
     Scope,
-    ServiceKey
+    ServiceKey,
+    Transport
   }
 
   @default_callback_timeout 1_000
@@ -158,9 +159,7 @@ defmodule CatalystWeb.Workbench do
   end
 
   defp invoke(%Handle{} = handle, callback, args) do
-    case ImplementationRef.transport(handle.resolution.claim.implementation) do
-      :local -> apply(handle.implementation, callback, args)
-    end
+    Transport.invoke(handle, callback, args)
   end
 
   defp validate_forms(forms) do

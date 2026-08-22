@@ -21,7 +21,8 @@ defmodule Catalyst.Runtime.SessionFactory do
     Resolution,
     Resolver,
     Scope,
-    ServiceKey
+    ServiceKey,
+    Transport
   }
 
   @doc "Resolve and pin the effective factory for one new local session."
@@ -141,9 +142,7 @@ defmodule Catalyst.Runtime.SessionFactory do
   end
 
   defp invoke(%Handle{} = handle, opts) do
-    case ImplementationRef.transport(handle.resolution.claim.implementation) do
-      :local -> handle.implementation.child_spec(opts)
-    end
+    Transport.invoke(handle, :child_spec, [opts])
   end
 
   defp normalize_child_spec(child_spec) do
