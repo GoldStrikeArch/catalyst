@@ -734,8 +734,9 @@ surviving run leases. Artifact and lease ownership survives runtime-chain restar
 source reuses its artifact namespace and activation. Rejected candidates and drained activations
 stop and join their candidate processes before purging artifacts. Local generation-qualified source
 remains intentionally limited to service declarations, and its permanent artifact namespaces have a
-bounded budget. Candidate compilation is preflighted in a disposable Elixir VM. A manifest declaring
-`:isolated_worker` is compiled and executed only outside the host VM, currently for the
+bounded budget. Local managed compilation may optionally use a disposable preflight VM, but still
+loads accepted code into the host. A manifest declaring `:isolated_worker` is always preflighted,
+compiled, and executed only outside the host VM, currently for the
 `catalyst.permission-policy/1` contract; its bounded protocol fails closed, but the worker runs as the
 same OS user and is not a filesystem/network sandbox. Session-engine and Workbench contracts support
 quiescent state handoff, while generic state-changing manifest migrations remain fail-closed except
