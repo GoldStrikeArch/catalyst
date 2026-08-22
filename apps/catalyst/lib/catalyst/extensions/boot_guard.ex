@@ -27,6 +27,8 @@ defmodule Catalyst.Extensions.BootGuard do
 
   require Logger
 
+  alias Catalyst.Files.AtomicWrite
+
   @doc "Path of the marker file (`~/.catalyst/boot_marker`; test-overridable)."
   @spec marker_path() :: Path.t()
   def marker_path do
@@ -65,6 +67,15 @@ defmodule Catalyst.Extensions.BootGuard do
     end
   end
 
+  @doc "Notify an external Recovery Host of this VM's ready token and effective product."
+  @spec mark_recovery_ready() :: :ok
+  def mark_recovery_ready do
+    case recovery_handshake() do
+      {:ok, path, token} -> write_recovery_ready(path, token)
+      :disabled -> :ok
+    end
+  end
+
   @doc "Whether the previous boot died before its extensions were marked stable."
   @spec crashed_last_boot?() :: boolean()
   def crashed_last_boot? do
@@ -89,6 +100,42 @@ defmodule Catalyst.Extensions.BootGuard do
 
       {:error, reason} ->
         Logger.warning("[extensions] could not write boot marker #{path}: #{inspect(reason)}")
+
+        :ok
+    end
+  end
+
+  defp recovery_handshake do
+    path = System.get_env("CATALYST_RECOVERY_READY_PATH")
+    token = System.get_env("CATALYST_RECOVERY_BOOT_TOKEN")
+
+    case {path, token} do
+      {path, token}
+      when is_binary(path) and path != "" and is_binary(token) and token != "" and
+             byte_size(token) <= 256 ->
+        {:ok, path, token}
+
+      _disabled_or_invalid ->
+        :disabled
+    end
+  end
+
+  defp write_recovery_ready(path, token) do
+    result =
+      with :ok <- File.mkdir_p(Path.dirname(path)),
+           :ok <-
+             AtomicWrite.write(path, token <> ":" <> Catalyst.Product.id() <> "\n", mode: 0o600) do
+        :ok
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[extensions] could not signal Recovery Host at #{path}: #{inspect(reason)}"
+        )
 
         :ok
     end

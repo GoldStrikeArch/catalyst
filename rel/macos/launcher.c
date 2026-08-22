@@ -28,8 +28,26 @@ int main(int argc, char *argv[]) {
   char real[PATH_MAX];
   if (realpath(exe, real) == NULL) return 71;
 
+  char *directory = dirname(real);
   char run[PATH_MAX];
-  snprintf(run, sizeof(run), "%s/run", dirname(real)); /* .../Contents/MacOS/run */
+  char host[PATH_MAX];
+  snprintf(run, sizeof(run), "%s/run", directory); /* .../Contents/MacOS/run */
+  snprintf(host, sizeof(host), "%s/catalyst-recovery-host", directory);
+
+  if (access(host, X_OK) == 0) {
+    char **args = calloc(argc + 4, sizeof(char *));
+    if (args == NULL) return 73;
+    args[0] = host;
+    args[1] = "start";
+    args[2] = "--";
+    args[3] = run;
+    for (int i = 1; i < argc; i++) args[i + 3] = argv[i];
+    args[argc + 3] = NULL;
+
+    execv(host, args);
+    perror("execv recovery host");
+    return 72;
+  }
 
   char **args = calloc(argc + 1, sizeof(char *));
   if (args == NULL) return 73;

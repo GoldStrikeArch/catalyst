@@ -1,0 +1,327 @@
+#!/bin/sh
+# Minimal process boundary around a Catalyst release.
+#
+# The child proves boot readiness by atomically writing
+# CATALYST_RECOVERY_BOOT_TOKEN to CATALYST_RECOVERY_READY_PATH. Until then this
+# host can terminate a timed-out child, restore the last-known-good profile,
+# and retry once with extensions disabled.
+
+set -u
+
+DEFAULT_PROFILE="coding-agent"
+DEFAULT_DEADLINE=30
+MAX_FILE_BYTES=1024
+
+fail() {
+  printf 'catalyst-recovery-host: %s\n' "$*" >&2
+  exit 64
+}
+
+home_dir() {
+  if [ -n "${CATALYST_HOME:-}" ]; then
+    printf '%s\n' "$CATALYST_HOME"
+  elif [ -n "${HOME:-}" ]; then
+    printf '%s/.catalyst\n' "$HOME"
+  else
+    fail 'CATALYST_HOME or HOME is required'
+  fi
+}
+
+atomic_write() {
+  target=$1
+  value=$2
+  directory=$(dirname "$target")
+  temporary="${target}.tmp.$$"
+
+  mkdir -p "$directory" || return 1
+  (umask 077 && printf '%s\n' "$value" >"$temporary") || return 1
+  mv -f "$temporary" "$target"
+}
+
+read_bounded() {
+  path=$1
+
+  [ -f "$path" ] || return 1
+  bytes=$(wc -c <"$path" | tr -d ' ')
+  [ "$bytes" -le "$MAX_FILE_BYTES" ] || return 1
+  cat "$path"
+}
+
+valid_profile() {
+  printf '%s\n' "$1" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9._-]{0,127}$'
+}
+
+valid_deadline() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) [ "$1" -ge 1 ] && [ "$1" -le 300 ] ;;
+  esac
+}
+
+state_paths() {
+  state_dir=${state_dir:-"$(home_dir)/recovery"}
+
+  if [ -e "$state_dir" ]; then
+    [ -d "$state_dir" ] || fail "$state_dir is not a directory"
+  else
+    (umask 077 && mkdir -p "$state_dir") || fail "cannot create $state_dir"
+    chmod 700 "$state_dir" || fail "cannot protect $state_dir"
+  fi
+
+  profile_path="$(home_dir)/product_profile"
+  last_good_path="$state_dir/last_known_good_profile"
+  status_path="$state_dir/boot_status"
+  ready_path="$state_dir/ready"
+  pid_path="$state_dir/child_pid"
+  safe_mode_path="$state_dir/safe_mode"
+  stop_path="$state_dir/stop_requested"
+}
+
+read_profile() {
+  if [ -f "$profile_path" ]; then
+    contents=$(read_bounded "$profile_path" 2>/dev/null) || fail "invalid profile pointer"
+    profile=$(printf '%s' "$contents" | tr -d '\r\n')
+  else
+    profile=$DEFAULT_PROFILE
+  fi
+
+  valid_profile "$profile" || fail "invalid profile pointer: $profile"
+  printf '%s\n' "$profile"
+}
+
+write_profile() {
+  valid_profile "$1" || fail "invalid profile id: $1"
+  atomic_write "$profile_path" "$1" || fail "cannot write $profile_path"
+}
+
+write_status() {
+  atomic_write "$status_path" "$1" || fail "cannot write $status_path"
+}
+
+ready_for_token() {
+  ready=$(read_bounded "$ready_path" 2>/dev/null | tr -d '\r\n' || true)
+  [ "$ready" = "$1:$2" ]
+}
+
+wait_for_boot() {
+  child_pid=$1
+  token=$2
+  profile=$3
+  deadline_epoch=$4
+
+  while :; do
+    if ready_for_token "$token" "$profile"; then
+      return 0
+    fi
+
+    if ! kill -0 "$child_pid" 2>/dev/null; then
+      if wait "$child_pid"; then
+        child_exit_status=0
+      else
+        child_exit_status=$?
+      fi
+
+      child_reaped=1
+
+      if ready_for_token "$token" "$profile"; then
+        return 0
+      fi
+
+      if [ "$child_exit_status" -eq 0 ]; then
+        boot_failure_status=125
+      else
+        boot_failure_status=$child_exit_status
+      fi
+
+      return 1
+    fi
+
+    now=$(date +%s)
+    if [ "$now" -ge "$deadline_epoch" ]; then
+      kill "$child_pid" 2>/dev/null || true
+      kill -KILL "$child_pid" 2>/dev/null || true
+      wait "$child_pid" 2>/dev/null || true
+      boot_failure_status=124
+      return 1
+    fi
+
+    sleep 1
+  done
+}
+
+run_child() {
+  profile=$1
+  safe_mode=$2
+  attempt=$3
+  shift 3
+
+  token="$$-$(date +%s)-$attempt"
+  boot_ready=0
+  boot_failure_status=1
+  child_reaped=0
+  child_exit_status=0
+  deadline_epoch=$(($(date +%s) + deadline_seconds))
+  rm -f "$ready_path"
+  atomic_write "$safe_mode_path" "$safe_mode" || fail "cannot write $safe_mode_path"
+  write_status "booting:$token:$profile:$deadline_epoch:$safe_mode"
+
+  if [ "$safe_mode" = 1 ]; then
+    CATALYST_SAFE_MODE=1 \
+      CATALYST_RECOVERY_READY_PATH="$ready_path" \
+      CATALYST_RECOVERY_BOOT_TOKEN="$token" \
+      "$@" &
+  else
+    CATALYST_RECOVERY_READY_PATH="$ready_path" \
+      CATALYST_RECOVERY_BOOT_TOKEN="$token" \
+      "$@" &
+  fi
+
+  child_pid=$!
+  atomic_write "$pid_path" "$child_pid" || fail "cannot write $pid_path"
+
+  if wait_for_boot "$child_pid" "$token" "$profile" "$deadline_epoch"; then
+    boot_ready=1
+    atomic_write "$last_good_path" "$profile" || fail "cannot write $last_good_path"
+    write_status "ready:$token:$profile:$deadline_epoch:$safe_mode"
+
+    if [ "$child_reaped" = 1 ]; then
+      child_status=$child_exit_status
+    else
+      wait "$child_pid"
+      child_status=$?
+    fi
+
+    rm -f "$pid_path"
+    write_status "stopped:$child_status:$profile:$safe_mode"
+    return "$child_status"
+  else
+    child_status=$boot_failure_status
+    rm -f "$pid_path"
+    write_status "failed:$child_status:$profile:$safe_mode"
+    return "$child_status"
+  fi
+}
+
+start() {
+  deadline_seconds=$DEFAULT_DEADLINE
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --state-dir)
+        [ "$#" -ge 2 ] || fail '--state-dir requires a path'
+        state_dir=$2
+        shift 2
+        ;;
+      --deadline)
+        [ "$#" -ge 2 ] || fail '--deadline requires seconds'
+        deadline_seconds=$2
+        valid_deadline "$deadline_seconds" || fail 'deadline must be 1..300 seconds'
+        shift 2
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *) fail "unknown start option: $1" ;;
+    esac
+  done
+
+  [ "$#" -gt 0 ] || fail 'start requires a command after --'
+  state_paths
+  rm -f "$stop_path"
+  profile=$(read_profile)
+  write_profile "$profile"
+
+  if run_child "$profile" 0 1 "$@"; then
+    return 0
+  else
+    first_status=$?
+  fi
+
+  if [ -f "$stop_path" ]; then
+    rm -f "$stop_path"
+    write_status "stopped:$first_status:$profile:operator"
+    return "$first_status"
+  fi
+
+  [ "$boot_ready" = 0 ] || return "$first_status"
+
+  last_good=$(read_bounded "$last_good_path" 2>/dev/null | tr -d '\r\n' || true)
+
+  case "$last_good" in
+    '') last_good=$profile ;;
+  esac
+
+  valid_profile "$last_good" || last_good=$profile
+  write_profile "$last_good"
+  write_status "rollback:$first_status:$profile:$last_good"
+  run_child "$last_good" 1 2 "$@"
+}
+
+select_profile() {
+  state_paths
+  [ "$#" -eq 1 ] || fail 'select requires one profile id'
+  write_profile "$1"
+  printf '%s\n' "$1"
+}
+
+stop_child() {
+  state_paths
+  child_pid=$(read_bounded "$pid_path" 2>/dev/null | tr -d '\r\n' || true)
+
+  case "$child_pid" in
+    ''|*[!0-9]*) fail 'no valid child pid' ;;
+  esac
+
+  atomic_write "$stop_path" 1 || fail "cannot write $stop_path"
+  kill "$child_pid" 2>/dev/null || fail "child $child_pid is not running"
+  write_status "stopping:$child_pid"
+}
+
+diagnostics() {
+  state_paths
+  profile=$(read_profile)
+  last_good=$(read_bounded "$last_good_path" 2>/dev/null | tr -d '\r\n' || true)
+  status=$(read_bounded "$status_path" 2>/dev/null | tr -d '\r\n' || true)
+  safe_mode=$(read_bounded "$safe_mode_path" 2>/dev/null | tr -d '\r\n' || true)
+  child_pid=$(read_bounded "$pid_path" 2>/dev/null | tr -d '\r\n' || true)
+
+  printf 'profile=%s\nlast_known_good=%s\nstatus=%s\nsafe_mode=%s\npid=%s\n' \
+    "$profile" "$last_good" "$status" "$safe_mode" "$child_pid"
+}
+
+usage() {
+  cat <<'EOF'
+usage:
+  catalyst-recovery-host start [--state-dir DIR] [--deadline SECONDS] -- COMMAND [ARG...]
+  catalyst-recovery-host select [--state-dir DIR] PROFILE
+  catalyst-recovery-host stop [--state-dir DIR]
+  catalyst-recovery-host diagnostics [--state-dir DIR]
+EOF
+}
+
+command=${1:-}
+[ "$#" -gt 0 ] && shift
+
+case "$command" in
+  start) start "$@" ;;
+  select|stop|diagnostics|status)
+    state_dir=''
+    if [ "${1:-}" = '--state-dir' ]; then
+      [ "$#" -ge 2 ] || fail '--state-dir requires a path'
+      state_dir=$2
+      shift 2
+    fi
+
+    case "$command" in
+      select) select_profile "$@" ;;
+      stop) [ "$#" -eq 0 ] || fail 'stop takes no arguments'; stop_child ;;
+      diagnostics|status)
+        [ "$#" -eq 0 ] || fail "$command takes no arguments"
+        diagnostics
+        ;;
+    esac
+    ;;
+  -h|--help|help|'') usage ;;
+  *) fail "unknown command: $command" ;;
+esac

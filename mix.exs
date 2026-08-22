@@ -264,8 +264,11 @@ defmodule Catalyst.Umbrella.MixProject do
       true ->
         name = package()[:name]
         launcher = Path.join([app, "Contents/MacOS", name])
+        recovery_host = Path.join([app, "Contents/MacOS", "catalyst-recovery-host"])
         plist = Path.join(app, "Contents/Info.plist")
 
+        File.cp!("rel/recovery_host", recovery_host)
+        File.chmod!(recovery_host, 0o755)
         cmd!("cc", ["-arch", "arm64", "-O2", "-o", launcher, "rel/macos/launcher.c"])
         File.chmod!(launcher, 0o755)
         # Ad-hoc sign the launcher as a standalone Mach-O *before* it becomes the

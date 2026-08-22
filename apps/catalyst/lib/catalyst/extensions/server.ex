@@ -157,8 +157,12 @@ defmodule Catalyst.Extensions.Server do
 
   def handle_info(:mark_boot_ok, state) do
     case {Catalyst.Extensions.boot_status(), state.boot_token} do
-      {:ok, token} when is_binary(token) -> BootGuard.mark_ok(token)
-      _not_this_boots_clean_window -> :ok
+      {:ok, token} when is_binary(token) ->
+        BootGuard.mark_ok(token)
+        BootGuard.mark_recovery_ready()
+
+      _not_this_boots_clean_window ->
+        :ok
     end
 
     {:noreply, state}
@@ -508,7 +512,15 @@ defmodule Catalyst.Extensions.Server do
 
   defp complete_bootstrap(state) do
     :ok = Hooks.mark_runtime_ready(state.hook_generation)
+    mark_safe_recovery_ready()
     %{state | bootstrap: :complete}
+  end
+
+  defp mark_safe_recovery_ready do
+    case Catalyst.Extensions.boot_status() do
+      {:safe_mode, _reason} -> BootGuard.mark_recovery_ready()
+      _normal_or_failed_boot -> :ok
+    end
   end
 
   defp run_reseeders_bounded do
