@@ -49,6 +49,15 @@ defmodule Catalyst.Runtime.Context do
     struct!(__MODULE__, values)
   end
 
+  @doc "Build a host resolution context with the active product identity filled in."
+  @spec host(t() | map() | keyword()) :: t()
+  def host(context) do
+    case new(context) do
+      %__MODULE__{product_id: nil} = context -> %{context | product_id: Catalyst.Product.id()}
+      %__MODULE__{} = context -> context
+    end
+  end
+
   @doc "The supported identity dimensions."
   @spec dimensions() :: [dimension()]
   def dimensions, do: @dimensions

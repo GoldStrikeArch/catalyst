@@ -58,7 +58,7 @@ defmodule Catalyst.Runtime.TranscriptStore do
   @doc "Resolve the effective default transcript store."
   @spec resolve(Context.t() | map() | keyword()) :: {:ok, Resolution.t()} | {:error, term()}
   def resolve(context \\ %{}) do
-    context = Context.new(context)
+    context = Context.host(context)
 
     case Resolver.resolve(claims(), key(), context, contract: V1.ref()) do
       {:ok, resolution} -> {:ok, resolution}
@@ -69,7 +69,7 @@ defmodule Catalyst.Runtime.TranscriptStore do
   @doc "Explain the effective transcript store without opening a session."
   @spec explain(Context.t() | map() | keyword()) :: Catalyst.Runtime.Explanation.t()
   def explain(context \\ %{}) do
-    Resolver.explain(claims(), key(), Context.new(context), contract: V1.ref())
+    Resolver.explain(claims(), key(), Context.host(context), contract: V1.ref())
   end
 
   @doc "Export the managed and built-in transcript-store claims."

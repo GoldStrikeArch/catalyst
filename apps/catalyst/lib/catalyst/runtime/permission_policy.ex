@@ -18,7 +18,7 @@ defmodule Catalyst.Runtime.PermissionPolicy do
   def authorize(action, principal, resource, context)
       when is_map(action) and is_map(principal) and is_map(resource) and is_map(context) do
     runtime_context =
-      Context.new(
+      Context.host(
         session_id: Map.get(principal, :session_id),
         run_id: Map.get(context, :run_id)
       )
@@ -35,7 +35,7 @@ defmodule Catalyst.Runtime.PermissionPolicy do
   @doc "Explain the effective permission policy without invoking it."
   @spec explain(Context.t() | map() | keyword()) :: Catalyst.Runtime.Explanation.t()
   def explain(context \\ %{}) do
-    Resolver.explain(claims(), key(), Context.new(context), contract: V1.ref())
+    Resolver.explain(claims(), key(), Context.host(context), contract: V1.ref())
   end
 
   @doc "Export managed and built-in permission-policy claims."

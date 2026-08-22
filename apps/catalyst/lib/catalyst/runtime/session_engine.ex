@@ -17,7 +17,7 @@ defmodule Catalyst.Runtime.SessionEngine do
   @spec resolve(Context.t() | map() | keyword()) ::
           {:ok, Resolution.t()} | {:error, term()}
   def resolve(context \\ %{}) do
-    context = Context.new(context)
+    context = Context.host(context)
 
     case Resolver.resolve(claims(), key(), context, contract: V1.ref()) do
       {:ok, resolution} -> {:ok, resolution}
@@ -115,7 +115,7 @@ defmodule Catalyst.Runtime.SessionEngine do
   @doc "Explain the effective session engine without starting a session."
   @spec explain(Context.t() | map() | keyword()) :: Catalyst.Runtime.Explanation.t()
   def explain(context \\ %{}) do
-    Resolver.explain(claims(), key(), Context.new(context), contract: V1.ref())
+    Resolver.explain(claims(), key(), Context.host(context), contract: V1.ref())
   end
 
   @doc "Export the managed and built-in session-engine claims."
@@ -191,6 +191,16 @@ defmodule Catalyst.Runtime.SessionEngine do
   end
 
   defp ensure_handoff_callback(%Handle{implementation: implementation}, callback) do
+    case Code.ensure_loaded(implementation) do
+      {:module, ^implementation} ->
+        ensure_exported_handoff_callback(implementation, callback)
+
+      {:error, reason} ->
+        {:error, {:session_engine_handoff_module_unavailable, implementation, reason}}
+    end
+  end
+
+  defp ensure_exported_handoff_callback(implementation, callback) do
     case function_exported?(implementation, callback, 1) do
       true -> :ok
       false -> {:error, {:session_engine_handoff_not_supported, implementation, callback}}

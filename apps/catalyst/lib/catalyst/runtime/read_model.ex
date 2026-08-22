@@ -47,7 +47,7 @@ defmodule Catalyst.Runtime.ReadModel do
   @doc "Capture one aggregate graph without mutating any source registry."
   @spec snapshot(Context.t() | map() | keyword()) :: Graph.t()
   def snapshot(context \\ %{}) do
-    context = Context.new(context)
+    context = Context.host(context)
     {claims, contributions, source_status, source_metadata} = collect(context)
 
     %Graph{

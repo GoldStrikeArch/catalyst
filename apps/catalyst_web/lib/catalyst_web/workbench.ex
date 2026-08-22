@@ -50,7 +50,7 @@ defmodule CatalystWeb.Workbench do
   @doc "Resolve the effective workbench without acquiring a generation lease."
   @spec resolve(Context.t() | map() | keyword()) :: {:ok, Resolution.t()} | {:error, term()}
   def resolve(context \\ %{}) do
-    context = Context.new(context)
+    context = Context.host(context)
 
     case Resolver.resolve(claims(), key(), context, contract: V1.ref()) do
       {:ok, resolution} -> {:ok, resolution}

@@ -37,7 +37,7 @@ defmodule Catalyst.Runtime.RunEngine do
   @spec resolve(keyword() | map(), Context.t() | map() | keyword()) ::
           {:ok, resolved()} | {:error, term()}
   def resolve(opts, context \\ %{}) do
-    context = Context.new(context)
+    context = Context.host(context)
 
     with {:ok, key, claims} <- resolution_claims(opts, context),
          {:ok, resolution} <- Resolver.resolve(claims, key, context, contract: V1.ref()),
@@ -82,7 +82,7 @@ defmodule Catalyst.Runtime.RunEngine do
   @spec explain(keyword() | map(), Context.t() | map() | keyword()) ::
           {:ok, Catalyst.Runtime.Explanation.t()} | {:error, term()}
   def explain(opts, context \\ %{}) do
-    context = Context.new(context)
+    context = Context.host(context)
 
     with {:ok, key, claims} <- resolution_claims(opts, context) do
       {:ok, Resolver.explain(claims, key, context, contract: V1.ref())}
@@ -93,7 +93,7 @@ defmodule Catalyst.Runtime.RunEngine do
   @spec claims(keyword() | map(), Context.t() | map() | keyword()) ::
           {:ok, [Claim.t()]} | {:error, term()}
   def claims(opts, context \\ %{}) do
-    context = Context.new(context)
+    context = Context.host(context)
 
     with {:ok, _key, claims} <- resolution_claims(opts, context) do
       {:ok, claims}
@@ -103,7 +103,7 @@ defmodule Catalyst.Runtime.RunEngine do
   @doc "Export claims for every currently selectable workflow slot."
   @spec all_claims(Context.t() | map() | keyword()) :: [Claim.t()]
   def all_claims(context \\ %{}) do
-    context = Context.new(context)
+    context = Context.host(context)
 
     Registry.list()
     |> Enum.flat_map(fn selection ->
