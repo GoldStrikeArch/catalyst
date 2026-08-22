@@ -36,8 +36,7 @@ defmodule Catalyst.Extensions.State do
           setup_collisions: %{optional(reference()) => setup_entry()},
           hook_generation: reference() | nil,
           boot_token: String.t() | nil,
-          bootstrap: bootstrap(),
-          ready_waiters: [GenServer.from()]
+          bootstrap: bootstrap()
         }
 
   defstruct contrib: %{},
@@ -50,8 +49,7 @@ defmodule Catalyst.Extensions.State do
             setup_collisions: %{},
             hook_generation: nil,
             boot_token: nil,
-            bootstrap: :waiting,
-            ready_waiters: []
+            bootstrap: :waiting
 
   @doc "Create an empty extension runtime state."
   @spec new() :: t()

@@ -29,6 +29,8 @@ defmodule Catalyst.Flex.Harness do
   @doc "Enter a unique Catalyst home and schedule exact environment restoration."
   @spec isolated_home!() :: Path.t()
   def isolated_home! do
+    await_extension_runtime!()
+
     root =
       Path.join(
         System.tmp_dir!(),
@@ -41,6 +43,7 @@ defmodule Catalyst.Flex.Harness do
     ExUnit.Callbacks.on_exit(fn ->
       Enum.each(previous, fn {{app, key}, value} -> restore_app_env(app, key, value) end)
       File.mkdir_p!(Extensions.dir())
+      await_extension_runtime!()
       _ = Extensions.load_all()
       File.rm_rf!(root)
     end)
@@ -62,6 +65,13 @@ defmodule Catalyst.Flex.Harness do
 
       other ->
         flunk("could not enter isolated flexibility home: #{inspect(other)}")
+    end
+  end
+
+  defp await_extension_runtime! do
+    case Extensions.await_ready(5_000) do
+      :ok -> :ok
+      other -> flunk("extension runtime did not become ready: #{inspect(other)}")
     end
   end
 

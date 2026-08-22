@@ -52,7 +52,6 @@ defmodule Catalyst.MixProject do
       {:phoenix_pubsub, "~> 2.1"},
       {:jason, "~> 1.4"},
       {:ex_json_schema, "~> 0.10"},
-      {:muontrap, "~> 1.0"},
       {:finch, "~> 0.19"},
       # Codex websocket transport (Mint is already in the tree via Finch).
       {:mint_web_socket, "~> 1.0"},
@@ -64,7 +63,17 @@ defmodule Catalyst.MixProject do
       {:plug, "~> 1.16"},
       # Test-only: local websocket server for the Codex websocket client tests.
       {:websock_adapter, "~> 0.5", only: :test}
-    ]
+    ] ++ platform_deps()
+  end
+
+  # MuonTrap's process-group wrapper uses POSIX headers and cannot compile on
+  # Windows. Exec.bash/2 reports that platform as unsupported instead of
+  # weakening its process-tree cancellation contract.
+  defp platform_deps do
+    case :os.type() do
+      {:unix, _name} -> [{:muontrap, "~> 1.0"}]
+      {_family, _name} -> []
+    end
   end
 
   # Aliases are shortcuts or tasks specific to the current project.

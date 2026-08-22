@@ -42,7 +42,7 @@ defmodule CatalystWeb.MixProject do
       {:desktop, "~> 1.5"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
-      {:phoenix_live_view, "~> 1.1.0"},
+      {:phoenix_live_view, "~> 1.2.9"},
       {:lazy_html, ">= 0.1.0", only: :test},
       # Runtime in dev AND prod (not test): the packaged app rebuilds assets at
       # runtime (CatalystWeb.Assets). Kept out of :test so suites never shell out.

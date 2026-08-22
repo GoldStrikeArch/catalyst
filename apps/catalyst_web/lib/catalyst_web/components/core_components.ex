@@ -77,15 +77,15 @@ defmodule CatalystWeb.CoreComponents do
   end
 
   @doc "Builds a LiveView JS command that reveals the target with a transition."
-  @spec show(String.t()) :: JS.t()
+  @spec show(String.t()) :: %JS{}
   def show(selector), do: JS.show(show_options(selector))
 
   @doc "Builds a LiveView JS command that hides the target with a transition."
-  @spec hide(String.t()) :: JS.t()
+  @spec hide(String.t()) :: %JS{}
   def hide(selector), do: JS.hide(hide_options(selector))
 
   @doc "Adds the hide transition to an existing LiveView JS command."
-  @spec hide(JS.t(), String.t()) :: JS.t()
+  @spec hide(%JS{}, String.t()) :: %JS{}
   def hide(js, selector), do: JS.hide(js, hide_options(selector))
 
   # Compatibility for extensions or application code that call the former

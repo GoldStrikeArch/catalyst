@@ -70,8 +70,7 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
           :if={@action}
           class="flex items-center gap-2 text-xs text-muted"
         >
-          <span class="size-3 animate-spin rounded-full border-2 border-edge-strong border-t-muted">
-          </span>
+          <span class="size-3 animate-spin rounded-full border-2 border-edge-strong border-t-muted"></span>
           {@action.label}…
         </span>
 

@@ -20,13 +20,23 @@ defmodule CatalystCli do
   """
   @spec run([String.t()]) :: :ok | :error
   def run(["tools" | _]) do
-    IO.puts("registered tools: " <> Enum.join(Enum.sort(Catalyst.Extensions.names()), ", "))
-    :ok
+    case Catalyst.Extensions.await_ready() do
+      :ok ->
+        IO.puts("registered tools: " <> Enum.join(Enum.sort(Catalyst.Extensions.names()), ", "))
+        :ok
+
+      {:error, reason} ->
+        command_failed(reason)
+    end
   end
 
   def run(["selftest" | _]) do
     IO.puts("== Catalyst packaged self-develop test ==")
-    run_isolated_selftest()
+
+    case Catalyst.Extensions.await_ready() do
+      :ok -> run_isolated_selftest()
+      {:error, reason} -> selftest_failed({:extension_runtime_not_ready, reason})
+    end
   end
 
   def run(argv) do
@@ -191,6 +201,11 @@ defmodule CatalystCli do
 
   defp selftest_failed(reason) do
     IO.puts("FAILED: #{inspect(reason)}")
+    :error
+  end
+
+  defp command_failed(reason) do
+    IO.puts(:stderr, "catalyst: extension runtime is not ready: #{inspect(reason)}")
     :error
   end
 
