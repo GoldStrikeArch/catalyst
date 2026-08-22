@@ -5,8 +5,19 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
 
   alias Catalyst.Contracts.Workbench.V1
   alias Catalyst.Extension.Manifest
-  alias Catalyst.Runtime.{GenerationStore, Generations, Leases}
+  alias Catalyst.ExtensionAPI
+  alias Catalyst.Runtime.{ExtensionPoints, GenerationStore, Generations, Leases, PermissionPolicy}
   alias CatalystWeb.Workbench
+
+  defmodule DenyWrites do
+    @behaviour Catalyst.Contracts.PermissionPolicy.V1
+
+    @impl true
+    def authorize(%{operation: :write}, _principal, _resource, _context),
+      do: {:deny, :read_only_workspace}
+
+    def authorize(_action, _principal, _resource, _context), do: :allow
+  end
 
   setup do
     :ok = Generations.clear()
@@ -21,11 +32,36 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
     File.write!(Path.join(root, "lib/example.ex"), "hello\n")
 
     on_exit(fn ->
+      ExtensionPoints.purge_owner("workbench_policy_test")
       Generations.clear()
       File.rm_rf!(root)
     end)
 
     {:ok, root: root}
+  end
+
+  test "workspace effects obey the effective permission policy", %{conn: conn, root: root} do
+    assert :ok =
+             "workbench_policy_test"
+             |> ExtensionAPI.new()
+             |> ExtensionAPI.claim(PermissionPolicy.key(), DenyWrites,
+               contract: Catalyst.Contracts.PermissionPolicy.V1.ref(),
+               priority: 900
+             )
+
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/ide")
+
+    wait_until(fn -> has_element?(view, ~s([data-file-path="lib/example.ex"])) end)
+    view |> element(~s([data-file-path="lib/example.ex"])) |> render_click()
+    wait_until(fn -> has_element?(view, "#editor-content", "hello") end)
+
+    view
+    |> form("#editor-form", %{"editor" => %{"content" => "blocked\n"}})
+    |> render_submit()
+
+    wait_until(fn -> has_element?(view, "#command-output", "read_only_workspace") end)
+    assert File.read!(Path.join(root, "lib/example.ex")) == "hello\n"
   end
 
   test "the IDE opens, edits, saves, and runs a workspace task", %{conn: conn, root: root} do

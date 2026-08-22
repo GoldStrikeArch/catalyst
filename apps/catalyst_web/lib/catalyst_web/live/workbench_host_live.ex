@@ -3,6 +3,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   use CatalystWeb, :live_view
 
+  alias Catalyst.Resources
   alias CatalystWeb.ShellLive.SessionLifecycle
   alias CatalystWeb.UI.{Registry, SafeRender}
   alias CatalystWeb.Workbench
@@ -167,31 +168,62 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   defp start_effect({:workspace, :list, request_id}, socket) do
     workspace = workspace!(socket)
-    start_effect_task(socket, request_id, fn -> Workspace.list_files(workspace) end)
+
+    start_brokered_effect(socket, request_id, :list, %{type: :workspace, path: workspace}, fn ->
+      Workspace.list_files(workspace)
+    end)
   end
 
   defp start_effect({:workspace, :read, request_id, path}, socket) do
     workspace = workspace!(socket)
-    start_effect_task(socket, request_id, fn -> Workspace.read_file(workspace, path) end)
+
+    start_brokered_effect(socket, request_id, :read, file_resource(workspace, path), fn ->
+      Workspace.read_file(workspace, path)
+    end)
   end
 
   defp start_effect({:workspace, :write, request_id, path, content}, socket) do
     workspace = workspace!(socket)
 
-    start_effect_task(socket, request_id, fn ->
+    start_brokered_effect(socket, request_id, :write, file_resource(workspace, path), fn ->
       Workspace.write_file(workspace, path, content)
     end)
   end
 
   defp start_effect({:command, :run, request_id, command}, socket) do
     workspace = workspace!(socket)
-    start_effect_task(socket, request_id, fn -> Workspace.run_command(workspace, command) end)
+    resource = %{type: :process, cwd: workspace, command: command}
+
+    start_brokered_effect(socket, request_id, :run_command, resource, fn ->
+      Workspace.run_command(workspace, command)
+    end)
   end
 
   defp start_effect({:navigate, path}, socket), do: push_navigate(socket, to: path)
 
   defp start_effect_task(socket, request_id, task),
     do: start_async(socket, {:workbench_effect, request_id}, task)
+
+  defp start_brokered_effect(socket, request_id, operation, resource, task) do
+    principal = %{
+      type: :human,
+      surface: :workbench,
+      owner: socket.assigns.workbench_metadata[:owner]
+    }
+
+    action = %{type: :workbench_effect, operation: operation, request_id: request_id}
+    context = %{cwd: workspace!(socket), runtime: socket.assigns.workbench_metadata}
+
+    start_effect_task(socket, request_id, fn ->
+      case Resources.request(action, principal, resource, context, task) do
+        {:ok, result} -> result
+        {:error, _reason} = error -> error
+      end
+    end)
+  end
+
+  defp file_resource(workspace, path),
+    do: %{type: :filesystem, workspace: workspace, path: path}
 
   defp workspace!(socket), do: socket.assigns.workbench_context.workspace
 
