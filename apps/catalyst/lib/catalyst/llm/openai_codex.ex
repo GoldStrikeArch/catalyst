@@ -17,6 +17,8 @@ defmodule Catalyst.LLM.OpenAICodex do
       `service_tier: "priority"`.
   """
 
+  @behaviour Catalyst.LLM.ModelCatalog
+
   alias Catalyst.LLM.OpenAICodex.{Catalog, CatalogCache}
   alias Catalyst.Model
 
@@ -105,6 +107,7 @@ defmodule Catalyst.LLM.OpenAICodex do
   displaying whatever option the browser picks when none is selected.
   """
   @spec catalog_snapshot(String.t()) :: catalog_snapshot()
+  @impl true
   def catalog_snapshot(id) do
     models = list_models()
 
@@ -128,6 +131,7 @@ defmodule Catalyst.LLM.OpenAICodex do
 
   @doc "Build a Codex `%Model{}` for `id` (defaults to the configured codex_model)."
   @spec model(String.t(), keyword()) :: Model.t()
+  @impl true
   def model(id \\ default_model_id(), opts \\ []) do
     entry = catalog_entry(id)
     explicit_window = positive(Keyword.get(opts, :context_window))
@@ -162,6 +166,7 @@ defmodule Catalyst.LLM.OpenAICodex do
 
   @doc "The configured default Codex model id (`config :catalyst, :codex_model`)."
   @spec default_model_id() :: String.t()
+  @impl true
   def default_model_id, do: Application.get_env(:catalyst, :codex_model, "gpt-5.4")
 
   defp live_or_built_in do

@@ -21,9 +21,22 @@ defmodule Catalyst.LLM.RegistryTest do
     end
   end
 
+  defmodule InvalidCatalog do
+    @moduledoc false
+  end
+
   test "built-in providers are seeded" do
     assert {:ok, Catalyst.LLM.Faux} = Registry.fetch("faux")
     assert {:ok, Catalyst.LLM.OpenAICodex.Provider} = Registry.fetch("openai-codex-responses")
+    assert {:ok, {"openai-codex-responses", codex}} = Registry.fetch_by_id("openai-codex")
+    assert codex.catalog == Catalyst.LLM.OpenAICodex
+    assert codex.auth == Catalyst.Auth.OpenAIOAuth
+
+    assert {:ok, {"grok-subscription-chat-completions", grok}} =
+             Registry.fetch_by_id("grok-subscription")
+
+    assert grok.catalog == Catalyst.LLM.GrokSubscription
+    assert grok.auth == Catalyst.Auth.XAIOAuth
     assert Map.has_key?(Registry.list(), "faux")
   end
 
@@ -60,6 +73,16 @@ defmodule Catalyst.LLM.RegistryTest do
 
     Registry.unregister_provider("faux")
     assert {:ok, Catalyst.LLM.Faux} = Registry.fetch("faux")
+  end
+
+  test "a bare module override retains a built-in provider's descriptor" do
+    api = "openai-codex-responses"
+    on_exit(fn -> Registry.unregister_provider(api) end)
+
+    assert :ok = Registry.register_provider(api, EchoProvider)
+    assert {:ok, %ProviderConfig{module: EchoProvider} = config} = Registry.fetch_config(api)
+    assert config.id == "openai-codex"
+    assert config.catalog == Catalyst.LLM.OpenAICodex
   end
 
   test "extension owners cannot replace each other's provider and purge is owner-safe" do
@@ -107,5 +130,28 @@ defmodule Catalyst.LLM.RegistryTest do
 
     assert {:error, {:missing_stream_4, InvalidProvider}} =
              Registry.register_provider("invalid", InvalidProvider)
+  end
+
+  test "legacy configs remain valid without catalog metadata" do
+    on_exit(fn -> Registry.unregister_provider("legacy") end)
+
+    config = %ProviderConfig{module: EchoProvider, name: "Legacy"}
+    assert :ok = Registry.register_provider("legacy", config)
+    assert {:ok, ^config} = Registry.fetch_config("legacy")
+    assert {:error, {:unknown_provider, "legacy"}} = Registry.fetch_by_id("legacy")
+  end
+
+  test "catalog registrations require an id and the catalog callbacks" do
+    assert {:error, :catalog_provider_id_required} =
+             Registry.register_provider(
+               "missing-catalog-id",
+               %ProviderConfig{module: EchoProvider, catalog: Catalyst.LLM.GrokSubscription}
+             )
+
+    assert {:error, {:invalid_model_catalog, InvalidCatalog}} =
+             Registry.register_provider(
+               "invalid-catalog",
+               %ProviderConfig{id: "invalid", module: EchoProvider, catalog: InvalidCatalog}
+             )
   end
 end

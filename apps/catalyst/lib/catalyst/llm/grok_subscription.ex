@@ -4,6 +4,8 @@ defmodule Catalyst.LLM.GrokSubscription do
   subscription access through xAI's Grok Build proxy.
   """
 
+  @behaviour Catalyst.LLM.ModelCatalog
+
   alias Catalyst.Model
 
   @base_url "https://cli-chat-proxy.grok.com/v1"
@@ -43,6 +45,18 @@ defmodule Catalyst.LLM.GrokSubscription do
   @spec list_models() :: [catalog_entry()]
   def list_models, do: @models
 
+  @doc "Read the Grok catalog once and resolve `id` from that snapshot."
+  @impl true
+  @spec catalog_snapshot(String.t()) :: Catalyst.LLM.ModelCatalog.snapshot()
+  def catalog_snapshot(id) do
+    selected = catalog_entry(id)
+
+    case Enum.any?(@models, &(&1.id == id)) do
+      true -> %{models: @models, selected: selected}
+      false -> %{models: @models ++ [selected], selected: selected}
+    end
+  end
+
   @doc "Catalog entry for `id`, falling back to a renderable custom entry."
   @spec catalog_entry(String.t()) :: catalog_entry()
   def catalog_entry(id) do
@@ -57,6 +71,7 @@ defmodule Catalyst.LLM.GrokSubscription do
   end
 
   @doc "Build a Grok subscription model."
+  @impl true
   @spec model(String.t(), keyword()) :: Model.t()
   def model(id \\ default_model_id(), opts \\ []) do
     entry = catalog_entry(id)
@@ -80,6 +95,7 @@ defmodule Catalyst.LLM.GrokSubscription do
   end
 
   @doc "Default Grok model id."
+  @impl true
   @spec default_model_id() :: String.t()
   def default_model_id, do: Application.get_env(:catalyst, :grok_model, @default_model)
 

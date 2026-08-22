@@ -21,9 +21,26 @@ defmodule Catalyst.LLM.Registry do
   @table :catalyst_llm_providers
 
   @builtin %{
-    "faux" => Catalyst.LLM.Faux,
-    "openai-codex-responses" => Catalyst.LLM.OpenAICodex.Provider,
-    "grok-subscription-chat-completions" => Catalyst.LLM.GrokSubscription.Provider
+    "faux" => %ProviderConfig{
+      id: "faux",
+      module: Catalyst.LLM.Faux,
+      name: "Faux"
+    },
+    "openai-codex-responses" => %ProviderConfig{
+      id: "openai-codex",
+      module: Catalyst.LLM.OpenAICodex.Provider,
+      name: "ChatGPT",
+      catalog: Catalyst.LLM.OpenAICodex,
+      auth: Catalyst.Auth.OpenAIOAuth,
+      controls: %{transports: ~w(auto websocket sse)}
+    },
+    "grok-subscription-chat-completions" => %ProviderConfig{
+      id: "grok-subscription",
+      module: Catalyst.LLM.GrokSubscription.Provider,
+      name: "SuperGrok",
+      catalog: Catalyst.LLM.GrokSubscription,
+      auth: Catalyst.Auth.XAIOAuth
+    }
   }
 
   # ---- API ------------------------------------------------------------------
@@ -47,6 +64,20 @@ defmodule Catalyst.LLM.Registry do
     case lookup(api) do
       %ProviderConfig{} = config -> {:ok, config}
       nil -> :error
+    end
+  end
+
+  @doc "Find a catalog-aware provider by its stable descriptor id."
+  @spec fetch_by_id(String.t()) ::
+          {:ok, {String.t(), ProviderConfig.t()}}
+          | {:error, {:unknown_provider, String.t()} | {:ambiguous_provider, String.t()}}
+  def fetch_by_id(id) when is_binary(id) do
+    matches = Enum.filter(list(), fn {_api, config} -> config.id == id end)
+
+    case matches do
+      [match] -> {:ok, match}
+      [] -> {:error, {:unknown_provider, id}}
+      _many -> {:error, {:ambiguous_provider, id}}
     end
   end
 
@@ -90,7 +121,7 @@ defmodule Catalyst.LLM.Registry do
     do: GenServer.call(__MODULE__, {:register, api, config, opts})
 
   def register_provider(api, module, opts) when is_binary(api) and is_atom(module),
-    do: register_provider(api, %ProviderConfig{module: module}, opts)
+    do: register_provider(api, module_config(api, module), opts)
 
   @doc "Remove a provider (restoring a built-in/config one if it was shadowed)."
   @spec unregister_provider(String.t()) :: :ok
@@ -118,7 +149,7 @@ defmodule Catalyst.LLM.Registry do
   def handle_call({:register, api, config, opts}, _from, state) do
     owner = Owner.normalize(opts[:owner])
 
-    case validate_provider_module(config.module) do
+    case validate_config(config) do
       :ok ->
         case OwnedIndex.claim(state, api, owner, track_owner: owner != Owner.host()) do
           {:ok, state} ->
@@ -166,6 +197,27 @@ defmodule Catalyst.LLM.Registry do
     _, _ -> :ok
   end
 
+  defp validate_config(%ProviderConfig{} = config) do
+    with :ok <- validate_provider_module(config.module) do
+      validate_catalog(config)
+    end
+  end
+
+  defp validate_catalog(%ProviderConfig{catalog: nil}), do: :ok
+
+  defp validate_catalog(%ProviderConfig{id: id}) when not is_binary(id) or id == "",
+    do: {:error, :catalog_provider_id_required}
+
+  defp validate_catalog(%ProviderConfig{catalog: catalog}) do
+    callbacks = [catalog_snapshot: 1, model: 1, default_model_id: 0]
+
+    case is_atom(catalog) and Code.ensure_loaded?(catalog) and
+           Enum.all?(callbacks, fn {name, arity} -> function_exported?(catalog, name, arity) end) do
+      true -> :ok
+      false -> {:error, {:invalid_model_catalog, catalog}}
+    end
+  end
+
   # ---- internals ------------------------------------------------------------
 
   defp lookup(api) do
@@ -192,19 +244,20 @@ defmodule Catalyst.LLM.Registry do
   end
 
   defp seed_map do
-    builtins =
-      Map.new(@builtin, fn {api, mod} -> {api, %ProviderConfig{module: mod, name: api}} end)
-
     overrides =
       :catalyst
       |> Application.get_env(:llm_providers, %{})
-      |> Map.new(fn {api, v} -> {api, normalize(v)} end)
+      |> Map.new(fn {api, value} -> {api, normalize(api, value)} end)
 
-    Map.merge(builtins, overrides)
+    Map.merge(@builtin, overrides)
   end
 
-  defp normalize(%ProviderConfig{} = c), do: c
-  defp normalize(module) when is_atom(module), do: %ProviderConfig{module: module}
+  defp normalize(_api, %ProviderConfig{} = config), do: config
+  defp normalize(api, module) when is_atom(module), do: module_config(@builtin[api], module)
+
+  defp module_config(api, module) when is_binary(api), do: module_config(lookup(api), module)
+  defp module_config(%ProviderConfig{} = config, module), do: %{config | module: module}
+  defp module_config(_missing, module), do: %ProviderConfig{module: module}
 
   @doc false
   @spec register_extension_provider(ExtensionAPI.t(), String.t(), ProviderConfig.t() | module()) ::
