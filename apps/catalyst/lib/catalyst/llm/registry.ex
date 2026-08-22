@@ -17,33 +17,9 @@ defmodule Catalyst.LLM.Registry do
   alias Catalyst.Extensions.Owner
   alias Catalyst.LLM.ProviderConfig
   alias Catalyst.OwnedIndex
+  alias Catalyst.Pack.Registry, as: PackRegistry
 
   @table :catalyst_llm_providers
-
-  @builtin %{
-    "faux" => %ProviderConfig{
-      id: "faux",
-      module: Catalyst.LLM.Faux,
-      name: "Faux"
-    },
-    "openai-codex-responses" => %ProviderConfig{
-      id: "openai-codex",
-      module: Catalyst.LLM.OpenAICodex.Provider,
-      name: "ChatGPT",
-      catalog: Catalyst.LLM.OpenAICodex,
-      auth: Catalyst.Auth.OpenAICodexFlow,
-      controls: %{transports: ~w(auto websocket sse)},
-      catalog_priority: 100
-    },
-    "grok-subscription-chat-completions" => %ProviderConfig{
-      id: "grok-subscription",
-      module: Catalyst.LLM.GrokSubscription.Provider,
-      name: "SuperGrok",
-      catalog: Catalyst.LLM.GrokSubscription,
-      auth: Catalyst.Auth.GrokFlow,
-      catalog_priority: 200
-    }
-  }
 
   # ---- API ------------------------------------------------------------------
 
@@ -261,11 +237,35 @@ defmodule Catalyst.LLM.Registry do
       |> Application.get_env(:llm_providers, %{})
       |> Map.new(fn {api, value} -> {api, normalize(api, value)} end)
 
-    Map.merge(@builtin, overrides)
+    Map.merge(compiled_provider_map(), overrides)
   end
 
   defp normalize(_api, %ProviderConfig{} = config), do: config
-  defp normalize(api, module) when is_atom(module), do: module_config(@builtin[api], module)
+
+  defp normalize(api, module) when is_atom(module),
+    do: module_config(compiled_provider_map()[api], module)
+
+  defp compiled_provider_map do
+    case PackRegistry.resolve(Catalyst.Product.active_spec().packs) do
+      {:ok, manifests} ->
+        manifests |> Enum.flat_map(& &1.services) |> provider_map()
+
+      {:error, reason} ->
+        raise ArgumentError, "invalid product provider packs: #{inspect(reason)}"
+    end
+  end
+
+  defp provider_map(services) do
+    services
+    |> Enum.flat_map(fn
+      %{kind: :llm_provider, api: api, config: config} when is_binary(api) and is_map(config) ->
+        [{api, struct!(ProviderConfig, config)}]
+
+      _other ->
+        []
+    end)
+    |> Map.new()
+  end
 
   defp module_config(api, module) when is_binary(api), do: module_config(lookup(api), module)
   defp module_config(%ProviderConfig{} = config, module), do: %{config | module: module}

@@ -70,6 +70,7 @@ defmodule Catalyst.Product.Default do
         "catalyst.meta-runtime",
         "catalyst.agent.default",
         "catalyst.workbench.default",
+        "catalyst.provider.faux",
         "catalyst.provider.openai",
         "catalyst.provider.grok",
         "catalyst.tools.coding",

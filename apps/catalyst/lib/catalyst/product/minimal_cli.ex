@@ -29,6 +29,8 @@ defmodule Catalyst.Product.MinimalCLI do
       packs: [
         "catalyst.meta-runtime",
         "catalyst.agent.default",
+        "catalyst.provider.faux",
+        "catalyst.provider.openai",
         "catalyst.tools.coding"
       ],
       tools: @tools,

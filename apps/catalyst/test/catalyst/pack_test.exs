@@ -54,6 +54,9 @@ defmodule Catalyst.PackTest do
           ] do
         assert :ok = profile.spec() |> Registry.validate_product_packs()
       end
+
+      assert {:ok, faux} = Registry.fetch("catalyst.provider.faux")
+      assert [%{kind: :llm_provider, api: "faux"}] = faux.services
     end
 
     test "rejects unknown, duplicate, and incomplete product selections" do

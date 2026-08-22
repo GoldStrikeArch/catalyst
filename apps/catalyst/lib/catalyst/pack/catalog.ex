@@ -28,18 +28,61 @@ defmodule Catalyst.Pack.Catalog do
       hosts: [:web, :desktop]
     }),
     Manifest.new!(%{
+      id: "catalyst.provider.faux",
+      version: @version,
+      trust: :compiled_trusted,
+      dependencies: ["catalyst.meta-runtime"],
+      hosts: @all_hosts,
+      services: [
+        %{
+          kind: :llm_provider,
+          api: "faux",
+          config: %{id: "faux", module: Catalyst.LLM.Faux, name: "Faux"}
+        }
+      ]
+    }),
+    Manifest.new!(%{
       id: "catalyst.provider.openai",
       version: @version,
       trust: :compiled_trusted,
       dependencies: ["catalyst.meta-runtime"],
-      hosts: @all_hosts
+      hosts: @all_hosts,
+      services: [
+        %{
+          kind: :llm_provider,
+          api: "openai-codex-responses",
+          config: %{
+            id: "openai-codex",
+            module: Catalyst.LLM.OpenAICodex.Provider,
+            name: "ChatGPT",
+            catalog: Catalyst.LLM.OpenAICodex,
+            auth: Catalyst.Auth.OpenAICodexFlow,
+            controls: %{transports: ~w(auto websocket sse)},
+            catalog_priority: 100
+          }
+        }
+      ]
     }),
     Manifest.new!(%{
       id: "catalyst.provider.grok",
       version: @version,
       trust: :compiled_trusted,
       dependencies: ["catalyst.meta-runtime"],
-      hosts: @all_hosts
+      hosts: @all_hosts,
+      services: [
+        %{
+          kind: :llm_provider,
+          api: "grok-subscription-chat-completions",
+          config: %{
+            id: "grok-subscription",
+            module: Catalyst.LLM.GrokSubscription.Provider,
+            name: "SuperGrok",
+            catalog: Catalyst.LLM.GrokSubscription,
+            auth: Catalyst.Auth.GrokFlow,
+            catalog_priority: 200
+          }
+        }
+      ]
     }),
     Manifest.new!(%{
       id: "catalyst.tools.coding",
