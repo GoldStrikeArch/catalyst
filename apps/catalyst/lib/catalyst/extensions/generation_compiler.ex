@@ -30,13 +30,20 @@ defmodule Catalyst.Extensions.GenerationCompiler do
   `compile_managed_file/1` in bounded work and then registers the returned set.
   """
   @spec compile_file(Path.t()) :: {:ok, ArtifactSet.t()} | {:error, term()}
-  def compile_file(path) when is_binary(path) do
+  def compile_file(path) when is_binary(path), do: do_compile_file(path, false)
+
+  @doc false
+  @spec compile_preflight_file(Path.t()) :: {:ok, ArtifactSet.t()} | {:error, term()}
+  def compile_preflight_file(path) when is_binary(path), do: do_compile_file(path, true)
+
+  defp do_compile_file(path, preflight_only?) do
     with {:ok, source} <- File.read(path),
          {:ok, quoted} <- parse(source, path),
          :ok <- validate_source_forms(quoted),
          {:ok, logical_modules} <- top_level_modules(quoted),
          {:ok, external} <- external_manifest(path, logical_modules),
          :ok <- validate_external_source_mode(external, quoted),
+         :ok <- validate_local_trust(external, preflight_only?),
          artifact_id = ArtifactId.from_source(artifact_source(source, external)),
          :ok <- Artifacts.reserve_namespace(artifact_id),
          mappings = module_mappings(logical_modules, artifact_id),
@@ -411,6 +418,16 @@ defmodule Catalyst.Extensions.GenerationCompiler do
     case Enum.any?(top_level_forms(quoted), &generation_module?/1) do
       true -> {:error, :external_manifest_cannot_mix_with_embedded_generation_manifest}
       false -> :ok
+    end
+  end
+
+  defp validate_local_trust(_external, true), do: :ok
+  defp validate_local_trust(nil, false), do: :ok
+
+  defp validate_local_trust(%{manifest: %Manifest{} = manifest}, false) do
+    case Catalyst.Extension.Trust.unrestricted?(manifest.trust) do
+      true -> :ok
+      false -> {:error, {:isolated_runtime_transport_required, manifest.id, manifest.trust}}
     end
   end
 

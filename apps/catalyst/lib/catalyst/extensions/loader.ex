@@ -12,7 +12,7 @@ defmodule Catalyst.Extensions.Loader do
   require Logger
 
   alias Catalyst.{Extension, ExtensionAPI, Tasks}
-  alias Catalyst.Extensions.{CompilerTracer, Contribution, GenerationCompiler}
+  alias Catalyst.Extensions.{CompilerTracer, Contribution, GenerationCompiler, IsolatedCompiler}
   alias Catalyst.Runtime.{ArtifactSet, Artifacts}
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
@@ -22,7 +22,13 @@ defmodule Catalyst.Extensions.Loader do
   @typedoc "A compiled file's registry-neutral contribution."
   @type contribution :: Contribution.t()
 
-  @doc "Compile and classify one source file within a bounded task."
+  @doc """
+  Compile and classify one source file within bounded work.
+
+  Generation-managed sources may first be compiled in a disposable OS process
+  by setting `:extension_managed_preflight` to `:isolated_process`. The default
+  `:local` path and legacy/raw source behavior are unchanged.
+  """
   @spec compile(Path.t()) :: {:ok, contribution()} | {:error, term(), [module()]}
   def compile(path) do
     case generation_managed_file?(path) do
@@ -67,14 +73,42 @@ defmodule Catalyst.Extensions.Loader do
   end
 
   defp compile_generation(path) do
-    case compile_generation_tracked(path) do
-      {:ok, contribution, trace_ref} ->
-        CompilerTracer.acknowledge(trace_ref)
+    with {:ok, preflight} <- managed_preflight(path) do
+      case compile_generation_tracked(path) do
+        {:ok, contribution, trace_ref} ->
+          CompilerTracer.acknowledge(trace_ref)
+          register_preflighted_artifact(contribution, preflight)
+
+        {:error, reason, emitted_modules, trace_ref} ->
+          CompilerTracer.acknowledge(trace_ref)
+          {:error, reason, emitted_modules}
+      end
+    else
+      {:error, reason} -> {:error, reason, []}
+    end
+  end
+
+  defp managed_preflight(path) do
+    case Application.get_env(:catalyst, :extension_managed_preflight, :local) do
+      :local -> {:ok, nil}
+      :isolated_process -> IsolatedCompiler.preflight(path)
+      mode -> {:error, {:invalid_extension_managed_preflight, mode}}
+    end
+  end
+
+  defp register_preflighted_artifact(contribution, nil), do: register_artifact(contribution)
+
+  defp register_preflighted_artifact(
+         %Contribution{artifact: %ArtifactSet{} = artifact} = contribution,
+         preflight
+       ) do
+    case IsolatedCompiler.expected_artifact?(preflight, artifact) do
+      true ->
         register_artifact(contribution)
 
-      {:error, reason, emitted_modules, trace_ref} ->
-        CompilerTracer.acknowledge(trace_ref)
-        {:error, reason, emitted_modules}
+      false ->
+        {:error, :isolated_compiler_artifact_changed,
+         ArtifactSet.physical_modules(contribution.artifact)}
     end
   end
 
