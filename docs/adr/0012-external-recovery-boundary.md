@@ -18,6 +18,8 @@ small, bounded file protocol containing the requested product profile, boot
 token, readiness status, safe-mode flag, child PID, and last-known-good profile.
 The launcher starts one Catalyst VM, waits for a matching readiness handshake,
 and retries a failed boot once in safe mode with the last-known-good profile.
+`TERM`, `INT`, and `HUP` are forwarded to the child and recorded as intentional
+operator shutdown, so OS termination does not orphan the VM or trigger rollback.
 
 The active product pointer contains a stable allow-listed string id, never a
 module name or dynamically created atom. Replacing the meta-runtime itself uses

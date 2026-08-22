@@ -10,6 +10,7 @@ defmodule CatalystWeb.ShellComponents do
 
   use CatalystWeb, :html
 
+  alias Catalyst.LLM.Models
   alias CatalystWeb.UI.PageRenderer
 
   @doc """
@@ -469,7 +470,7 @@ defmodule CatalystWeb.ShellComponents do
             <.input
               field={@codex_form[:model]}
               type="select"
-              options={Enum.map(@codex_catalog, &{&1.name, &1.id})}
+              options={Models.picker_options(@codex_catalog)}
               container_class="m-0"
               class={codex_select_class()}
               title="Model"
@@ -477,7 +478,7 @@ defmodule CatalystWeb.ShellComponents do
             <.input
               field={@codex_form[:effort]}
               type="select"
-              options={@selected_codex_entry.efforts}
+              options={Map.get(@selected_codex_entry, :efforts, [])}
               container_class="m-0"
               class={codex_select_class()}
               title="Reasoning effort"
@@ -501,11 +502,15 @@ defmodule CatalystWeb.ShellComponents do
           >
             <button
               :for={entry <- @codex_catalog}
-              id={"codex-model-#{entry.id}"}
+              id={"codex-model-#{entry.provider}-#{entry.id}"}
               type="button"
               phx-click="codex_opts"
-              phx-value-model={entry.id}
-              class={menu_item_class(entry.id == @codex_prefs.model)}
+              phx-value-model={Models.picker_value(@codex_catalog, entry.provider, entry.id)}
+              class={
+                menu_item_class(
+                  entry.id == @codex_prefs.model and entry.provider == @codex_prefs.provider
+                )
+              }
             >
               {entry.name}
             </button>
@@ -519,7 +524,7 @@ defmodule CatalystWeb.ShellComponents do
             title="Reasoning effort"
           >
             <button
-              :for={effort <- @selected_codex_entry.efforts}
+              :for={effort <- Map.get(@selected_codex_entry, :efforts, [])}
               id={"codex-effort-#{effort}"}
               type="button"
               phx-click="codex_opts"
@@ -531,7 +536,7 @@ defmodule CatalystWeb.ShellComponents do
           </.chrome_menu>
 
           <button
-            :if={@selected_codex_entry.fast?}
+            :if={Map.get(@selected_codex_entry, :fast?, false)}
             id="codex-fast-toggle"
             type="button"
             phx-click="codex_fast"

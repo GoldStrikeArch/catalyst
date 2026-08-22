@@ -14,13 +14,13 @@ defmodule Catalyst.Runtime.SessionFactory do
     Context,
     ContractRef,
     ExtensionPoints,
-    Generations,
     Handle,
     ImplementationRef,
     Leases,
     Resolution,
     Resolver,
     Scope,
+    Service,
     ServiceKey,
     Transport
   }
@@ -117,7 +117,7 @@ defmodule Catalyst.Runtime.SessionFactory do
 
   defp resolve_and_pin(context, owner, retries) do
     with {:ok, resolution} <- resolve(context),
-         result <- pin(resolution, owner) do
+         result <- Service.acquire(resolution, owner) do
       case result do
         {:error, {:stale_runtime_generation, _requested, _active}} when retries > 0 ->
           resolve_and_pin(context, owner, retries - 1)
@@ -125,19 +125,6 @@ defmodule Catalyst.Runtime.SessionFactory do
         other ->
           other
       end
-    end
-  end
-
-  defp pin(%Resolution{} = resolution, owner) do
-    case Map.get(resolution.claim.metadata, :runtime_generation) do
-      nil -> {:ok, Handle.new(resolution, nil)}
-      _generation -> acquire_handle(resolution, owner)
-    end
-  end
-
-  defp acquire_handle(resolution, owner) do
-    with {:ok, lease} <- Generations.acquire_lease(resolution, owner) do
-      {:ok, Handle.new(resolution, lease)}
     end
   end
 

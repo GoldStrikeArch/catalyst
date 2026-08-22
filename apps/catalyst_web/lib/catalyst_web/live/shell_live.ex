@@ -39,7 +39,7 @@ defmodule CatalystWeb.ShellLive do
       |> assign(
         page: "chat",
         chat_form: ChatInput.form(""),
-        logged_in: Catalyst.Auth.logged_in?(Settings.auth_provider(codex_prefs)),
+        logged_in: Settings.logged_in?(codex_prefs),
         login_state: :idle,
         login_ref: nil,
         login_provider: nil,
@@ -295,22 +295,34 @@ defmodule CatalystWeb.ShellLive do
   end
 
   def handle_event("login", _params, socket) do
-    provider = Settings.auth_provider(socket.assigns.codex_prefs)
-    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, login_fun(provider))
+    case Settings.auth_provider(socket.assigns.codex_prefs) do
+      nil ->
+        {:noreply, put_flash(socket, :info, "The selected provider does not require sign-in.")}
 
-    {:noreply,
-     assign(socket, login_state: :pending, login_ref: task.ref, login_provider: provider)}
+      provider ->
+        task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, login_fun(provider))
+
+        {:noreply,
+         assign(socket, login_state: :pending, login_ref: task.ref, login_provider: provider)}
+    end
   end
 
   def handle_event("logout", _params, socket) do
     provider = Settings.auth_provider(socket.assigns.codex_prefs)
     label = Settings.auth_label(socket.assigns.codex_prefs)
-    Catalyst.Auth.logout(provider)
 
-    {:noreply,
-     socket
-     |> assign(logged_in: false)
-     |> put_flash(:info, "Signed out of #{label}.")}
+    case provider do
+      nil ->
+        {:noreply, put_flash(socket, :info, "#{label} does not require sign-in.")}
+
+      provider ->
+        Catalyst.Auth.logout(provider)
+
+        {:noreply,
+         socket
+         |> assign(logged_in: false)
+         |> put_flash(:info, "Signed out of #{label}.")}
+    end
   end
 
   def handle_event("codex_opts", params, socket) do
@@ -553,7 +565,7 @@ defmodule CatalystWeb.ShellLive do
         logged_in =
           case completed_provider == selected_provider do
             true -> true
-            false -> Catalyst.Auth.logged_in?(selected_provider)
+            false -> Settings.logged_in?(socket.assigns.codex_prefs)
           end
 
         {:noreply,

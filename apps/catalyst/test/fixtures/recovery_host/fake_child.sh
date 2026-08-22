@@ -51,6 +51,15 @@ case "${TEST_RECOVERY_SCENARIO:-}" in
     atomic_ready
     exit 0
     ;;
+  signal)
+    trap 'printf "term\n" >"$TEST_RECOVERY_STATE/child_signal"; exit 0' TERM
+    atomic_ready
+    printf 'child-ready\n'
+
+    while :; do
+      sleep 1
+    done
+    ;;
   *)
     exit 10
     ;;

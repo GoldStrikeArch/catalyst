@@ -15,12 +15,12 @@ defmodule CatalystWeb.Workbench do
     Context,
     ContractRef,
     ExtensionPoints,
-    Generations,
     Handle,
     ImplementationRef,
     Resolution,
     Resolver,
     Scope,
+    Service,
     ServiceKey,
     Transport
   }
@@ -37,7 +37,7 @@ defmodule CatalystWeb.Workbench do
 
   defp resolve_and_pin(context, owner, retries) do
     with {:ok, resolution} <- resolve(context),
-         result <- pin(resolution, owner) do
+         result <- Service.acquire(resolution, owner) do
       case result do
         {:error, {:stale_runtime_generation, _requested, _active}} when retries > 0 ->
           resolve_and_pin(context, owner, retries - 1)
@@ -147,19 +147,6 @@ defmodule CatalystWeb.Workbench do
       implementation: inspect(ImplementationRef.logical(claim.implementation)),
       generation: Map.get(claim.metadata, :runtime_generation)
     }
-  end
-
-  defp pin(%Resolution{} = resolution, owner) do
-    case Map.get(resolution.claim.metadata, :runtime_generation) do
-      nil -> {:ok, Handle.new(resolution, nil)}
-      _generation -> acquire_handle(resolution, owner)
-    end
-  end
-
-  defp acquire_handle(resolution, owner) do
-    with {:ok, lease} <- Generations.acquire_lease(resolution, owner) do
-      {:ok, Handle.new(resolution, lease)}
-    end
   end
 
   defp invoke_transition(handle, callback, args) do

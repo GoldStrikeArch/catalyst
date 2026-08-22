@@ -21,6 +21,14 @@ publishes successful builds as immutable content-digest generations under
 pointer exposes the complete generation; a failed build leaves the prior pointer
 unchanged.
 
+The runtime retains the packaged seed used for the workspace. On application
+upgrade it performs a three-way seed update: files unchanged by the user receive
+the new packaged version, user edits are preserved, newly packaged files are
+added, and removed packaged files are deleted only when still unmodified. An
+existing modified workspace without a retained baseline is rejected with an
+explicit migration error rather than silently building obsolete release assets.
+Abandoned staging directories are removed before each serialized build.
+
 Runtime JavaScript is served only from same-origin, digest-addressed module URLs.
 Publication and serving reject traversal, unsafe path segments, non-JavaScript
 files, and symlinks. The packaged `app.js` pre-registers one `RuntimeHook`. A
@@ -38,4 +46,5 @@ active.
 - A pack can add browser behavior without rebuilding the named LiveView hook map.
 - Module generation changes can require a LiveView patch or browser reload; they
   do not imply arbitrary router or endpoint replacement.
-- Old generations may be retained later while mounted workbench handles drain.
+- Published generation garbage collection remains deferred until mounted
+  workbench handles can report which asset generations they retain.

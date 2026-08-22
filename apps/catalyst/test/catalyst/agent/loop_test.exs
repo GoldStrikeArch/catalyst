@@ -1,5 +1,7 @@
 defmodule Catalyst.Agent.LoopTest do
-  use ExUnit.Case, async: true
+  # The loop resolves the process-global extension tool and hook snapshots.
+  # Running beside registry chaos tests makes its tool outcome nondeterministic.
+  use ExUnit.Case, async: false
 
   alias Catalyst.Agent.Loop
   alias Catalyst.Agent.Event

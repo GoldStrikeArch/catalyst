@@ -7,8 +7,8 @@ defmodule Catalyst.Runtime.PermissionPolicy do
   """
 
   alias Catalyst.Contracts.PermissionPolicy.V1
-  alias Catalyst.Runtime.{Claim, Context, ContractRef, ExtensionPoints, Generations}
-  alias Catalyst.Runtime.{Handle, Resolution, Resolver, Scope, ServiceKey, Transport}
+  alias Catalyst.Runtime.{Claim, Context, ContractRef, ExtensionPoints}
+  alias Catalyst.Runtime.{Handle, Resolver, Scope, Service, ServiceKey, Transport}
   alias Catalyst.Tasks
 
   @default_timeout 10_000
@@ -52,7 +52,7 @@ defmodule Catalyst.Runtime.PermissionPolicy do
 
   defp resolve_and_pin(context, owner, retries) do
     with {:ok, resolution} <- resolve(context),
-         result <- pin(resolution, owner) do
+         result <- Service.acquire(resolution, owner) do
       case result do
         {:error, {:stale_runtime_generation, _requested, _active}} when retries > 0 ->
           resolve_and_pin(context, owner, retries - 1)
@@ -67,19 +67,6 @@ defmodule Catalyst.Runtime.PermissionPolicy do
     case Resolver.resolve(claims(), key(), context, contract: V1.ref()) do
       {:ok, resolution} -> {:ok, resolution}
       {:error, explanation} -> {:error, explanation.status}
-    end
-  end
-
-  defp pin(%Resolution{} = resolution, owner) do
-    case Map.get(resolution.claim.metadata, :runtime_generation) do
-      nil -> {:ok, Handle.new(resolution, nil)}
-      _generation -> acquire_handle(resolution, owner)
-    end
-  end
-
-  defp acquire_handle(resolution, owner) do
-    with {:ok, lease} <- Generations.acquire_lease(resolution, owner) do
-      {:ok, Handle.new(resolution, lease)}
     end
   end
 

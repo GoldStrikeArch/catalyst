@@ -43,6 +43,8 @@ defmodule Catalyst.Runtime.IsolatedWorker do
   def call(%ActivationId{} = activation_id, owner, protocol, callback, args, timeout) do
     with {:ok, worker} <- lookup(activation_id, owner) do
       GenServer.call(worker, {:call, protocol, callback, args, timeout}, timeout + 100)
+    else
+      :error -> {:error, :isolated_worker_not_found}
     end
   catch
     :exit, reason -> {:error, {:isolated_worker_call_exit, reason}}

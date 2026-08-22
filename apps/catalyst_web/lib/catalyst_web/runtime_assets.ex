@@ -114,7 +114,8 @@ defmodule CatalystWeb.RuntimeAssets do
     staging = staging_dir()
 
     try do
-      with {:ok, source} <- source(),
+      with :ok <- cleanup_staging(),
+           {:ok, source} <- source(),
            :ok <- File.mkdir_p(staging),
            {:ok, build_result} <- run_builder(builder, source, staging),
            {:ok, modules} <- publish_modules(source.root, staging),
@@ -162,9 +163,20 @@ defmodule CatalystWeb.RuntimeAssets do
   end
 
   defp seed_writable_workspace do
-    case File.dir?(workspace()) do
-      true -> :ok
-      false -> copy_workspace()
+    cond do
+      not File.dir?(workspace()) ->
+        with :ok <- copy_workspace() do
+          replace_seed_baseline()
+        end
+
+      not File.dir?(seed_baseline()) ->
+        adopt_unversioned_workspace()
+
+      seed_current?() ->
+        :ok
+
+      true ->
+        upgrade_workspace()
     end
   end
 
@@ -189,6 +201,187 @@ defmodule CatalystWeb.RuntimeAssets do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
     Path.join(Path.dirname(workspace()), ".#{Path.basename(workspace())}.#{suffix}")
   end
+
+  defp adopt_unversioned_workspace do
+    with {:ok, seed_files} <- tree_files(seed_workspace()),
+         true <- seed_files_unchanged?(seed_files) do
+      replace_seed_baseline()
+    else
+      false -> {:error, {:asset_workspace_unversioned, workspace()}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp upgrade_workspace do
+    candidate = workspace_candidate()
+
+    try do
+      with {:ok, old_seed} <- tree_files(seed_baseline()),
+           {:ok, new_seed} <- tree_files(seed_workspace()),
+           {:ok, _files} <- File.cp_r(workspace(), candidate),
+           :ok <- merge_seed_changes(candidate, old_seed, new_seed),
+           :ok <- replace_workspace(candidate),
+           :ok <- replace_seed_baseline() do
+        :ok
+      else
+        {:error, reason, path} -> {:error, {:asset_workspace_upgrade_failed, path, reason}}
+        {:error, _reason} = error -> error
+      end
+    after
+      File.rm_rf(candidate)
+    end
+  end
+
+  defp merge_seed_changes(candidate, old_seed, new_seed) do
+    old_seed
+    |> Map.keys()
+    |> Kernel.++(Map.keys(new_seed))
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.reduce_while(:ok, fn relative, :ok ->
+      case merge_seed_file(
+             candidate,
+             relative,
+             Map.get(old_seed, relative),
+             Map.get(new_seed, relative)
+           ) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp merge_seed_file(candidate, relative, old_content, nil) do
+    path = Path.join(candidate, relative)
+
+    case File.read(path) do
+      {:ok, ^old_content} -> File.rm(path)
+      {:ok, _user_content} -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:asset_workspace_read_failed, relative, reason}}
+    end
+  end
+
+  defp merge_seed_file(candidate, relative, nil, new_content) do
+    path = Path.join(candidate, relative)
+
+    case File.lstat(path) do
+      {:error, :enoent} -> write_seed_file(path, new_content)
+      {:ok, _user_file} -> :ok
+      {:error, reason} -> {:error, {:asset_workspace_stat_failed, relative, reason}}
+    end
+  end
+
+  defp merge_seed_file(candidate, relative, old_content, new_content) do
+    path = Path.join(candidate, relative)
+
+    case File.read(path) do
+      {:ok, ^old_content} -> write_seed_file(path, new_content)
+      {:ok, _user_content} -> :ok
+      {:error, :enoent} -> write_seed_file(path, new_content)
+      {:error, reason} -> {:error, {:asset_workspace_read_failed, relative, reason}}
+    end
+  end
+
+  defp write_seed_file(path, content) do
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path, content) do
+      :ok
+    end
+  end
+
+  defp replace_workspace(candidate) do
+    backup = workspace_candidate()
+
+    with :ok <- File.rename(workspace(), backup) do
+      case File.rename(candidate, workspace()) do
+        :ok ->
+          File.rm_rf(backup)
+          :ok
+
+        {:error, reason} ->
+          _restore = File.rename(backup, workspace())
+          {:error, {:asset_workspace_switch_failed, reason}}
+      end
+    end
+  end
+
+  defp replace_seed_baseline do
+    candidate = seed_baseline() <> ".tmp"
+
+    try do
+      with {:ok, _removed} <- File.rm_rf(candidate),
+           :ok <- File.mkdir_p(Path.dirname(seed_baseline())),
+           {:ok, _files} <- File.cp_r(seed_workspace(), candidate),
+           {:ok, _removed} <- File.rm_rf(seed_baseline()),
+           :ok <- File.rename(candidate, seed_baseline()) do
+        :ok
+      else
+        {:error, reason, path} -> {:error, {:asset_seed_snapshot_failed, path, reason}}
+        {:error, reason} -> {:error, {:asset_seed_snapshot_failed, reason}}
+      end
+    after
+      File.rm_rf(candidate)
+    end
+  end
+
+  defp seed_current? do
+    with {:ok, baseline} <- tree_files(seed_baseline()),
+         {:ok, packaged} <- tree_files(seed_workspace()) do
+      baseline == packaged
+    else
+      _error -> false
+    end
+  end
+
+  defp seed_files_unchanged?(seed_files) do
+    Enum.all?(seed_files, fn {relative, content} ->
+      File.read(Path.join(workspace(), relative)) == {:ok, content}
+    end)
+  end
+
+  defp tree_files(root), do: collect_tree_files(root, root, %{})
+
+  defp collect_tree_files(root, directory, files) do
+    case File.ls(directory) do
+      {:ok, entries} ->
+        entries
+        |> Enum.sort()
+        |> Enum.reduce_while({:ok, files}, fn entry, {:ok, acc} ->
+          collect_tree_entry(root, Path.join(directory, entry), acc)
+          |> then(fn
+            {:ok, next} -> {:cont, {:ok, next}}
+            {:error, _reason} = error -> {:halt, error}
+          end)
+        end)
+
+      {:error, reason} ->
+        {:error, {:asset_seed_read_failed, directory, reason}}
+    end
+  end
+
+  defp collect_tree_entry(root, path, files) do
+    relative = Path.relative_to(path, root)
+
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} ->
+        collect_tree_files(root, path, files)
+
+      {:ok, %File.Stat{type: :regular}} ->
+        case File.read(path) do
+          {:ok, content} -> {:ok, Map.put(files, relative, content)}
+          {:error, reason} -> {:error, {:asset_seed_read_failed, relative, reason}}
+        end
+
+      {:ok, _unsupported} ->
+        {:error, {:invalid_asset_seed_entry, relative}}
+
+      {:error, reason} ->
+        {:error, {:asset_seed_stat_failed, relative, reason}}
+    end
+  end
+
+  defp seed_baseline, do: Path.join(root(), "workspace-seed")
 
   defp seed_workspace do
     Application.get_env(
@@ -397,6 +590,8 @@ defmodule CatalystWeb.RuntimeAssets do
   defp regular_descendant(root, segments) do
     with {:ok, %File.Stat{type: :directory}} <- File.lstat(root) do
       walk_descendant(root, segments)
+    else
+      _missing_or_unsafe -> {:error, :not_found}
     end
   end
 
@@ -421,5 +616,12 @@ defmodule CatalystWeb.RuntimeAssets do
   defp staging_dir do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
     Path.join([root(), ".staging", suffix])
+  end
+
+  defp cleanup_staging do
+    case File.rm_rf(Path.join(root(), ".staging")) do
+      {:ok, _removed} -> :ok
+      {:error, reason, path} -> {:error, {:asset_staging_cleanup_failed, path, reason}}
+    end
   end
 end

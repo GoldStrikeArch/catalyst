@@ -39,7 +39,7 @@ defmodule CatalystWeb.RuntimeAssetsTest do
       File.rm_rf!(tmp)
     end)
 
-    {:ok, workspace: workspace, root: root}
+    {:ok, workspace: workspace, root: root, seed: seed}
   end
 
   test "publishes a complete digest generation and exposes cache-busting URLs", %{root: root} do
@@ -145,6 +145,44 @@ defmodule CatalystWeb.RuntimeAssetsTest do
 
     assert {:ok, _published} = RuntimeAssets.rebuild(checking_builder)
     assert File.read!(css) == "user edited css"
+  end
+
+  test "a newer packaged seed updates unchanged files and preserves user edits", %{
+    workspace: workspace,
+    seed: seed
+  } do
+    assert {:ok, ^workspace} = RuntimeAssets.ensure_workspace()
+    css = Path.join(workspace, "assets/css/app.css")
+    js = Path.join(workspace, "assets/js/app.js")
+    File.write!(css, "user edited css")
+
+    File.write!(Path.join(seed, "assets/css/app.css"), "release two css")
+    File.write!(Path.join(seed, "assets/js/app.js"), "release two js")
+    File.write!(Path.join(seed, "assets/js/new-hook.js"), "new hook")
+
+    assert {:ok, ^workspace} = RuntimeAssets.ensure_workspace()
+    assert File.read!(css) == "user edited css"
+    assert File.read!(js) == "release two js"
+    assert File.read!(Path.join(workspace, "assets/js/new-hook.js")) == "new hook"
+  end
+
+  test "an unversioned modified workspace is reported instead of silently staying stale", %{
+    workspace: workspace
+  } do
+    File.mkdir_p!(Path.join(workspace, "assets/css"))
+    File.write!(Path.join(workspace, "assets/css/app.css"), "unknown user version")
+
+    assert {:error, {:asset_workspace_unversioned, ^workspace}} =
+             RuntimeAssets.ensure_workspace()
+  end
+
+  test "a rebuild removes staging trees abandoned by an earlier process crash", %{root: root} do
+    abandoned = Path.join([root, ".staging", "abandoned"])
+    File.mkdir_p!(abandoned)
+    File.write!(Path.join(abandoned, "partial"), "partial")
+
+    assert {:ok, _published} = RuntimeAssets.rebuild(&build("clean", &1, &2))
+    refute File.exists?(abandoned)
   end
 
   test "missing or malformed current pointers use packaged assets", %{root: root} do

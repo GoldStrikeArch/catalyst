@@ -28,10 +28,12 @@ defmodule Catalyst.Agent.Loop do
   @behaviour Catalyst.Workflow
 
   alias Catalyst.Agent.{Event, ToolRunner}
-  alias Catalyst.{Content, Hooks, Message}
+  alias Catalyst.{Content, Extensions, Hooks, Message}
 
   alias Catalyst.Session.RunContext
   alias Catalyst.Workflow.Support
+
+  @hook_snapshot_attempts 2
 
   @doc "Run the loop for the given prompts. Returns `{:ok, new_messages, final_context}`."
   @impl true
@@ -96,7 +98,7 @@ defmodule Catalyst.Agent.Loop do
   end
 
   defp run_turn(context, acc, config, emit) do
-    case Hooks.capture_snapshot() do
+    case capture_hook_snapshot(@hook_snapshot_attempts) do
       {:ok, hook_snapshot} ->
         turn_config =
           config
@@ -114,6 +116,20 @@ defmodule Catalyst.Agent.Loop do
 
       {:error, reason} ->
         {:error, reason, context, acc}
+    end
+  end
+
+  defp capture_hook_snapshot(0), do: Hooks.capture_snapshot()
+
+  defp capture_hook_snapshot(attempts) do
+    case Hooks.capture_snapshot() do
+      {:error, :extension_runtime_recovering} ->
+        with :ok <- Extensions.await_ready() do
+          capture_hook_snapshot(attempts - 1)
+        end
+
+      result ->
+        result
     end
   end
 

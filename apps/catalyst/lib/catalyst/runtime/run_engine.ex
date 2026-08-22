@@ -15,12 +15,12 @@ defmodule Catalyst.Runtime.RunEngine do
     Context,
     ContractRef,
     ExtensionPoints,
-    Generations,
     Handle,
     ImplementationRef,
     Resolution,
     Resolver,
     Scope,
+    Service,
     ServiceKey,
     Transport
   }
@@ -54,14 +54,8 @@ defmodule Catalyst.Runtime.RunEngine do
   @spec pin(resolved(), pid()) :: {:ok, resolved()} | {:error, term()}
   def pin(%{resolution: %Resolution{} = resolution} = resolved, owner \\ self())
       when is_pid(owner) do
-    case Map.get(resolution.claim.metadata, :runtime_generation) do
-      nil ->
-        {:ok, put_handle(resolved, resolution, nil)}
-
-      _generation ->
-        with {:ok, lease} <- Generations.acquire_lease(resolution, owner) do
-          {:ok, put_handle(resolved, resolution, lease)}
-        end
+    with {:ok, handle} <- Service.acquire(resolution, owner) do
+      {:ok, Map.put(resolved, :handle, handle)}
     end
   end
 
@@ -285,9 +279,6 @@ defmodule Catalyst.Runtime.RunEngine do
 
   defp selection_opts(%{name: :default}), do: []
   defp selection_opts(%{name: name}), do: [workflow: name]
-
-  defp put_handle(resolved, resolution, lease),
-    do: Map.put(resolved, :handle, Handle.new(resolution, lease))
 
   defp named_slot(name), do: "named:" <> name
 end

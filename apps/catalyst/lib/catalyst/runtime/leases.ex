@@ -43,6 +43,8 @@ defmodule Catalyst.Runtime.Leases do
   @spec transfer(Lease.t(), pid()) :: {:ok, Lease.t()} | {:error, term()}
   def transfer(%Lease{} = lease, owner) when is_pid(owner) do
     GenServer.call(__MODULE__, {:transfer, lease.ref, owner})
+  catch
+    :exit, reason -> {:error, {:runtime_leases_unavailable, reason}}
   end
 
   @doc "List active leases in stable acquisition order."

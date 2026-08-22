@@ -108,6 +108,14 @@ defmodule Catalyst.LLM.Models do
     end
   end
 
+  def provider_id(model), do: {:error, {:invalid_model, model}}
+
+  @doc "Whether a provider descriptor id currently resolves to one registered provider."
+  @spec provider_registered?(String.t()) :: boolean()
+  def provider_registered?(provider_id) when is_binary(provider_id) do
+    match?({:ok, _provider}, Registry.fetch_by_id(provider_id))
+  end
+
   @doc "Find the sole provider advertising `model_id`."
   @spec infer_provider(String.t()) ::
           {:ok, String.t()}

@@ -60,18 +60,20 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   @spec start_in(socket(), String.t()) :: socket()
   def start_in(socket, cwd) when is_binary(cwd) do
     socket = release_focus(socket)
-    model = Settings.provider_config(socket.assigns.codex_prefs)
     run_opts = Settings.start_opts(socket)
 
-    case Manager.start_session(cwd: cwd, model: model, opts: run_opts) do
-      {:ok, %{id: id, pid: pid}} ->
+    with {:ok, model} <- Settings.provider_config(socket.assigns.codex_prefs),
+         {:ok, %{id: id, pid: pid}} <-
+           Manager.start_session(cwd: cwd, model: model, opts: run_opts) do
+      socket
+      |> assign(cwd: cwd)
+      |> attach_new_session(id, pid, model, run_opts)
+      |> refresh_sidebar()
+    else
+      {:error, reason} ->
         socket
         |> assign(cwd: cwd)
-        |> attach_new_session(id, pid, model, run_opts)
-        |> refresh_sidebar()
-
-      {:error, reason} ->
-        session_start_failed(socket, reason)
+        |> session_start_failed(reason)
     end
   end
 
@@ -264,18 +266,18 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   # somehow still alive and otherwise reopens the on-disk transcript, so this
   # one call covers both the warm and the restarted-VM case.
   defp restart_persisted_session(socket, id, cwd) do
-    model = Settings.provider_config(socket.assigns.codex_prefs)
     run_opts = Settings.start_opts(socket)
 
-    case Manager.start_session(id: id, cwd: cwd, model: model, opts: run_opts) do
-      {:ok, %{id: ^id, pid: pid}} ->
-        remember_session(id, cwd)
+    with {:ok, model} <- Settings.provider_config(socket.assigns.codex_prefs),
+         {:ok, %{id: ^id, pid: pid}} <-
+           Manager.start_session(id: id, cwd: cwd, model: model, opts: run_opts) do
+      remember_session(id, cwd)
 
-        socket
-        |> assign(cwd: cwd)
-        |> reattach(id, pid)
-        |> refresh_sidebar()
-
+      socket
+      |> assign(cwd: cwd)
+      |> reattach(id, pid)
+      |> refresh_sidebar()
+    else
       {:error, reason} ->
         Logger.warning("[shell] could not resume cataloged session #{id}: #{inspect(reason)}")
         start_in(socket, cwd)

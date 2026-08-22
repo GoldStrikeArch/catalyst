@@ -1,10 +1,17 @@
 defmodule Catalyst.Runtime.ReadModelTest do
   use ExUnit.Case, async: false
 
+  alias Catalyst.LLM.Registry, as: ProviderRegistry
   alias Catalyst.Runtime
   alias Catalyst.Runtime.{ReadModel, ServiceKey}
 
   setup do
+    # This module verifies the product baseline, not a prior test's runtime
+    # provider overlay. Unregistering restores the compiled/configured seed and
+    # clears any owner index entry atomically.
+    :ok = ProviderRegistry.unregister_provider("openai-codex-responses")
+    :ok = Catalyst.Extensions.await_ready()
+
     :ok =
       ReadModel.register_source(
         :core,

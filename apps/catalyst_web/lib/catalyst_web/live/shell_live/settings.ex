@@ -26,10 +26,12 @@ defmodule CatalystWeb.ShellLive.Settings do
   # Workflow selection is provider-agnostic, so it also gets its own key
   # rather than riding in `codex_prefs` (same wholesale-rebuild hazard).
   @workflow_prefs_ptr {CatalystWeb.ShellLive, :workflow_prefs}
+  @fallback_provider "unavailable"
+  @fallback_model "unavailable"
   @type codex_prefs :: %{
           model: String.t(),
           provider: String.t(),
-          effort: String.t(),
+          effort: String.t() | nil,
           fast: boolean(),
           transport: String.t()
         }
@@ -150,8 +152,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   @spec update_codex(codex_prefs(), map()) :: codex_prefs()
   def update_codex(prefs, params) do
     prefs
-    |> put_if_present(:model, params["model"])
-    |> infer_provider()
+    |> put_model_selection(params["model"])
     |> put_if_present(:effort, params["effort"])
     |> put_if_present(:transport, params["transport"])
     |> clamp_effort()
@@ -170,7 +171,7 @@ defmodule CatalystWeb.ShellLive.Settings do
     socket =
       assign(socket,
         codex_prefs: prefs,
-        logged_in: Catalyst.Auth.logged_in?(auth_provider(prefs))
+        logged_in: logged_in?(prefs)
       )
 
     case socket.assigns.session_pid do
@@ -254,8 +255,12 @@ defmodule CatalystWeb.ShellLive.Settings do
   @doc "One combined model-catalog snapshot with the selected entry."
   @spec catalog_snapshot(codex_prefs()) :: %{models: [map()], selected: map()}
   def catalog_snapshot(prefs) do
-    {:ok, snapshot} = Models.catalog_snapshot(provider(prefs), prefs.model)
-    snapshot
+    selected_provider = provider(prefs)
+
+    case Models.catalog_snapshot(selected_provider, prefs.model) do
+      {:ok, snapshot} -> normalize_snapshot(snapshot, selected_provider, prefs.model)
+      {:error, _reason} -> fallback_snapshot(selected_provider, prefs.model)
+    end
   end
 
   @doc """
@@ -264,10 +269,9 @@ defmodule CatalystWeb.ShellLive.Settings do
   Provider selection is deliberately left to the model API's live registry
   entry, so no provider is returned here.
   """
-  @spec provider_config(codex_prefs()) :: Catalyst.Model.t()
+  @spec provider_config(codex_prefs()) :: {:ok, Catalyst.Model.t()} | {:error, term()}
   def provider_config(prefs) do
-    {:ok, model} = Models.build(provider(prefs), prefs.model)
-    model
+    Models.build(provider(prefs), prefs.model)
   end
 
   @doc "Converts the selected provider's controls into session run options."
@@ -276,7 +280,7 @@ defmodule CatalystWeb.ShellLive.Settings do
     entry = catalog_snapshot(prefs).selected
 
     service_tier =
-      case prefs.fast and entry.fast? do
+      case prefs.fast and Map.get(entry, :fast?, false) do
         true -> "priority"
         false -> nil
       end
@@ -289,12 +293,29 @@ defmodule CatalystWeb.ShellLive.Settings do
   end
 
   @doc "Token-store provider for the selected model."
-  @spec auth_provider(codex_prefs()) :: String.t()
-  def auth_provider(prefs), do: catalog_snapshot(prefs).selected.auth.provider_id()
+  @spec auth_provider(codex_prefs()) :: String.t() | nil
+  def auth_provider(prefs) do
+    case Map.get(catalog_snapshot(prefs).selected, :auth) do
+      auth when is_atom(auth) and not is_nil(auth) -> auth.provider_id()
+      _no_auth -> nil
+    end
+  end
+
+  @doc "Whether the selected provider is ready for use without prompting for authentication."
+  @spec logged_in?(codex_prefs()) :: boolean()
+  def logged_in?(prefs) do
+    case auth_provider(prefs) do
+      nil -> true
+      provider -> Catalyst.Auth.logged_in?(provider)
+    end
+  end
 
   @doc "Human-facing subscription name for the selected model."
   @spec auth_label(codex_prefs()) :: String.t()
-  def auth_label(prefs), do: catalog_snapshot(prefs).selected.provider_name
+  def auth_label(prefs) do
+    selected = catalog_snapshot(prefs).selected
+    Map.get(selected, :provider_name) || Map.get(selected, :provider) || "provider"
+  end
 
   @doc """
   Synchronizes controls from an attached session, which is the source of truth.
@@ -311,7 +332,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   """
   @spec sync_from_session(socket()) :: socket()
   def sync_from_session(socket) do
-    model = socket.assigns.session_model || provider_config(socket.assigns.codex_prefs)
+    model = session_model(socket)
     opts = socket.assigns.session_opts || []
     provider = provider_from_model(model, socket.assigns.codex_prefs)
 
@@ -329,7 +350,7 @@ defmodule CatalystWeb.ShellLive.Settings do
     socket
     |> assign(
       codex_prefs: prefs,
-      logged_in: Catalyst.Auth.logged_in?(auth_provider(prefs))
+      logged_in: logged_in?(prefs)
     )
     |> sync_machine_from_opts(opts)
     |> sync_workflow_from_opts(opts)
@@ -365,21 +386,21 @@ defmodule CatalystWeb.ShellLive.Settings do
   end
 
   defp configure_session(socket, pid, prefs) do
-    model = provider_config(prefs)
-    opts = run_opts(prefs)
+    with {:ok, model} <- provider_config(prefs) do
+      opts = run_opts(prefs)
 
-    try do
-      :ok = Server.configure(pid, model: model, opts: opts)
-      # Merge rather than replace: the server merges too, so a capability grant
-      # set by another control must not disappear from the UI's own view.
-      assign(socket,
-        session_model: model,
-        session_opts: merge_local_opts(socket.assigns.session_opts || [], opts)
-      )
-    catch
-      # The session can die during a control change. The monitor callback will
-      # reattach, while the persisted preferences apply to the next session.
-      :exit, _reason -> socket
+      try do
+        :ok = Server.configure(pid, model: model, opts: opts)
+
+        assign(socket,
+          session_model: model,
+          session_opts: merge_local_opts(socket.assigns.session_opts || [], opts)
+        )
+      catch
+        :exit, _reason -> socket
+      end
+    else
+      {:error, reason} -> put_flash(socket, :error, model_error(reason))
     end
   end
 
@@ -479,7 +500,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   defp put_if_present(prefs, key, value), do: Map.put(prefs, key, value)
 
   defp clamp_fast(prefs) do
-    case catalog_snapshot(prefs).selected.fast? do
+    case Map.get(catalog_snapshot(prefs).selected, :fast?, false) do
       true -> prefs
       false -> %{prefs | fast: false}
     end
@@ -487,10 +508,28 @@ defmodule CatalystWeb.ShellLive.Settings do
 
   defp clamp_effort(prefs) do
     selected = catalog_snapshot(prefs).selected
+    efforts = Map.get(selected, :efforts, [])
 
-    case prefs.effort in selected.efforts do
+    case prefs.effort in efforts do
       true -> prefs
-      false -> %{prefs | effort: selected.default_effort}
+      false -> %{prefs | effort: Map.get(selected, :default_effort)}
+    end
+  end
+
+  defp put_model_selection(prefs, nil), do: prefs
+
+  defp put_model_selection(prefs, selection) do
+    case Models.decode_selection(selection) do
+      {:ok, %{"provider_id" => provider, "model_id" => model}} ->
+        %{prefs | provider: provider, model: model}
+
+      {:ok, model} ->
+        prefs
+        |> Map.put(:model, model)
+        |> infer_provider()
+
+      {:error, _reason} ->
+        prefs
     end
   end
 
@@ -510,17 +549,24 @@ defmodule CatalystWeb.ShellLive.Settings do
 
   defp default_effort(provider) do
     model = default_model_id(provider)
-    selected_entry(provider, model).default_effort
+    Map.get(selected_entry(provider, model), :default_effort)
   end
 
   defp default_model_id(provider) do
-    {:ok, model} = Models.default_model_id(provider)
-    model
+    case Models.default_model_id(provider) do
+      {:ok, model} -> model
+      {:error, _reason} -> default_selection().model_id
+    end
   end
 
   defp selected_entry(provider, model) do
-    {:ok, snapshot} = Models.catalog_snapshot(provider, model)
-    snapshot.selected
+    catalog_snapshot(%{
+      provider: provider,
+      model: model,
+      effort: nil,
+      fast: false,
+      transport: "auto"
+    }).selected
   end
 
   defp supported_transport(entry, transport) do
@@ -534,16 +580,82 @@ defmodule CatalystWeb.ShellLive.Settings do
     default = default_selection().provider_id
     requested = Map.get(prefs, :provider, default)
 
-    case Models.default_model_id(requested) do
-      {:ok, _model_id} -> requested
-      {:error, _reason} -> default
+    case Models.provider_registered?(requested) do
+      true -> requested
+      false -> default
     end
   end
 
   defp default_selection do
-    {:ok, selection} = Models.default_selection()
-    selection
+    case Models.default_selection() do
+      {:ok, selection} -> selection
+      {:error, _reason} -> %{provider_id: @fallback_provider, model_id: @fallback_model}
+    end
   end
+
+  defp normalize_snapshot(snapshot, provider, model) do
+    models = Enum.map(snapshot.models, &normalize_entry(&1, provider, model))
+    selected = normalize_entry(snapshot.selected, provider, model)
+    %{models: ensure_selected(models, selected), selected: selected}
+  end
+
+  defp fallback_snapshot(provider, model) do
+    selected = normalize_entry(%{id: model}, provider, model)
+    %{models: [selected], selected: selected}
+  end
+
+  defp normalize_entry(entry, provider, fallback_model) do
+    id = valid_string(Map.get(entry, :id), fallback_model)
+    efforts = valid_efforts(Map.get(entry, :efforts))
+    default_effort = valid_default_effort(Map.get(entry, :default_effort), efforts)
+
+    entry
+    |> Map.put(:id, id)
+    |> Map.put(:name, valid_string(Map.get(entry, :name), id))
+    |> Map.put(:provider, valid_string(Map.get(entry, :provider), provider))
+    |> Map.put(:provider_name, Map.get(entry, :provider_name))
+    |> Map.put(:auth, Map.get(entry, :auth))
+    |> Map.put(:controls, valid_controls(Map.get(entry, :controls)))
+    |> Map.put(:efforts, efforts)
+    |> Map.put(:default_effort, default_effort)
+    |> Map.put(:fast?, Map.get(entry, :fast?, false) == true)
+  end
+
+  defp ensure_selected(models, selected) do
+    case Enum.any?(models, &(&1.provider == selected.provider and &1.id == selected.id)) do
+      true -> models
+      false -> models ++ [selected]
+    end
+  end
+
+  defp valid_string(value, _fallback) when is_binary(value) and value != "", do: value
+  defp valid_string(_value, fallback), do: fallback
+
+  defp valid_efforts(efforts) when is_list(efforts),
+    do: Enum.filter(efforts, &(is_binary(&1) and &1 != ""))
+
+  defp valid_efforts(_efforts), do: []
+
+  defp valid_default_effort(effort, efforts) do
+    case Enum.member?(efforts, effort) do
+      true -> effort
+      false -> List.first(efforts)
+    end
+  end
+
+  defp valid_controls(controls) when is_map(controls), do: controls
+  defp valid_controls(_controls), do: %{}
+
+  defp session_model(%{assigns: %{session_model: %Catalyst.Model{} = model}}), do: model
+
+  defp session_model(socket) do
+    case provider_config(socket.assigns.codex_prefs) do
+      {:ok, model} -> model
+      {:error, _reason} -> %{id: socket.assigns.codex_prefs.model}
+    end
+  end
+
+  defp model_error(reason), do: "could not configure model: #{inspect(reason)}"
 
   defp persist(key, prefs), do: :persistent_term.put(key, prefs)
 end

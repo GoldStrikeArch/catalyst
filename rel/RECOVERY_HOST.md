@@ -45,6 +45,9 @@ expiry is a failed boot.
 
 The host creates a missing recovery directory with mode `0700`. It never
 changes permissions on an existing directory supplied through `--state-dir`.
+While supervising a child, it forwards `TERM`, `INT`, and `HUP`, waits for that
+child to exit, and records the stop marker before returning. These signals are
+operator shutdowns and never trigger the safe-mode retry.
 
 ## Boundary and limitations
 

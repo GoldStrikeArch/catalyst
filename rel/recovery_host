@@ -98,6 +98,45 @@ write_status() {
   atomic_write "$status_path" "$1" || fail "cannot write $status_path"
 }
 
+forward_signal() {
+  signal=$1
+
+  atomic_write "$stop_path" 1 || true
+
+  case "${child_pid:-}" in
+    ''|*[!0-9]*) return ;;
+  esac
+
+  atomic_write "$status_path" "stopping:$child_pid:signal:$signal" || true
+  kill "-$signal" "$child_pid" 2>/dev/null || true
+}
+
+install_signal_traps() {
+  trap 'forward_signal TERM' TERM
+  trap 'forward_signal INT' INT
+  trap 'forward_signal HUP' HUP
+}
+
+clear_signal_traps() {
+  trap - TERM INT HUP
+}
+
+wait_for_child_stop() {
+  child_pid=$1
+
+  while :; do
+    if wait "$child_pid"; then
+      child_exit_status=0
+    else
+      child_exit_status=$?
+    fi
+
+    if ! kill -0 "$child_pid" 2>/dev/null; then
+      return
+    fi
+  done
+}
+
 ready_for_token() {
   ready=$(read_bounded "$ready_path" 2>/dev/null | tr -d '\r\n' || true)
   [ "$ready" = "$1:$2" ]
@@ -178,6 +217,7 @@ run_child() {
 
   child_pid=$!
   atomic_write "$pid_path" "$child_pid" || fail "cannot write $pid_path"
+  install_signal_traps
 
   if wait_for_boot "$child_pid" "$token" "$profile" "$deadline_epoch"; then
     boot_ready=1
@@ -187,15 +227,17 @@ run_child() {
     if [ "$child_reaped" = 1 ]; then
       child_status=$child_exit_status
     else
-      wait "$child_pid"
-      child_status=$?
+      wait_for_child_stop "$child_pid"
+      child_status=$child_exit_status
     fi
 
+    clear_signal_traps
     rm -f "$pid_path"
     write_status "stopped:$child_status:$profile:$safe_mode"
     return "$child_status"
   else
     child_status=$boot_failure_status
+    clear_signal_traps
     rm -f "$pid_path"
     write_status "failed:$child_status:$profile:$safe_mode"
     return "$child_status"
@@ -233,6 +275,11 @@ start() {
   write_profile "$profile"
 
   if run_child "$profile" 0 1 "$@"; then
+    if [ -f "$stop_path" ]; then
+      rm -f "$stop_path"
+      write_status "stopped:0:$profile:operator"
+    fi
+
     return 0
   else
     first_status=$?

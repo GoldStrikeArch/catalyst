@@ -8,9 +8,18 @@ defmodule Catalyst.Runtime.SessionEngine do
   """
 
   alias Catalyst.Contracts.SessionEngine.V1
-  alias Catalyst.Runtime.{Claim, Context, ContractRef, ExtensionPoints, Generations}
+  alias Catalyst.Runtime.{Claim, Context, ContractRef, ExtensionPoints}
 
-  alias Catalyst.Runtime.{Handle, ImplementationRef, Resolution, Resolver, Scope, ServiceKey}
+  alias Catalyst.Runtime.{
+    Handle,
+    ImplementationRef,
+    Resolution,
+    Resolver,
+    Scope,
+    Service,
+    ServiceKey
+  }
+
   alias Catalyst.Runtime.Transport
   alias Catalyst.Session.{EngineState, EventEnvelope}
 
@@ -48,12 +57,8 @@ defmodule Catalyst.Runtime.SessionEngine do
 
   @doc "Acquire the managed-generation lease for a resolved session engine."
   @spec pin(Resolution.t(), pid()) :: {:ok, Handle.t()} | {:error, term()}
-  def pin(%Resolution{} = resolution, owner \\ self()) when is_pid(owner) do
-    case Map.get(resolution.claim.metadata, :runtime_generation) do
-      nil -> {:ok, Handle.new(resolution, nil)}
-      _generation -> acquire_handle(resolution, owner)
-    end
-  end
+  def pin(%Resolution{} = resolution, owner \\ self()) when is_pid(owner),
+    do: Service.acquire(resolution, owner)
 
   @doc "Release a pinned session-engine handle."
   @spec release(Handle.t()) :: :ok
@@ -160,12 +165,6 @@ defmodule Catalyst.Runtime.SessionEngine do
       provenance: :builtin,
       metadata: %{}
     }
-  end
-
-  defp acquire_handle(resolution, owner) do
-    with {:ok, lease} <- Generations.acquire_lease(resolution, owner) do
-      {:ok, Handle.new(resolution, lease)}
-    end
   end
 
   defp safe_handoff_callback(operation, callback) do
