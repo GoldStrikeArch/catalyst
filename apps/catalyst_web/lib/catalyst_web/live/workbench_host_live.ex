@@ -20,7 +20,8 @@ defmodule CatalystWeb.WorkbenchHostLive do
         workbench_target: nil,
         workbench_metadata: %{},
         workbench_error: nil,
-        workbench_forms: %{}
+        workbench_forms: %{},
+        workbench_effects: MapSet.new()
       )
 
     case mount_workbench(session, socket) do
@@ -30,6 +31,10 @@ defmodule CatalystWeb.WorkbenchHostLive do
   end
 
   @impl true
+  def handle_event("workbench:host:remount", _params, socket) do
+    {:noreply, remount_workbench(socket)}
+  end
+
   def handle_event("workbench:" <> event, params, socket) do
     {:noreply, transition(socket, &Workbench.event(&1, event, params, &2, &3))}
   end
@@ -39,11 +44,15 @@ defmodule CatalystWeb.WorkbenchHostLive do
   @impl true
   def handle_async({:workbench_effect, request_id}, {:ok, result}, socket) do
     message = {:effect_result, request_id, result}
+
+    socket = finish_effect(socket, request_id)
     {:noreply, transition(socket, &Workbench.info(&1, message, &2, &3))}
   end
 
   def handle_async({:workbench_effect, request_id}, {:exit, reason}, socket) do
     message = {:effect_result, request_id, {:error, {:task_exit, reason}}}
+
+    socket = finish_effect(socket, request_id)
     {:noreply, transition(socket, &Workbench.info(&1, message, &2, &3))}
   end
 
@@ -146,6 +155,61 @@ defmodule CatalystWeb.WorkbenchHostLive do
     end
   end
 
+  defp remount_workbench(%{assigns: %{workbench_handle: nil}} = socket), do: socket
+
+  defp remount_workbench(socket) do
+    case MapSet.size(socket.assigns.workbench_effects) do
+      0 -> perform_remount(socket)
+      _active -> put_flash(socket, :error, "Wait for current workbench tasks before applying it.")
+    end
+  end
+
+  defp perform_remount(socket) do
+    old_handle = socket.assigns.workbench_handle
+    old_state = socket.assigns.workbench_state
+    workspace = workspace!(socket)
+    runtime_context = %{metadata: %{workspace_path: workspace}}
+
+    with {:ok, capsule} <- Workbench.snapshot(old_handle, old_state),
+         {:ok, new_handle} <- Workbench.resolve_and_pin(runtime_context, self()),
+         new_context = %{
+           workspace: workspace,
+           runtime: Workbench.metadata(new_handle.resolution)
+         } do
+      restore_remount(socket, old_handle, new_handle, capsule, new_context)
+    else
+      {:error, reason} -> remount_error(socket, reason)
+    end
+  end
+
+  defp restore_remount(socket, old_handle, new_handle, capsule, context) do
+    with {:ok, state, effects} <- Workbench.restore(new_handle, capsule, context),
+         {:ok, target} <- registered_target(new_handle, state),
+         {:ok, forms} <- Workbench.forms(new_handle, state) do
+      socket =
+        assign(socket,
+          workbench_handle: new_handle,
+          workbench_state: state,
+          workbench_context: context,
+          workbench_target: target,
+          workbench_metadata: context.runtime,
+          workbench_forms: to_forms(forms),
+          workbench_error: nil
+        )
+
+      :ok = Workbench.release(old_handle)
+      maybe_start_effects(socket, effects)
+    else
+      {:error, reason} ->
+        :ok = Workbench.release(new_handle)
+        remount_error(socket, reason)
+    end
+  end
+
+  defp remount_error(socket, reason) do
+    put_flash(socket, :error, "Could not apply active workbench: #{inspect(reason)}")
+  end
+
   defp registered_target(handle, state) do
     with {:ok, id} <- Workbench.render_target(handle, state),
          {:ok, target} <- Registry.fetch_page(id) do
@@ -201,8 +265,17 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   defp start_effect({:navigate, path}, socket), do: push_navigate(socket, to: path)
 
-  defp start_effect_task(socket, request_id, task),
-    do: start_async(socket, {:workbench_effect, request_id}, task)
+  defp start_effect_task(socket, request_id, task) do
+    case MapSet.member?(socket.assigns.workbench_effects, request_id) do
+      true ->
+        assign(socket, :workbench_error, {:duplicate_active_workbench_effect, request_id})
+
+      false ->
+        socket
+        |> assign(:workbench_effects, MapSet.put(socket.assigns.workbench_effects, request_id))
+        |> start_async({:workbench_effect, request_id}, task)
+    end
+  end
 
   defp start_brokered_effect(socket, request_id, operation, resource, task) do
     principal = %{
@@ -224,6 +297,14 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   defp file_resource(workspace, path),
     do: %{type: :filesystem, workspace: workspace, path: path}
+
+  defp finish_effect(socket, request_id) do
+    assign(
+      socket,
+      :workbench_effects,
+      MapSet.delete(socket.assigns.workbench_effects, request_id)
+    )
+  end
 
   defp workspace!(socket), do: socket.assigns.workbench_context.workspace
 

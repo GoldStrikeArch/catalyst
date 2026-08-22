@@ -99,6 +99,25 @@ defmodule CatalystWeb.Workbench do
     end
   end
 
+  @doc "Create and validate a bounded handoff capsule through the pinned workbench."
+  @spec snapshot(Handle.t(), map()) :: {:ok, V1.capsule()} | {:error, term()}
+  def snapshot(%Handle{} = handle, state) do
+    with :ok <- ensure_callback(handle, :snapshot, 1),
+         {:ok, result} <- invoke_callback(handle, :snapshot, [state]),
+         {:ok, capsule} <- normalize_snapshot(result) do
+      V1.validate_capsule(capsule)
+    end
+  end
+
+  @doc "Restore a capsule through a newly pinned workbench target."
+  @spec restore(Handle.t(), V1.capsule(), map()) :: V1.transition()
+  def restore(%Handle{} = handle, capsule, context) do
+    with {:ok, capsule} <- V1.validate_capsule(capsule),
+         :ok <- ensure_callback(handle, :restore, 2) do
+      invoke_transition(handle, :restore, [capsule, context])
+    end
+  end
+
   @doc "Export managed and built-in workbench claims."
   @spec claims() :: [Claim.t()]
   def claims, do: managed_claims() ++ [builtin_claim()]
@@ -157,6 +176,49 @@ defmodule CatalystWeb.Workbench do
       :timeout -> {:error, {:workbench_callback_timeout, callback}}
     end
   end
+
+  defp ensure_callback(
+         %Handle{
+           resolution: %Resolution{
+             claim: %Claim{implementation: %ImplementationRef{transport: :process}}
+           }
+         },
+         _callback,
+         _arity
+       ),
+       do: :ok
+
+  defp ensure_callback(
+         %Handle{
+           resolution: %Resolution{
+             claim: %Claim{
+               implementation: %ImplementationRef{transport: :local, target: module}
+             }
+           }
+         },
+         callback,
+         arity
+       ),
+       do: ensure_local_callback(module, callback, arity)
+
+  defp ensure_callback(%Handle{implementation: module}, callback, arity) when is_atom(module) do
+    ensure_local_callback(module, callback, arity)
+  end
+
+  defp ensure_callback(_handle, callback, _arity),
+    do: {:error, {:workbench_handoff_not_supported, callback}}
+
+  defp ensure_local_callback(module, callback, arity) do
+    case is_atom(module) and Code.ensure_loaded?(module) and
+           function_exported?(module, callback, arity) do
+      true -> :ok
+      false -> {:error, {:workbench_handoff_not_supported, callback}}
+    end
+  end
+
+  defp normalize_snapshot({:ok, capsule}), do: {:ok, capsule}
+  defp normalize_snapshot({:error, _reason} = error), do: error
+  defp normalize_snapshot(invalid), do: {:error, {:invalid_workbench_snapshot_result, invalid}}
 
   defp invoke(%Handle{} = handle, callback, args) do
     Transport.invoke(handle, callback, args)

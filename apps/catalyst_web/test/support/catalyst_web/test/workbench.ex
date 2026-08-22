@@ -31,4 +31,21 @@ defmodule CatalystWeb.Test.Workbench do
 
   @impl true
   defdelegate forms(state), to: CatalystWeb.Workbench.IDE
+
+  @impl true
+  defdelegate snapshot(state), to: CatalystWeb.Workbench.IDE
+
+  @impl true
+  def restore(_capsule, %{runtime: %{owner: "test.workbench-reject"}}),
+    do: {:error, :restore_rejected}
+
+  def restore(capsule, context) do
+    with {:ok, state, effects} <- CatalystWeb.Workbench.IDE.restore(capsule, context) do
+      owner = get_in(context, [:runtime, :owner])
+      target = if owner == "test.workbench-broken", do: "missing", else: "ide"
+
+      {:ok, state |> Map.put(:output, "restored workbench #{owner}") |> Map.put(:target, target),
+       effects}
+    end
+  end
 end

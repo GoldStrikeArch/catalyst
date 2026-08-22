@@ -128,6 +128,20 @@ defmodule CatalystWeb.Workbench.IDE do
     }
   end
 
+  @impl true
+  def snapshot(state) do
+    payload = state |> Map.drop([:busy]) |> Map.put(:workspace, nil)
+    {:ok, %{version: 1, payload: payload}}
+  end
+
+  @impl true
+  def restore(%{version: 1, payload: payload}, %{workspace: workspace}) when is_map(payload) do
+    state = payload |> Map.put(:workspace, workspace) |> Map.put(:busy, %{})
+    {:ok, state, [{:workspace, :list, "files"}]}
+  end
+
+  def restore(capsule, _context), do: {:error, {:unsupported_ide_capsule, capsule}}
+
   defp start(state, request_id, effects) do
     case Map.get(state.busy, request_id, false) do
       true -> {:ok, state, []}

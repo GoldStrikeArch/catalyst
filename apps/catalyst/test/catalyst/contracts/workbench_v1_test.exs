@@ -24,4 +24,25 @@ defmodule Catalyst.Contracts.Workbench.V1Test do
     assert {:error, {:invalid_workbench_effect, {:socket, :mutate}}} =
              V1.validate_transition({:ok, %{}, [{:socket, :mutate}]})
   end
+
+  test "bounds effect admission and rejects ambiguous request ids" do
+    duplicate = [
+      {:workspace, :read, "same", "one.ex"},
+      {:command, :run, "same", "mix test"}
+    ]
+
+    assert {:error, {:duplicate_workbench_effect_ids, ["same"]}} =
+             V1.validate_effects(duplicate)
+
+    effects = Enum.map(1..33, &{:workspace, :list, Integer.to_string(&1)})
+    assert {:error, {:too_many_workbench_effects, 33, 32}} = V1.validate_effects(effects)
+  end
+
+  test "accepts bounded versioned handoff capsules" do
+    capsule = %{version: 1, payload: %{active_file: "lib/example.ex"}}
+    assert {:ok, ^capsule} = V1.validate_capsule(capsule)
+
+    assert {:error, {:invalid_workbench_capsule, %{payload: %{}}}} =
+             V1.validate_capsule(%{payload: %{}})
+  end
 end

@@ -10,6 +10,7 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   alias Catalyst.Runtime.ContractRef
 
   @max_state_bytes 4_194_304
+  @max_effects 32
 
   @type state :: map()
   @type context :: map()
@@ -21,6 +22,7 @@ defmodule Catalyst.Contracts.Workbench.V1 do
           | {:command, :run, request_id(), String.t()}
           | {:navigate, String.t()}
   @type transition :: {:ok, state(), [effect()]} | {:error, term()}
+  @type capsule :: %{version: pos_integer(), payload: term()}
 
   @doc "Initialize serializable workbench state and declarative host effects."
   @callback mount(context()) :: transition()
@@ -36,6 +38,14 @@ defmodule Catalyst.Contracts.Workbench.V1 do
 
   @doc "Return raw named form values; the stable host constructs Phoenix forms."
   @callback forms(state()) :: %{optional(atom()) => map()}
+
+  @doc "Create a bounded, versioned capsule for controlled workbench replacement."
+  @callback snapshot(state()) :: {:ok, capsule()} | {:error, term()}
+
+  @doc "Restore a capsule into a new workbench generation."
+  @callback restore(capsule(), context()) :: transition()
+
+  @optional_callbacks snapshot: 1, restore: 2
 
   @doc "Return the stable Runtime Graph contract reference."
   @spec ref() :: ContractRef.t()
@@ -56,13 +66,26 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   @doc "Validate effects accepted by the stable workbench host."
   @spec validate_effects([term()]) :: :ok | {:error, term()}
   def validate_effects(effects) when is_list(effects) do
-    case Enum.find(effects, &(not valid_effect?(&1))) do
-      nil -> :ok
-      invalid -> {:error, {:invalid_workbench_effect, invalid}}
+    with :ok <- validate_effect_count(effects),
+         :ok <- validate_effect_shapes(effects) do
+      validate_request_ids(effects)
     end
   end
 
   def validate_effects(effects), do: {:error, {:invalid_workbench_effects, effects}}
+
+  @doc "Validate a versioned workbench handoff capsule."
+  @spec validate_capsule(term()) :: {:ok, capsule()} | {:error, term()}
+  def validate_capsule(%{version: version, payload: _payload} = capsule)
+      when is_integer(version) and version > 0 do
+    case Jason.encode(capsule) do
+      {:ok, json} when byte_size(json) <= @max_state_bytes -> {:ok, capsule}
+      {:ok, json} -> {:error, {:workbench_capsule_too_large, byte_size(json), @max_state_bytes}}
+      {:error, reason} -> {:error, {:invalid_workbench_capsule, reason}}
+    end
+  end
+
+  def validate_capsule(capsule), do: {:error, {:invalid_workbench_capsule, capsule}}
 
   defp serializable_state(state) do
     case Jason.encode(state) do
@@ -71,6 +94,33 @@ defmodule Catalyst.Contracts.Workbench.V1 do
       {:error, reason} -> {:error, {:invalid_workbench_state, reason}}
     end
   end
+
+  defp validate_effect_count(effects) when length(effects) <= @max_effects, do: :ok
+
+  defp validate_effect_count(effects),
+    do: {:error, {:too_many_workbench_effects, length(effects), @max_effects}}
+
+  defp validate_effect_shapes(effects) do
+    case Enum.find(effects, &(not valid_effect?(&1))) do
+      nil -> :ok
+      invalid -> {:error, {:invalid_workbench_effect, invalid}}
+    end
+  end
+
+  defp validate_request_ids(effects) do
+    ids = Enum.flat_map(effects, &request_ids/1)
+
+    case ids -- Enum.uniq(ids) do
+      [] -> :ok
+      duplicates -> {:error, {:duplicate_workbench_effect_ids, Enum.uniq(duplicates)}}
+    end
+  end
+
+  defp request_ids({:workspace, :list, request_id}), do: [request_id]
+  defp request_ids({:workspace, :read, request_id, _path}), do: [request_id]
+  defp request_ids({:workspace, :write, request_id, _path, _content}), do: [request_id]
+  defp request_ids({:command, :run, request_id, _command}), do: [request_id]
+  defp request_ids({:navigate, _location}), do: []
 
   defp valid_effect?({:workspace, :list, request_id}), do: valid_request_id?(request_id)
 

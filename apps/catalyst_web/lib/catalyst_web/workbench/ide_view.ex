@@ -26,6 +26,14 @@ defmodule CatalystWeb.Workbench.IDEView do
 
         <div class="flex items-center gap-2">
           <button
+            id="workbench-apply-active"
+            type="button"
+            phx-click="workbench:host:remount"
+            class="inline-flex items-center gap-2 rounded-lg border border-edge bg-raised px-3 py-1.5 text-xs font-medium text-muted transition hover:border-edge-strong hover:text-ink"
+          >
+            <.icon name="hero-arrow-path-rounded-square" class="size-4" /> Apply active workbench
+          </button>
+          <button
             id="command-palette-toggle"
             type="button"
             phx-click="workbench:ide:palette-toggle"

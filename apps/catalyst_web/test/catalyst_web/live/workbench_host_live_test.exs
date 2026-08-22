@@ -121,6 +121,72 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
     assert has_element?(second_view, "#command-output", "test.workbench-b")
   end
 
+  test "a mounted host atomically restores into the active workbench", %{conn: conn, root: root} do
+    first = manifest("test.workbench-a")
+    assert {:ok, first_generation} = Generations.install("workbench_source", [first])
+
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/ide")
+    host_pid = view.pid
+
+    wait_until(fn -> has_element?(view, ~s([data-file-path="lib/example.ex"])) end)
+
+    assert Enum.any?(
+             Leases.list(),
+             &(&1.generation == first_generation.id and &1.owner == host_pid)
+           )
+
+    second = manifest("test.workbench-b")
+    assert {:ok, second_generation} = Generations.install("workbench_source", [second])
+
+    view |> element("#workbench-apply-active") |> render_click()
+
+    assert view.pid == host_pid
+    assert has_element?(view, "#workbench-host[data-workbench-owner='test.workbench-b']")
+    assert has_element?(view, "#command-output", "restored workbench test.workbench-b")
+
+    refute Enum.any?(
+             Leases.list(),
+             &(&1.generation == first_generation.id and &1.owner == host_pid)
+           )
+
+    assert Enum.any?(
+             Leases.list(),
+             &(&1.generation == second_generation.id and &1.owner == host_pid)
+           )
+  end
+
+  test "a rejected restore keeps the old workbench and releases the candidate lease", %{
+    conn: conn,
+    root: root
+  } do
+    first = manifest("test.workbench-a")
+    assert {:ok, first_generation} = Generations.install("workbench_source", [first])
+
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/ide")
+    host_pid = view.pid
+    wait_until(fn -> has_element?(view, ~s([data-file-path="lib/example.ex"])) end)
+
+    rejected = manifest("test.workbench-reject")
+    assert {:ok, rejected_generation} = Generations.install("workbench_source", [rejected])
+
+    view |> element("#workbench-apply-active") |> render_click()
+
+    assert has_element?(view, "#workbench-host[data-workbench-owner='test.workbench-a']")
+    assert has_element?(view, "#command-output", "mounted workbench test.workbench-a")
+
+    assert Enum.any?(
+             Leases.list(),
+             &(&1.generation == first_generation.id and &1.owner == host_pid)
+           )
+
+    refute Enum.any?(
+             Leases.list(),
+             &(&1.generation == rejected_generation.id and &1.owner == host_pid)
+           )
+  end
+
   test "an invalid managed render target falls back without retaining its lease", %{
     conn: conn,
     root: root
