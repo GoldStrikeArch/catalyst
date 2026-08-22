@@ -40,6 +40,17 @@ defmodule Catalyst.LLM.RegistryTest do
     assert Map.has_key?(Registry.list(), "faux")
   end
 
+  test "compiled providers remain visible when their ETS seed is briefly absent" do
+    api = "openai-codex-responses"
+    :ets.delete(:catalyst_llm_providers, api)
+    on_exit(fn -> Registry.unregister_provider(api) end)
+
+    assert {:ok, Catalyst.LLM.OpenAICodex.Provider} = Registry.fetch(api)
+
+    assert %ProviderConfig{module: Catalyst.LLM.OpenAICodex.Provider} =
+             Registry.list()[api]
+  end
+
   test "register / fetch / list / unregister a provider at runtime" do
     on_exit(fn -> Registry.unregister_provider("echo") end)
 

@@ -62,7 +62,7 @@ defmodule Catalyst.LLM.Registry do
   @spec list() :: %{String.t() => ProviderConfig.t()}
   def list do
     case table_rows() do
-      {:ok, rows} -> Map.new(rows)
+      {:ok, rows} -> Map.merge(seed_map(), Map.new(rows))
       :error -> seed_map()
     end
   end
