@@ -36,6 +36,38 @@ defmodule CatalystWeb.RuntimeAssetControllerTest do
     assert get_resp_header(conn, "cache-control") == ["public, max-age=31536000, immutable"]
   end
 
+  test "serves validated nested runtime modules", %{conn: conn, root: root} do
+    generation = String.duplicate("d", 64)
+    file = Path.join([root, "generations", generation, "modules/editor/main.js"])
+    File.mkdir_p!(Path.dirname(file))
+    File.write!(file, "export default { mounted() {} }")
+
+    conn = get(conn, "/runtime-assets/#{generation}/modules/editor/main.js")
+
+    assert response(conn, 200) == "export default { mounted() {} }"
+    assert get_resp_header(conn, "content-type") == ["text/javascript"]
+    assert get_resp_header(conn, "cache-control") == ["public, max-age=31536000, immutable"]
+  end
+
+  test "rejects malformed and unsafe runtime module paths", %{conn: conn, root: root} do
+    generation = String.duplicate("e", 64)
+    modules = Path.join([root, "generations", generation, "modules"])
+    File.mkdir_p!(modules)
+    File.write!(Path.join(modules, "readme.txt"), "no")
+
+    assert conn
+           |> get("/runtime-assets/#{generation}/modules/readme.txt")
+           |> response(404)
+
+    assert build_conn()
+           |> get("/runtime-assets/not-a-digest/modules/editor/main.js")
+           |> response(404)
+
+    assert build_conn()
+           |> get("/runtime-assets/#{generation}/modules/%2e%2e/assets/js/app.js")
+           |> response(404)
+  end
+
   test "rejects malformed generations and missing files", %{conn: conn} do
     generation = String.duplicate("b", 64)
 

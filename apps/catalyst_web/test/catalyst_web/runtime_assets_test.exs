@@ -16,8 +16,10 @@ defmodule CatalystWeb.RuntimeAssetsTest do
 
     File.mkdir_p!(Path.join(seed, "assets/css"))
     File.mkdir_p!(Path.join(seed, "assets/js"))
+    File.mkdir_p!(Path.join(seed, "assets/runtime/editor"))
     File.write!(Path.join(seed, "assets/css/app.css"), "seed css")
     File.write!(Path.join(seed, "assets/js/app.js"), "seed js")
+    File.write!(Path.join(seed, "assets/runtime/editor/main.js"), "export default {}")
 
     original =
       for key <- [:asset_workspace_seed, :asset_workspace, :runtime_assets_root], into: %{} do
@@ -72,6 +74,65 @@ defmodule CatalystWeb.RuntimeAssetsTest do
     assert second == first
   end
 
+  test "publishes nested modules and includes them in the generation digest", %{
+    workspace: workspace,
+    root: root
+  } do
+    assert {:ok, %{generation: first}} = RuntimeAssets.rebuild(&build("same", &1, &2))
+    module_url = "/runtime-assets/#{first}/modules/editor/main.js"
+
+    assert {:ok, ^module_url} = RuntimeAssets.module_url("editor/main.js")
+
+    assert File.read!(Path.join([root, "generations", first, "modules/editor/main.js"])) ==
+             "export default {}"
+
+    File.write!(
+      Path.join(workspace, "assets/runtime/editor/main.js"),
+      "export default { mounted() {} }"
+    )
+
+    assert {:ok, %{generation: second}} = RuntimeAssets.rebuild(&build("same", &1, &2))
+    refute second == first
+  end
+
+  test "rejects unsafe module paths without changing the active generation", %{
+    workspace: workspace
+  } do
+    assert {:ok, %{generation: active}} = RuntimeAssets.rebuild(&build("good", &1, &2))
+    File.write!(Path.join(workspace, "assets/runtime/not-javascript.txt"), "no")
+
+    assert {:error, {:invalid_runtime_module_path, ["not-javascript.txt"]}} =
+             RuntimeAssets.rebuild(&build("candidate", &1, &2))
+
+    assert {:ok, ^active} = RuntimeAssets.current_generation()
+    assert {:error, :invalid_module_path} = RuntimeAssets.module_url("../editor/main.js")
+    assert {:error, :invalid_module_path} = RuntimeAssets.module_url("editor/main.mjs")
+  end
+
+  test "rejects symlinked runtime modules", %{workspace: workspace} do
+    assert {:ok, _root} = RuntimeAssets.ensure_workspace()
+    outside = Path.join(Path.dirname(workspace), "outside.js")
+    link = Path.join(workspace, "assets/runtime/escape.js")
+    File.write!(outside, "export default 'outside'")
+    File.ln_s!(outside, link)
+
+    assert {:error, {:invalid_runtime_module_file, ["escape.js"]}} =
+             RuntimeAssets.rebuild(&build("candidate", &1, &2))
+  end
+
+  test "rejects a symlinked runtime module root", %{workspace: workspace} do
+    assert {:ok, _root} = RuntimeAssets.ensure_workspace()
+    runtime = Path.join(workspace, "assets/runtime")
+    outside = Path.join(Path.dirname(workspace), "outside-modules")
+    File.rm_rf!(runtime)
+    File.mkdir_p!(outside)
+    File.write!(Path.join(outside, "escape.js"), "export default 'outside'")
+    File.ln_s!(outside, runtime)
+
+    assert {:error, {:invalid_runtime_module_file, []}} =
+             RuntimeAssets.rebuild(&build("candidate", &1, &2))
+  end
+
   test "the packaged seed is copied once and never overwrites user edits", %{workspace: workspace} do
     assert {:ok, _published} = RuntimeAssets.rebuild(&build("first", &1, &2))
     css = Path.join(workspace, "assets/css/app.css")
@@ -89,6 +150,8 @@ defmodule CatalystWeb.RuntimeAssetsTest do
   test "missing or malformed current pointers use packaged assets", %{root: root} do
     assert Assets.css_path() == "/assets/css/app.css"
     assert Assets.js_path() == "/assets/js/app.js"
+    assert {:error, :not_found} = RuntimeAssets.module_url("editor/main.js")
+    assert {:error, :invalid_module_path} = RuntimeAssets.module_url("../editor/main.js")
 
     File.mkdir_p!(root)
     File.write!(Path.join(root, "current"), "../../not-a-generation\n")

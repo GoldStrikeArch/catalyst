@@ -1,16 +1,18 @@
 defmodule CatalystWeb.RuntimeAssets do
   @moduledoc """
-  Publishes runtime-built CSS and JavaScript outside the application bundle.
+  Publishes runtime-built CSS, JavaScript, and runtime ESM modules outside the
+  application bundle.
 
   Packaged releases seed a writable source workspace below `Catalyst.Paths.home/0`.
   Each successful build is installed under its content digest, then an atomic
-  pointer makes the complete CSS/JavaScript pair active. Failed builds leave the
-  previous generation untouched.
+  pointer makes the complete asset set active. Failed builds leave the previous
+  generation untouched.
   """
 
   alias Catalyst.Files.AtomicWrite
 
   @digest_format ~r/^[0-9a-f]{64}$/
+  @module_segment ~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/
   @lock {__MODULE__, :rebuild}
 
   @type source :: %{
@@ -71,6 +73,37 @@ defmodule CatalystWeb.RuntimeAssets do
   @spec generation_dir(String.t()) :: Path.t()
   def generation_dir(digest), do: Path.join([root(), "generations", digest])
 
+  @doc "Return the same-origin URL for a published module in the active generation."
+  @spec module_url(Path.t()) :: {:ok, String.t()} | {:error, :invalid_module_path | :not_found}
+  def module_url(relative) when is_binary(relative) do
+    segments = String.split(relative, "/", trim: false)
+
+    with true <- valid_module_segments?(segments),
+         {:ok, digest} <- current_generation(),
+         {:ok, _file} <- module_file(digest, segments) do
+      {:ok, "/runtime-assets/#{digest}/modules/#{Enum.join(segments, "/")}"}
+    else
+      false -> {:error, :invalid_module_path}
+      :error -> {:error, :not_found}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc false
+  @spec module_file(String.t(), [String.t()]) ::
+          {:ok, Path.t()} | {:error, :invalid_module_path | :not_found}
+  def module_file(digest, segments) do
+    with true <- valid_digest?(digest),
+         true <- valid_module_segments?(segments),
+         root <- Path.join(generation_dir(digest), "modules"),
+         {:ok, file} <- regular_descendant(root, segments) do
+      {:ok, file}
+    else
+      false -> {:error, :invalid_module_path}
+      {:error, _reason} -> {:error, :not_found}
+    end
+  end
+
   @doc false
   @spec rebuild(builder()) :: {:ok, %{generation: String.t(), build: term()}} | {:error, term()}
   def rebuild(builder) when is_function(builder, 2) do
@@ -84,7 +117,8 @@ defmodule CatalystWeb.RuntimeAssets do
       with {:ok, source} <- source(),
            :ok <- File.mkdir_p(staging),
            {:ok, build_result} <- run_builder(builder, source, staging),
-           {:ok, digest} <- output_digest(staging),
+           {:ok, modules} <- publish_modules(source.root, staging),
+           {:ok, digest} <- output_digest(staging, modules),
            :ok <- install(staging, digest),
            :ok <- activate(digest) do
         {:ok, %{generation: digest, build: build_result}}
@@ -201,8 +235,92 @@ defmodule CatalystWeb.RuntimeAssets do
     exception -> {:error, {:asset_build_error, Exception.message(exception)}}
   end
 
-  defp output_digest(staging) do
-    files = ["assets/css/app.css", "assets/js/app.js"]
+  defp publish_modules(source_root, staging) do
+    source = Path.join(source_root, "assets/runtime")
+
+    case File.lstat(source) do
+      {:ok, %File.Stat{type: :directory}} ->
+        copy_module_directory(source, Path.join(staging, "modules"), [])
+
+      {:error, :enoent} ->
+        {:ok, []}
+
+      {:ok, _unsafe} ->
+        {:error, {:invalid_runtime_module_file, []}}
+
+      {:error, reason} ->
+        {:error, {:runtime_module_stat_failed, [], reason}}
+    end
+  end
+
+  defp copy_module_directory(source, destination, relative) do
+    case File.ls(source) do
+      {:ok, entries} -> copy_module_entries(entries, source, destination, relative)
+      {:error, reason} -> {:error, {:runtime_module_read_failed, path_segments(relative), reason}}
+    end
+  end
+
+  defp copy_module_entries(entries, source, destination, relative) do
+    entries
+    |> Enum.sort()
+    |> Enum.reduce_while({:ok, []}, fn entry, {:ok, copied} ->
+      case copy_module_entry(source, destination, relative, entry) do
+        {:ok, paths} -> {:cont, {:ok, Enum.reverse(paths, copied)}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> then(fn
+      {:ok, copied} -> {:ok, Enum.reverse(copied)}
+      {:error, _reason} = error -> error
+    end)
+  end
+
+  defp copy_module_entry(source, destination, relative, entry) do
+    from = Path.join(source, entry)
+    next_relative = [entry | relative]
+
+    with true <- valid_module_segment?(entry),
+         {:ok, stat} <- File.lstat(from) do
+      copy_module_type(stat.type, from, destination, next_relative)
+    else
+      false ->
+        {:error, {:invalid_runtime_module_path, path_segments(next_relative)}}
+
+      {:error, reason} ->
+        {:error, {:runtime_module_stat_failed, path_segments(next_relative), reason}}
+    end
+  end
+
+  defp copy_module_type(:directory, source, destination, relative) do
+    copy_module_directory(source, Path.join(destination, List.first(relative)), relative)
+  end
+
+  defp copy_module_type(:regular, source, destination, relative) do
+    case String.ends_with?(List.first(relative), ".js") do
+      true -> copy_module_file(source, destination, relative)
+      false -> {:error, {:invalid_runtime_module_path, path_segments(relative)}}
+    end
+  end
+
+  defp copy_module_type(_unsupported, _source, _destination, relative),
+    do: {:error, {:invalid_runtime_module_file, path_segments(relative)}}
+
+  defp copy_module_file(source, destination, relative) do
+    target = Path.join(destination, List.first(relative))
+
+    with :ok <- File.mkdir_p(destination),
+         :ok <- File.cp(source, target) do
+      {:ok, ["modules/" <> Enum.join(path_segments(relative), "/")]}
+    else
+      {:error, reason} ->
+        {:error, {:runtime_module_copy_failed, path_segments(relative), reason}}
+    end
+  end
+
+  defp path_segments(reversed), do: Enum.reverse(reversed)
+
+  defp output_digest(staging, modules) do
+    files = ["assets/css/app.css", "assets/js/app.js" | modules]
 
     with {:ok, contents} <- read_outputs(staging, files) do
       digest =
@@ -262,6 +380,43 @@ defmodule CatalystWeb.RuntimeAssets do
   defp trim_current({:error, _reason}), do: :error
 
   defp valid_digest?(digest), do: Regex.match?(@digest_format, digest)
+
+  defp valid_module_segments?(segments) when is_list(segments) and segments != [] do
+    Enum.all?(segments, &valid_module_segment?/1) and
+      String.ends_with?(List.last(segments), ".js")
+  end
+
+  defp valid_module_segments?(_segments), do: false
+
+  defp valid_module_segment?(segment) when is_binary(segment) do
+    segment not in ["", ".", ".."] and Regex.match?(@module_segment, segment)
+  end
+
+  defp valid_module_segment?(_segment), do: false
+
+  defp regular_descendant(root, segments) do
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(root) do
+      walk_descendant(root, segments)
+    end
+  end
+
+  defp walk_descendant(parent, [file]) do
+    path = Path.join(parent, file)
+
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular}} -> {:ok, path}
+      _missing_or_unsafe -> {:error, :not_found}
+    end
+  end
+
+  defp walk_descendant(parent, [directory | rest]) do
+    path = Path.join(parent, directory)
+
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} -> walk_descendant(path, rest)
+      _missing_or_unsafe -> {:error, :not_found}
+    end
+  end
 
   defp staging_dir do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)

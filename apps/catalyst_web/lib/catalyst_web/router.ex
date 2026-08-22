@@ -33,6 +33,8 @@ defmodule CatalystWeb.Router do
         RuntimeAssetController,
         :javascript
 
+    get "/runtime-assets/:generation/modules/*path", RuntimeAssetController, :module
+
     # One LiveView for everything; the catch-all resolves runtime-registered
     # pages by path (e.g. /settings) with no router recompile per page.
     live "/compare", ComparisonLive, :index

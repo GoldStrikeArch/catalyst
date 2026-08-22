@@ -16,6 +16,15 @@ defmodule CatalystWeb.RuntimeAssetController do
   def javascript(conn, %{"generation" => generation}),
     do: show(conn, generation, "assets/js/app.js")
 
+  @doc "Serve one validated runtime ESM module, or return 404."
+  @spec module(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def module(conn, %{"generation" => generation, "path" => path}) do
+    case RuntimeAssets.module_file(generation, path) do
+      {:ok, file} -> serve(conn, file)
+      {:error, _reason} -> send_resp(conn, 404, "unknown runtime module")
+    end
+  end
+
   defp show(conn, generation, relative) do
     case asset_path(generation, relative) do
       {:ok, file} -> serve(conn, file)

@@ -130,6 +130,33 @@ end
 After it loads, the window reloads white. (`CatalystWeb.Assets.rebuild/0` runs tailwind+esbuild
 from the bundled toolchain and reloads connected windows; the `rebuild_assets` tool wraps it.)
 
+Runtime browser behavior can live outside the `app.js` bundle. Put a `.js` ESM module below
+`assets/runtime/` in the writable workspace, rebuild, then resolve its active digest URL with
+`CatalystWeb.RuntimeAssets.module_url/1`. A LiveView element can use the pre-registered generic
+hook without rebuilding Catalyst's hook registry:
+
+```heex
+<div
+  id="my-runtime-view"
+  phx-hook="RuntimeHook"
+  data-runtime-hook-src={@runtime_module_url}
+  phx-update="ignore"
+/>
+```
+
+```javascript
+export default {
+  mounted() {},
+  updated() {},
+  destroyed() {}
+}
+```
+
+The URL must be same-origin and point to the active digest-addressed `/runtime-assets/.../modules/`
+tree. Module paths accept only nested `.js` files with safe filename characters; symlinks and path
+traversal are rejected. Lifecycle/import failures are reported as
+`catalyst:runtime-hook-error` browser events with structured error details.
+
 ### Constraints in the bundled app (read before acting)
 
 - **Writable assets:** `rebuild_assets` writes source and digest-addressed output below

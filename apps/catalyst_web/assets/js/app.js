@@ -31,6 +31,7 @@ import { Socket } from "phoenix";
 import { LiveSocket } from "phoenix_live_view";
 import { hooks as colocatedHooks } from "phoenix-colocated/catalyst_web";
 import topbar from "../vendor/topbar";
+import { RuntimeHook } from "./runtime_hook.mjs";
 
 const setTheme = (theme) => {
   if (theme === "system") {
@@ -60,6 +61,7 @@ window.addEventListener("phx:set-theme", (e) =>
 // listener covers scrollbar drags and momentum tails, and the hook's own
 // scrolls are recognized by landing position so they can never re-latch it.
 const Hooks = {
+  RuntimeHook,
   ScrollBottom: {
     atBottom() {
       const el = this.el;
