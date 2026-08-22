@@ -10,7 +10,7 @@ defmodule Catalyst.LLM.ProviderConfig do
   """
 
   @enforce_keys [:module]
-  defstruct [:module, :id, :name, :catalog, :auth, controls: %{}]
+  defstruct [:module, :id, :name, :catalog, :auth, controls: %{}, catalog_priority: 500]
 
   @type t :: %__MODULE__{
           module: module(),
@@ -18,6 +18,7 @@ defmodule Catalyst.LLM.ProviderConfig do
           name: String.t() | nil,
           catalog: module() | nil,
           auth: module() | nil,
-          controls: map()
+          controls: map(),
+          catalog_priority: integer()
         }
 end

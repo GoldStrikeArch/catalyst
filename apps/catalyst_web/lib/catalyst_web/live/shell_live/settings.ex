@@ -11,8 +11,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   import Phoenix.Component, only: [assign: 2]
   import Phoenix.LiveView, only: [put_flash: 3]
 
-  alias Catalyst.Auth.{OpenAIOAuth, XAIOAuth}
-  alias Catalyst.LLM.{GrokSubscription, OpenAICodex}
+  alias Catalyst.LLM.Models
   alias Catalyst.Session.Server
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
   alias CatalystWeb.ShellLive.SessionLifecycle
@@ -27,6 +26,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   # Workflow selection is provider-agnostic, so it also gets its own key
   # rather than riding in `codex_prefs` (same wholesale-rebuild hazard).
   @workflow_prefs_ptr {CatalystWeb.ShellLive, :workflow_prefs}
+  @default_provider "openai-codex"
 
   @type codex_prefs :: %{
           model: String.t(),
@@ -48,10 +48,12 @@ defmodule CatalystWeb.ShellLive.Settings do
   @doc "Loads persisted Codex controls over the current application defaults."
   @spec load_codex() :: codex_prefs()
   def load_codex do
+    model = default_model_id(@default_provider)
+
     defaults = %{
-      model: OpenAICodex.default_model_id(),
-      provider: "openai-codex",
-      effort: OpenAICodex.default_effort(),
+      model: model,
+      provider: @default_provider,
+      effort: selected_entry(@default_provider, model).default_effort,
       fast: false,
       transport: "auto"
     }
@@ -254,18 +256,8 @@ defmodule CatalystWeb.ShellLive.Settings do
   @doc "One combined model-catalog snapshot with the selected entry."
   @spec catalog_snapshot(codex_prefs()) :: %{models: [map()], selected: map()}
   def catalog_snapshot(prefs) do
-    models =
-      Enum.map(OpenAICodex.list_models(), &Map.put(&1, :provider, "openai-codex")) ++
-        GrokSubscription.list_models()
-
-    case Enum.find(models, &(&1.id == prefs.model)) do
-      nil ->
-        selected = unknown_entry(prefs)
-        %{models: models ++ [selected], selected: selected}
-
-      selected ->
-        %{models: models, selected: selected}
-    end
+    {:ok, snapshot} = Models.catalog_snapshot(provider(prefs), prefs.model)
+    snapshot
   end
 
   @doc """
@@ -275,20 +267,18 @@ defmodule CatalystWeb.ShellLive.Settings do
   entry, so no provider is returned here.
   """
   @spec provider_config(codex_prefs()) :: Catalyst.Model.t()
-  def provider_config(%{provider: "grok-subscription"} = prefs),
-    do: GrokSubscription.model(prefs.model)
-
-  def provider_config(prefs), do: OpenAICodex.model(prefs.model)
+  def provider_config(prefs) do
+    {:ok, model} = Models.build(provider(prefs), prefs.model)
+    model
+  end
 
   @doc "Converts the selected provider's controls into session run options."
   @spec run_opts(codex_prefs()) :: keyword()
-  def run_opts(%{provider: "grok-subscription"} = prefs) do
-    [reasoning_effort: prefs.effort, service_tier: nil, transport: nil]
-  end
-
   def run_opts(prefs) do
+    entry = catalog_snapshot(prefs).selected
+
     service_tier =
-      case prefs.fast do
+      case prefs.fast and entry.fast? do
         true -> "priority"
         false -> nil
       end
@@ -296,19 +286,17 @@ defmodule CatalystWeb.ShellLive.Settings do
     [
       reasoning_effort: prefs.effort,
       service_tier: service_tier,
-      transport: prefs.transport
+      transport: supported_transport(entry, prefs.transport)
     ]
   end
 
   @doc "Token-store provider for the selected model."
   @spec auth_provider(codex_prefs()) :: String.t()
-  def auth_provider(%{provider: "grok-subscription"}), do: XAIOAuth.provider_id()
-  def auth_provider(_prefs), do: OpenAIOAuth.provider_id()
+  def auth_provider(prefs), do: catalog_snapshot(prefs).selected.auth.provider_id()
 
   @doc "Human-facing subscription name for the selected model."
   @spec auth_label(codex_prefs()) :: String.t()
-  def auth_label(%{provider: "grok-subscription"}), do: "SuperGrok"
-  def auth_label(_prefs), do: "ChatGPT"
+  def auth_label(prefs), do: catalog_snapshot(prefs).selected.provider_name
 
   @doc """
   Synchronizes controls from an attached session, which is the source of truth.
@@ -327,7 +315,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   def sync_from_session(socket) do
     model = socket.assigns.session_model || provider_config(socket.assigns.codex_prefs)
     opts = socket.assigns.session_opts || []
-    provider = provider_from_model(model)
+    provider = provider_from_model(model, socket.assigns.codex_prefs)
 
     prefs =
       clamp_fast(%{
@@ -509,25 +497,49 @@ defmodule CatalystWeb.ShellLive.Settings do
   end
 
   defp infer_provider(prefs) do
-    case Enum.any?(GrokSubscription.list_models(), &(&1.id == prefs.model)) do
-      true -> Map.put(prefs, :provider, "grok-subscription")
-      false -> Map.put(prefs, :provider, "openai-codex")
+    case Models.infer_provider(prefs.model) do
+      {:ok, provider} -> Map.put(prefs, :provider, provider)
+      {:error, _unknown_or_ambiguous} -> prefs
     end
   end
 
-  defp provider_from_model(%{api: "grok-subscription-chat-completions"}),
-    do: "grok-subscription"
+  defp provider_from_model(model, prefs) do
+    case Models.provider_id(model) do
+      {:ok, provider} -> provider
+      {:error, _unknown_or_legacy} -> provider(prefs)
+    end
+  end
 
-  defp provider_from_model(_model), do: "openai-codex"
+  defp default_effort(provider) do
+    model = default_model_id(provider)
+    selected_entry(provider, model).default_effort
+  end
 
-  defp default_effort("grok-subscription"), do: GrokSubscription.default_effort()
-  defp default_effort(_provider), do: OpenAICodex.default_effort()
+  defp default_model_id(provider) do
+    {:ok, model} = Models.default_model_id(provider)
+    model
+  end
 
-  defp unknown_entry(%{provider: "grok-subscription", model: model}),
-    do: GrokSubscription.catalog_entry(model)
+  defp selected_entry(provider, model) do
+    {:ok, snapshot} = Models.catalog_snapshot(provider, model)
+    snapshot.selected
+  end
 
-  defp unknown_entry(%{model: model}),
-    do: model |> OpenAICodex.catalog_entry() |> Map.put(:provider, "openai-codex")
+  defp supported_transport(entry, transport) do
+    case entry.controls[:transports] do
+      transports when is_list(transports) and transports != [] -> transport
+      _unsupported -> nil
+    end
+  end
+
+  defp provider(prefs) do
+    requested = Map.get(prefs, :provider, @default_provider)
+
+    case Models.default_model_id(requested) do
+      {:ok, _model_id} -> requested
+      {:error, _reason} -> @default_provider
+    end
+  end
 
   defp persist(key, prefs), do: :persistent_term.put(key, prefs)
 end

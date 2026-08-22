@@ -32,14 +32,16 @@ defmodule Catalyst.LLM.Registry do
       name: "ChatGPT",
       catalog: Catalyst.LLM.OpenAICodex,
       auth: Catalyst.Auth.OpenAIOAuth,
-      controls: %{transports: ~w(auto websocket sse)}
+      controls: %{transports: ~w(auto websocket sse)},
+      catalog_priority: 100
     },
     "grok-subscription-chat-completions" => %ProviderConfig{
       id: "grok-subscription",
       module: Catalyst.LLM.GrokSubscription.Provider,
       name: "SuperGrok",
       catalog: Catalyst.LLM.GrokSubscription,
-      auth: Catalyst.Auth.XAIOAuth
+      auth: Catalyst.Auth.XAIOAuth,
+      catalog_priority: 200
     }
   }
 

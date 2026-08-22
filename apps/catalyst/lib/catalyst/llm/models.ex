@@ -53,6 +53,18 @@ defmodule Catalyst.LLM.Models do
     end
   end
 
+  @doc "Return the selected provider's configured default model id."
+  @spec default_model_id(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def default_model_id(provider_id) when is_binary(provider_id) do
+    with {:ok, {_api, %ProviderConfig{catalog: catalog}}} <- Registry.fetch_by_id(provider_id),
+         true <- catalog_module?(catalog) or {:error, {:provider_has_no_catalog, provider_id}} do
+      case catalog.default_model_id() do
+        id when is_binary(id) and id != "" -> {:ok, id}
+        other -> {:error, {:invalid_default_model_id, provider_id, other}}
+      end
+    end
+  end
+
   @doc "Resolve the registered provider descriptor id for a request model."
   @spec provider_id(Model.t()) :: {:ok, String.t()} | {:error, term()}
   def provider_id(%Model{api: api}) do
@@ -86,7 +98,7 @@ defmodule Catalyst.LLM.Models do
   defp aggregate(selected_api, model_id) do
     Registry.list()
     |> Enum.filter(fn {_api, config} -> catalog_module?(config.catalog) end)
-    |> Enum.sort_by(fn {api, _config} -> api end)
+    |> Enum.sort_by(fn {api, config} -> {config.catalog_priority, api} end)
     |> Enum.reduce_while({:ok, {[], nil}}, &read_catalog(&1, &2, selected_api, model_id))
     |> finish_aggregate(selected_api)
   end

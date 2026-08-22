@@ -590,8 +590,8 @@ defmodule CatalystWeb.ShellComponents do
     })
   end
 
-  defp subscription_name(%{provider: "grok-subscription"}), do: "SuperGrok"
-  defp subscription_name(_entry), do: "ChatGPT"
+  defp subscription_name(entry),
+    do: Map.get(entry, :provider_name) || Map.get(entry, :provider) || "Provider"
 
   defp workflow_form(prefs) do
     to_form(%{"workflow" => prefs.workflow || ""})
