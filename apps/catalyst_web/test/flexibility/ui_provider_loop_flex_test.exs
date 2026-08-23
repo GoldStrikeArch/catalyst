@@ -37,7 +37,7 @@ defmodule CatalystWeb.Flex.UIProviderLoopFlexTest do
     previous_persistent = snapshot_persistent()
     Enum.each(@shell_keys, &:persistent_term.erase/1)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     pid = session_pid(view)
 
     assert has_element?(view, ~s(#codex-opts option[value="flex-model-a"]))

@@ -68,7 +68,7 @@ defmodule CatalystWeb.ShellLiveTest do
       owner: "e5_render"
     )
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     submit_prompt(view, "list the files")
 
@@ -77,13 +77,13 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "the chat page is the default at /", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     assert has_element?(view, "#shell-header")
     assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
   end
 
   test "the shell keeps page nav in the header and run controls in the footer", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     assert has_element?(view, "#shell-header")
     assert has_element?(view, "#sidebar-toggle")
@@ -96,13 +96,13 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "the chat starts empty and renders messages through a LiveView stream", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     assert has_element?(view, "#chat-empty-state", "Ask Catalyst to inspect this project.")
     assert has_element?(view, "#message-stream")
   end
 
   test "user and assistant turns are jump-by-turn targets", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     assert has_element?(view, "#turn-jump-track")
     assert has_element?(view, "#turn-jump-ticks")
     assert has_element?(view, "#turn-jump-card")
@@ -117,7 +117,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
   test "streaming pushes deltas to the client bubble, then the final message replaces it",
        %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
 
     send(
@@ -157,7 +157,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "a prompt submitted while a run is active is queued", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
 
     send(view.pid, {:agent_event, id, %Event.AgentStart{}})
@@ -172,7 +172,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
   test "streaming commits stable markdown blocks progressively through the real renderer",
        %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
 
     send(
@@ -221,7 +221,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "the open last block paints as markdown in the stream preview", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
 
     send(
@@ -290,7 +290,7 @@ defmodule CatalystWeb.ShellLiveTest do
       Application.delete_env(:catalyst_web, :slow_provider_test)
     end)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
     [{session_pid, _}] = Elixir.Registry.lookup(Catalyst.Session.Registry, id)
 
@@ -318,7 +318,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
   test "a replayed MessageEnd after a page round-trip is deduped, new ones are not",
        %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
     submit_prompt(view, "run ls for me")
 
@@ -354,7 +354,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
   test "a pasted image is sent as an image content block and rendered in the bubble",
        %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
     Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
 
@@ -386,7 +386,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "tool execution indicators and results render immediately", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
 
     send(
@@ -427,7 +427,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "context status updates the header meter without adding a chat block", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
 
     status = %Event.ContextStatus{
@@ -454,7 +454,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "context compaction resets and re-streams the authoritative replacement", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
 
     old_user = %Message.User{content: Content.text("OLD-CONTEXT-USER")}
@@ -492,7 +492,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "a never-run session exposes a supervised read-only prompt preview", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     assert wait_until(fn -> has_element?(view, "#run-diagnostics") end)
     assert has_element?(view, "#run-diagnostics-toggle[aria-expanded=false]")
@@ -508,7 +508,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "a completed run exposes model, workflow, and resolved prompt metadata", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     submit_prompt(view, "show run diagnostics")
     assert wait_until(fn -> has_element?(view, "#run-diagnostics") end)
@@ -523,7 +523,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "an event tagged with another session's id is dropped, not rendered", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     leaked = %Message.Assistant{content: Content.text("LEAKED-FROM-OTHER-SESSION")}
 
@@ -543,7 +543,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "an asset reload broadcast triggers a full page reload in connected views", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     CatalystWeb.Assets.reload()
     assert_redirect(view, "/")
   end
@@ -562,7 +562,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "a bare /cd flashes a usage hint instead of prompting the model", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     view |> form("#chat-form", %{"message" => "/cd "}) |> render_submit()
 
@@ -572,7 +572,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "an unknown /command flashes the known command list instead of prompting", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     view |> form("#chat-form", %{"message" => "/nope now"}) |> render_submit()
 
@@ -594,7 +594,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
     on_exit(fn -> CatalystWeb.UI.Registry.unregister_owner("cmd_test") end)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     view |> form("#chat-form", %{"message" => "/ping_test hello"}) |> render_submit()
 
@@ -611,7 +611,7 @@ defmodule CatalystWeb.ShellLiveTest do
     File.mkdir_p!(child)
     on_exit(fn -> File.rm_rf!(root) end)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     view |> form("#chat-form", %{"message" => "/cd #{parent}"}) |> render_submit()
     assert has_element?(view, "#chat-empty-state", parent)

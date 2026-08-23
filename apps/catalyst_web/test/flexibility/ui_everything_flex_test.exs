@@ -32,7 +32,7 @@ defmodule CatalystWeb.Flex.UIEverythingFlexTest do
     [process] = Catalyst.Extensions.Processes.list("ui_everything")
     process_ref = Process.monitor(process)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
     assert has_element?(view, "#flex-everything-header")
 

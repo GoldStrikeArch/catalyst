@@ -125,7 +125,7 @@ defmodule CatalystWeb.CodexControlsTest do
   end
 
   test "the run controls reconfigure the live session in place", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     assert has_element?(view, "#codex-opts")
     assert has_element?(view, "#codex-opts option[value='gpt-5.6-sol']")
     assert has_element?(view, "#codex-opts option[value='gpt-5.6-terra']")
@@ -173,7 +173,7 @@ defmodule CatalystWeb.CodexControlsTest do
       ])
 
     :ok = CatalogCache.store(live)
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     Enum.each(~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna), fn model_id ->
@@ -189,7 +189,7 @@ defmodule CatalystWeb.CodexControlsTest do
   end
 
   test "fast is clamped off when switching to a model without the priority tier", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     view |> element("#codex-fast-toggle") |> render_click()
@@ -212,7 +212,7 @@ defmodule CatalystWeb.CodexControlsTest do
 
     on_exit(fn -> Application.delete_env(:catalyst_web, :auth_login_fun) end)
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     assert has_element?(view, "#codex-opts option[value='grok-4.6']", "Grok 4.6")
@@ -257,7 +257,7 @@ defmodule CatalystWeb.CodexControlsTest do
       Registry.unregister_provider("third-api")
     end)
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     assert has_element?(view, "#codex-opts option[value='third-model']", "Third Model")
 
     view |> form("#codex-opts") |> render_change(%{"model" => "third-model"})
@@ -278,7 +278,7 @@ defmodule CatalystWeb.CodexControlsTest do
       Registry.register_provider(@codex_api, previous_provider)
     end)
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     view |> element("#new-session-button") |> render_click()
 
     view
@@ -299,7 +299,7 @@ defmodule CatalystWeb.CodexControlsTest do
     conn: conn
   } do
     :ok = CatalogCache.reset()
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
 
     assert Enum.take(model_option_values(view), 5) ==
              ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5 gpt-5.4)

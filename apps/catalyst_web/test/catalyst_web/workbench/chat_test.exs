@@ -31,8 +31,9 @@ defmodule CatalystWeb.Workbench.ChatTest do
 
     assert selected.selected_model == %{provider: "provider-one", model: "model-one"}
 
-    assert {:session, :configure, configure_request, "session-one",
-            %{"provider" => "provider-one", "model" => "model-one"}} = effect
+    assert {:session, :configure, configure_request, "session-one", settings} = effect
+    assert settings["provider"] == "provider-one"
+    assert settings["model"] == "model-one"
 
     assert configure_request =~ "configure-"
 
@@ -103,13 +104,68 @@ defmodule CatalystWeb.Workbench.ChatTest do
   test "new sessions are explicit and every open request has a unique id" do
     state = ready_state()
 
-    assert {:ok, first, [{:session, :open, first_request, %{}}]} =
+    assert {:ok, first, [{:session, :open, first_request, first_settings}]} =
              Chat.event("chat:new", %{}, state, @context)
 
-    assert {:ok, _second, [{:session, :open, second_request, %{}}]} =
+    assert {:ok, _second, [{:session, :open, second_request, second_settings}]} =
              Chat.event("chat:new", %{}, first, @context)
 
     refute first_request == second_request
+    assert first_settings == second_settings
+    assert first_settings["transport"] == "auto"
+    assert first_settings["quiet"] == false
+  end
+
+  test "controls and authentication remain declarative host effects" do
+    state = %{
+      ready_state()
+      | selected_model: %{provider: "provider-one", model: "model-one"},
+        settings: %{
+          provider: "provider-one",
+          model: "model-one",
+          effort: "medium",
+          fast: false,
+          transport: "auto",
+          workflow: nil,
+          quiet: false,
+          computer_use: false
+        },
+        models: [
+          %{
+            provider: "provider-one",
+            id: "model-one",
+            efforts: ["medium", "high"],
+            default_effort: "medium",
+            fast: true,
+            transports: ["auto", "sse"],
+            auth_provider: "fixture-auth",
+            logged_in: false
+          }
+        ]
+    }
+
+    assert {:ok, configured, [{:session, :configure, request_id, "session-one", settings}]} =
+             Chat.event(
+               "chat:controls",
+               %{
+                 "controls" => %{
+                   "effort" => "high",
+                   "transport" => "sse",
+                   "workflow" => ""
+                 }
+               },
+               state,
+               @context
+             )
+
+    assert request_id =~ "configure-"
+    assert settings["effort"] == "high"
+    assert settings["transport"] == "sse"
+
+    assert {:ok, _authenticating, [{:auth, :login, login_request, "fixture-auth"}]} =
+             Chat.event("chat:login", %{}, configured, @context)
+
+    assert login_request =~ "login-"
   end
 
   test "streaming deltas use client pushes and snapshot only at lifecycle boundaries" do

@@ -1,9 +1,9 @@
 defmodule CatalystWeb.Router do
   @moduledoc """
-  HTTP routes. The current chat product renders through `CatalystWeb.ShellLive`;
-  `/ide` and `/workbench/:workbench` exercise the stable replaceable-workbench
-  host before any root switch. Other `/:page` paths resolve runtime-registered
-  shell pages from the UI registry.
+  HTTP routes. The default chat and IDE products render through the stable
+  replaceable-workbench host. `/legacy-chat` retains the previous shell chat as
+  a recovery and parity surface, while other `/:page` paths continue to resolve
+  runtime-registered shell pages from the UI registry.
   """
   use CatalystWeb, :router
 
@@ -36,15 +36,16 @@ defmodule CatalystWeb.Router do
 
     get "/runtime-assets/:generation/modules/*path", RuntimeAssetController, :module
 
-    # The stable workbench host is an A/B seam; `/` remains the chat Shell.
+    # Product roots resolve explicit Workbench slots. The legacy chat remains
+    # available during this release cycle as a recovery and parity surface.
+    live "/", WorkbenchHostLive, :chat
     live "/ide", WorkbenchHostLive, :index
     live "/workbench/:workbench", WorkbenchHostLive, :show
 
-    # One LiveView for the current shell; the catch-all resolves runtime-registered
-    # pages by path (e.g. /settings) with no router recompile per page.
+    # The compatibility shell retains its chat and runtime-registered pages.
     live "/compare", ComparisonLive, :index
     live "/compare/:id", ComparisonLive, :show
-    live "/", ShellLive, :index
+    live "/legacy-chat", ShellLive, :index
     live "/:page", ShellLive, :page
   end
 end

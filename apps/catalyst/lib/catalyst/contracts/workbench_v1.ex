@@ -37,6 +37,8 @@ defmodule Catalyst.Contracts.Workbench.V1 do
           | {:session, :attach, request_id(), String.t()}
           | {:session, :close, request_id(), String.t()}
           | {:session, :configure, request_id(), String.t(), map()}
+          | {:auth, :login, request_id(), String.t()}
+          | {:auth, :logout, request_id(), String.t()}
           | {:client, :push, String.t(), map()}
           | {:navigate, String.t()}
   @type transition :: {:ok, state(), [effect()]} | {:error, term()}
@@ -176,6 +178,10 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   defp request_ids({:session, :configure, request_id, _session_id, _settings}),
     do: [request_id]
 
+  defp request_ids({:auth, operation, request_id, _provider})
+       when operation in [:login, :logout],
+       do: [request_id]
+
   defp request_ids({:client, :push, _event, _payload}), do: []
   defp request_ids({:navigate, _location}), do: []
 
@@ -227,6 +233,10 @@ defmodule Catalyst.Contracts.Workbench.V1 do
       valid_request_id?(request_id) and valid_text?(session_id, 128) and
         valid_session_settings?(settings)
 
+  defp valid_effect?({:auth, operation, request_id, provider})
+       when operation in [:login, :logout],
+       do: valid_request_id?(request_id) and valid_text?(provider, 128)
+
   defp valid_effect?({:client, :push, "workbench:" <> _suffix = event, payload})
        when is_map(payload) do
     valid_text?(event, 128) and serializable_client_payload?(payload)
@@ -247,7 +257,7 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   defp valid_session_settings?(settings) when is_map(settings) do
     Enum.all?(settings, fn
       {key, value} when is_binary(key) ->
-        valid_session_setting_key?(key) and valid_text?(value, 4_096)
+        valid_session_setting_key?(key) and valid_session_setting_value?(value)
 
       _invalid ->
         false
@@ -259,7 +269,19 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   defp valid_session_setting_key?("provider"), do: true
   defp valid_session_setting_key?("model"), do: true
   defp valid_session_setting_key?("cwd"), do: true
+  defp valid_session_setting_key?("effort"), do: true
+  defp valid_session_setting_key?("fast"), do: true
+  defp valid_session_setting_key?("transport"), do: true
+  defp valid_session_setting_key?("workflow"), do: true
+  defp valid_session_setting_key?("quiet"), do: true
+  defp valid_session_setting_key?("computer_use"), do: true
   defp valid_session_setting_key?(_key), do: false
+
+  defp valid_session_setting_value?(value) when is_binary(value),
+    do: byte_size(value) <= 4_096
+
+  defp valid_session_setting_value?(value) when is_boolean(value) or is_nil(value), do: true
+  defp valid_session_setting_value?(_value), do: false
 
   defp valid_session_prompt?(prompt) when is_binary(prompt),
     do: valid_text?(prompt, 262_144)

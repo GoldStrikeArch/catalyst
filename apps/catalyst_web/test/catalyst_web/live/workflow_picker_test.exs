@@ -41,7 +41,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
   end
 
   test "picker includes persisted built-in templates", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     assert has_element?(view, "#workflow-form")
     assert has_element?(view, "#workflow-select option[value='research']", "(template)")
     assert has_element?(view, "#workflow-select option[value='build-review']", "(template)")
@@ -51,7 +51,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
   end
 
   test "switching backend with a transcript starts a fresh session", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     assert :ok =
@@ -69,7 +69,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
   end
 
   test "switching backend during an active first run starts a fresh session", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
     ref = make_ref()
 
@@ -102,7 +102,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
   } do
     :ok = WorkflowRegistry.register_workflow("review", StubWorkflow, owner: owner)
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     assert has_element?(view, "#workflow-form")
     assert has_element?(view, "#workflow-select option[value='review']", "(extension)")
 
@@ -134,7 +134,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
     :ok = WorkflowRegistry.register_workflow("review", StubWorkflow, owner: owner)
     :ok = WorkflowRegistry.register_workflow("doomed", StubWorkflow, owner: owner)
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     view |> form("#workflow-form") |> render_change(%{"workflow" => "review"})
@@ -157,7 +157,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
   } do
     :ok = WorkflowRegistry.register_workflow("review", StubWorkflow, owner: owner)
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
     store_path = Server.state(pid).store_path
     original = File.read!(store_path)
@@ -185,7 +185,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
   } do
     :ok = WorkflowRegistry.register_workflow("review", StubWorkflow, owner: owner)
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     view |> form("#workflow-form") |> render_change(%{"workflow" => "review"})
@@ -196,7 +196,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
     # The next chrome refresh (patch navigation) recomputes the options; the
     # vanished selection must stay visible — and selected — rather than letting
     # the browser silently display another workflow.
-    view |> render_patch("/")
+    view |> render_patch("/legacy-chat")
     assert has_element?(view, "#workflow-select option[value='review'][selected]", "unavailable")
 
     # The live session still carries the name (its next run reports the error);
@@ -209,7 +209,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
   test "a stale saved preference self-heals when starting a session", %{conn: conn} do
     :persistent_term.put(@workflow_prefs_ptr, %{workflow: "ghost"})
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
 
     # The unknown name was dropped from start opts (it would fail every run)
     # and the preference reconciled to default while valid templates remain.

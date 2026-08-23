@@ -45,7 +45,7 @@ defmodule CatalystWeb.Workbench.ChatView do
           for={@workbench_forms.model}
           id="workbench-model-form"
           phx-change="workbench:chat:model"
-          class="ml-auto w-56"
+          class="ml-auto w-52"
         >
           <.input
             field={@workbench_forms.model[:selection]}
@@ -56,6 +56,84 @@ defmodule CatalystWeb.Workbench.ChatView do
             class="h-8 w-full rounded-lg border border-edge bg-raised px-2 text-xs text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/10"
           />
         </.form>
+
+        <button
+          :if={auth_action(@workbench_state) == :login}
+          id="workbench-auth-login"
+          type="button"
+          phx-click="workbench:chat:login"
+          class="inline-flex items-center gap-1.5 rounded-lg border border-edge bg-raised px-2.5 py-1.5 text-xs font-medium text-muted transition hover:border-edge-strong hover:text-ink"
+        >
+          <.icon name="hero-arrow-right-end-on-rectangle" class="size-3.5" /> Sign in
+        </button>
+        <button
+          :if={auth_action(@workbench_state) == :logout}
+          id="workbench-auth-logout"
+          type="button"
+          phx-click="workbench:chat:logout"
+          class="inline-flex items-center gap-1.5 rounded-lg border border-success/30 bg-success/10 px-2.5 py-1.5 text-xs font-medium text-success transition hover:brightness-110"
+        >
+          <.icon name="hero-check-circle" class="size-3.5" /> Signed in
+        </button>
+
+        <details id="workbench-chat-controls" class="group relative">
+          <summary class="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-lg border border-edge bg-raised px-2.5 py-1.5 text-xs font-medium text-muted transition hover:border-edge-strong hover:text-ink">
+            <.icon name="hero-adjustments-horizontal" class="size-3.5" /> Controls
+          </summary>
+          <div class="absolute right-0 top-10 z-40 w-72 rounded-xl border border-edge bg-surface p-4 shadow-2xl">
+            <.form
+              for={@workbench_forms.controls}
+              id="workbench-controls-form"
+              phx-change="workbench:chat:controls"
+              class="space-y-3"
+            >
+              <.input
+                field={@workbench_forms.controls[:effort]}
+                type="select"
+                id="workbench-effort-select"
+                label="Reasoning effort"
+                options={effort_options(@workbench_state)}
+              />
+              <.input
+                field={@workbench_forms.controls[:transport]}
+                type="select"
+                id="workbench-transport-select"
+                label="Transport"
+                options={transport_options(@workbench_state)}
+              />
+              <.input
+                field={@workbench_forms.controls[:workflow]}
+                type="select"
+                id="workbench-workflow-select"
+                label="Workflow"
+                options={workflow_options(@workbench_state.workflows)}
+              />
+            </.form>
+            <div class="mt-4 grid grid-cols-3 gap-2">
+              <.control_toggle
+                id="workbench-fast-toggle"
+                event="workbench:chat:toggle-fast"
+                active={@workbench_state.settings.fast}
+                label="Fast"
+                icon="hero-bolt"
+              />
+              <.control_toggle
+                id="workbench-quiet-toggle"
+                event="workbench:chat:toggle-quiet"
+                active={@workbench_state.settings.quiet}
+                label="Quiet"
+                icon="hero-eye-slash"
+              />
+              <.control_toggle
+                id="workbench-computer-toggle"
+                event="workbench:chat:toggle-computer"
+                active={@workbench_state.settings.computer_use}
+                label="Computer"
+                icon="hero-computer-desktop"
+              />
+            </div>
+          </div>
+        </details>
 
         <button
           id="workbench-chat-new"
@@ -80,6 +158,18 @@ defmodule CatalystWeb.Workbench.ChatView do
         >
           <.icon name="hero-code-bracket-square" class="size-3.5" /> IDE
         </.link>
+        <details id="workbench-product-navigation" class="group relative">
+          <summary class="flex size-8 cursor-pointer list-none items-center justify-center rounded-lg text-muted transition hover:bg-raised hover:text-ink">
+            <.icon name="hero-ellipsis-horizontal" class="size-4" />
+          </summary>
+          <nav class="absolute right-0 top-10 z-40 w-48 rounded-xl border border-edge bg-surface p-2 shadow-2xl">
+            <.nav_link id="workbench-nav-extensions" path={~p"/extensions"} label="Extensions" />
+            <.nav_link id="workbench-nav-workflows" path={~p"/workflows"} label="Workflows" />
+            <.nav_link id="workbench-nav-prompts" path={~p"/prompts"} label="Prompts" />
+            <.nav_link id="workbench-nav-compare" path={~p"/compare"} label="Comparison" />
+            <.nav_link id="workbench-nav-legacy" path={~p"/legacy-chat"} label="Legacy chat" />
+          </nav>
+        </details>
       </header>
 
       <div class="flex min-h-0 flex-1">
@@ -191,8 +281,9 @@ defmodule CatalystWeb.Workbench.ChatView do
 
               <div id="workbench-chat-messages" class="space-y-5">
                 <.projected_message
-                  :for={message <- @workbench_state.messages}
+                  :for={message <- visible_messages(@workbench_state)}
                   message={message}
+                  quiet={@workbench_state.settings.quiet}
                 />
               </div>
               <article
@@ -341,6 +432,7 @@ defmodule CatalystWeb.Workbench.ChatView do
   end
 
   attr :message, :map, required: true
+  attr :quiet, :boolean, required: true
 
   defp projected_message(assigns) do
     ~H"""
@@ -373,7 +465,7 @@ defmodule CatalystWeb.Workbench.ChatView do
           {@message.tool_name}
         </p>
         <.projected_block
-          :for={block <- @message.blocks}
+          :for={block <- visible_blocks(@message.blocks, @quiet)}
           block={block}
           user?={@message.role == "user"}
         />
@@ -446,12 +538,97 @@ defmodule CatalystWeb.Workbench.ChatView do
 
   defp projected_block(assigns), do: ~H""
 
+  attr :id, :string, required: true
+  attr :event, :string, required: true
+  attr :active, :boolean, required: true
+  attr :label, :string, required: true
+  attr :icon, :string, required: true
+
+  defp control_toggle(assigns) do
+    ~H"""
+    <button
+      id={@id}
+      type="button"
+      phx-click={@event}
+      aria-pressed={to_string(@active)}
+      class={[
+        "flex flex-col items-center gap-1 rounded-lg border px-2 py-2 text-[10px] font-semibold transition",
+        @active && "border-accent/30 bg-accent/10 text-accent",
+        !@active && "border-edge bg-raised text-muted hover:text-ink"
+      ]}
+    >
+      <.icon name={@icon} class="size-4" /> {@label}
+    </button>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :path, :string, required: true
+  attr :label, :string, required: true
+
+  defp nav_link(assigns) do
+    ~H"""
+    <.link
+      id={@id}
+      navigate={@path}
+      class="block rounded-lg px-3 py-2 text-xs font-medium text-muted transition hover:bg-raised hover:text-ink"
+    >
+      {@label}
+    </.link>
+    """
+  end
+
   defp model_options(models) do
     Enum.map(models, fn model ->
       label = "#{model.provider_name} · #{model.name}"
       {label, "#{model.provider}::#{model.id}"}
     end)
   end
+
+  defp selected_model_entry(state) do
+    Enum.find(
+      state.models,
+      &(&1.provider == state.settings.provider and &1.id == state.settings.model)
+    )
+  end
+
+  defp auth_action(state) do
+    case selected_model_entry(state) do
+      %{auth_provider: provider, logged_in: false} when is_binary(provider) -> :login
+      %{auth_provider: provider, logged_in: true} when is_binary(provider) -> :logout
+      _no_auth -> nil
+    end
+  end
+
+  defp effort_options(state) do
+    case selected_model_entry(state) do
+      %{efforts: efforts} -> Enum.map(efforts, &{String.capitalize(&1), &1})
+      _missing -> []
+    end
+  end
+
+  defp transport_options(state) do
+    case selected_model_entry(state) do
+      %{transports: transports} when transports != [] ->
+        Enum.map(transports, &{String.upcase(&1), &1})
+
+      _missing_or_unsupported ->
+        [{"Automatic", "auto"}]
+    end
+  end
+
+  defp workflow_options(workflows),
+    do: [{"Default workflow", ""} | Enum.map(workflows, &{&1.label, &1.id})]
+
+  defp visible_messages(state) do
+    case state.settings.quiet do
+      true -> Enum.reject(state.messages, &(&1.role == "tool"))
+      false -> state.messages
+    end
+  end
+
+  defp visible_blocks(blocks, true), do: Enum.reject(blocks, &(&1.type == "thinking"))
+  defp visible_blocks(blocks, false), do: blocks
 
   defp message_icon("user"), do: "hero-user"
   defp message_icon("tool"), do: "hero-wrench-screwdriver"

@@ -21,7 +21,7 @@ defmodule CatalystWeb.QuietModeTest do
   end
 
   test "the header toggle flips the transcript's data-quiet attribute", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     refute has_element?(view, "#messages[data-quiet]")
 
     view |> element("#quiet-toggle") |> render_click()
@@ -32,10 +32,10 @@ defmodule CatalystWeb.QuietModeTest do
   end
 
   test "quiet persists across a remount like other header prefs", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     view |> element("#quiet-toggle") |> render_click()
 
-    {:ok, view2, _html} = live(conn, "/")
+    {:ok, view2, _html} = live(conn, "/legacy-chat")
     assert has_element?(view2, "#messages[data-quiet]")
   end
 
@@ -45,7 +45,7 @@ defmodule CatalystWeb.QuietModeTest do
   # retroactive and lossless), and the session was never touched.
   test "quiet is display-only: tool markup stays in the DOM, session untouched",
        %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     # Demo-provider run: a tool-call chip, then a tool-result card.
@@ -68,7 +68,7 @@ defmodule CatalystWeb.QuietModeTest do
   end
 
   test "a thinking message keeps its markup while quiet", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     id = session_id(view)
 
     view |> element("#quiet-toggle") |> render_click()

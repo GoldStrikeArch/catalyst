@@ -21,7 +21,7 @@ defmodule CatalystWeb.Flex.UISwapFlexTest do
       :extension_processes
     ])
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     _session_id = session_id(view)
 
     assert has_element?(view, "#flex-chat-v2")
@@ -43,7 +43,7 @@ defmodule CatalystWeb.Flex.UISwapFlexTest do
     assert {:ok, %{owner: nil}} = Registry.fetch_command("cd")
     assert :error = Registry.fetch_command("flexping")
 
-    {:ok, baseline_view, _html} = live(conn, ~p"/")
+    {:ok, baseline_view, _html} = live(conn, ~p"/legacy-chat")
     _baseline_id = session_id(baseline_view)
 
     refute has_element?(baseline_view, "#flex-chat-v2")
@@ -58,13 +58,13 @@ defmodule CatalystWeb.Flex.UISwapFlexTest do
     original_hash = object_code_hash(CatalystWeb.ShellLive)
     load_fixture!("ui_shell_shadow")
 
-    {:ok, _shadow_view, shadow_html} = live(conn, ~p"/")
+    {:ok, _shadow_view, shadow_html} = live(conn, ~p"/legacy-chat")
     assert shadow_html =~ "FLEX-SHELL-SHADOW"
 
     unload_fixture!("ui_shell_shadow")
     assert object_code_hash(CatalystWeb.ShellLive) == original_hash
 
-    {:ok, restored_view, _html} = live(conn, ~p"/")
+    {:ok, restored_view, _html} = live(conn, ~p"/legacy-chat")
     _session_id = session_id(restored_view)
 
     assert has_element?(restored_view, "#catalyst-shell")

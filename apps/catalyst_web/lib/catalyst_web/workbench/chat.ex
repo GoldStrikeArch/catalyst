@@ -13,7 +13,9 @@ defmodule CatalystWeb.Workbench.Chat do
   alias Catalyst.LLM.Event, as: LLMEvent
 
   @impl true
-  def mount(%{workspace: workspace}) when is_binary(workspace) do
+  def mount(%{workspace: workspace} = context) when is_binary(workspace) do
+    settings = Map.merge(default_settings(), Map.get(context, :settings, %{}))
+
     state = %{
       version: 1,
       workspace: workspace,
@@ -22,7 +24,9 @@ defmodule CatalystWeb.Workbench.Chat do
       messages_truncated: 0,
       input: "",
       models: [],
-      selected_model: nil,
+      selected_model: selected_model(settings),
+      settings: settings,
+      workflows: Map.get(context, :workflows, []),
       threads: %{projects: []},
       file_search: nil,
       file_search_request: nil,
@@ -95,22 +99,42 @@ defmodule CatalystWeb.Workbench.Chat do
   end
 
   def event("chat:model", %{"model" => %{"selection" => selection}}, state, _context) do
-    with {:ok, selected} <- parse_selection(selection),
-         session_id when is_binary(session_id) <- state.session_id do
-      {state, request_id} = request(state, "configure")
+    with {:ok, selected} <- parse_selection(selection) do
+      settings =
+        state.settings
+        |> Map.put(:provider, selected.provider)
+        |> Map.put(:model, selected.model)
+        |> clamp_model_settings(state.models)
 
-      {:ok, %{state | selected_model: selected, error: nil},
-       [
-         {:session, :configure, request_id, session_id,
-          %{
-            "provider" => selected.provider,
-            "model" => selected.model
-          }}
-       ]}
+      configure(%{state | selected_model: selected, settings: settings, error: nil})
     else
       _invalid -> {:ok, %{state | error: "That model selection is unavailable."}, []}
     end
   end
+
+  def event("chat:controls", %{"controls" => controls}, state, _context)
+      when is_map(controls) do
+    settings =
+      state.settings
+      |> put_control(:effort, controls["effort"])
+      |> put_control(:transport, controls["transport"])
+      |> put_control(:workflow, controls["workflow"])
+      |> clamp_model_settings(state.models)
+
+    configure(%{state | settings: settings, error: nil})
+  end
+
+  def event("chat:toggle-fast", _params, state, _context),
+    do: toggle_setting(state, :fast)
+
+  def event("chat:toggle-quiet", _params, state, _context),
+    do: toggle_setting(state, :quiet)
+
+  def event("chat:toggle-computer", _params, state, _context),
+    do: toggle_setting(state, :computer_use)
+
+  def event("chat:login", _params, state, _context), do: authenticate(state, :login)
+  def event("chat:logout", _params, state, _context), do: authenticate(state, :logout)
 
   def event("chat:switch", %{"id" => id}, state, _context) when is_binary(id) do
     case id == state.session_id do
@@ -240,7 +264,12 @@ defmodule CatalystWeb.Workbench.Chat do
   def forms(state) do
     %{
       chat: %{"message" => state.input},
-      model: %{"selection" => selection_value(state.selected_model)}
+      model: %{"selection" => selection_value(state.selected_model)},
+      controls: %{
+        "effort" => state.settings.effort,
+        "transport" => state.settings.transport,
+        "workflow" => state.settings.workflow || ""
+      }
     }
   end
 
@@ -248,7 +277,8 @@ defmodule CatalystWeb.Workbench.Chat do
   def snapshot(state), do: {:ok, %{version: 1, payload: state}}
 
   @impl true
-  def restore(%{version: 1, payload: state}, %{workspace: workspace}) when is_map(state) do
+  def restore(%{version: 1, payload: state}, %{workspace: workspace} = context)
+      when is_map(state) do
     restored =
       state
       |> Map.put(:workspace, workspace)
@@ -259,6 +289,8 @@ defmodule CatalystWeb.Workbench.Chat do
       |> Map.put(:pending_requests, %{})
       |> Map.put_new(:request_seq, 0)
       |> Map.put_new(:messages_truncated, 0)
+      |> Map.put_new(:settings, Map.get(context, :settings, %{}))
+      |> Map.put_new(:workflows, Map.get(context, :workflows, []))
 
     case Map.get(restored, :session_id) do
       session_id when is_binary(session_id) ->
@@ -289,6 +321,19 @@ defmodule CatalystWeb.Workbench.Chat do
   defp fallback_input(nil, state), do: state.input
   defp fallback_input(input, _state), do: input
 
+  defp default_settings do
+    %{
+      provider: "",
+      model: "",
+      effort: nil,
+      fast: false,
+      transport: "auto",
+      workflow: nil,
+      quiet: false,
+      computer_use: false
+    }
+  end
+
   defp apply_snapshot(state, snapshot) when is_map(snapshot) do
     {:ok,
      state
@@ -300,6 +345,7 @@ defmodule CatalystWeb.Workbench.Chat do
          :running,
          :error,
          :selected_model,
+         :settings,
          :threads,
          :workspace
        ])
@@ -358,10 +404,96 @@ defmodule CatalystWeb.Workbench.Chat do
   defp selection_value(%{provider: provider, model: model}), do: "#{provider}::#{model}"
   defp selection_value(_missing), do: ""
 
-  defp selected_settings(%{selected_model: %{provider: provider, model: model}}),
-    do: %{"provider" => provider, "model" => model}
+  defp selected_model(%{provider: provider, model: model})
+       when is_binary(provider) and is_binary(model),
+       do: %{provider: provider, model: model}
+
+  defp selected_model(_settings), do: nil
+
+  defp selected_settings(%{settings: settings}) do
+    Map.new(settings, fn {key, value} -> {to_string(key), value} end)
+  end
 
   defp selected_settings(_state), do: %{}
+
+  defp configure(%{session_id: session_id} = state) when is_binary(session_id) do
+    {state, request_id} = request(state, "configure")
+
+    {:ok, state, [{:session, :configure, request_id, session_id, selected_settings(state)}]}
+  end
+
+  defp configure(state), do: {:ok, state, []}
+
+  defp toggle_setting(state, key) do
+    settings =
+      state.settings
+      |> Map.update(key, true, &(!&1))
+      |> clamp_model_settings(state.models)
+
+    configure(%{state | settings: settings, error: nil})
+  end
+
+  defp authenticate(state, operation) do
+    case selected_model_entry(state) do
+      %{auth_provider: provider, logged_in: logged_in}
+      when is_binary(provider) and operation == :login and not logged_in ->
+        auth_effect(state, operation, provider)
+
+      %{auth_provider: provider, logged_in: true}
+      when is_binary(provider) and operation == :logout ->
+        auth_effect(state, operation, provider)
+
+      %{auth_provider: nil} ->
+        {:ok, %{state | error: "The selected provider does not require sign-in."}, []}
+
+      _already_in_requested_state ->
+        {:ok, state, []}
+    end
+  end
+
+  defp auth_effect(state, operation, provider) do
+    {state, request_id} = request(state, to_string(operation))
+    {:ok, state, [{:auth, operation, request_id, provider}]}
+  end
+
+  defp selected_model_entry(state) do
+    Enum.find(
+      state.models,
+      &(&1.provider == state.settings.provider and &1.id == state.settings.model)
+    )
+  end
+
+  defp put_control(settings, _key, nil), do: settings
+  defp put_control(settings, :workflow, ""), do: Map.put(settings, :workflow, nil)
+  defp put_control(settings, key, value), do: Map.put(settings, key, value)
+
+  defp clamp_model_settings(settings, []), do: settings
+
+  defp clamp_model_settings(settings, models) do
+    selected =
+      Enum.find(models, fn model ->
+        model.provider == settings.provider and model.id == settings.model
+      end) || List.first(models)
+
+    efforts = selected.efforts
+    transports = selected.transports
+
+    settings
+    |> Map.put(:provider, selected.provider)
+    |> Map.put(:model, selected.id)
+    |> Map.put(:effort, supported_value(settings.effort, efforts, selected.default_effort))
+    |> Map.put(:transport, supported_value(settings.transport, transports, "auto"))
+    |> Map.put(:fast, settings.fast and selected.fast)
+  end
+
+  defp supported_value(_value, [], default), do: default
+
+  defp supported_value(value, supported, default) do
+    case Enum.member?(supported, value) do
+      true -> value
+      false -> default
+    end
+  end
 
   defp maybe_put_threads(state, %{threads: threads}) when is_map(threads),
     do: %{state | threads: threads}
@@ -419,8 +551,17 @@ defmodule CatalystWeb.Workbench.Chat do
     do: {:ok, %{state | running: false}, []}
 
   defp handle_effect_result(%{"kind" => "models"}, _request_id, {:ok, models}, state)
-       when is_list(models),
-       do: {:ok, %{state | models: models}, []}
+       when is_list(models) do
+    settings = clamp_model_settings(state.settings, models)
+    selected_model = selected_model(settings)
+    {:ok, %{state | models: models, settings: settings, selected_model: selected_model}, []}
+  end
+
+  defp handle_effect_result(%{"kind" => kind}, _request_id, result, state)
+       when kind in ["login", "logout"] and (result == :ok or elem(result, 0) == :ok) do
+    {state, request_id} = request(%{state | error: nil}, "models")
+    {:ok, state, [{:models, :list, request_id}]}
+  end
 
   defp handle_effect_result(%{"kind" => "threads"}, _request_id, {:ok, threads}, state)
        when is_map(threads),
@@ -452,7 +593,7 @@ defmodule CatalystWeb.Workbench.Chat do
   end
 
   defp handle_effect_error(kind, _request_id, reason, state)
-       when kind in ["models", "threads", "configure", "close"] do
+       when kind in ["models", "threads", "configure", "close", "login", "logout"] do
     {:ok, %{state | error: "#{human_operation(kind)} failed: #{inspect(reason)}"}, []}
   end
 
@@ -481,6 +622,8 @@ defmodule CatalystWeb.Workbench.Chat do
   defp human_operation("models"), do: "Model loading"
   defp human_operation("threads"), do: "Thread loading"
   defp human_operation("configure"), do: "Model configuration"
+  defp human_operation("login"), do: "Sign-in"
+  defp human_operation("logout"), do: "Sign-out"
   defp human_operation("close"), do: "Thread closing"
   defp human_operation("submit"), do: "Message submission"
   defp human_operation("abort"), do: "Run cancellation"

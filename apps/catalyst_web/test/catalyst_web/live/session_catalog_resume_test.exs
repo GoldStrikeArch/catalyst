@@ -28,7 +28,7 @@ defmodule CatalystWeb.SessionCatalogResumeTest do
       File.rm(catalog)
     end)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
     submit_prompt(view, "list the files")
     assert has_element?(view, "#message-stream", "list the files")
@@ -48,7 +48,7 @@ defmodule CatalystWeb.SessionCatalogResumeTest do
 
     # A fresh mount discovers the catalog entry, resumes the same session id
     # at the same cwd, and replays the persisted transcript.
-    {:ok, view2, _html} = live(conn, ~p"/")
+    {:ok, view2, _html} = live(conn, ~p"/legacy-chat")
     assert session_id(view2) == id
 
     assert has_element?(view2, "#message-stream", "list the files")

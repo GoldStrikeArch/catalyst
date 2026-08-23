@@ -20,7 +20,7 @@ defmodule CatalystWeb.FileRefsLiveTest do
 
     on_exit(fn -> File.rm_rf!(root) end)
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     view |> form("#chat-form", %{"message" => "/cd #{root}"}) |> render_submit()
     assert has_element?(view, "#chat-empty-state", root)
     view

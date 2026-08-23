@@ -3,11 +3,12 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   use CatalystWeb, :live_view
 
-  alias Catalyst.{Content, Message, Resources}
+  alias Catalyst.{Content, Extensions, Message, Resources}
   alias Catalyst.LLM.Models
   alias Catalyst.Session.{Catalog, Manager, Server}
+  alias CatalystWeb.Auth.Login
   alias CatalystWeb.FileSearch
-  alias CatalystWeb.ShellLive.SessionLifecycle
+  alias CatalystWeb.ShellLive.{SessionLifecycle, Settings}
   alias CatalystWeb.ShellLive.Threads
   alias CatalystWeb.UI.ImageStore
   alias CatalystWeb.UI.SafeRender
@@ -20,7 +21,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   @impl true
   def mount(params, session, socket) do
-    slot = Map.get(params, "workbench", "default")
+    slot = workbench_slot(socket.assigns.live_action, params)
 
     socket =
       socket
@@ -37,7 +38,8 @@ defmodule CatalystWeb.WorkbenchHostLive do
         workbench_session_id: nil,
         workbench_session_pid: nil,
         workbench_session_ref: nil,
-        workbench_session_provider: nil
+        workbench_session_provider: nil,
+        boot_status: Extensions.boot_status()
       )
       |> allow_upload(:image,
         accept: ~w(.png .jpg .jpeg .gif .webp),
@@ -187,6 +189,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
         data-workbench-generation={@workbench_metadata[:generation]}
         data-workbench-target={target_id(@workbench_target)}
       >
+        <.runtime_banner :if={@boot_status != :ok} status={@boot_status} />
         <%= case @workbench_error do %>
           <% nil -> %>
             {render_workbench(assigns)}
@@ -203,11 +206,14 @@ defmodule CatalystWeb.WorkbenchHostLive do
          runtime_context = %{
            metadata: %{workspace_path: workspace, workbench_slot: slot}
          },
-         {:ok, handle} <- Workbench.resolve_and_pin(runtime_context, self()) do
+         {:ok, handle} <- Workbench.resolve_and_pin(runtime_context, self()),
+         preferences = Settings.load_workbench() do
       context = %{
         workspace: workspace,
         slot: slot,
-        runtime: Workbench.metadata(handle.resolution)
+        runtime: Workbench.metadata(handle.resolution),
+        settings: preferences,
+        workflows: Settings.workbench_workflows(preferences)
       }
 
       finish_mount(handle, context, socket)
@@ -215,6 +221,10 @@ defmodule CatalystWeb.WorkbenchHostLive do
       {:error, reason} -> {:error, reason, socket}
     end
   end
+
+  defp workbench_slot(:chat, _params), do: "chat"
+  defp workbench_slot(:index, _params), do: "default"
+  defp workbench_slot(_action, params), do: Map.get(params, "workbench", "default")
 
   defp finish_mount(handle, context, socket) do
     with {:ok, state, effects} <- Workbench.mount(handle, context),
@@ -283,13 +293,16 @@ defmodule CatalystWeb.WorkbenchHostLive do
     workspace = workspace!(socket)
     slot = socket.assigns.workbench_context.slot
     runtime_context = %{metadata: %{workspace_path: workspace, workbench_slot: slot}}
+    preferences = Settings.load_workbench()
 
     with {:ok, capsule} <- Workbench.snapshot(old_handle, old_state),
          {:ok, new_handle} <- Workbench.resolve_and_pin(runtime_context, self()),
          new_context = %{
            workspace: workspace,
            slot: slot,
-           runtime: Workbench.metadata(new_handle.resolution)
+           runtime: Workbench.metadata(new_handle.resolution),
+           settings: preferences,
+           workflows: Settings.workbench_workflows(preferences)
          } do
       restore_remount(socket, old_handle, new_handle, capsule, new_context)
     else
@@ -472,14 +485,24 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   defp start_effect({:session, :configure, request_id, session_id, settings}, socket) do
     with {:ok, pid} <- current_session(socket, session_id),
-         {:ok, {provider_id, model}} <- resolve_model(settings),
-         :ok <- Server.configure(pid, model: model) do
+         {:ok, config} <- session_config(settings),
+         :ok <- Server.configure(pid, model: config.model, opts: config.opts),
+         :ok <- Settings.persist_workbench(config.preferences) do
+      provider_id = config.preferences.provider
       socket = assign(socket, :workbench_session_provider, provider_id)
       snapshot = project_session(session_id, Server.state(pid), provider_id)
       deliver_effect_result(socket, request_id, {:ok, snapshot})
     else
       {:error, _reason} = error -> deliver_effect_result(socket, request_id, error)
     end
+  end
+
+  defp start_effect({:auth, :login, request_id, provider}, socket) do
+    start_effect_task(socket, request_id, Login.callback(provider))
+  end
+
+  defp start_effect({:auth, :logout, request_id, provider}, socket) do
+    deliver_effect_result(socket, request_id, Catalyst.Auth.logout(provider))
   end
 
   defp start_effect({:client, :push, event, payload}, socket),
@@ -547,10 +570,12 @@ defmodule CatalystWeb.WorkbenchHostLive do
   end
 
   defp open_new_session(workspace, settings) do
-    with {:ok, {provider_id, model}} <- resolve_model(settings),
-         {:ok, %{id: id, pid: pid}} <- Manager.start_session(cwd: workspace, model: model) do
+    with {:ok, config} <- session_config(settings),
+         {:ok, %{id: id, pid: pid}} <-
+           Manager.start_session(cwd: workspace, model: config.model, opts: config.opts),
+         :ok <- Settings.persist_workbench(config.preferences) do
       _result = Catalog.remember(id, workspace)
-      {:session_opened, id, pid, provider_id}
+      {:session_opened, id, pid, config.preferences.provider}
     end
   end
 
@@ -561,23 +586,24 @@ defmodule CatalystWeb.WorkbenchHostLive do
           {:session_opened, id, pid, nil}
 
         :error ->
-          with {:ok, {provider_id, model}} <- resolve_model(%{}),
+          with {:ok, config} <- session_config(%{}),
                {:ok, %{id: ^id, pid: pid}} <-
-                 Manager.start_session(id: id, cwd: cwd, model: model) do
-            {:session_opened, id, pid, provider_id}
+                 Manager.start_session(
+                   id: id,
+                   cwd: cwd,
+                   model: config.model,
+                   opts: config.opts
+                 ) do
+            {:session_opened, id, pid, config.preferences.provider}
           end
       end
     end
   end
 
-  defp resolve_model(%{"provider" => provider_id, "model" => model_id}),
-    do: Models.resolve(provider_id, model_id)
+  defp session_config(settings) when map_size(settings) == 0,
+    do: Settings.load_workbench() |> Settings.workbench_config()
 
-  defp resolve_model(_settings) do
-    with {:ok, %{provider_id: provider_id, model_id: model_id}} <- Models.default_selection() do
-      Models.resolve(provider_id, model_id)
-    end
-  end
+  defp session_config(settings), do: Settings.workbench_config(settings)
 
   defp attach_session(socket, id, pid, provider_id) do
     socket = detach_session(socket)
@@ -640,7 +666,8 @@ defmodule CatalystWeb.WorkbenchHostLive do
       messages_truncated: messages_truncated,
       running: snapshot.running,
       error: snapshot.error_message,
-      selected_model: selected_model(provider_id, snapshot.model)
+      selected_model: selected_model(provider_id, snapshot.model),
+      settings: Settings.workbench_from_session(snapshot.model, snapshot.opts, provider_id)
     }
 
     case include_threads? do
@@ -766,6 +793,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   defp project_model(entry) do
     provider_id = Map.get(entry, :provider, "unknown")
+    auth_provider = auth_provider(Map.get(entry, :auth))
 
     %{
       id: entry.id,
@@ -774,9 +802,16 @@ defmodule CatalystWeb.WorkbenchHostLive do
       provider_name: Map.get(entry, :provider_name, provider_id),
       efforts: Map.get(entry, :efforts, []),
       default_effort: Map.get(entry, :default_effort),
-      fast: Map.get(entry, :fast?, false)
+      fast: Map.get(entry, :fast?, false),
+      transports: entry |> Map.get(:controls, %{}) |> Map.get(:transports, []),
+      auth_provider: auth_provider,
+      auth_label: Map.get(entry, :provider_name, provider_id),
+      logged_in: is_nil(auth_provider) or Catalyst.Auth.logged_in?(auth_provider)
     }
   end
+
+  defp auth_provider(auth) when is_atom(auth) and not is_nil(auth), do: auth.provider_id()
+  defp auth_provider(_no_auth), do: nil
 
   defp selected_model(provider_id, %{id: model_id}) when is_binary(provider_id),
     do: %{provider: provider_id, model: model_id}
@@ -937,6 +972,28 @@ defmodule CatalystWeb.WorkbenchHostLive do
     )
   end
 
+  attr :status, :any, required: true
+
+  defp runtime_banner(assigns) do
+    {title, reason} = Extensions.describe_boot_status(assigns.status)
+    assigns = assign(assigns, title: title, reason: reason)
+
+    ~H"""
+    <div
+      id="workbench-runtime-status"
+      class="flex items-center justify-between gap-4 border-b border-warning/30 bg-warning/10 px-4 py-2 text-xs text-warning"
+    >
+      <span><strong>{@title}</strong> · {@reason}</span>
+      <.link
+        navigate={~p"/extensions"}
+        class="shrink-0 font-semibold underline decoration-warning/40 underline-offset-2"
+      >
+        Open recovery
+      </.link>
+    </div>
+    """
+  end
+
   defp error_view(assigns) do
     ~H"""
     <main
@@ -957,10 +1014,10 @@ defmodule CatalystWeb.WorkbenchHostLive do
         >{inspect(@reason)}</pre>
         <.link
           id="workbench-error-chat-link"
-          navigate={~p"/"}
+          navigate={~p"/legacy-chat"}
           class="mt-5 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white"
         >
-          <.icon name="hero-chat-bubble-left-right" class="size-4" /> Return to agent chat
+          <.icon name="hero-chat-bubble-left-right" class="size-4" /> Open legacy chat
         </.link>
       </div>
     </main>

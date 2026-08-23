@@ -254,13 +254,13 @@ defmodule CatalystWeb.ExtensionsPageTest do
 
     assert has_element?(
              chat_view,
-             "#extension-boot-status",
+             "#workbench-runtime-status",
              "Safe mode — extensions were not loaded"
            )
 
     assert has_element?(
              chat_view,
-             "#extension-boot-status",
+             "#workbench-runtime-status",
              "previous boot died while extensions were active"
            )
 
@@ -336,13 +336,13 @@ defmodule CatalystWeb.ExtensionsPageTest do
   end
 
   test "patching to the panel and back preserves the chat transcript", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
 
     submit_prompt(view, "panel roundtrip probe")
     assert has_element?(view, "#message-stream", "panel roundtrip probe")
 
     render_patch(view, "/extensions")
-    render_patch(view, "/")
+    render_patch(view, "/legacy-chat")
 
     # Stream items live only in the DOM the panel replaced — without the
     # replay in change_page/2 the transcript would come back empty.

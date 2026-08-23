@@ -15,11 +15,13 @@ capable of hosting chat and IDE compositions.
 ## Decision
 
 A stable `WorkbenchHostLive` owns the Phoenix socket and pins one
-`ui.workbench/default` Runtime Graph handle for the mount lifetime. A Workbench
-is a pure state/effects protocol: it receives bounded events and context, returns
-JSON-serializable state plus validated effects, and identifies a registered
-function-component render target. The host owns forms, navigation, filesystem
-and command effects, task supervision, and permission-broker calls.
+`ui.workbench/<slot>` Runtime Graph handle for the mount lifetime. `/` resolves
+the `chat` slot, `/ide` resolves `default`, and `/workbench/:workbench` exposes
+an explicit slot URL. A Workbench is a pure state/effects protocol: it receives
+bounded events and context, returns JSON-serializable state plus validated
+effects, and identifies a registered function-component render target. The host
+owns forms, navigation, authentication, sessions, filesystem and command effects,
+task supervision, and permission-broker calls.
 
 Legacy Workbenches identify renderers by string ID. The host captures the
 effective `UI.Registry` descriptor once at mount or remount and never resolves
@@ -41,9 +43,10 @@ keeps the complete transcript in the session store, sends bounded streaming
 deltas directly to the browser, and refreshes authoritative state at lifecycle
 boundaries rather than once per token.
 
-The current chat `ShellLive` remains a compatibility product controller until a
-separate chat-view/process contract can preserve its session and streaming
-lifecycle. Raw BEAM replacement remains the unrestricted escape hatch; it does
+The replaceable chat Workbench is the default `/` product. The previous
+`ShellLive` chat remains available at `/legacy-chat` as a recovery and parity
+surface during this release cycle; registry-backed legacy pages remain under
+`/:page`. Raw BEAM replacement remains the unrestricted escape hatch; it does
 not receive managed Workbench guarantees.
 
 ## Consequences
@@ -53,5 +56,6 @@ not receive managed Workbench guarantees.
 - The IDE can evolve as a composition without expanding `ShellLive`.
 - Endpoint, router, CSRF/session machinery, and the stable host remain web-host
   boundaries until a controlled restart replaces them.
-- Moving chat into the Workbench is an explicit migration, not a wrapper around
-  the existing LiveView.
+- Chat was moved into the Workbench as an explicit migration, not a wrapper
+  around the existing LiveView; the legacy route makes rollback and parity
+  comparison possible without changing the runtime graph.

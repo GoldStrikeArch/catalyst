@@ -123,7 +123,7 @@ defmodule CatalystWeb.ComputerUseTest do
   end
 
   test "the header toggle flips the session's computer-use option", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     assert Server.state(pid).opts[:computer_use] == false
@@ -140,10 +140,10 @@ defmodule CatalystWeb.ComputerUseTest do
   end
 
   test "the grant persists across a remount and into a new session", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     view |> element("#computer-toggle") |> render_click()
 
-    {:ok, view2, _html} = live(conn, "/")
+    {:ok, view2, _html} = live(conn, "/legacy-chat")
     assert has_element?(view2, ~s(#computer-toggle[aria-pressed="true"]))
 
     view2 |> element("#new-session-button") |> render_click()
@@ -151,7 +151,7 @@ defmodule CatalystWeb.ComputerUseTest do
   end
 
   test "the toggle never leaves the Codex controls behind", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/legacy-chat")
     pid = session_pid(view)
 
     before_opts = Server.state(pid).opts

@@ -60,7 +60,7 @@ defmodule CatalystWeb.Flex.ModalityAudioFlexTest do
     install_fixture!("ui_audio_probe")
     previous_provider = with_codex_provider(Catalyst.Ext.UIAudioProvider)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
 
     submit_prompt!(view, "prepare audio")

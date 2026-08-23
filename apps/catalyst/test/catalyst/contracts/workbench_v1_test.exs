@@ -27,7 +27,18 @@ defmodule Catalyst.Contracts.Workbench.V1Test do
          {:session, :attach, "session-attach", "session-1"},
          {:session, :close, "session-close", "session-1"},
          {:session, :configure, "session-configure", "session-1",
-          %{"provider" => "provider", "model" => "model"}},
+          %{
+            "provider" => "provider",
+            "model" => "model",
+            "effort" => "high",
+            "fast" => true,
+            "transport" => "sse",
+            "workflow" => nil,
+            "quiet" => false,
+            "computer_use" => true
+          }},
+         {:auth, :login, "auth-login", "provider-auth"},
+         {:auth, :logout, "auth-logout", "provider-auth"},
          {:client, :push, "workbench:stream_delta", %{kind: "text", delta: "hello"}},
          {:navigate, "/"}
        ]}

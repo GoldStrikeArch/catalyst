@@ -14,7 +14,7 @@ Self-extension guide (for the agent and humans): [`guide.md`](guide.md).
 | App | What it is |
 | --- | --- |
 | `apps/catalyst` | Headless agent core: loop, sessions, tools, permissions/hooks, LLM providers, extensions. **No Phoenix dep.** |
-| `apps/catalyst_web` | Phoenix LiveView UI: catch-all `ShellLive`, chat + extensions pages, UI registries, web self-mod tools. |
+| `apps/catalyst_web` | Phoenix LiveView UI: replaceable Workbench host for chat/IDE, compatibility pages, UI registries, web self-mod tools. |
 | `apps/catalyst_desktop` | Native desktop shell (elixir-desktop/wx) wrapping `catalyst_web`. |
 | `apps/catalyst_cli` | Headless (no-wx) release, Burrito-capable — proves packaged hot-loading. |
 

@@ -4,7 +4,7 @@ defmodule CatalystWeb.ChatLiveTest do
   import Phoenix.LiveViewTest
 
   test "renders the chat shell with the Codex run controls", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     assert has_element?(view, "#codex-opts")
     refute has_element?(view, "#catalyst-shell", "Demo (offline)")
     assert has_element?(view, "#chat-empty-state")
@@ -15,7 +15,7 @@ defmodule CatalystWeb.ChatLiveTest do
   end
 
   test "sending a prompt streams a reply with a tool result (offline provider)", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
 
     submit_prompt(view, "list the files")
 
@@ -36,14 +36,14 @@ defmodule CatalystWeb.ChatLiveTest do
       :persistent_term.erase({CatalystWeb.ShellLive, :current_session})
     end)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     id = session_id(view)
     submit_prompt(view, "list the files")
     assert has_element?(view, "#message-stream", "list the files")
 
     # A reconnect/refresh mounts a fresh LiveView; it must pick up the same
     # session and replay the conversation instead of starting over.
-    {:ok, view2, _html} = live(conn, ~p"/")
+    {:ok, view2, _html} = live(conn, ~p"/legacy-chat")
     assert session_id(view2) == id
 
     assert has_element?(view2, "#message-stream", "list the files")
@@ -61,7 +61,7 @@ defmodule CatalystWeb.ChatLiveTest do
 
     on_exit(fn -> Application.delete_env(:catalyst_web, :login_fun) end)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     assert has_element?(view, "#login-button", "Sign in to ChatGPT")
     id = session_id(view)
     submit_prompt(view, "hello there")

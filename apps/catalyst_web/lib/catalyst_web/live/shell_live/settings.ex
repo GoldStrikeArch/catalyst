@@ -38,6 +38,21 @@ defmodule CatalystWeb.ShellLive.Settings do
   @type ui_prefs :: %{quiet: boolean(), sidebar: boolean()}
   @type machine_prefs :: %{computer_use: boolean()}
   @type workflow_prefs :: %{workflow: String.t() | nil}
+  @type workbench_prefs :: %{
+          provider: String.t(),
+          model: String.t(),
+          effort: String.t() | nil,
+          fast: boolean(),
+          transport: String.t(),
+          workflow: String.t() | nil,
+          quiet: boolean(),
+          computer_use: boolean()
+        }
+  @type workbench_config :: %{
+          preferences: workbench_prefs(),
+          model: Catalyst.Model.t(),
+          opts: keyword()
+        }
   @type workflow_option :: %{
           name: Catalyst.Workflow.Registry.name(),
           module: module() | nil,
@@ -95,6 +110,100 @@ defmodule CatalystWeb.ShellLive.Settings do
       %{} = saved -> Map.merge(defaults, saved)
       _not_saved -> defaults
     end
+  end
+
+  @doc "Loads the serializable preference projection used by the chat Workbench."
+  @spec load_workbench() :: workbench_prefs()
+  def load_workbench do
+    codex = load_codex()
+    ui = load_ui()
+    machine = load_machine()
+    workflow = load_workflow()
+
+    Map.merge(codex, %{
+      workflow: workflow.workflow,
+      quiet: ui.quiet,
+      computer_use: machine.computer_use
+    })
+  end
+
+  @doc "Validates Workbench preferences and builds one authoritative session configuration."
+  @spec workbench_config(map()) :: {:ok, workbench_config()} | {:error, term()}
+  def workbench_config(settings) when is_map(settings) do
+    with {:ok, workflow} <- normalize_workflow(workbench_value(settings, :workflow, "")),
+         codex <- workbench_codex(settings),
+         {:ok, model} <- provider_config(codex) do
+      preferences =
+        Map.merge(codex, %{
+          workflow: workflow,
+          quiet: workbench_boolean(settings, :quiet),
+          computer_use: workbench_boolean(settings, :computer_use)
+        })
+
+      opts =
+        run_opts(codex) ++
+          machine_opts(%{computer_use: preferences.computer_use}) ++ [workflow: workflow]
+
+      {:ok, %{preferences: preferences, model: model, opts: opts}}
+    end
+  end
+
+  def workbench_config(settings), do: {:error, {:invalid_workbench_settings, settings}}
+
+  @doc "Persists a previously validated Workbench preference projection."
+  @spec persist_workbench(workbench_prefs()) :: :ok
+  def persist_workbench(preferences) do
+    codex = Map.take(preferences, [:provider, :model, :effort, :fast, :transport])
+
+    persist(@codex_prefs_ptr, codex)
+    persist(@workflow_prefs_ptr, %{workflow: preferences.workflow})
+    persist(@machine_prefs_ptr, %{computer_use: preferences.computer_use})
+
+    ui =
+      load_ui()
+      |> Map.put(:quiet, preferences.quiet)
+
+    persist(@ui_prefs_ptr, ui)
+  end
+
+  @doc "Projects authoritative session model/options back into Workbench preferences."
+  @spec workbench_from_session(Catalyst.Model.t(), keyword(), String.t() | nil) ::
+          workbench_prefs()
+  def workbench_from_session(model, opts, provider_id) when is_list(opts) do
+    current = load_workbench()
+    provider = provider_id || provider_from_model(model, current)
+
+    %{
+      provider: provider,
+      model: model.id,
+      effort: Keyword.get(opts, :reasoning_effort) || default_effort(provider),
+      fast: Keyword.get(opts, :service_tier) == "priority",
+      transport: to_string(Keyword.get(opts, :transport) || "auto"),
+      workflow: valid_workflow_opt(Keyword.get(opts, :workflow)),
+      quiet: current.quiet,
+      computer_use: Keyword.get(opts, :computer_use, current.computer_use)
+    }
+    |> workbench_config()
+    |> case do
+      {:ok, config} -> config.preferences
+      {:error, _reason} -> current
+    end
+  end
+
+  @doc "Returns serializable workflow choices for the Workbench controls."
+  @spec workbench_workflows(workbench_prefs()) :: [map()]
+  def workbench_workflows(preferences) do
+    preferences
+    |> Map.take([:workflow])
+    |> workflow_options()
+    |> Enum.reject(&(&1.name == :default))
+    |> Enum.map(fn row ->
+      %{
+        id: to_string(row.name),
+        label: workflow_label(row.name),
+        source: inspect(row.source)
+      }
+    end)
   end
 
   @doc """
@@ -498,6 +607,42 @@ defmodule CatalystWeb.ShellLive.Settings do
 
   defp put_if_present(prefs, _key, nil), do: prefs
   defp put_if_present(prefs, key, value), do: Map.put(prefs, key, value)
+
+  defp workbench_codex(settings) do
+    current = load_codex()
+
+    %{
+      provider: workbench_value(settings, :provider, current.provider),
+      model: workbench_value(settings, :model, current.model),
+      effort: workbench_optional_string(settings, :effort, current.effort),
+      fast: workbench_boolean(settings, :fast),
+      transport: workbench_value(settings, :transport, current.transport)
+    }
+    |> clamp_effort()
+    |> clamp_fast()
+  end
+
+  defp workbench_value(settings, key, default) do
+    case Map.get(settings, key, Map.get(settings, to_string(key), default)) do
+      value when is_binary(value) and value != "" -> value
+      _invalid -> default
+    end
+  end
+
+  defp workbench_optional_string(settings, key, default) do
+    case Map.get(settings, key, Map.get(settings, to_string(key), default)) do
+      value when is_binary(value) and value != "" -> value
+      nil -> nil
+      _invalid -> default
+    end
+  end
+
+  defp workbench_boolean(settings, key) do
+    Map.get(settings, key, Map.get(settings, to_string(key), false)) in [true, "true", "on", "1"]
+  end
+
+  defp workflow_label(nil), do: "Default workflow"
+  defp workflow_label(name), do: to_string(name)
 
   defp clamp_fast(prefs) do
     case Map.get(catalog_snapshot(prefs).selected, :fast?, false) do

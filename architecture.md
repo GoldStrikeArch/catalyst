@@ -327,13 +327,15 @@ Loop Task ──cast {:agent_event, e}──▶ Session.Server (reduce state)
                                         └─ PubSub.broadcast "session:<id>" ─▶ ChatLive(s)
 ```
 
-The migration Workbench host exposes the same session runtime through a bounded effect vocabulary.
+The Workbench host exposes the same session runtime through a bounded effect vocabulary.
 `ui.workbench/chat` emits model-catalog, workspace-search, session open/list/attach/close/configure,
-submit, abort, and snapshot requests. `CatalystWeb.WorkbenchHostLive` owns model resolution,
-the `Session.Server`, catalog access, image uploads, PubSub subscriptions, and process monitors.
+authentication, submit, abort, and snapshot requests. `CatalystWeb.WorkbenchHostLive` owns model
+resolution, the `Session.Server`, catalog access, authentication, image uploads, PubSub
+subscriptions, and process monitors.
 The host projects messages, thinking, tool calls, images, models, and project-grouped threads into
-serializable view state. `/workbench/chat` exercises that ordinary mount-pinned service without
-changing the current `/` product route; `/ide` continues to resolve `ui.workbench/default`.
+serializable view state. `/` is the default chat product and resolves that ordinary mount-pinned
+service; `/workbench/chat` is its explicit slot URL, `/ide` resolves `ui.workbench/default`, and
+`/legacy-chat` retains the previous Shell chat as a recovery/parity surface for this release.
 Workbench state contains no socket, PID, upload entry, or session handle.
 
 The generic Workbench contract permits at most 256 MiB of serialized state as an emergency
@@ -979,13 +981,14 @@ configuration, then its documented file/built-in layers; deleting an overlay nev
 stale boot value. Their `runtime_entries/0` results expose `key`, `value`, and `owner` fields for rollback and
 diagnostics. `CatalystWeb.UI.Registry` resolves **pages / renderers / components / commands**.
 `CatalystWeb.UI.MessageRenderer` dispatches transcript rendering to registered renderers
-(newest-first, `match_fun`) falling back to built-ins. Routing is **catch-all**: one
-`CatalystWeb.ShellLive` is mounted at `/` and `/:page` (router ships this once), and
-`handle_params` resolves the page registry by path — so a new page (`/settings`) is a registry
-write, no router recompile. The chat itself is just a registered page (`Pages.ChatPage`), and
-the commands registry is dogfooded the same way: `/cd` is a seeded built-in command, and every
-`/name [arg]` chat message dispatches through `UI.Registry.fetch_command/1` (crash-isolated
-handlers; unknown names flash the known list).
+(newest-first, `match_fun`) falling back to built-ins. The product roots are explicit:
+`CatalystWeb.WorkbenchHostLive` serves `/`, `/ide`, and `/workbench/:workbench`, while the
+compatibility `CatalystWeb.ShellLive` remains mounted at `/legacy-chat` and `/:page`.
+`ShellLive.handle_params` still resolves the page registry by path — so a new page (`/settings`)
+is a registry write, no router recompile. Its legacy chat is a registered page
+(`Pages.ChatPage`). Both chat products dogfood the commands registry: `/cd` is a seeded built-in
+command, and every `/name [arg]` chat message dispatches through `UI.Registry.fetch_command/1`
+(crash-isolated handlers; unknown names report the known list).
 
 **Apply-cost matrix.** new tool/provider/prompt/workflow/context-policy/hook/renderer/page/panel →
 registry write (live at the next relevant run/request/render); system/compaction prompt → write

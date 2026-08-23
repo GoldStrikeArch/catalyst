@@ -803,15 +803,7 @@ defmodule CatalystWeb.ShellLive do
   defp toggle_menu(_current, menu), do: menu
 
   defp login_fun(provider) do
-    override =
-      Application.get_env(:catalyst_web, :auth_login_fun) ||
-        CatalystWeb.Auth.LegacyLogin.configured(provider)
-
-    case override do
-      fun when is_function(fun, 1) -> fn -> fun.(provider) end
-      fun when is_function(fun, 0) -> fun
-      nil -> fn -> Catalyst.Auth.login(provider) end
-    end
+    CatalystWeb.Auth.Login.callback(provider)
   end
 
   defp auth_label(provider) do

@@ -32,7 +32,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
   end
 
   test "New starts a sibling thread without stopping the previous session", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     first = session_id(view)
     {:ok, first_pid} = Manager.whereis(first)
 
@@ -48,7 +48,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
   end
 
   test "the Projects header + starts a thread in the current directory", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     first = session_id(view)
     assert {:ok, %{cwd: cwd}} = Catalog.lookup(first)
 
@@ -66,7 +66,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
     File.mkdir_p!(other)
     on_exit(fn -> File.rm_rf!(other) end)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     home = session_id(view)
     assert {:ok, %{cwd: home_cwd}} = Catalog.lookup(home)
 
@@ -87,7 +87,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
   end
 
   test "switching threads focuses the other session and leaves the first running", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     first = session_id(view)
     submit_prompt(view, "first thread prompt")
     {:ok, first_pid} = Manager.whereis(first)
@@ -106,7 +106,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
   end
 
   test "closing a sibling stops it and leaves the current thread", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     first = session_id(view)
 
     view |> element("#new-session-button") |> render_click()
@@ -123,7 +123,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
   end
 
   test "closing the current thread starts a replacement", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     first = session_id(view)
 
     view |> element("#close-thread-#{first}") |> render_click()
@@ -137,7 +137,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
   end
 
   test "switching to a missing thread leaves the current focus", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     first = session_id(view)
 
     render_click(view, "switch_session", %{"id" => "does-not-exist"})
@@ -147,7 +147,7 @@ defmodule CatalystWeb.SidebarThreadsTest do
   end
 
   test "the sidebar toggle hides and restores the project list", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/legacy-chat")
     assert has_element?(view, "#shell-sidebar")
     assert has_element?(view, ~s(#sidebar-toggle[aria-pressed="true"]))
 
