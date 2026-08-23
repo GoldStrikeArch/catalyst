@@ -17,6 +17,9 @@ The apps:
 
 ## Elixir Style
 
+- Prefer the smallest clear solution that fully meets the current requirement. Do not add speculative abstractions, configuration, or extension points for hypothetical future needs.
+- Reuse existing Catalyst modules, helpers, components, and patterns before creating new ones. Prefer the standard library, OTP, Phoenix, LiveView, browser-native features, and already-installed dependencies before adding custom code or dependencies.
+- Keep changes focused and cohesive. Fix the root cause at the layer that owns the behavior, and do not trade correctness, security, accessibility, or appropriate tests for fewer lines of code.
 - Prefer small, pure functions. Most functions should be 1-8 lines and do one thing.
 - Keep side effects at the edges: file IO, shell execution, model calls, process messaging, persistence, and event emission should call pure helpers for decisions.
 - Prefer explicit data shapes: structs for stable internal state, typed maps for boundary payloads, keyword lists for options.
