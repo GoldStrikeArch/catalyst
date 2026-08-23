@@ -34,6 +34,13 @@ effects are bounded and request IDs are unique per transition. Browser behavior
 uses the single packaged `RuntimeHook` and same-origin, digest-addressed modules
 from ADR-0007.
 
+The contract's 256 MiB serialized-state bound is an emergency rejection ceiling,
+not a recommended state size. Product Workbenches must define substantially
+smaller projection budgets. Chat projects a bounded recent transcript window,
+keeps the complete transcript in the session store, sends bounded streaming
+deltas directly to the browser, and refreshes authoritative state at lifecycle
+boundaries rather than once per token.
+
 The current chat `ShellLive` remains a compatibility product controller until a
 separate chat-view/process contract can preserve its session and streaming
 lifecycle. Raw BEAM replacement remains the unrestricted escape hatch; it does

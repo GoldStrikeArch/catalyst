@@ -166,14 +166,24 @@ defmodule CatalystWeb.RuntimeAssetsTest do
     assert File.read!(Path.join(workspace, "assets/js/new-hook.js")) == "new hook"
   end
 
-  test "an unversioned modified workspace is reported instead of silently staying stale", %{
+  test "an unversioned modified workspace is adopted without overwriting user files", %{
     workspace: workspace
   } do
     File.mkdir_p!(Path.join(workspace, "assets/css"))
     File.write!(Path.join(workspace, "assets/css/app.css"), "unknown user version")
 
-    assert {:error, {:asset_workspace_unversioned, ^workspace}} =
-             RuntimeAssets.ensure_workspace()
+    assert {:ok, ^workspace} = RuntimeAssets.ensure_workspace()
+    assert File.read!(Path.join(workspace, "assets/css/app.css")) == "unknown user version"
+    assert File.read!(Path.join(workspace, "assets/js/app.js")) == "seed js"
+
+    File.write!(
+      Path.join(Application.fetch_env!(:catalyst_web, :asset_workspace_seed), "assets/js/app.js"),
+      "release two js"
+    )
+
+    assert {:ok, ^workspace} = RuntimeAssets.ensure_workspace()
+    assert File.read!(Path.join(workspace, "assets/css/app.css")) == "unknown user version"
+    assert File.read!(Path.join(workspace, "assets/js/app.js")) == "release two js"
   end
 
   test "a rebuild removes staging trees abandoned by an earlier process crash", %{root: root} do

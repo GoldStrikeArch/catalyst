@@ -180,12 +180,41 @@ defmodule CatalystWeb.Workbench.ChatView do
                 </p>
               </div>
 
+              <p
+                :if={@workbench_state.messages_truncated > 0}
+                id="workbench-transcript-truncated"
+                class="mb-5 rounded-lg border border-warning/20 bg-warning/5 px-3 py-2 text-xs text-warning"
+              >
+                {@workbench_state.messages_truncated} older transcript messages are hidden from
+                this live projection and remain available in the session transcript.
+              </p>
+
               <div id="workbench-chat-messages" class="space-y-5">
                 <.projected_message
                   :for={message <- @workbench_state.messages}
                   message={message}
                 />
               </div>
+              <article
+                id="workbench-streaming-preview"
+                phx-hook="StreamingMessage"
+                phx-update="ignore"
+                hidden
+                class="mt-5 flex gap-3"
+              >
+                <div class="mt-1 flex size-8 shrink-0 items-center justify-center rounded-lg border border-edge bg-surface text-accent">
+                  <.icon name="hero-sparkles" class="size-4" />
+                </div>
+                <div class="w-full max-w-[86%] rounded-2xl rounded-tl-sm border border-edge bg-surface px-4 py-3 shadow-sm">
+                  <p
+                    data-stream="thinking"
+                    class="mb-2 whitespace-pre-wrap text-xs italic leading-5 text-muted"
+                  >
+                  </p>
+                  <p data-stream="text" class="whitespace-pre-wrap text-sm leading-6"></p>
+                  <span data-stream-dots class="text-sm text-faint">Thinking…</span>
+                </div>
+              </article>
             </div>
           </main>
 

@@ -205,10 +205,10 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
 
     input =
       file_input(view, "#workbench-chat-form", :image, [
-        %{name: "shot.png", content: @png_bytes, type: "image/png"}
+        %{name: "shot.jpg", content: @png_bytes, type: "application/octet-stream"}
       ])
 
-    render_upload(input, "shot.png")
+    render_upload(input, "shot.jpg")
 
     view
     |> form("#workbench-chat-form", %{"chat" => %{"message" => "inspect this image"}})

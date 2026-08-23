@@ -336,6 +336,12 @@ serializable view state. `/workbench/chat` exercises that ordinary mount-pinned 
 changing the current `/` product route; `/ide` continues to resolve `ui.workbench/default`.
 Workbench state contains no socket, PID, upload entry, or session handle.
 
+The generic Workbench contract permits at most 256 MiB of serialized state as an emergency
+validation ceiling, not as a normal operating target. Chat keeps its live projection much smaller:
+the newest 200 messages within an 8 MiB budget are rendered while the complete transcript remains
+durable in the session store. Streaming text and thinking deltas use bounded client-push effects;
+the host requests a new authoritative session snapshot only at message, tool, and run boundaries.
+
 The chat input supports **`@` file references** (`CatalystWeb.FileSearch`, fd-backed): a
 trailing `@query` opens a candidate dropdown; picking inserts a short label
 (`@<parent>/<name>`, extended upward only as needed to disambiguate same-named files), and on

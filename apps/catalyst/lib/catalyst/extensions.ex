@@ -217,7 +217,13 @@ defmodule Catalyst.Extensions do
   @spec await_ready(non_neg_integer()) ::
           :ok | {:error, :extension_runtime_unavailable | :timeout}
   def await_ready(timeout \\ @ready_timeout) when is_integer(timeout) and timeout >= 0 do
-    await_ready_until(System.monotonic_time(:millisecond) + timeout)
+    case {Process.whereis(__MODULE__), Process.whereis(Catalyst.Supervisor)} do
+      {nil, nil} ->
+        {:error, :extension_runtime_unavailable}
+
+      _coordinator_or_running_application ->
+        await_ready_until(System.monotonic_time(:millisecond) + timeout)
+    end
   end
 
   @doc """

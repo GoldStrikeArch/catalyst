@@ -51,6 +51,25 @@ case "${TEST_RECOVERY_SCENARIO:-}" in
     atomic_ready
     exit 0
     ;;
+  rollback_signal)
+    count_path="$TEST_RECOVERY_STATE/count"
+    count=0
+    [ -f "$count_path" ] && count=$(cat "$count_path")
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$count_path"
+
+    if [ "$count" -eq 1 ]; then
+      exit 7
+    fi
+
+    trap 'printf "term\n" >"$TEST_RECOVERY_STATE/child_signal"; exit 0' TERM
+    atomic_ready
+    printf 'child-ready\n'
+
+    while :; do
+      sleep 1
+    done
+    ;;
   signal)
     trap 'printf "term\n" >"$TEST_RECOVERY_STATE/child_signal"; exit 0' TERM
     atomic_ready

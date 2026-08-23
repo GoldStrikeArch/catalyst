@@ -302,7 +302,19 @@ start() {
   valid_profile "$last_good" || last_good=$DEFAULT_PROFILE
   write_profile "$last_good"
   write_status "rollback:$first_status:$profile:$last_good"
-  run_child "$last_good" 1 2 "$@"
+
+  if run_child "$last_good" 1 2 "$@"; then
+    retry_status=0
+  else
+    retry_status=$?
+  fi
+
+  if [ -f "$stop_path" ]; then
+    rm -f "$stop_path"
+    write_status "stopped:$retry_status:$last_good:operator"
+  fi
+
+  return "$retry_status"
 }
 
 select_profile() {

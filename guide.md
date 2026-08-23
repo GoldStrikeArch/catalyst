@@ -94,7 +94,9 @@ Inside the bundle — resolve at runtime, don't hardcode:
   `ui.workbench/chat`; the stable host owns the session and interprets the implementation's
   bounded model, workspace-search, thread, upload, and session effects. The replaceable workbench
   presents model selection, project-grouped threads, `@` file references, pasted images, thinking,
-  tool calls, and transcript images without owning a PID, socket, or upload entry.
+  tool calls, and transcript images without owning a PID, socket, or upload entry. Its live view
+  shows a bounded recent transcript window; older messages remain available in the durable session
+  transcript.
 - **Recover** → `rollback_extension` (git revert + reload; pass `name` to scope it to one
   extension), `reload_extensions`, the **Extensions panel** at `/extensions` (per-extension
   reload / roll back / disable buttons), or restart with `CATALYST_SAFE_MODE=1` (built-ins only).

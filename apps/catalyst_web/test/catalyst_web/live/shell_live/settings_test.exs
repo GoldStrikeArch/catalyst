@@ -92,10 +92,23 @@ defmodule CatalystWeb.ShellLive.SettingsTest do
     def model(id), do: %Model{id: id, api: "duplicate-api", provider: "duplicate"}
   end
 
+  defmodule BrokenCatalog do
+    @behaviour Catalyst.LLM.ModelCatalog
+
+    @impl true
+    def default_model_id, do: "broken-model"
+
+    @impl true
+    def catalog_snapshot(_id), do: raise("catalog unavailable")
+
+    @impl true
+    def model(id), do: %Model{id: id, api: "broken-api", provider: "broken"}
+  end
+
   setup do
     on_exit(fn ->
       Enum.each(
-        ["fixture-api", "sparse-api", "duplicate-api", "no-catalog-api"],
+        ["fixture-api", "sparse-api", "duplicate-api", "no-catalog-api", "broken-api"],
         &Registry.unregister_provider/1
       )
     end)
@@ -195,6 +208,30 @@ defmodule CatalystWeb.ShellLive.SettingsTest do
 
     assert %{models: [%{id: "manual-model"}], selected: %{provider: "no-catalog"}} =
              Settings.catalog_snapshot(prefs)
+  end
+
+  test "catalog failures preserve the provider authentication descriptor" do
+    config = %ProviderConfig{
+      id: "broken",
+      module: FixtureProvider,
+      name: "Broken Subscription",
+      catalog: BrokenCatalog,
+      auth: FixtureAuth
+    }
+
+    assert :ok = Registry.register_provider("broken-api", config)
+    prefs = %{@base_prefs | provider: "broken", model: "broken-model"}
+
+    assert %{
+             catalog_error: {:model_catalog_exit, "broken", :catalog_snapshot, _reason},
+             selected: selected
+           } =
+             Settings.catalog_snapshot(prefs)
+
+    assert selected.auth == FixtureAuth
+    assert selected.provider_name == "Broken Subscription"
+    assert Settings.auth_provider(prefs) == "fixture-auth"
+    refute Settings.logged_in?(prefs)
   end
 
   test "provider-qualified picker values preserve duplicate model identity" do

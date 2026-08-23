@@ -263,6 +263,31 @@ const Hooks = {
   // appended text; the finished message removes the whole element.
   StreamingMessage: {
     mounted() {
+      this.handleEvent("workbench:stream_reset", () => {
+        this.el.querySelectorAll("[data-stream]").forEach((target) => {
+          target.textContent = "";
+        });
+        const dots = this.el.querySelector("[data-stream-dots]");
+        if (dots) dots.style.display = "";
+        this.el.hidden = false;
+      });
+
+      this.handleEvent("workbench:stream_delta", ({ kind, delta }) => {
+        const target = this.el.querySelector(`[data-stream="${kind}"]`);
+        if (!target) return;
+        target.appendChild(document.createTextNode(delta));
+        this.hideDots();
+        this.el.hidden = false;
+        window.dispatchEvent(new Event("catalyst:autoscroll"));
+      });
+
+      this.handleEvent("workbench:stream_finish", () => {
+        this.el.querySelectorAll("[data-stream]").forEach((target) => {
+          target.textContent = "";
+        });
+        this.el.hidden = true;
+      });
+
       this.handleEvent("stream_delta", ({ kind, delta }) => {
         const target = this.el.querySelector(`[data-stream="${kind}"]`);
         if (!target) return;

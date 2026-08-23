@@ -67,17 +67,17 @@ defmodule CatalystWeb.Workbench do
 
   @doc "Invoke and validate the pinned workbench mount callback."
   @spec mount(Handle.t(), map()) :: V1.transition()
-  def mount(%Handle{} = handle, context), do: invoke_transition(handle, :mount, [context])
+  def mount(%Handle{} = handle, context), do: invoke_transition(handle, :mount, [context], nil)
 
   @doc "Invoke and validate one pinned workbench event callback."
   @spec event(Handle.t(), String.t(), map(), map(), map()) :: V1.transition()
   def event(%Handle{} = handle, event, params, state, context),
-    do: invoke_transition(handle, :event, [event, params, state, context])
+    do: invoke_transition(handle, :event, [event, params, state, context], state)
 
   @doc "Invoke and validate one pinned workbench info callback."
   @spec info(Handle.t(), term(), map(), map()) :: V1.transition()
   def info(%Handle{} = handle, message, state, context),
-    do: invoke_transition(handle, :info, [message, state, context])
+    do: invoke_transition(handle, :info, [message, state, context], state)
 
   @doc "Resolve and validate the render target reference for current state."
   @spec render_target(Handle.t(), map()) :: {:ok, V1.render_target()} | {:error, term()}
@@ -117,7 +117,7 @@ defmodule CatalystWeb.Workbench do
   def restore(%Handle{} = handle, capsule, context) do
     with {:ok, capsule} <- V1.validate_capsule(capsule),
          :ok <- ensure_callback(handle, :restore, 2) do
-      invoke_transition(handle, :restore, [capsule, context])
+      invoke_transition(handle, :restore, [capsule, context], nil)
     end
   end
 
@@ -155,9 +155,12 @@ defmodule CatalystWeb.Workbench do
     }
   end
 
-  defp invoke_transition(handle, callback, args) do
+  defp invoke_transition(handle, callback, args, previous_state) do
     with {:ok, result} <- invoke_callback(handle, callback, args) do
-      V1.validate_transition(result)
+      case previous_state do
+        nil -> V1.validate_transition(result)
+        state -> V1.validate_transition(result, state)
+      end
     end
   end
 

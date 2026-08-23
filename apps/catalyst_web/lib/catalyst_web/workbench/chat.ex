@@ -9,36 +9,35 @@ defmodule CatalystWeb.Workbench.Chat do
 
   @behaviour Catalyst.Contracts.Workbench.V1
 
-  @open_request "session-open"
-  @submit_request "session-submit"
-  @abort_request "session-abort"
-  @snapshot_request "session-snapshot"
-  @models_request "models-list"
-  @threads_request "session-list"
-  @attach_request "session-attach"
-  @close_request "session-close"
-  @configure_request "session-configure"
+  alias Catalyst.Agent.Event
+  alias Catalyst.LLM.Event, as: LLMEvent
 
   @impl true
   def mount(%{workspace: workspace}) when is_binary(workspace) do
-    {:ok,
-     %{
-       version: 1,
-       workspace: workspace,
-       session_id: nil,
-       messages: [],
-       input: "",
-       models: [],
-       selected_model: nil,
-       threads: %{projects: []},
-       file_search: nil,
-       file_search_request: nil,
-       file_refs: %{},
-       request_seq: 0,
-       running: false,
-       status: :starting,
-       error: nil
-     }, [{:models, :list, @models_request}, {:session, :open, @open_request}]}
+    state = %{
+      version: 1,
+      workspace: workspace,
+      session_id: nil,
+      messages: [],
+      messages_truncated: 0,
+      input: "",
+      models: [],
+      selected_model: nil,
+      threads: %{projects: []},
+      file_search: nil,
+      file_search_request: nil,
+      file_refs: %{},
+      pending_requests: %{},
+      request_seq: 0,
+      running: false,
+      status: :starting,
+      error: nil
+    }
+
+    {state, models_request} = request(state, "models")
+    {state, open_request} = request(state, "open")
+
+    {:ok, state, [{:models, :list, models_request}, {:session, :open, open_request}]}
   end
 
   def mount(context), do: {:error, {:invalid_workbench_context, context}}
@@ -65,6 +64,7 @@ defmodule CatalystWeb.Workbench.Chat do
 
       {session_id, input, images} when is_binary(session_id) and is_list(images) ->
         prompt = %{"text" => input, "images" => images}
+        {state, request_id} = request(state, "submit")
 
         {:ok,
          %{
@@ -74,7 +74,7 @@ defmodule CatalystWeb.Workbench.Chat do
              error: nil,
              file_search: nil,
              file_refs: %{}
-         }, [{:session, :submit, @submit_request, session_id, prompt}]}
+         }, [{:session, :submit, request_id, session_id, prompt}]}
 
       _unavailable ->
         {:ok, %{state | error: "The chat session is not ready yet."}, []}
@@ -83,20 +83,25 @@ defmodule CatalystWeb.Workbench.Chat do
 
   def event("chat:abort", _params, %{session_id: session_id} = state, _context)
       when is_binary(session_id) do
-    {:ok, state, [{:session, :abort, @abort_request, session_id}]}
+    {state, request_id} = request(state, "abort")
+    {:ok, state, [{:session, :abort, request_id, session_id}]}
   end
 
   def event("chat:new", _params, state, _context) do
+    {state, request_id} = request(state, "open")
+
     {:ok, %{state | session_id: nil, messages: [], running: false, status: :starting},
-     [{:session, :open, @open_request, selected_settings(state)}]}
+     [{:session, :open, request_id, selected_settings(state)}]}
   end
 
   def event("chat:model", %{"model" => %{"selection" => selection}}, state, _context) do
     with {:ok, selected} <- parse_selection(selection),
          session_id when is_binary(session_id) <- state.session_id do
+      {state, request_id} = request(state, "configure")
+
       {:ok, %{state | selected_model: selected, error: nil},
        [
-         {:session, :configure, @configure_request, session_id,
+         {:session, :configure, request_id, session_id,
           %{
             "provider" => selected.provider,
             "model" => selected.model
@@ -109,25 +114,37 @@ defmodule CatalystWeb.Workbench.Chat do
 
   def event("chat:switch", %{"id" => id}, state, _context) when is_binary(id) do
     case id == state.session_id do
-      true -> {:ok, state, []}
-      false -> {:ok, %{state | status: :starting}, [{:session, :attach, @attach_request, id}]}
+      true ->
+        {:ok, state, []}
+
+      false ->
+        {state, request_id} = request(state, "attach")
+        {:ok, %{state | status: :starting}, [{:session, :attach, request_id, id}]}
     end
   end
 
   def event("chat:close", %{"id" => id}, state, _context) when is_binary(id) do
-    effects =
+    {state, close_request} = request(state, "close")
+
+    {state, effects} =
       case id == state.session_id do
         true ->
-          [
-            {:session, :close, @close_request, id},
-            {:session, :open, @open_request, selected_settings(state)}
-          ]
+          {state, open_request} = request(state, "open")
+
+          {state,
+           [
+             {:session, :close, close_request, id},
+             {:session, :open, open_request, selected_settings(state)}
+           ]}
 
         false ->
-          [
-            {:session, :close, @close_request, id},
-            {:session, :list, @threads_request, state.session_id}
-          ]
+          {state, threads_request} = request(state, "threads")
+
+          {state,
+           [
+             {:session, :close, close_request, id},
+             {:session, :list, threads_request, state.session_id}
+           ]}
       end
 
     {:ok, state, effects}
@@ -155,57 +172,55 @@ defmodule CatalystWeb.Workbench.Chat do
   def event(_event, _params, state, _context), do: {:ok, state, []}
 
   @impl true
-  def info({:effect_result, @open_request, {:ok, snapshot}}, state, _context),
-    do: apply_snapshot(state, snapshot)
-
-  def info({:effect_result, @attach_request, {:ok, snapshot}}, state, _context),
-    do: apply_snapshot(state, snapshot)
-
-  def info({:effect_result, @submit_request, {:ok, result}}, state, _context) do
-    next_state =
-      state
-      |> Map.put(:running, true)
-      |> Map.put(:error, nil)
-      |> maybe_put_threads(result)
-
-    {:ok, next_state, []}
+  def info({:effect_result, request_id, result}, state, _context) when is_binary(request_id) do
+    case pop_request(state, request_id) do
+      {:ok, operation, state} -> handle_effect_result(operation, request_id, result, state)
+      :error -> {:ok, state, []}
+    end
   end
-
-  def info({:effect_result, @abort_request, :ok}, state, _context),
-    do: {:ok, %{state | running: false}, []}
-
-  def info({:effect_result, @snapshot_request, {:ok, snapshot}}, state, _context),
-    do: apply_snapshot(state, snapshot)
-
-  def info({:effect_result, @models_request, {:ok, models}}, state, _context)
-      when is_list(models) do
-    {:ok, %{state | models: models}, []}
-  end
-
-  def info({:effect_result, @threads_request, {:ok, threads}}, state, _context)
-      when is_map(threads) do
-    {:ok, %{state | threads: threads}, []}
-  end
-
-  def info({:effect_result, @close_request, :ok}, state, _context), do: {:ok, state, []}
-
-  def info({:effect_result, @configure_request, {:ok, snapshot}}, state, _context),
-    do: apply_snapshot(state, snapshot)
 
   def info(
-        {:effect_result, request_id, {:ok, %{query: query, results: results}}},
-        %{file_search_request: request_id} = state,
+        {:session_event, session_id, %Event.MessageStart{}},
+        %{session_id: session_id} = state,
+        _context
+      ),
+      do: {:ok, state, [{:client, :push, "workbench:stream_reset", %{}}]}
+
+  def info(
+        {:session_event, session_id,
+         %Event.MessageUpdate{llm_event: %LLMEvent.TextDelta{delta: delta}}},
+        %{session_id: session_id} = state,
         _context
       )
-      when is_binary(request_id) and is_binary(query) and is_list(results) do
-    {:ok, %{state | file_search: %{query: query, results: results}}, []}
-  end
+      when is_binary(delta),
+      do:
+        {:ok, state, [{:client, :push, "workbench:stream_delta", %{kind: "text", delta: delta}}]}
 
-  def info({:effect_result, _request_id, {:error, reason}}, state, _context),
-    do: {:ok, %{state | running: false, status: :error, error: inspect(reason)}, []}
+  def info(
+        {:session_event, session_id,
+         %Event.MessageUpdate{llm_event: %LLMEvent.ThinkingDelta{delta: delta}}},
+        %{session_id: session_id} = state,
+        _context
+      )
+      when is_binary(delta),
+      do:
+        {:ok, state,
+         [{:client, :push, "workbench:stream_delta", %{kind: "thinking", delta: delta}}]}
+
+  def info(
+        {:session_event, session_id, event},
+        %{session_id: session_id} = state,
+        _context
+      )
+      when is_struct(event, Event.MessageEnd) or is_struct(event, Event.ToolExecutionEnd) or
+             is_struct(event, Event.AgentEnd),
+      do:
+        request_snapshot(state, session_id, [
+          {:client, :push, "workbench:stream_finish", %{}}
+        ])
 
   def info({:session_event, session_id, _event}, %{session_id: session_id} = state, _context),
-    do: {:ok, state, [{:session, :snapshot, @snapshot_request, session_id}]}
+    do: {:ok, state, []}
 
   def info({:session_exit, session_id, reason}, %{session_id: session_id} = state, _context) do
     {:ok, %{state | running: false, status: :error, error: "Session exited: #{inspect(reason)}"},
@@ -241,20 +256,30 @@ defmodule CatalystWeb.Workbench.Chat do
       |> Map.put(:status, :starting)
       |> Map.put(:file_search, nil)
       |> Map.put(:file_search_request, nil)
+      |> Map.put(:pending_requests, %{})
+      |> Map.put_new(:request_seq, 0)
+      |> Map.put_new(:messages_truncated, 0)
 
     case Map.get(restored, :session_id) do
       session_id when is_binary(session_id) ->
+        {restored, models_request} = request(restored, "models")
+        {restored, snapshot_request} = request(restored, "snapshot")
+
         {:ok, restored,
          [
-           {:models, :list, @models_request},
-           {:session, :snapshot, @snapshot_request, session_id}
+           {:models, :list, models_request},
+           {:session, :snapshot, snapshot_request, session_id}
          ]}
 
       _missing ->
-        {:ok, Map.put(restored, :session_id, nil),
+        restored = Map.put(restored, :session_id, nil)
+        {restored, models_request} = request(restored, "models")
+        {restored, open_request} = request(restored, "open")
+
+        {:ok, restored,
          [
-           {:models, :list, @models_request},
-           {:session, :open, @open_request, selected_settings(restored)}
+           {:models, :list, models_request},
+           {:session, :open, open_request, selected_settings(restored)}
          ]}
     end
   end
@@ -271,6 +296,7 @@ defmodule CatalystWeb.Workbench.Chat do
        Map.take(snapshot, [
          :session_id,
          :messages,
+         :messages_truncated,
          :running,
          :error,
          :selected_model,
@@ -293,10 +319,9 @@ defmodule CatalystWeb.Workbench.Chat do
         {:ok, %{state | file_search: nil, file_search_request: nil}, []}
 
       query ->
-        sequence = state.request_seq + 1
-        request_id = "file-search-#{sequence}"
+        {state, request_id} = request(state, "file_search", %{"query" => query})
 
-        {:ok, %{state | request_seq: sequence, file_search_request: request_id},
+        {:ok, %{state | file_search_request: request_id},
          [{:workspace, :search, request_id, query}]}
     end
   end
@@ -342,4 +367,124 @@ defmodule CatalystWeb.Workbench.Chat do
     do: %{state | threads: threads}
 
   defp maybe_put_threads(state, _result), do: state
+
+  defp request_snapshot(state, session_id, preceding_effects) do
+    {state, request_id} = request(state, "snapshot")
+
+    {:ok, state, preceding_effects ++ [{:session, :snapshot, request_id, session_id}]}
+  end
+
+  defp request(state, kind, metadata \\ %{}) do
+    sequence = state.request_seq + 1
+    request_id = "#{kind}-#{sequence}"
+    operation = Map.put(metadata, "kind", kind)
+
+    state = %{
+      state
+      | request_seq: sequence,
+        pending_requests: Map.put(state.pending_requests, request_id, operation)
+    }
+
+    {state, request_id}
+  end
+
+  defp pop_request(state, request_id) do
+    case Map.pop(state.pending_requests, request_id) do
+      {nil, _pending} ->
+        :error
+
+      {operation, pending} ->
+        {:ok, operation, %{state | pending_requests: pending}}
+    end
+  end
+
+  defp handle_effect_result(%{"kind" => kind}, request_id, {:error, reason}, state),
+    do: handle_effect_error(kind, request_id, reason, state)
+
+  defp handle_effect_result(%{"kind" => kind}, _request_id, {:ok, snapshot}, state)
+       when kind in ["open", "attach", "snapshot", "configure"],
+       do: apply_snapshot(state, snapshot)
+
+  defp handle_effect_result(%{"kind" => "submit"}, _request_id, {:ok, result}, state) do
+    next_state =
+      state
+      |> Map.put(:running, true)
+      |> Map.put(:error, nil)
+      |> maybe_put_threads(result)
+
+    {:ok, next_state, []}
+  end
+
+  defp handle_effect_result(%{"kind" => "abort"}, _request_id, :ok, state),
+    do: {:ok, %{state | running: false}, []}
+
+  defp handle_effect_result(%{"kind" => "models"}, _request_id, {:ok, models}, state)
+       when is_list(models),
+       do: {:ok, %{state | models: models}, []}
+
+  defp handle_effect_result(%{"kind" => "threads"}, _request_id, {:ok, threads}, state)
+       when is_map(threads),
+       do: {:ok, %{state | threads: threads}, []}
+
+  defp handle_effect_result(%{"kind" => "close"}, _request_id, :ok, state),
+    do: {:ok, state, []}
+
+  defp handle_effect_result(
+         %{"kind" => "file_search"},
+         request_id,
+         {:ok, %{query: query, results: results}},
+         %{file_search_request: request_id} = state
+       )
+       when is_binary(query) and is_list(results),
+       do: {:ok, %{state | file_search: %{query: query, results: results}}, []}
+
+  defp handle_effect_result(_operation, _request_id, _result, state),
+    do: {:ok, state, []}
+
+  defp handle_effect_error("file_search", request_id, reason, state) do
+    state =
+      case state.file_search_request == request_id do
+        true -> %{state | file_search: nil, file_search_request: nil}
+        false -> state
+      end
+
+    {:ok, %{state | error: "File search unavailable: #{inspect(reason)}"}, []}
+  end
+
+  defp handle_effect_error(kind, _request_id, reason, state)
+       when kind in ["models", "threads", "configure", "close"] do
+    {:ok, %{state | error: "#{human_operation(kind)} failed: #{inspect(reason)}"}, []}
+  end
+
+  defp handle_effect_error(kind, _request_id, reason, state)
+       when kind in ["submit", "abort", "snapshot"] do
+    {:ok,
+     %{
+       state
+       | running: false,
+         status: :ready,
+         error: "#{human_operation(kind)} failed: #{inspect(reason)}"
+     }, []}
+  end
+
+  defp handle_effect_error(kind, _request_id, reason, state)
+       when kind in ["open", "attach"] do
+    {:ok,
+     %{
+       state
+       | running: false,
+         status: :error,
+         error: "#{human_operation(kind)} failed: #{inspect(reason)}"
+     }, []}
+  end
+
+  defp human_operation("models"), do: "Model loading"
+  defp human_operation("threads"), do: "Thread loading"
+  defp human_operation("configure"), do: "Model configuration"
+  defp human_operation("close"), do: "Thread closing"
+  defp human_operation("submit"), do: "Message submission"
+  defp human_operation("abort"), do: "Run cancellation"
+  defp human_operation("snapshot"), do: "Session refresh"
+  defp human_operation("open"), do: "Session opening"
+  defp human_operation("attach"), do: "Session attachment"
 end

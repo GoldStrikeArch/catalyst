@@ -71,9 +71,7 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
       |> refresh_sidebar()
     else
       {:error, reason} ->
-        socket
-        |> assign(cwd: cwd)
-        |> session_start_failed(reason)
+        session_start_failed(socket, reason)
     end
   end
 
@@ -280,6 +278,13 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
     else
       {:error, reason} ->
         Logger.warning("[shell] could not resume cataloged session #{id}: #{inspect(reason)}")
+        start_in(socket, cwd)
+
+      {:ok, %{id: actual_id}} ->
+        Logger.warning(
+          "[shell] session manager returned #{actual_id} while resuming cataloged session #{id}"
+        )
+
         start_in(socket, cwd)
     end
   end

@@ -11,7 +11,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   import Phoenix.Component, only: [assign: 2]
   import Phoenix.LiveView, only: [put_flash: 3]
 
-  alias Catalyst.LLM.Models
+  alias Catalyst.LLM.{Models, ProviderConfig, Registry}
   alias Catalyst.Session.Server
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
   alias CatalystWeb.ShellLive.SessionLifecycle
@@ -259,7 +259,7 @@ defmodule CatalystWeb.ShellLive.Settings do
 
     case Models.catalog_snapshot(selected_provider, prefs.model) do
       {:ok, snapshot} -> normalize_snapshot(snapshot, selected_provider, prefs.model)
-      {:error, _reason} -> fallback_snapshot(selected_provider, prefs.model)
+      {:error, reason} -> fallback_snapshot(selected_provider, prefs.model, reason)
     end
   end
 
@@ -599,9 +599,29 @@ defmodule CatalystWeb.ShellLive.Settings do
     %{models: ensure_selected(models, selected), selected: selected}
   end
 
-  defp fallback_snapshot(provider, model) do
-    selected = normalize_entry(%{id: model}, provider, model)
-    %{models: [selected], selected: selected}
+  defp fallback_snapshot(provider, model, reason) do
+    selected =
+      provider
+      |> fallback_entry(model)
+      |> normalize_entry(provider, model)
+
+    %{models: [selected], selected: selected, catalog_error: reason}
+  end
+
+  defp fallback_entry(provider, model) do
+    case Registry.fetch_by_id(provider) do
+      {:ok, {api, %ProviderConfig{} = config}} ->
+        %{
+          id: model,
+          api: api,
+          auth: config.auth,
+          controls: config.controls,
+          provider_name: config.name
+        }
+
+      {:error, _reason} ->
+        %{id: model}
+    end
   end
 
   defp normalize_entry(entry, provider, fallback_model) do

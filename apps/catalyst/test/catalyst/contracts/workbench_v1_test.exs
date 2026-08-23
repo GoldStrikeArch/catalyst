@@ -28,6 +28,7 @@ defmodule Catalyst.Contracts.Workbench.V1Test do
          {:session, :close, "session-close", "session-1"},
          {:session, :configure, "session-configure", "session-1",
           %{"provider" => "provider", "model" => "model"}},
+         {:client, :push, "workbench:stream_delta", %{kind: "text", delta: "hello"}},
          {:navigate, "/"}
        ]}
 
@@ -64,5 +65,20 @@ defmodule Catalyst.Contracts.Workbench.V1Test do
 
     assert {:error, {:invalid_workbench_capsule, %{payload: %{}}}} =
              V1.validate_capsule(%{payload: %{}})
+  end
+
+  test "the emergency state ceiling permits workbenches larger than four MiB" do
+    state = %{version: 1, document: String.duplicate("x", 5_000_000)}
+
+    assert {:ok, ^state, []} = V1.validate_transition({:ok, state, []})
+  end
+
+  test "unchanged state validates bounded client pushes without a state re-encode" do
+    state = %{version: 1, messages: ["already validated"]}
+
+    transition =
+      {:ok, state, [{:client, :push, "workbench:stream_delta", %{kind: "text", delta: "next"}}]}
+
+    assert V1.validate_transition(transition, state) == transition
   end
 end

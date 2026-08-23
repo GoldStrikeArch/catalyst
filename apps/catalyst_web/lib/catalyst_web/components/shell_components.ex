@@ -24,7 +24,7 @@ defmodule CatalystWeb.ShellComponents do
   def render(assigns) do
     assigns =
       assign(assigns,
-        codex_form: codex_form(assigns.codex_prefs),
+        codex_form: codex_form(assigns.codex_prefs, assigns.codex_catalog),
         workflow_form: workflow_form(assigns.workflow_prefs),
         diagnostic_prompt: diagnostic_prompt(assigns),
         diagnostic_run_engine: metadata_value(assigns.run_metadata, :run_engine),
@@ -587,9 +587,9 @@ defmodule CatalystWeb.ShellComponents do
     """
   end
 
-  defp codex_form(prefs) do
+  defp codex_form(prefs, catalog) do
     to_form(%{
-      "model" => prefs.model,
+      "model" => Models.picker_value(catalog, prefs.provider, prefs.model),
       "effort" => prefs.effort,
       "transport" => prefs.transport
     })

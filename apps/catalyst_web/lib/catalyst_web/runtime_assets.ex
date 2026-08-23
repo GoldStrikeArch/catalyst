@@ -9,6 +9,8 @@ defmodule CatalystWeb.RuntimeAssets do
   generation untouched.
   """
 
+  require Logger
+
   alias Catalyst.Files.AtomicWrite
 
   @digest_format ~r/^[0-9a-f]{64}$/
@@ -204,12 +206,48 @@ defmodule CatalystWeb.RuntimeAssets do
 
   defp adopt_unversioned_workspace do
     with {:ok, seed_files} <- tree_files(seed_workspace()),
-         true <- seed_files_unchanged?(seed_files) do
+         :ok <- copy_missing_seed_files(seed_files),
+         :ok <- warn_unversioned_changes(seed_files) do
       replace_seed_baseline()
-    else
-      false -> {:error, {:asset_workspace_unversioned, workspace()}}
-      {:error, _reason} = error -> error
     end
+  end
+
+  defp copy_missing_seed_files(seed_files) do
+    Enum.reduce_while(seed_files, :ok, fn {relative, content}, :ok ->
+      destination = Path.join(workspace(), relative)
+
+      case File.exists?(destination) do
+        true ->
+          {:cont, :ok}
+
+        false ->
+          with :ok <- File.mkdir_p(Path.dirname(destination)),
+               :ok <- File.write(destination, content) do
+            {:cont, :ok}
+          else
+            {:error, reason} ->
+              {:halt, {:error, {:asset_workspace_adoption_failed, destination, reason}}}
+          end
+      end
+    end)
+  end
+
+  defp warn_unversioned_changes(seed_files) do
+    case Enum.any?(seed_files, fn {relative, content} ->
+           path = Path.join(workspace(), relative)
+           File.exists?(path) and File.read(path) != {:ok, content}
+         end) do
+      true ->
+        Logger.warning(
+          "adopting an unversioned runtime asset workspace without overwriting user files",
+          workspace: workspace()
+        )
+
+      false ->
+        :ok
+    end
+
+    :ok
   end
 
   defp upgrade_workspace do
@@ -332,12 +370,6 @@ defmodule CatalystWeb.RuntimeAssets do
     else
       _error -> false
     end
-  end
-
-  defp seed_files_unchanged?(seed_files) do
-    Enum.all?(seed_files, fn {relative, content} ->
-      File.read(Path.join(workspace(), relative)) == {:ok, content}
-    end)
   end
 
   defp tree_files(root), do: collect_tree_files(root, root, %{})

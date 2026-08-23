@@ -144,6 +144,44 @@ defmodule Catalyst.RecoveryHostTest do
     refute File.exists?(Path.join(state, "child_pid"))
   end
 
+  test "records an operator stop during the safe-mode retry", %{home: home, state: state} do
+    File.write!(Path.join(home, "product_profile"), "ide\n")
+    File.write!(Path.join(state, "last_known_good_profile"), "coding-agent\n")
+
+    port =
+      Port.open(
+        {:spawn_executable, @host},
+        [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          args: ["start", "--state-dir", state, "--deadline", "2", "--", @child],
+          env: [
+            {~c"CATALYST_HOME", String.to_charlist(home)},
+            {~c"TEST_RECOVERY_SCENARIO", ~c"rollback_signal"},
+            {~c"TEST_RECOVERY_STATE", String.to_charlist(state)},
+            {~c"EXPECTED_PROFILE", ~c"coding-agent"}
+          ]
+        ]
+      )
+
+    on_exit(fn ->
+      case Port.info(port) do
+        nil -> :ok
+        _info -> Port.close(port)
+      end
+    end)
+
+    assert_receive {^port, {:data, "child-ready\n"}}, 2_000
+    {:os_pid, host_pid} = Port.info(port, :os_pid)
+    assert {_output, 0} = System.cmd("kill", ["-TERM", Integer.to_string(host_pid)])
+    assert_receive {^port, {:exit_status, 0}}, 5_000
+
+    assert File.read!(Path.join(state, "child_signal")) == "term\n"
+    assert File.read!(Path.join(state, "boot_status")) == "stopped:0:coding-agent:operator\n"
+    refute File.exists?(Path.join(state, "child_pid"))
+  end
+
   defp run_host(home, state, scenario, expected_profile \\ "coding-agent") do
     System.cmd(
       @host,

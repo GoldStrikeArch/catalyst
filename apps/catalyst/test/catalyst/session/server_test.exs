@@ -5,6 +5,8 @@ defmodule Catalyst.Session.ServerTest do
 
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Hooks, Message, Model}
+  alias Catalyst.Contracts.SessionEngine.V2
+  alias Catalyst.Runtime.{ExtensionPoints, SessionEngine}
   alias Catalyst.Session.{EventSink, Manager, Server, Store}
 
   setup do
@@ -327,6 +329,33 @@ defmodule Catalyst.Session.ServerTest do
     snap = Server.state(pid)
     assert snap.error_message == "Run aborted."
     assert Enum.any?(snap.messages, &match?(%Message.Assistant{stop_reason: :aborted}, &1))
+  end
+
+  test "the host rejects an engine that starts a second run", %{tmp: tmp, model: model} do
+    owner = "always_start_engine_#{System.unique_integer([:positive])}"
+
+    assert :ok =
+             Catalyst.ExtensionAPI.claim(
+               Catalyst.ExtensionAPI.new(owner),
+               SessionEngine.key(),
+               Catalyst.Test.AlwaysStartSessionEngine,
+               contract: V2.ref(),
+               priority: 900
+             )
+
+    on_exit(fn -> ExtensionPoints.purge_owner(owner) end)
+
+    {_id, pid} =
+      start(tmp, model, [{:tool, "bash", %{"command" => "sleep 30"}}, {:text, "unreached"}])
+
+    assert :ok = Server.prompt(pid, "first")
+    first_run = :sys.get_state(pid).run
+
+    assert {:error, {:session_effect_rejected, :run_already_started}} =
+             Server.prompt(pid, "second")
+
+    assert :sys.get_state(pid).run == first_run
+    Server.abort(pid)
   end
 
   test "abort mid-tool synthesizes results for orphaned tool calls", %{tmp: tmp, model: model} do

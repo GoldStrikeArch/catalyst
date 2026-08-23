@@ -9,8 +9,9 @@ defmodule Catalyst.Contracts.Workbench.V1 do
 
   alias Catalyst.Runtime.ContractRef
 
-  @max_state_bytes 4_194_304
+  @max_state_bytes 268_435_456
   @max_effects 32
+  @max_client_payload_bytes 1_048_576
 
   @type state :: map()
   @type context :: map()
@@ -36,6 +37,7 @@ defmodule Catalyst.Contracts.Workbench.V1 do
           | {:session, :attach, request_id(), String.t()}
           | {:session, :close, request_id(), String.t()}
           | {:session, :configure, request_id(), String.t(), map()}
+          | {:client, :push, String.t(), map()}
           | {:navigate, String.t()}
   @type transition :: {:ok, state(), [effect()]} | {:error, term()}
   @type capsule :: %{version: pos_integer(), payload: term()}
@@ -86,6 +88,22 @@ defmodule Catalyst.Contracts.Workbench.V1 do
 
   def validate_transition({:error, _reason} = error), do: error
   def validate_transition(result), do: {:error, {:invalid_workbench_transition, result}}
+
+  @doc """
+  Validate a transition while avoiding a full re-encode when state is unchanged.
+
+  This is used for bounded client-push effects such as streaming deltas. Changed
+  state still receives the complete serializability and size validation.
+  """
+  @spec validate_transition(term(), state()) :: transition()
+  def validate_transition({:ok, state, effects}, state) when is_map(state) and is_list(effects) do
+    case validate_effects(effects) do
+      :ok -> {:ok, state, effects}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def validate_transition(result, _previous_state), do: validate_transition(result)
 
   @doc "Validate effects accepted by the stable workbench host."
   @spec validate_effects([term()]) :: :ok | {:error, term()}
@@ -158,6 +176,7 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   defp request_ids({:session, :configure, request_id, _session_id, _settings}),
     do: [request_id]
 
+  defp request_ids({:client, :push, _event, _payload}), do: []
   defp request_ids({:navigate, _location}), do: []
 
   defp valid_effect?({:workspace, :list, request_id}), do: valid_request_id?(request_id)
@@ -208,6 +227,11 @@ defmodule Catalyst.Contracts.Workbench.V1 do
       valid_request_id?(request_id) and valid_text?(session_id, 128) and
         valid_session_settings?(settings)
 
+  defp valid_effect?({:client, :push, "workbench:" <> _suffix = event, payload})
+       when is_map(payload) do
+    valid_text?(event, 128) and serializable_client_payload?(payload)
+  end
+
   defp valid_effect?({:navigate, "/" <> _path = location}),
     do: byte_size(location) <= 4_096 and not String.starts_with?(location, "//")
 
@@ -254,4 +278,11 @@ defmodule Catalyst.Contracts.Workbench.V1 do
         mime_type in ~w(image/png image/jpeg image/gif image/webp)
 
   defp valid_prompt_image?(_image), do: false
+
+  defp serializable_client_payload?(payload) do
+    case Jason.encode(payload) do
+      {:ok, json} -> byte_size(json) <= @max_client_payload_bytes
+      {:error, _reason} -> false
+    end
+  end
 end

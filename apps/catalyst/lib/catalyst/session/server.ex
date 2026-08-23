@@ -955,10 +955,16 @@ defmodule Catalyst.Session.Server do
            state.session_engine_state
          ) do
       {:ok, engine_state, private_state, effects} ->
-        state
-        |> EngineState.merge_into_server(engine_state)
-        |> Map.put(:session_engine_state, private_state)
-        |> interpret_session_effects(effects)
+        case validate_session_effect_sequence(state, effects) do
+          :ok ->
+            state
+            |> EngineState.merge_into_server(engine_state)
+            |> Map.put(:session_engine_state, private_state)
+            |> interpret_session_effects(effects)
+
+          {:error, reason} ->
+            raise "session engine effect rejected: #{inspect(reason)}"
+        end
 
       {:error, reason} ->
         raise "session engine event failed: #{inspect(reason)}"
@@ -1076,13 +1082,15 @@ defmodule Catalyst.Session.Server do
 
     case result do
       {:ok, engine_state, private_state, effects, reply} ->
-        state =
-          state
-          |> EngineState.merge_into_server(engine_state)
-          |> Map.put(:session_engine_state, private_state)
-          |> interpret_session_effects(effects)
+        with :ok <- validate_session_effect_sequence(state, effects) do
+          state =
+            state
+            |> EngineState.merge_into_server(engine_state)
+            |> Map.put(:session_engine_state, private_state)
+            |> interpret_session_effects(effects)
 
-        {:ok, reply, state}
+          {:ok, reply, state}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -1103,6 +1111,28 @@ defmodule Catalyst.Session.Server do
   defp interpret_session_effects(%State{} = state, effects) do
     Enum.reduce(effects, state, &interpret_session_effect/2)
   end
+
+  defp validate_session_effect_sequence(%State{} = state, effects) do
+    effects
+    |> Enum.reduce_while(run_status(state), &validate_session_effect/2)
+    |> case do
+      :idle -> :ok
+      :busy -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_session_effect(%Effect{kind: :start_run}, :idle),
+    do: {:cont, :busy}
+
+  defp validate_session_effect(%Effect{kind: :start_run}, :busy),
+    do: {:halt, {:error, {:session_effect_rejected, :run_already_started}}}
+
+  defp validate_session_effect(%Effect{kind: :stop_run}, _status),
+    do: {:cont, :idle}
+
+  defp validate_session_effect(%Effect{kind: :emit}, status),
+    do: {:cont, status}
 
   defp interpret_session_effect(%Effect{kind: :start_run, payload: messages}, state) do
     state
