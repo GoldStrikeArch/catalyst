@@ -23,6 +23,16 @@ defmodule CatalystWeb.WorkbenchTest do
            end)
   end
 
+  test "chat is an independent built-in workbench slot" do
+    assert {:ok, resolution} =
+             Workbench.resolve(%{metadata: %{workbench_slot: "chat"}})
+
+    assert resolution.key == Workbench.key("chat")
+    assert resolution.claim.owner == :builtin
+    assert resolution.claim.implementation == CatalystWeb.Workbench.Chat
+    assert resolution.claim.binding == {:pin, :mount}
+  end
+
   test "a claimed workbench resolves through a process-owned handle", %{owner: owner} do
     assert :ok =
              ExtensionAPI.claim(

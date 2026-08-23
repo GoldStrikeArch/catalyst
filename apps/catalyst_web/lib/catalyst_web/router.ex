@@ -1,8 +1,9 @@
 defmodule CatalystWeb.Router do
   @moduledoc """
   HTTP routes. The current chat product renders through `CatalystWeb.ShellLive`;
-  `/ide` exercises the stable replaceable-workbench host before any root switch.
-  Other `/:page` paths resolve runtime-registered shell pages from the UI registry.
+  `/ide` and `/workbench/:workbench` exercise the stable replaceable-workbench
+  host before any root switch. Other `/:page` paths resolve runtime-registered
+  shell pages from the UI registry.
   """
   use CatalystWeb, :router
 
@@ -37,6 +38,7 @@ defmodule CatalystWeb.Router do
 
     # The stable workbench host is an A/B seam; `/` remains the chat Shell.
     live "/ide", WorkbenchHostLive, :index
+    live "/workbench/:workbench", WorkbenchHostLive, :show
 
     # One LiveView for the current shell; the catch-all resolves runtime-registered
     # pages by path (e.g. /settings) with no router recompile per page.

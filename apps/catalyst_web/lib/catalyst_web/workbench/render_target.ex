@@ -2,9 +2,9 @@ defmodule CatalystWeb.Workbench.RenderTarget do
   @moduledoc """
   Immutable render descriptor captured at a Workbench mount boundary.
 
-  Legacy string IDs are captured from the UI registry once. An artifact-backed
-  managed Workbench may instead render through its own exact physical module.
-  A mounted Workbench never resolves either target again.
+  Legacy string IDs are captured from the UI registry once. A built-in or
+  artifact-backed managed Workbench may instead render through its own exact
+  implementation module. A mounted Workbench never resolves either target again.
   """
 
   alias Catalyst.Runtime.{ActivationId, ArtifactId, Claim, Handle, ImplementationRef, Resolution}
@@ -68,6 +68,32 @@ defmodule CatalystWeb.Workbench.RenderTarget do
          sequence: entry.seq,
          snapshot_id: resolution.snapshot_id,
          generation: Map.get(resolution.claim.metadata, :runtime_generation),
+         artifact: nil
+       }}
+    end
+  end
+
+  defp build_direct(
+         {module, function} = target,
+         %Handle{
+           implementation: module,
+           generation: nil,
+           artifact: nil,
+           resolution: %Resolution{
+             claim: %Claim{owner: :builtin, implementation: module}
+           }
+         } = handle
+       ) do
+    with :ok <- validate_callback(module, function, target) do
+      {:ok,
+       %__MODULE__{
+         id: target,
+         module: module,
+         function: function,
+         owner: :builtin,
+         sequence: nil,
+         snapshot_id: handle.resolution.snapshot_id,
+         generation: nil,
          artifact: nil
        }}
     end

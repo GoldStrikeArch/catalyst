@@ -53,9 +53,11 @@ defmodule CatalystWeb.Workbench do
   def resolve(context \\ %{}) do
     context = Context.host(context)
 
-    case Resolver.resolve(claims(), key(), context, contract: V1.ref()) do
-      {:ok, resolution} -> {:ok, resolution}
-      {:error, %{status: {:error, reason}}} -> {:error, {:workbench_resolution, reason}}
+    with {:ok, service_key} <- resolution_key(context) do
+      case Resolver.resolve(claims(), service_key, context, contract: V1.ref()) do
+        {:ok, resolution} -> {:ok, resolution}
+        {:error, %{status: {:error, reason}}} -> {:error, {:workbench_resolution, reason}}
+      end
     end
   end
 
@@ -121,15 +123,19 @@ defmodule CatalystWeb.Workbench do
 
   @doc "Export managed and built-in workbench claims."
   @spec claims() :: [Claim.t()]
-  def claims, do: managed_claims() ++ [builtin_claim()]
+  def claims, do: managed_claims() ++ builtin_claims()
 
   @doc false
   @spec unmanaged_claims() :: [Claim.t()]
-  def unmanaged_claims, do: [builtin_claim()]
+  def unmanaged_claims, do: builtin_claims()
 
   @doc "Return the default workbench service key."
   @spec key() :: ServiceKey.t()
-  def key, do: ServiceKey.new!("ui", "workbench", "default")
+  def key, do: key("default")
+
+  @doc "Return a named workbench service key."
+  @spec key(String.t()) :: ServiceKey.t()
+  def key(slot) when is_binary(slot), do: ServiceKey.new!("ui", "workbench", slot)
 
   @doc "Project a workbench resolution into serializable mount diagnostics."
   @spec metadata(Resolution.t()) :: map()
@@ -242,15 +248,25 @@ defmodule CatalystWeb.Workbench do
 
   defp managed_claims do
     ExtensionPoints.list_claims()
-    |> Enum.filter(&(&1.key == key()))
+    |> Enum.filter(&workbench_claim?/1)
     |> Enum.filter(&ContractRef.compatible?(&1.contract, V1.ref()))
   end
 
-  defp builtin_claim do
+  defp workbench_claim?(%Claim{key: %ServiceKey{namespace: "ui", name: "workbench"}}), do: true
+  defp workbench_claim?(_claim), do: false
+
+  defp builtin_claims do
+    [
+      builtin_claim("default", CatalystWeb.Workbench.IDE),
+      builtin_claim("chat", CatalystWeb.Workbench.Chat)
+    ]
+  end
+
+  defp builtin_claim(slot, implementation) do
     %Claim{
-      key: key(),
+      key: key(slot),
       contract: V1.ref(),
-      implementation: CatalystWeb.Workbench.IDE,
+      implementation: implementation,
       owner: :builtin,
       scope: Scope.global(),
       priority: 0,
@@ -258,5 +274,10 @@ defmodule CatalystWeb.Workbench do
       provenance: :builtin,
       metadata: %{}
     }
+  end
+
+  defp resolution_key(%Context{metadata: metadata}) do
+    slot = Map.get(metadata, :workbench_slot, Map.get(metadata, "workbench_slot", "default"))
+    ServiceKey.new("ui", "workbench", slot)
   end
 end

@@ -15,11 +15,27 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   @type state :: map()
   @type context :: map()
   @type request_id :: String.t()
+  @type session_prompt ::
+          String.t()
+          | %{
+              required(String.t()) => String.t() | [map()]
+            }
   @type effect ::
           {:workspace, :list, request_id()}
           | {:workspace, :read, request_id(), Path.t()}
           | {:workspace, :write, request_id(), Path.t(), String.t()}
+          | {:workspace, :search, request_id(), String.t()}
           | {:command, :run, request_id(), String.t()}
+          | {:models, :list, request_id()}
+          | {:session, :open, request_id()}
+          | {:session, :open, request_id(), map()}
+          | {:session, :submit, request_id(), String.t(), session_prompt()}
+          | {:session, :abort, request_id(), String.t()}
+          | {:session, :snapshot, request_id(), String.t()}
+          | {:session, :list, request_id(), String.t() | nil}
+          | {:session, :attach, request_id(), String.t()}
+          | {:session, :close, request_id(), String.t()}
+          | {:session, :configure, request_id(), String.t(), map()}
           | {:navigate, String.t()}
   @type transition :: {:ok, state(), [effect()]} | {:error, term()}
   @type capsule :: %{version: pos_integer(), payload: term()}
@@ -35,11 +51,12 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   @callback info(term(), state(), context()) :: transition()
 
   @doc """
-  Return a legacy registered component ID or the managed implementation's own
-  artifact-bound `{module, function}` component.
+  Return a legacy registered component ID or the exact local implementation's
+  own `{module, function}` component.
 
-  The stable host rejects a direct target unless its module is the exact local
-  implementation pinned by the Workbench Runtime Handle.
+  Built-ins and managed artifacts may use direct targets. The stable host rejects
+  a direct target unless its module is the exact implementation pinned by the
+  Workbench Runtime Handle.
   """
   @callback render_target(state()) :: render_target()
 
@@ -126,7 +143,21 @@ defmodule Catalyst.Contracts.Workbench.V1 do
   defp request_ids({:workspace, :list, request_id}), do: [request_id]
   defp request_ids({:workspace, :read, request_id, _path}), do: [request_id]
   defp request_ids({:workspace, :write, request_id, _path, _content}), do: [request_id]
+  defp request_ids({:workspace, :search, request_id, _query}), do: [request_id]
   defp request_ids({:command, :run, request_id, _command}), do: [request_id]
+  defp request_ids({:models, :list, request_id}), do: [request_id]
+  defp request_ids({:session, :open, request_id}), do: [request_id]
+  defp request_ids({:session, :open, request_id, _settings}), do: [request_id]
+  defp request_ids({:session, :submit, request_id, _session_id, _input}), do: [request_id]
+  defp request_ids({:session, :abort, request_id, _session_id}), do: [request_id]
+  defp request_ids({:session, :snapshot, request_id, _session_id}), do: [request_id]
+  defp request_ids({:session, :list, request_id, _session_id}), do: [request_id]
+  defp request_ids({:session, :attach, request_id, _session_id}), do: [request_id]
+  defp request_ids({:session, :close, request_id, _session_id}), do: [request_id]
+
+  defp request_ids({:session, :configure, request_id, _session_id, _settings}),
+    do: [request_id]
+
   defp request_ids({:navigate, _location}), do: []
 
   defp valid_effect?({:workspace, :list, request_id}), do: valid_request_id?(request_id)
@@ -139,8 +170,43 @@ defmodule Catalyst.Contracts.Workbench.V1 do
       valid_request_id?(request_id) and valid_text?(path, 4_096) and
         valid_binary?(content, 1_048_576)
 
+  defp valid_effect?({:workspace, :search, request_id, query}),
+    do: valid_request_id?(request_id) and valid_binary?(query, 4_096)
+
   defp valid_effect?({:command, :run, request_id, command}),
     do: valid_request_id?(request_id) and valid_text?(command, 8_192)
+
+  defp valid_effect?({:models, :list, request_id}), do: valid_request_id?(request_id)
+
+  defp valid_effect?({:session, :open, request_id}), do: valid_request_id?(request_id)
+
+  defp valid_effect?({:session, :open, request_id, settings}),
+    do: valid_request_id?(request_id) and valid_session_settings?(settings)
+
+  defp valid_effect?({:session, :submit, request_id, session_id, prompt}),
+    do:
+      valid_request_id?(request_id) and valid_text?(session_id, 128) and
+        valid_session_prompt?(prompt)
+
+  defp valid_effect?({:session, :abort, request_id, session_id}),
+    do: valid_request_id?(request_id) and valid_text?(session_id, 128)
+
+  defp valid_effect?({:session, :snapshot, request_id, session_id}),
+    do: valid_request_id?(request_id) and valid_text?(session_id, 128)
+
+  defp valid_effect?({:session, :list, request_id, session_id}),
+    do:
+      valid_request_id?(request_id) and
+        (is_nil(session_id) or valid_text?(session_id, 128))
+
+  defp valid_effect?({:session, operation, request_id, session_id})
+       when operation in [:attach, :close],
+       do: valid_request_id?(request_id) and valid_text?(session_id, 128)
+
+  defp valid_effect?({:session, :configure, request_id, session_id, settings}),
+    do:
+      valid_request_id?(request_id) and valid_text?(session_id, 128) and
+        valid_session_settings?(settings)
 
   defp valid_effect?({:navigate, "/" <> _path = location}),
     do: byte_size(location) <= 4_096 and not String.starts_with?(location, "//")
@@ -153,4 +219,39 @@ defmodule Catalyst.Contracts.Workbench.V1 do
     do: is_binary(value) and byte_size(value) > 0 and byte_size(value) <= limit
 
   defp valid_binary?(value, limit), do: is_binary(value) and byte_size(value) <= limit
+
+  defp valid_session_settings?(settings) when is_map(settings) do
+    Enum.all?(settings, fn
+      {key, value} when is_binary(key) ->
+        valid_session_setting_key?(key) and valid_text?(value, 4_096)
+
+      _invalid ->
+        false
+    end)
+  end
+
+  defp valid_session_settings?(_settings), do: false
+
+  defp valid_session_setting_key?("provider"), do: true
+  defp valid_session_setting_key?("model"), do: true
+  defp valid_session_setting_key?("cwd"), do: true
+  defp valid_session_setting_key?(_key), do: false
+
+  defp valid_session_prompt?(prompt) when is_binary(prompt),
+    do: valid_text?(prompt, 262_144)
+
+  defp valid_session_prompt?(%{"text" => text, "images" => images})
+       when is_binary(text) and is_list(images) and length(images) <= 4 do
+    valid_binary?(text, 262_144) and Enum.all?(images, &valid_prompt_image?/1) and
+      (text != "" or images != [])
+  end
+
+  defp valid_session_prompt?(_prompt), do: false
+
+  defp valid_prompt_image?(%{"data" => data, "mime_type" => mime_type}),
+    do:
+      valid_binary?(data, 7_000_000) and
+        mime_type in ~w(image/png image/jpeg image/gif image/webp)
+
+  defp valid_prompt_image?(_image), do: false
 end

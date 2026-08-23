@@ -19,7 +19,9 @@ defmodule Catalyst.Session.EngineState do
     :error_message,
     :in_flight,
     :current_run_metadata,
-    :run_final_assistant
+    :run_final_assistant,
+    :steering,
+    :follow_up
   ]
 
   @type t :: %__MODULE__{
@@ -33,7 +35,9 @@ defmodule Catalyst.Session.EngineState do
           error_message: String.t() | nil,
           in_flight: [term()],
           current_run_metadata: map() | nil,
-          run_final_assistant: Message.Assistant.t() | nil
+          run_final_assistant: Message.Assistant.t() | nil,
+          steering: :queue.queue(Message.User.t()),
+          follow_up: :queue.queue(Message.User.t())
         }
 
   defstruct schema_version: 1,
@@ -46,7 +50,9 @@ defmodule Catalyst.Session.EngineState do
             error_message: nil,
             in_flight: [],
             current_run_metadata: nil,
-            run_final_assistant: nil
+            run_final_assistant: nil,
+            steering: :queue.new(),
+            follow_up: :queue.new()
 
   @doc "Project engine-owned fields from the session host state."
   @spec from_server(map()) :: t()

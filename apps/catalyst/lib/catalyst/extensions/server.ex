@@ -440,6 +440,18 @@ defmodule Catalyst.Extensions.Server do
       )
 
     :ok =
+      Catalyst.Runtime.ExtensionPoints.register_host(
+        %{
+          id: "agent.session_engine.v2",
+          cardinality: :many,
+          contract: Catalyst.Contracts.SessionEngine.V2.ref(),
+          service: {"agent", "session_engine"},
+          default_binding: {:pin, :session}
+        },
+        nil
+      )
+
+    :ok =
       ExtensionAPI.register_extension_point(
         %{id: "agent.tool", cardinality: :many},
         {Catalyst.Extensions, :activate_tool_contribution}

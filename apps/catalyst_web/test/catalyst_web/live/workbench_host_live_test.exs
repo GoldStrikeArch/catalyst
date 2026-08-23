@@ -21,6 +21,10 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
   alias CatalystWeb.UI.Registry
   alias CatalystWeb.Workbench
 
+  @png_bytes Base.decode64!(
+               "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+             )
+
   defmodule DenyWrites do
     @behaviour Catalyst.Contracts.PermissionPolicy.V1
 
@@ -108,6 +112,116 @@ defmodule CatalystWeb.WorkbenchHostLiveTest do
     view |> element("#command-palette-toggle") |> render_click()
     assert has_element?(view, "#command-palette")
     assert has_element?(view, "#palette-chat")
+  end
+
+  test "the chat slot opens a host-owned session and submits a prompt", %{
+    conn: conn,
+    root: root
+  } do
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/workbench/chat")
+
+    assert has_element?(view, "#workbench-host[data-workbench-owner=builtin]")
+    assert has_element?(view, "#chat-workbench")
+    assert has_element?(view, "#workbench-chat-form")
+    assert has_element?(view, "#workbench-chat-ide-link[href='/ide']")
+
+    wait_until(fn ->
+      has_element?(view, "#workbench-chat-status[data-status=ready]") and
+        has_element?(view, "#chat-workbench[data-session-id]")
+    end)
+
+    view
+    |> form("#workbench-chat-form", %{"chat" => %{"message" => "list the files"}})
+    |> render_submit()
+
+    wait_until(fn ->
+      has_element?(
+        view,
+        "#workbench-chat-messages [data-role=user]",
+        "list the files"
+      )
+    end)
+
+    wait_until(fn ->
+      has_element?(
+        view,
+        "#workbench-chat-messages [data-role=assistant]",
+        "offline Demo provider"
+      )
+    end)
+
+    view |> element("#workbench-chat-apply-active") |> render_click()
+
+    assert has_element?(
+             view,
+             "#workbench-chat-messages [data-role=user]",
+             "list the files"
+           )
+  end
+
+  test "the chat slot mediates models, threads, file references, and image prompts", %{
+    conn: conn,
+    root: root
+  } do
+    conn = init_test_session(conn, %{"workbench_workspace" => root})
+    {:ok, view, _html} = live(conn, "/workbench/chat")
+
+    wait_until(fn -> has_element?(view, "#workbench-chat-status[data-status=ready]") end)
+
+    assert has_element?(view, "#workbench-model-select option")
+    assert has_element?(view, "#workbench-thread-sidebar")
+
+    view
+    |> form("#workbench-chat-form", %{"chat" => %{"message" => "@exam"}})
+    |> render_change()
+
+    wait_until(fn ->
+      has_element?(
+        view,
+        "#workbench-file-search button[phx-value-path='lib/example.ex']"
+      )
+    end)
+
+    view
+    |> element("#workbench-file-search button[phx-value-path='lib/example.ex']")
+    |> render_click()
+
+    view
+    |> form("#workbench-chat-form", %{
+      "chat" => %{"message" => "inspect @lib/example.ex"}
+    })
+    |> render_submit()
+
+    wait_until(fn ->
+      has_element?(
+        view,
+        "#workbench-chat-messages [data-role=user]",
+        "inspect lib/example.ex"
+      )
+    end)
+
+    wait_until(fn -> has_element?(view, "#workbench-chat-submit") end)
+
+    input =
+      file_input(view, "#workbench-chat-form", :image, [
+        %{name: "shot.png", content: @png_bytes, type: "image/png"}
+      ])
+
+    render_upload(input, "shot.png")
+
+    view
+    |> form("#workbench-chat-form", %{"chat" => %{"message" => "inspect this image"}})
+    |> render_submit()
+
+    wait_until(fn ->
+      has_element?(
+        view,
+        "#workbench-chat-messages [data-role=user] img[src^='/image/']"
+      )
+    end)
+
+    assert has_element?(view, "#workbench-thread-sidebar [data-current='true']")
   end
 
   test "managed workbench replacements apply to new mounts while the old mount stays pinned", %{

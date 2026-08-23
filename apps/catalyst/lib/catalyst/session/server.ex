@@ -20,6 +20,7 @@ defmodule Catalyst.Session.Server do
   alias Catalyst.{Message, Tasks}
 
   alias Catalyst.Session.{
+    Effect,
     EngineState,
     EventEnvelope,
     EventSink,
@@ -139,7 +140,8 @@ defmodule Catalyst.Session.Server do
 
     with {:ok, session_factory_handle} <- session_factory_handle(opts),
          {:ok, cwd} <- session_cwd(opts),
-         {:ok, session_engine_handle} <- SessionEngine.resolve_and_pin(session_id: id) do
+         {:ok, session_engine_handle, session_engine_state} <-
+           open_session_engine(id, cwd) do
       case open_store(cwd, opts) do
         {:ok, store} ->
           state = %State{
@@ -156,6 +158,7 @@ defmodule Catalyst.Session.Server do
             session_factory_metadata: session_factory_metadata(session_factory_handle),
             store: store,
             session_engine_handle: session_engine_handle,
+            session_engine_state: session_engine_state,
             session_engine_metadata: SessionEngine.metadata(session_engine_handle.resolution),
             parent_id: Keyword.get(opts, :parent_id),
             root_session_id: Keyword.get(opts, :root_session_id, id),
@@ -209,21 +212,20 @@ defmodule Catalyst.Session.Server do
   end
 
   @impl true
-  def handle_call({:prompt, msg}, _from, %State{run: nil} = state) do
-    state = stop_prewarm(state)
-    {:reply, :ok, start_run(state, [msg])}
+  def handle_call({:prompt, msg}, _from, %State{} = state) do
+    status = run_status(state)
+
+    case session_engine_command(state, {:prompt, msg, status}) do
+      {:ok, reply, state} -> {:reply, reply, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
-  def handle_call({:prompt, _msg}, _from, state), do: {:reply, {:error, :busy}, state}
-
-  def handle_call({:submit, msg}, _from, %State{run: nil} = state) do
-    state = stop_prewarm(state)
-    {:reply, {:ok, :started}, start_run(state, [msg])}
-  end
-
-  def handle_call({:submit, msg}, _from, state) do
-    follow_up = :queue.in(msg, state.follow_up)
-    {:reply, {:ok, :queued}, %{state | follow_up: follow_up}}
+  def handle_call({:submit, msg}, _from, %State{} = state) do
+    case session_engine_command(state, {:submit, msg, run_status(state)}) do
+      {:ok, reply, state} -> {:reply, reply, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   # Drains are scoped to the run that asked: a drain from a dead run (buffered
@@ -233,18 +235,20 @@ defmodule Catalyst.Session.Server do
   # would silently drop them.
   def handle_call({:drain_steering, ref}, _from, %State{run_ref: ref} = state)
       when ref != nil do
-    {msgs, q} = drain_queue(state.steering)
-    in_flight = state.in_flight ++ Enum.map(msgs, &{:steering, &1})
-    {:reply, msgs, %{state | steering: q, in_flight: in_flight}}
+    case session_engine_command(state, {:drain, :steering}) do
+      {:ok, messages, state} -> {:reply, messages, state}
+      {:error, reason} -> {:stop, {:session_engine_command_failed, reason}, state}
+    end
   end
 
   def handle_call({:drain_steering, _stale_ref}, _from, state), do: {:reply, [], state}
 
   def handle_call({:drain_follow_up, ref}, _from, %State{run_ref: ref} = state)
       when ref != nil do
-    {msgs, q} = drain_queue(state.follow_up)
-    in_flight = state.in_flight ++ Enum.map(msgs, &{:follow_up, &1})
-    {:reply, msgs, %{state | follow_up: q, in_flight: in_flight}}
+    case session_engine_command(state, {:drain, :follow_up}) do
+      {:ok, messages, state} -> {:reply, messages, state}
+      {:error, reason} -> {:stop, {:session_engine_command_failed, reason}, state}
+    end
   end
 
   def handle_call({:drain_follow_up, _stale_ref}, _from, state), do: {:reply, [], state}
@@ -315,7 +319,13 @@ defmodule Catalyst.Session.Server do
     # session continues unchanged and restart cannot resurrect cleared history.
     case append_durable_event(state, :reset) do
       :ok ->
-        {:reply, :ok, install_reset(state)}
+        case session_engine_command(state, :reset) do
+          {:ok, :ok, state} ->
+            {:reply, :ok, %{state | agent_ended: false, run_resources: []}}
+
+          {:error, reason} ->
+            {:stop, {:session_engine_command_failed, reason}, state}
+        end
 
       {:error, reason} ->
         log_persistence_failure(state, :reset, reason)
@@ -324,11 +334,13 @@ defmodule Catalyst.Session.Server do
   end
 
   @impl true
-  def handle_cast({:steer, msg}, state),
-    do: {:noreply, %{state | steering: :queue.in(msg, state.steering)}}
+  def handle_cast({:steer, msg}, state) do
+    {:noreply, command_or_keep(state, {:enqueue, :steering, msg})}
+  end
 
-  def handle_cast({:follow_up, msg}, state),
-    do: {:noreply, %{state | follow_up: :queue.in(msg, state.follow_up)}}
+  def handle_cast({:follow_up, msg}, state) do
+    {:noreply, command_or_keep(state, {:enqueue, :follow_up, msg})}
+  end
 
   def handle_cast(:abort, %State{run: %Task{} = task} = state) do
     # Clear run_ref FIRST: events the killed task already cast are still queued
@@ -752,29 +764,6 @@ defmodule Catalyst.Session.Server do
 
   defp shutdown_run(%Task{} = task), do: Task.shutdown(task, :brutal_kill)
 
-  defp drain_queue(q), do: {:queue.to_list(q), :queue.new()}
-
-  defp install_reset(state) do
-    state = stop_reset_run(state)
-
-    %{
-      state
-      | messages: [],
-        streaming_message: nil,
-        streaming_text: [],
-        streaming_thinking: [],
-        pending_tool_calls: MapSet.new(),
-        error_message: nil,
-        agent_ended: false,
-        run_final_assistant: nil,
-        steering: :queue.new(),
-        follow_up: :queue.new(),
-        in_flight: [],
-        current_run_metadata: nil,
-        run_resources: []
-    }
-  end
-
   defp stop_reset_run(%State{run: %Task{} = task} = state) do
     shutdown_run(task)
 
@@ -959,10 +948,21 @@ defmodule Catalyst.Session.Server do
   end
 
   defp session_engine_event(%State{} = state, %EventEnvelope{} = envelope) do
-    state
-    |> EngineState.from_server()
-    |> then(&SessionEngine.event(state.session_engine_handle, envelope, &1))
-    |> then(&EngineState.merge_into_server(state, &1))
+    case SessionEngine.transition(
+           state.session_engine_handle,
+           envelope,
+           EngineState.from_server(state),
+           state.session_engine_state
+         ) do
+      {:ok, engine_state, private_state, effects} ->
+        state
+        |> EngineState.merge_into_server(engine_state)
+        |> Map.put(:session_engine_state, private_state)
+        |> interpret_session_effects(effects)
+
+      {:error, reason} ->
+        raise "session engine event failed: #{inspect(reason)}"
+    end
   end
 
   defp perform_session_engine_handoff(%State{} = state) do
@@ -976,13 +976,19 @@ defmodule Catalyst.Session.Server do
     source_state = EngineState.from_server(state)
 
     result =
-      with {:ok, snapshot} <- SessionEngine.snapshot(state.session_engine_handle, source_state),
-           {:ok, restored} <- SessionEngine.restore(target, snapshot),
+      with {:ok, snapshot} <-
+             SessionEngine.snapshot_binding(
+               state.session_engine_handle,
+               source_state,
+               state.session_engine_state
+             ),
+           {:ok, restored, private_state} <- SessionEngine.restore_binding(target, snapshot),
            :ok <- verify_session_engine_handoff(source_state, restored) do
         {:ok,
          state
          |> EngineState.merge_into_server(restored)
          |> Map.put(:session_engine_handle, target)
+         |> Map.put(:session_engine_state, private_state)
          |> Map.put(:session_engine_metadata, SessionEngine.metadata(target.resolution))}
       end
 
@@ -1008,6 +1014,7 @@ defmodule Catalyst.Session.Server do
     SessionEngine.aborted_tool_results(
       state.session_engine_handle,
       EngineState.from_server(state),
+      state.session_engine_state,
       reason
     )
   end
@@ -1016,6 +1023,7 @@ defmodule Catalyst.Session.Server do
     SessionEngine.failure_message(
       state.session_engine_handle,
       EngineState.from_server(state),
+      state.session_engine_state,
       reason
     )
   end
@@ -1040,6 +1048,77 @@ defmodule Catalyst.Session.Server do
   defp append_durable_event(%State{} = state, event) do
     TranscriptStore.append(state.store, event_envelope(state, event))
   end
+
+  defp open_session_engine(id, cwd) do
+    context = %{session_id: id, metadata: %{cwd: cwd}}
+
+    with {:ok, handle} <- SessionEngine.resolve_and_pin(context),
+         result <- SessionEngine.initialize(handle, context) do
+      case result do
+        {:ok, private_state} ->
+          {:ok, handle, private_state}
+
+        {:error, reason} ->
+          :ok = SessionEngine.release(handle)
+          {:error, reason}
+      end
+    end
+  end
+
+  defp session_engine_command(%State{} = state, command) do
+    result =
+      SessionEngine.command(
+        state.session_engine_handle,
+        command,
+        EngineState.from_server(state),
+        state.session_engine_state
+      )
+
+    case result do
+      {:ok, engine_state, private_state, effects, reply} ->
+        state =
+          state
+          |> EngineState.merge_into_server(engine_state)
+          |> Map.put(:session_engine_state, private_state)
+          |> interpret_session_effects(effects)
+
+        {:ok, reply, state}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp command_or_keep(%State{} = state, command) do
+    case session_engine_command(state, command) do
+      {:ok, _reply, state} ->
+        state
+
+      {:error, reason} ->
+        Logger.error("[session:#{state.id}] session engine command failed: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp interpret_session_effects(%State{} = state, effects) do
+    Enum.reduce(effects, state, &interpret_session_effect/2)
+  end
+
+  defp interpret_session_effect(%Effect{kind: :start_run, payload: messages}, state) do
+    state
+    |> stop_prewarm()
+    |> start_run(messages)
+  end
+
+  defp interpret_session_effect(%Effect{kind: :stop_run}, state), do: stop_reset_run(state)
+
+  defp interpret_session_effect(%Effect{kind: :emit, payload: event}, state) do
+    synthetic_and_broadcast(state, event)
+    state
+  end
+
+  defp run_status(%State{run: nil}), do: :idle
+  defp run_status(%State{}), do: :busy
 
   defp release_session_engine(nil), do: :ok
   defp release_session_engine(handle), do: SessionEngine.release(handle)

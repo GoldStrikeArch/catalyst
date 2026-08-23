@@ -39,7 +39,9 @@ defmodule CatalystWeb.Workbench.RenderTargetTest do
   test "fails closed for missing or non-renderable descriptors", %{owner: owner} do
     assert {:ok, handle} = Workbench.resolve_and_pin(%{}, self())
 
-    assert {:error, {:workbench_render_target_not_pinned, {CatalystWeb.Workbench.IDE, :render}}} =
+    assert {:error,
+            {:workbench_render_target_unavailable, {CatalystWeb.Workbench.IDE, :render},
+             :undefined}} =
              RenderTarget.capture({CatalystWeb.Workbench.IDE, :render}, handle)
 
     assert {:error, :workbench_render_target_not_registered} =
@@ -50,5 +52,19 @@ defmodule CatalystWeb.Workbench.RenderTargetTest do
 
     assert {:error, {:workbench_render_target_unavailable, "not-renderable", :undefined}} =
              RenderTarget.capture("not-renderable", handle)
+  end
+
+  test "captures a callback on the exact built-in implementation" do
+    assert {:ok, handle} =
+             Workbench.resolve_and_pin(%{metadata: %{workbench_slot: "chat"}}, self())
+
+    assert {:ok, target} =
+             RenderTarget.capture({CatalystWeb.Workbench.Chat, :render}, handle)
+
+    assert target.module == CatalystWeb.Workbench.Chat
+    assert target.function == :render
+    assert target.owner == :builtin
+    assert target.generation == nil
+    assert target.artifact == nil
   end
 end

@@ -3,17 +3,25 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   use CatalystWeb, :live_view
 
-  alias Catalyst.Resources
+  alias Catalyst.{Content, Message, Resources}
+  alias Catalyst.LLM.Models
+  alias Catalyst.Session.{Catalog, Manager, Server}
+  alias CatalystWeb.FileSearch
   alias CatalystWeb.ShellLive.SessionLifecycle
+  alias CatalystWeb.ShellLive.Threads
+  alias CatalystWeb.UI.ImageStore
   alias CatalystWeb.UI.SafeRender
   alias CatalystWeb.Workbench
   alias CatalystWeb.Workbench.{IDEView, RenderTarget, Workspace}
 
   @impl true
-  def mount(_params, session, socket) do
+  def mount(params, session, socket) do
+    slot = Map.get(params, "workbench", "default")
+
     socket =
-      assign(socket,
-        page_title: "Catalyst IDE",
+      socket
+      |> assign(
+        page_title: page_title(slot),
         workbench_handle: nil,
         workbench_state: nil,
         workbench_context: nil,
@@ -21,10 +29,20 @@ defmodule CatalystWeb.WorkbenchHostLive do
         workbench_metadata: %{},
         workbench_error: nil,
         workbench_forms: %{},
-        workbench_effects: MapSet.new()
+        workbench_effects: MapSet.new(),
+        workbench_session_id: nil,
+        workbench_session_pid: nil,
+        workbench_session_ref: nil,
+        workbench_session_provider: nil
+      )
+      |> allow_upload(:image,
+        accept: ~w(.png .jpg .jpeg .gif .webp),
+        max_entries: 4,
+        max_file_size: 5_000_000,
+        auto_upload: true
       )
 
-    case mount_workbench(session, socket) do
+    case mount_workbench(slot, session, socket) do
       {:ok, socket, effects} -> {:ok, maybe_start_effects(socket, effects)}
       {:error, reason, socket} -> {:ok, assign(socket, :workbench_error, reason)}
     end
@@ -35,6 +53,21 @@ defmodule CatalystWeb.WorkbenchHostLive do
     {:noreply, remount_workbench(socket)}
   end
 
+  def handle_event("workbench:host:cancel-image", %{"ref" => ref}, socket) do
+    {:noreply, cancel_upload(socket, :image, ref)}
+  end
+
+  def handle_event("workbench:chat:submit", params, socket) do
+    case uploading_images?(socket) do
+      true ->
+        {:noreply, put_flash(socket, :error, "Wait for image uploads to finish.")}
+
+      false ->
+        params = Map.put(params, "attachments", consume_prompt_images(socket))
+        {:noreply, transition(socket, &Workbench.event(&1, "chat:submit", params, &2, &3))}
+    end
+  end
+
   def handle_event("workbench:" <> event, params, socket) do
     {:noreply, transition(socket, &Workbench.event(&1, event, params, &2, &3))}
   end
@@ -42,6 +75,22 @@ defmodule CatalystWeb.WorkbenchHostLive do
   def handle_event(_event, _params, socket), do: {:noreply, socket}
 
   @impl true
+  def handle_async(
+        {:workbench_effect, request_id},
+        {:ok, {:session_opened, id, pid, snapshot, provider_id}},
+        socket
+      ) do
+    socket =
+      socket
+      |> finish_effect(request_id)
+      |> attach_session(id, pid, provider_id)
+
+    message =
+      {:effect_result, request_id, {:ok, project_session(id, snapshot, provider_id, true)}}
+
+    {:noreply, transition(socket, &Workbench.info(&1, message, &2, &3))}
+  end
+
   def handle_async({:workbench_effect, request_id}, {:ok, result}, socket) do
     message = {:effect_result, request_id, result}
 
@@ -57,6 +106,38 @@ defmodule CatalystWeb.WorkbenchHostLive do
   end
 
   @impl true
+  def handle_info(
+        {:agent_event, id, event},
+        %{assigns: %{workbench_session_id: id}} = socket
+      ) do
+    message = {:session_event, id, event}
+    {:noreply, transition(socket, &Workbench.info(&1, message, &2, &3))}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, pid, reason},
+        %{
+          assigns: %{
+            workbench_session_id: id,
+            workbench_session_pid: pid,
+            workbench_session_ref: ref
+          }
+        } = socket
+      )
+      when is_binary(id) do
+    message = {:session_exit, id, reason}
+
+    socket =
+      assign(socket,
+        workbench_session_id: nil,
+        workbench_session_pid: nil,
+        workbench_session_ref: nil,
+        workbench_session_provider: nil
+      )
+
+    {:noreply, transition(socket, &Workbench.info(&1, message, &2, &3))}
+  end
+
   def handle_info({:workbench_info, message}, socket) do
     {:noreply, transition(socket, &Workbench.info(&1, message, &2, &3))}
   end
@@ -65,6 +146,8 @@ defmodule CatalystWeb.WorkbenchHostLive do
 
   @impl true
   def terminate(_reason, socket) do
+    _socket = detach_session(socket)
+
     case Map.get(socket.assigns, :workbench_handle) do
       %Catalyst.Runtime.Handle{} = handle -> Workbench.release(handle)
       _unmounted -> :ok
@@ -92,11 +175,18 @@ defmodule CatalystWeb.WorkbenchHostLive do
     """
   end
 
-  defp mount_workbench(session, socket) do
+  defp mount_workbench(slot, session, socket) do
     with {:ok, workspace} <- workspace(session),
-         runtime_context = %{metadata: %{workspace_path: workspace}},
+         runtime_context = %{
+           metadata: %{workspace_path: workspace, workbench_slot: slot}
+         },
          {:ok, handle} <- Workbench.resolve_and_pin(runtime_context, self()) do
-      context = %{workspace: workspace, runtime: Workbench.metadata(handle.resolution)}
+      context = %{
+        workspace: workspace,
+        slot: slot,
+        runtime: Workbench.metadata(handle.resolution)
+      }
+
       finish_mount(handle, context, socket)
     else
       {:error, reason} -> {:error, reason, socket}
@@ -168,12 +258,14 @@ defmodule CatalystWeb.WorkbenchHostLive do
     old_handle = socket.assigns.workbench_handle
     old_state = socket.assigns.workbench_state
     workspace = workspace!(socket)
-    runtime_context = %{metadata: %{workspace_path: workspace}}
+    slot = socket.assigns.workbench_context.slot
+    runtime_context = %{metadata: %{workspace_path: workspace, workbench_slot: slot}}
 
     with {:ok, capsule} <- Workbench.snapshot(old_handle, old_state),
          {:ok, new_handle} <- Workbench.resolve_and_pin(runtime_context, self()),
          new_context = %{
            workspace: workspace,
+           slot: slot,
            runtime: Workbench.metadata(new_handle.resolution)
          } do
       restore_remount(socket, old_handle, new_handle, capsule, new_context)
@@ -257,6 +349,15 @@ defmodule CatalystWeb.WorkbenchHostLive do
     end)
   end
 
+  defp start_effect({:workspace, :search, request_id, query}, socket) do
+    workspace = workspace!(socket)
+    resource = %{type: :workspace, path: workspace, query: query}
+
+    start_brokered_effect(socket, request_id, :search, resource, fn ->
+      {:ok, %{query: query, results: FileSearch.search(workspace, query)}}
+    end)
+  end
+
   defp start_effect({:command, :run, request_id, command}, socket) do
     workspace = workspace!(socket)
     resource = %{type: :process, cwd: workspace, command: command}
@@ -264,6 +365,98 @@ defmodule CatalystWeb.WorkbenchHostLive do
     start_brokered_effect(socket, request_id, :run_command, resource, fn ->
       Workspace.run_command(workspace, command)
     end)
+  end
+
+  defp start_effect({:models, :list, request_id}, socket) do
+    result =
+      with {:ok, models} <- Models.list() do
+        {:ok, Enum.map(models, &project_model/1)}
+      end
+
+    deliver_effect_result(socket, request_id, result)
+  end
+
+  defp start_effect({:session, :open, request_id}, socket) do
+    workspace = workspace!(socket)
+    start_effect_task(socket, request_id, fn -> open_session(workspace, %{}) end)
+  end
+
+  defp start_effect({:session, :open, request_id, settings}, socket) do
+    workspace = Map.get(settings, "cwd", workspace!(socket))
+    start_effect_task(socket, request_id, fn -> open_session(workspace, settings) end)
+  end
+
+  defp start_effect({:session, :submit, request_id, session_id, prompt}, socket) do
+    result =
+      with {:ok, pid} <- current_session(socket, session_id) do
+        input = session_prompt(prompt)
+        maybe_title_session(session_id, input)
+
+        with {:ok, status} <- Server.submit(pid, input) do
+          {:ok, %{status: status, threads: project_threads(session_id)}}
+        end
+      end
+
+    deliver_effect_result(socket, request_id, result)
+  end
+
+  defp start_effect({:session, :abort, request_id, session_id}, socket) do
+    result =
+      with {:ok, pid} <- current_session(socket, session_id) do
+        Server.abort(pid)
+      end
+
+    deliver_effect_result(socket, request_id, result)
+  end
+
+  defp start_effect({:session, :snapshot, request_id, session_id}, socket) do
+    result =
+      with {:ok, pid} <- current_session(socket, session_id) do
+        {:ok,
+         project_session(
+           session_id,
+           Server.state(pid),
+           socket.assigns.workbench_session_provider
+         )}
+      end
+
+    deliver_effect_result(socket, request_id, result)
+  end
+
+  defp start_effect({:session, :list, request_id, session_id}, socket) do
+    deliver_effect_result(socket, request_id, {:ok, project_threads(session_id)})
+  end
+
+  defp start_effect({:session, :attach, request_id, session_id}, socket) do
+    start_effect_task(socket, request_id, fn -> open_cataloged_session(session_id) end)
+  end
+
+  defp start_effect({:session, :close, request_id, session_id}, socket) do
+    socket =
+      case socket.assigns.workbench_session_id == session_id do
+        true -> detach_session(socket)
+        false -> socket
+      end
+
+    result =
+      with :ok <- Manager.stop(session_id),
+           :ok <- Catalog.forget(session_id) do
+        :ok
+      end
+
+    deliver_effect_result(socket, request_id, result)
+  end
+
+  defp start_effect({:session, :configure, request_id, session_id, settings}, socket) do
+    with {:ok, pid} <- current_session(socket, session_id),
+         {:ok, {provider_id, model}} <- resolve_model(settings),
+         :ok <- Server.configure(pid, model: model) do
+      socket = assign(socket, :workbench_session_provider, provider_id)
+      snapshot = project_session(session_id, Server.state(pid), provider_id)
+      deliver_effect_result(socket, request_id, {:ok, snapshot})
+    else
+      {:error, _reason} = error -> deliver_effect_result(socket, request_id, error)
+    end
   end
 
   defp start_effect({:navigate, path}, socket), do: push_navigate(socket, to: path)
@@ -309,6 +502,287 @@ defmodule CatalystWeb.WorkbenchHostLive do
     )
   end
 
+  defp deliver_effect_result(socket, request_id, result) do
+    message = {:effect_result, request_id, result}
+    transition(socket, &Workbench.info(&1, message, &2, &3))
+  end
+
+  defp open_session(workspace, settings) do
+    case reattach_session?(settings) do
+      true ->
+        case Catalog.most_recent() do
+          {:ok, %{id: id}} -> open_cataloged_session(id)
+          {:error, _reason} -> open_new_session(workspace, settings)
+        end
+
+      false ->
+        open_new_session(workspace, settings)
+    end
+  end
+
+  defp open_new_session(workspace, settings) do
+    with {:ok, {provider_id, model}} <- resolve_model(settings),
+         {:ok, %{id: id, pid: pid}} <- Manager.start_session(cwd: workspace, model: model) do
+      _result = Catalog.remember(id, workspace)
+      {:session_opened, id, pid, Server.state(pid), provider_id}
+    end
+  end
+
+  defp open_cataloged_session(id) do
+    with {:ok, %{cwd: cwd}} <- Catalog.lookup(id) do
+      case Manager.whereis(id) do
+        {:ok, pid} ->
+          snapshot = Server.state(pid)
+          {:session_opened, id, pid, snapshot, provider_for_model(snapshot.model)}
+
+        :error ->
+          with {:ok, {provider_id, model}} <- resolve_model(%{}),
+               {:ok, %{id: ^id, pid: pid}} <-
+                 Manager.start_session(id: id, cwd: cwd, model: model) do
+            {:session_opened, id, pid, Server.state(pid), provider_id}
+          end
+      end
+    end
+  end
+
+  defp resolve_model(%{"provider" => provider_id, "model" => model_id}),
+    do: Models.resolve(provider_id, model_id)
+
+  defp resolve_model(_settings) do
+    with {:ok, %{provider_id: provider_id, model_id: model_id}} <- Models.default_selection() do
+      Models.resolve(provider_id, model_id)
+    end
+  end
+
+  defp reattach_session?(settings) do
+    settings == %{} and Application.get_env(:catalyst_web, :reattach_sessions, true)
+  end
+
+  defp attach_session(socket, id, pid, provider_id) do
+    socket = detach_session(socket)
+    :ok = Phoenix.PubSub.subscribe(Catalyst.PubSub, Server.topic(id))
+
+    assign(socket,
+      workbench_session_id: id,
+      workbench_session_pid: pid,
+      workbench_session_ref: Process.monitor(pid),
+      workbench_session_provider: provider_id
+    )
+  end
+
+  defp detach_session(socket) do
+    unsubscribe_session(socket.assigns.workbench_session_id)
+    demonitor_session(socket.assigns.workbench_session_ref)
+
+    assign(socket,
+      workbench_session_id: nil,
+      workbench_session_pid: nil,
+      workbench_session_ref: nil,
+      workbench_session_provider: nil
+    )
+  end
+
+  defp unsubscribe_session(id) when is_binary(id),
+    do: Phoenix.PubSub.unsubscribe(Catalyst.PubSub, Server.topic(id))
+
+  defp unsubscribe_session(_missing), do: :ok
+
+  defp demonitor_session(ref) when is_reference(ref), do: Process.demonitor(ref, [:flush])
+  defp demonitor_session(_missing), do: true
+
+  defp current_session(
+         %{assigns: %{workbench_session_id: id, workbench_session_pid: pid}},
+         id
+       )
+       when is_binary(id) and is_pid(pid),
+       do: {:ok, pid}
+
+  defp current_session(_socket, session_id),
+    do: {:error, {:workbench_session_unavailable, session_id}}
+
+  defp project_session(id, snapshot, provider_id, include_threads? \\ false) do
+    messages =
+      snapshot.messages
+      |> Enum.with_index()
+      |> Enum.map(fn {message, index} -> project_message(message, "message-#{index}") end)
+      |> append_streaming(snapshot.streaming_message)
+
+    projection = %{
+      session_id: id,
+      workspace: snapshot.cwd,
+      messages: messages,
+      running: snapshot.running,
+      error: snapshot.error_message,
+      selected_model: selected_model(provider_id, snapshot.model)
+    }
+
+    case include_threads? do
+      true -> Map.put(projection, :threads, project_threads(id))
+      false -> projection
+    end
+  end
+
+  defp append_streaming(messages, nil), do: messages
+
+  defp append_streaming(messages, message),
+    do: messages ++ [project_message(message, "message-streaming")]
+
+  defp project_message(%Message.User{} = message, id),
+    do: message_projection(id, "user", message.content, nil, %{})
+
+  defp project_message(%Message.Assistant{} = message, id),
+    do: message_projection(id, "assistant", message.content, message.error_message, %{})
+
+  defp project_message(%Message.ToolResult{} = message, id),
+    do:
+      message_projection(id, "tool", message.content, tool_error(message), %{
+        tool_name: message.tool_name,
+        tool_error: message.is_error
+      })
+
+  defp message_projection(id, role, content, error, metadata) do
+    Map.merge(
+      %{
+        id: id,
+        role: role,
+        text: Content.text_of(content),
+        blocks: Enum.map(content, &project_block/1),
+        error: error
+      },
+      metadata
+    )
+  end
+
+  defp project_block(%Content.Text{text: text}), do: %{type: "text", text: text}
+
+  defp project_block(%Content.Thinking{thinking: thinking}),
+    do: %{type: "thinking", text: thinking}
+
+  defp project_block(%Content.ToolCall{id: id, name: name, arguments: arguments}) do
+    %{type: "tool_call", id: id, name: name, arguments: arguments}
+  end
+
+  defp project_block(%Content.Image{data: data, mime_type: mime_type}) do
+    case ImageStore.register(data, mime_type) do
+      {:ok, digest} -> %{type: "image", src: "/image/#{digest}", mime_type: mime_type}
+      :error -> %{type: "image", src: nil, mime_type: mime_type}
+    end
+  end
+
+  defp tool_error(%Message.ToolResult{is_error: true, tool_name: name}),
+    do: "#{name} failed"
+
+  defp tool_error(%Message.ToolResult{}), do: nil
+
+  defp project_model(entry) do
+    provider_id = Map.get(entry, :provider, "unknown")
+
+    %{
+      id: entry.id,
+      name: Map.get(entry, :name, entry.id),
+      provider: provider_id,
+      provider_name: Map.get(entry, :provider_name, provider_id),
+      efforts: Map.get(entry, :efforts, []),
+      default_effort: Map.get(entry, :default_effort),
+      fast: Map.get(entry, :fast?, false)
+    }
+  end
+
+  defp selected_model(provider_id, %{id: model_id}) when is_binary(provider_id),
+    do: %{provider: provider_id, model: model_id}
+
+  defp selected_model(_provider_id, _model), do: nil
+
+  defp provider_for_model(%{id: model_id, api: api}) do
+    case Models.list() do
+      {:ok, models} ->
+        case Enum.find(models, &(Map.get(&1, :id) == model_id and Map.get(&1, :api) == api)) do
+          entry when is_map(entry) -> Map.get(entry, :provider)
+          _missing -> nil
+        end
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  defp provider_for_model(_model), do: nil
+
+  defp project_threads(current_id) do
+    keep_ids =
+      [current_id | Enum.map(Manager.list_live(), &elem(&1, 0))]
+      |> Enum.filter(&is_binary/1)
+
+    case Catalog.forget_untitled(keep_ids) do
+      {:ok, entries} ->
+        entries |> ensure_current_thread(current_id) |> Threads.project(current_id)
+
+      {:error, _reason} ->
+        %{projects: []}
+    end
+  end
+
+  defp ensure_current_thread(entries, current_id) when is_binary(current_id) do
+    case Enum.any?(entries, &(&1.id == current_id)) do
+      true ->
+        entries
+
+      false ->
+        case Manager.whereis(current_id) do
+          {:ok, pid} ->
+            snapshot = Server.state(pid)
+            [%{id: current_id, cwd: snapshot.cwd, title: nil} | entries]
+
+          :error ->
+            entries
+        end
+    end
+  end
+
+  defp ensure_current_thread(entries, _current_id), do: entries
+
+  defp session_prompt(prompt) when is_binary(prompt), do: prompt
+
+  defp session_prompt(%{"text" => text, "images" => images}) do
+    text_blocks =
+      case text do
+        "" -> []
+        text -> [%Content.Text{text: text}]
+      end
+
+    image_blocks =
+      Enum.map(images, fn %{"data" => data, "mime_type" => mime_type} ->
+        %Content.Image{data: data, mime_type: mime_type}
+      end)
+
+    text_blocks ++ image_blocks
+  end
+
+  defp maybe_title_session(id, input) do
+    text =
+      case input do
+        text when is_binary(text) -> text
+        content when is_list(content) -> Content.text_of(content)
+      end
+
+    _result = Catalog.put_title_if_blank(id, Catalog.title_from_text(text))
+    :ok
+  end
+
+  defp uploading_images?(socket) do
+    Enum.any?(socket.assigns.uploads.image.entries, &(not &1.done?))
+  end
+
+  defp consume_prompt_images(socket) do
+    consume_uploaded_entries(socket, :image, fn %{path: path}, entry ->
+      {:ok,
+       %{
+         "data" => path |> File.read!() |> Base.encode64(),
+         "mime_type" => entry.client_type || "image/png"
+       }}
+    end)
+  end
+
   defp workspace!(socket), do: socket.assigns.workbench_context.workspace
 
   defp workspace(session) do
@@ -332,7 +806,7 @@ defmodule CatalystWeb.WorkbenchHostLive do
          %{workbench_target: %RenderTarget{module: module, function: function}} = assigns
        ) do
     view_assigns =
-      Map.take(assigns, [:workbench_state, :workbench_forms, :workbench_metadata])
+      Map.take(assigns, [:workbench_state, :workbench_forms, :workbench_metadata, :uploads])
 
     SafeRender.forced_iodata(
       fn -> apply(module, function, [view_assigns]) end,
@@ -372,6 +846,9 @@ defmodule CatalystWeb.WorkbenchHostLive do
   end
 
   defp owner(metadata), do: metadata |> Map.get(:owner, :unavailable) |> to_string()
+
+  defp page_title("chat"), do: "Catalyst Chat"
+  defp page_title(_slot), do: "Catalyst IDE"
 
   defp target_id(%RenderTarget{id: {module, function}}),
     do: "#{inspect(module)}.#{function}/1"

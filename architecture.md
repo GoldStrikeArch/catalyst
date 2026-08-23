@@ -327,6 +327,15 @@ Loop Task ──cast {:agent_event, e}──▶ Session.Server (reduce state)
                                         └─ PubSub.broadcast "session:<id>" ─▶ ChatLive(s)
 ```
 
+The migration Workbench host exposes the same session runtime through a bounded effect vocabulary.
+`ui.workbench/chat` emits model-catalog, workspace-search, session open/list/attach/close/configure,
+submit, abort, and snapshot requests. `CatalystWeb.WorkbenchHostLive` owns model resolution,
+the `Session.Server`, catalog access, image uploads, PubSub subscriptions, and process monitors.
+The host projects messages, thinking, tool calls, images, models, and project-grouped threads into
+serializable view state. `/workbench/chat` exercises that ordinary mount-pinned service without
+changing the current `/` product route; `/ide` continues to resolve `ui.workbench/default`.
+Workbench state contains no socket, PID, upload entry, or session handle.
+
 The chat input supports **`@` file references** (`CatalystWeb.FileSearch`, fd-backed): a
 trailing `@query` opens a candidate dropdown; picking inserts a short label
 (`@<parent>/<name>`, extended upward only as needed to disambiguate same-named files), and on
@@ -746,6 +755,15 @@ same OS user and is not a filesystem/network sandbox. Session-engine and Workben
 quiescent state handoff, while generic state-changing manifest migrations remain fail-closed except
 for `:new_instances_only`. Raw trusted BEAM overrides remain opaque and cannot promise complete graph
 introspection or transactional activation.
+
+The built-in session engine uses the exact `catalyst.session-engine/2` contract. It receives pure
+semantic commands and versioned events, retains implementation-private state beside the host's
+semantic projection, and returns a closed set of typed effects. `Session.Server` remains the only
+owner of OTP messaging, run tasks, persistence ordering, PubSub, and runtime handles. V1 engine
+claims remain selectable through the same scoped resolver and inherit the built-in pure command
+semantics. Quiescent handoff uses a bounded checksummed capsule that rejects process-owned terms;
+the old generation lease is released only after target restore, capsule verification, and semantic
+state verification all succeed.
 
 The extension ontology is no longer closed in `Catalyst.ExtensionAPI`. Host subsystems declare
 schema-aware `Runtime.ExtensionPoint` values with stable `{module, function}` activation handlers,
