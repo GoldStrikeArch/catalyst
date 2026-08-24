@@ -4,7 +4,14 @@ defmodule Catalyst.Extensions.Sources do
 
   Filesystem mutation and load orchestration stay in `Catalyst.Extensions.Load`;
   this module owns only discovery, owner normalization, and managed-path checks.
+
+  Immutable extensions bundled by Catalyst live under each loaded Catalyst
+  application's `priv/builtins/` directory. User extensions live in `dir/0`.
+  Both use the same owner convention, so a user file with the same basename
+  replaces its bundled counterpart when sources are loaded in precedence order.
   """
+
+  @bundled_apps [:catalyst, :catalyst_web, :catalyst_desktop, :catalyst_cli]
 
   @doc "Return the configured runtime extension directory."
   @spec dir() :: Path.t()
@@ -22,6 +29,19 @@ defmodule Catalyst.Extensions.Sources do
   @doc "List enabled extension source files in stable path order."
   @spec enabled_files() :: [Path.t()]
   def enabled_files, do: wildcard(dir(), "*.ex")
+
+  @doc """
+  List immutable bundled extension sources in stable application and path order.
+
+  `:bundled_extensions_dirs` may be configured explicitly, primarily for
+  embedding Catalyst or testing source precedence.
+  """
+  @spec bundled_files() :: [Path.t()]
+  def bundled_files do
+    :catalyst
+    |> Application.get_env(:bundled_extensions_dirs, default_bundled_dirs())
+    |> Enum.flat_map(&wildcard(&1, "*.ex"))
+  end
 
   @doc "List disabled extension source files in stable path order."
   @spec disabled_files() :: [Path.t()]
@@ -78,5 +98,11 @@ defmodule Catalyst.Extensions.Sources do
       true -> directory |> Path.join(pattern) |> Path.wildcard()
       false -> []
     end
+  end
+
+  defp default_bundled_dirs do
+    @bundled_apps
+    |> Enum.filter(&(not is_nil(Application.spec(&1, :vsn))))
+    |> Enum.map(&Application.app_dir(&1, "priv/builtins"))
   end
 end

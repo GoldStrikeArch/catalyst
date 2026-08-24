@@ -9,7 +9,6 @@ defmodule Catalyst.Tools.Registry do
   triggers one fresh validation before the new code is advertised.
   """
 
-  use GenServer
   require Logger
 
   alias Catalyst.Tasks
@@ -90,13 +89,13 @@ defmodule Catalyst.Tools.Registry do
   @typedoc "Tool name => validated entry lookup map, as built by `index/1`."
   @type index :: %{optional(String.t()) => entry()}
 
-  @doc "Start the registry and validate/cache the built-in tool definitions."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-
   @doc "The default tool module list."
   @spec default_tools() :: [module()]
   def default_tools, do: @default
+
+  @doc "Validate and cache every built-in tool definition during application startup."
+  @spec validate_defaults() :: :ok | {:error, term()}
+  def validate_defaults, do: validate_defaults(@default)
 
   @doc """
   Map of tool name => validated entry for the given tool list.
@@ -310,14 +309,6 @@ defmodule Catalyst.Tools.Registry do
       _invalid -> []
     end)
     |> Enum.sort_by(& &1.name)
-  end
-
-  @impl true
-  def init(_opts) do
-    case validate_defaults(@default) do
-      :ok -> {:ok, %{}}
-      {:error, reason} -> {:stop, reason}
-    end
   end
 
   defp resolve_entry(module) do

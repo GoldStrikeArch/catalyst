@@ -21,9 +21,13 @@ defmodule Catalyst.LLM.RegistryTest do
     end
   end
 
-  test "built-in providers are seeded" do
+  test "kernel and bundled providers are available" do
     assert {:ok, Catalyst.LLM.Faux} = Registry.fetch("faux")
     assert {:ok, Catalyst.LLM.OpenAICodex.Provider} = Registry.fetch("openai-codex-responses")
+
+    assert {:ok, Catalyst.LLM.GrokSubscription.Provider} =
+             Registry.fetch("grok-subscription-chat-completions")
+
     assert Map.has_key?(Registry.list(), "faux")
   end
 
@@ -102,7 +106,7 @@ defmodule Catalyst.LLM.RegistryTest do
       def other, do: :ok
     end
 
-    # Purge OwnedIndex key if it exists to avoid collision interference
+    # Remove a prior runtime value so validation is the only failure under test.
     Registry.unregister_provider("invalid")
 
     assert {:error, {:missing_stream_4, InvalidProvider}} =

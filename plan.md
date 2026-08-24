@@ -177,7 +177,7 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   validates tool args against the tool's JSON Schema (`ex_json_schema`, new core dep; malformed
   calls → clean error result, unresolvable schemas skip validation); new `Catalyst.Tools.Diff`
   (Myers, 3-line context, capped 200 lines) gives `edit` and `replace` a unified diff in content +
-  `details`. Also: `ExtensionAPI.register_purger/1` now dedupes. Docs updated (architecture §2/§3/
+  `details`. Also: extension cleanup is owner-scoped. Docs updated (architecture §2/§3/
   §11 + drift fixes: `Exec.bash/2` naming, deferred items marked deferred, store entry types,
   SSE timeout, `Desktop.Window app:`); guide.md (+priv copy) documents `start_child`,
   `system_prompt.md`, `:agent_loop`, auto safe-mode, module restore. \*\*`mix test`: 129 (catalyst)
@@ -331,15 +331,18 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   types. GUI sessions resolve providers through `LLM.Registry`, and tool execution consumes one validated, generation-
   pinned registry entry instead of calling extension metadata twice. CLI controlled exits mark the
   boot clean, while self-test uses an exclusive temporary source and never touches user extension
-  state. Shared ownership bookkeeping moved into pure `OwnedIndex`; Codex token accounting and
-  request construction share one projection. The stable `Extensions` facade delegates its
+  state. Live extension ownership now resides in one `Runtime.Registry` table shared by tools,
+  hooks, providers, prompts, workflows, context, and UI; each domain facade retains only validation
+  and fallback resolution. Codex token accounting and request construction share one projection.
+  The stable `Extensions` facade delegates its
   GenServer state owner, serialized lifecycle saga, pure presentation, source rules, and exact BEAM
   restoration to `Server`, `Load`, `Presenter`, `Sources`, and `ModuleVersions`; the obsolete
   `RunConfig.build/3`/`resolve_loop/1`
   entry points and the `ModuleScan` module were removed (`Session.RunConfig` itself remains the
   heavily used host-side run preflight). Extension setup now has one host-controlled
-  `:waiting | :running | :complete` bootstrap, and exact live UI contributions replay after table
-  loss without recompiling or running setup twice. Extension transactions and
+  `:waiting | :running | :complete` bootstrap and one web-host readiness lease. Runtime table loss
+  restarts the coordinator and rebuilds enabled contributions from source; per-domain table owners
+  and the UI persistent-term replay log are gone. Extension transactions and
   API handles are generation-pinned, prior runtime footprints are revoked before restart/safe-mode
   readiness, and stale asynchronous boot work cannot run after or replace newer explicit outcomes.
   Returned stale compilations restore their traced candidates. The provisional compiler journal
@@ -408,6 +411,18 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   `:live_wire` 1/1.** Remaining manual residue (needs a human at the keyboard): packaged-`.app`
   TCC grant flow + rebuild re-grant, revoked-grant `/computer` reporting, and the LibreOffice
   zero-screenshot drive (LibreOffice not installed).
+- **P7 — Kernel simplification / extension dogfooding — IN PROGRESS.** The live contribution
+  plane is now one `Catalyst.Runtime.Registry` table instead of parallel owner-aware registries,
+  table-owner processes, and UI replay state. Domain modules retain validation and pure fallback
+  resolution. Registered pages can own otherwise-unhandled LiveView events, infos, and async
+  results, so UI features no longer require edits to the shell event router. Immutable
+  `priv/builtins/*.ex` sources now load through the same `Catalyst.ExtensionAPI` path before user
+  extensions and remain available in safe mode; same-named user sources replace them. Grok and
+  direct Claude workflow registration now dogfood `ExtensionAPI`. Moving their multi-file
+  implementations exposed that per-file generation cancellation is not an atomic bundle boundary,
+  so implementation modules remain compiled until the loader can stage a whole bundled feature.
+  Next: add that atomic source-bundle boundary, move the process-owning satellites behind it, then
+  replace incremental extension repair with source-driven rebuilds.
 - **Next options:** notarize for distribution (the launcher step must then re-sign inside-out +
   re-sign the dmg); replace the placeholder icon; optional approval gate as an extension via the
   `before_tool_call` hook (a panel toggle could install it); optional `self_test/0` extension

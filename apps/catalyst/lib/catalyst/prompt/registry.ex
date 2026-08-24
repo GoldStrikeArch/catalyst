@@ -1,19 +1,16 @@
 defmodule Catalyst.Prompt.Registry do
   @moduledoc """
-  Owner-aware runtime overlays for prompt text and prompt policies.
+  Prompt resolution and registration over the shared runtime contribution store.
 
-  Only runtime registrations live in ETS. Reads fall through to the current
+  Only runtime registrations live in `Catalyst.Runtime.Registry`. Reads fall through to the current
   application configuration, so post-boot changes remain visible and removing
   an overlay never restores a stale startup snapshot.
   """
 
-  use GenServer
-
   alias Catalyst.ExtensionAPI
-  alias Catalyst.Extensions.Owner
   alias Catalyst.Prompt.Config
+  alias Catalyst.Runtime.Registry, as: Runtime
 
-  @table :catalyst_prompt_registry
   @policy_key {:policy, :default}
 
   @type model_key :: Config.model_key()
@@ -23,10 +20,6 @@ defmodule Catalyst.Prompt.Registry do
           {:extension, term(), key()}
           | {:application, term()}
           | :builtin
-
-  @doc "Start the singleton prompt registry."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc "Register model- and purpose-specific prompt text as a runtime overlay."
   @spec register_prompt(model_key(), binary(), keyword()) :: :ok | {:error, term()}
@@ -41,7 +34,7 @@ defmodule Catalyst.Prompt.Registry do
 
   @doc "Remove one runtime overlay, revealing the current lower-precedence layer."
   @spec unregister(key()) :: :ok
-  def unregister(key), do: GenServer.call(__MODULE__, {:unregister, key})
+  def unregister(key), do: Runtime.delete(:prompt, key)
 
   @doc "Remove the runtime prompt-policy overlay."
   @spec unregister_policy() :: :ok
@@ -49,7 +42,7 @@ defmodule Catalyst.Prompt.Registry do
 
   @doc "Remove every runtime overlay owned by owner."
   @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
+  def unregister_owner(owner), do: Runtime.purge_owner(owner, :prompt)
 
   # test seam. Resolves one text layer through runtime and live application
   # configuration. Built-in policy file and text fallbacks are intentionally
@@ -99,70 +92,22 @@ defmodule Catalyst.Prompt.Registry do
   @doc "Return sorted owner-aware runtime registrations; fallback layers are excluded."
   @spec runtime_entries() :: [%{key: key(), value: term(), owner: term()}]
   def runtime_entries do
-    case table_rows() do
-      {:ok, rows} ->
-        rows
-        |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
-        |> Enum.sort_by(&inspect(&1.key))
+    Enum.map(Runtime.list(:prompt), fn entry ->
+      %{key: entry.key, value: entry.value, owner: entry.owner}
+    end)
+  end
 
-      :error ->
-        []
+  defp register(key, value, opts) do
+    with :ok <- validate_registration(key, value) do
+      Runtime.put(:prompt, key, value, opts)
     end
   end
-
-  @impl true
-  def init(:ok) do
-    :ets.new(@table, [:named_table, :public, read_concurrency: true])
-    wire_extension_api()
-    {:ok, :ok}
-  end
-
-  @impl true
-  def handle_call({:register, key, value, opts}, _from, state) do
-    owner = opts |> Keyword.get(:owner) |> Owner.normalize()
-
-    with :ok <- validate_registration(key, value),
-         :ok <- claim(key, owner) do
-      :ets.insert(@table, {key, value, owner})
-      {:reply, :ok, state}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call({:unregister, key}, _from, state) do
-    :ets.delete(@table, key)
-    {:reply, :ok, state}
-  end
-
-  def handle_call({:unregister_owner, owner}, _from, state) do
-    :ets.match_delete(@table, {:_, :_, owner})
-    {:reply, :ok, state}
-  end
-
-  defp register(key, value, opts),
-    do: GenServer.call(__MODULE__, {:register, key, value, opts})
 
   defp lookup_runtime(key) do
-    case lookup_row(key) do
-      [{^key, value, owner}] -> {:ok, value, owner}
-      _missing -> :error
+    case Runtime.fetch(:prompt, key) do
+      {:ok, value, owner} -> {:ok, value, owner}
+      :error -> :error
     end
-  end
-
-  # The rescues wrap only the :ets call: readers keep their documented
-  # fallback while the table is absent; a malformed row must not silently
-  # read as "no overlays".
-  defp lookup_row(key) do
-    :ets.lookup(@table, key)
-  rescue
-    ArgumentError -> []
-  end
-
-  defp table_rows do
-    {:ok, :ets.tab2list(@table)}
-  rescue
-    ArgumentError -> :error
   end
 
   defp application_text(purpose, model_key) do
@@ -201,20 +146,8 @@ defmodule Catalyst.Prompt.Registry do
     end
   end
 
-  defp validate_registration(key, value), do: invalid_registration(key, value)
-
   defp invalid_registration(key, value),
     do: {:error, {:invalid_registration, key, value}}
-
-  # Ownership lives in ETS column 3 (single writer: this process), so a claim
-  # is a plain lookup — no second bookkeeping structure to desync.
-  defp claim(key, owner) do
-    case lookup_runtime(key) do
-      :error -> :ok
-      {:ok, _value, ^owner} -> :ok
-      {:ok, _value, existing} -> {:error, {:owner_collision, :prompt, key, existing, owner}}
-    end
-  end
 
   defp valid_policy?(module) when is_atom(module) do
     Code.ensure_loaded?(module) and function_exported?(module, :resolve, 1)
@@ -236,7 +169,9 @@ defmodule Catalyst.Prompt.Registry do
     register_policy(module, Keyword.put(opts, :owner, owner))
   end
 
-  defp wire_extension_api do
+  @doc false
+  @spec wire_extension_api() :: :ok
+  def wire_extension_api do
     ExtensionAPI.register_kind(:prompt, &__MODULE__.register_extension_prompt/4)
 
     ExtensionAPI.register_kind(
@@ -244,6 +179,6 @@ defmodule Catalyst.Prompt.Registry do
       &__MODULE__.register_extension_prompt_policy/3
     )
 
-    ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
+    :ok
   end
 end

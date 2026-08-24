@@ -18,7 +18,8 @@ defmodule Catalyst.Flex.ChaosRecoveryFlexTest do
       )
 
     capture_log(fn ->
-      assert {:ok, %{loaded: [], failed: [{^broken, _reason}]}} = Extensions.load_all()
+      assert {:ok, %{loaded: loaded, failed: [{^broken, _reason}]}} = Extensions.load_all()
+      assert Enum.all?(loaded, &(&1.source == :bundled))
     end)
 
     assert Extensions.fetch("broken_flex") == :error

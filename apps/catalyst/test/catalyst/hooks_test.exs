@@ -9,6 +9,7 @@ defmodule Catalyst.HooksTest do
   alias Catalyst.Agent.Event
   alias Catalyst.Hooks
   alias Catalyst.Hooks.ObserverDispatcher
+  alias Catalyst.Runtime.Registry
   alias Catalyst.Session.EventSink
 
   setup do
@@ -543,32 +544,16 @@ defmodule Catalyst.HooksTest do
     assert {:ok, %{handlers: %{event: [_entry | _rest]}}} = Hooks.capture_snapshot([:event])
   end
 
-  test "registered handlers survive a Hooks crash (table owned by TableOwner)", %{owner: owner} do
+  test "registered handlers use the shared owner purge path", %{owner: owner} do
     Hooks.register(:test_filter, fn v, _ctx -> {:ok, v <> "survived"} end, owner: owner)
-    table_owner = Process.whereis(Catalyst.Hooks.TableOwner)
     assert Enum.any?(Hooks.handlers(:test_filter), &(&1.owner == owner))
 
-    pid = Process.whereis(Hooks)
-    assert pid, "expected Catalyst.Hooks to be running under the app supervisor"
-    supervisor = parent_supervisor(pid)
-    ref = Process.monitor(pid)
-    Process.exit(pid, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
-
-    new_pid = wait_for_restart!(Hooks, pid, supervisor)
-    assert Process.whereis(Catalyst.Hooks.TableOwner) == table_owner
-    _ = :sys.get_state(new_pid)
-    # rest_for_one also restarted Catalyst.Extensions, which re-publishes hook
-    # readiness only after its reseed bootstrap phase acknowledges completion.
-    wait_for_runtime_ready!()
-
-    # The table outlived the crash: the handler registered before still fires...
     assert Hooks.run_filter(:test_filter, "", %{}) == "survived"
+    assert Enum.any?(Registry.list(:hook), &(&1.owner == owner))
 
-    # ...and the restarted server keeps registering into the same table, with
-    # the seq counter resumed (priority tie-break stays registration-ordered).
-    Hooks.register(:test_filter, fn v, _ctx -> {:ok, v <> "+new"} end, owner: owner)
-    assert Hooks.run_filter(:test_filter, "", %{}) == "survived+new"
+    assert :ok = Hooks.unregister(owner)
+    refute Enum.any?(Registry.list(:hook), &(&1.owner == owner))
+    assert Hooks.handlers(:test_filter) == []
   end
 
   defp put_app_env(key, value) do

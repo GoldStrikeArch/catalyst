@@ -22,6 +22,10 @@ erl_crash.dump
 # Temporary files, for example, from tests.
 /tmp/
 
+# Hex may leave package-fetch work directories at the umbrella root when the
+# caller's temporary directory points at the checkout.
+/tmp_*/
+
 # The native computer-use helper, built by `mix catalyst.computer.build`
 # (compiled, not checked in).
 /apps/catalyst/priv/bin/catalyst-input

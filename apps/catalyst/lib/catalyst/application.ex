@@ -8,6 +8,7 @@ defmodule Catalyst.Application do
   @impl true
   def start(_type, _args) do
     :ok = Catalyst.Debug.init()
+    :ok = Catalyst.Tools.Registry.validate_defaults()
 
     children = [
       {Phoenix.PubSub, name: Catalyst.PubSub},
@@ -33,9 +34,6 @@ defmodule Catalyst.Application do
       # their rest-for-one group preserves admitted queues during registry
       # recovery; committed admission retries its own rare direct restart.
       Catalyst.Hooks.ObserverDispatcher,
-      # Validates built-in tool metadata once; extension registrations populate
-      # the same hot-reload-safe cache before a tool becomes visible.
-      Catalyst.Tools.Registry,
       # Holds OAuth credentials, refreshes tokens on demand.
       Catalyst.Auth.TokenStore,
       # Live Codex model metadata with monotonic freshness and single-flight refresh.
@@ -56,16 +54,9 @@ defmodule Catalyst.Application do
       # the owning Catalyst session id as the value.
       {Registry, keys: :unique, name: Catalyst.Tools.Shell.Registry},
       {DynamicSupervisor, name: Catalyst.Tools.Shell.Supervisor, strategy: :one_for_one},
-      # The extension runtime registries, grouped under :rest_for_one because
-      # they have hard inter-child dependencies (see extension_runtime/0).
-      # Under the previous flat :one_for_one those held only at first boot: a
-      # TableOwner crash restarted it with a fresh empty ETS table while Hooks
-      # kept running — every registered handler silently lost and the
-      # before_tool_call gates failing open — and a Hooks/LLM.Registry restart
-      # lost extension registrations with nothing re-registering them. The
-      # restart budget is test-overridable because chaos tests deliberately
-      # kill several different children in one short window; production keeps
-      # OTP's default escalation threshold.
+      # The reconstructible extension runtime. A registry restart also restarts
+      # the extension coordinator, whose boot load rebuilds every contribution
+      # from source instead of replaying parallel per-domain state.
       %{
         id: Catalyst.ExtensionRuntimeSupervisor,
         type: :supervisor,
@@ -131,26 +122,14 @@ defmodule Catalyst.Application do
     Catalyst.Extensions.mark_clean_shutdown()
   end
 
-  # Order is load-bearing (:rest_for_one): each child depends on the ones
-  # before it, and a crashed child restarts everything after it — ending with
-  # Catalyst.Extensions, whose load_all re-registers extension contributions
-  # into the freshly restarted registries.
+  # Order is load-bearing (:rest_for_one): a shared-registry crash restarts the
+  # extension coordinator, whose load rebuilds the live projection from source.
   defp extension_runtime do
     [
-      # Owns the hooks ETS table in a process that does nothing else, so the
-      # registered handlers survive a Catalyst.Hooks crash (the table would
-      # otherwise die with the server and the gates would fail open).
-      Catalyst.Hooks.TableOwner,
-      # Runtime agent-loop hook registry (before/after tool call, etc.).
-      Catalyst.Hooks,
-      # Runtime LLM provider registry (built-ins + runtime-registered providers).
-      Catalyst.LLM.Registry,
-      # Runtime-only owned overlays. Application config remains a live fallback
-      # and Catalyst.Extensions (last below) replays extension registrations
-      # after any rest-for-one restart.
-      Catalyst.Prompt.Registry,
-      Catalyst.Workflow.Registry,
-      Catalyst.Context.Registry,
+      # One owner-aware table backs every migrated runtime contribution kind.
+      # Domain modules retain validation and fallback resolution but no longer
+      # own parallel GenServer/ETS implementations.
+      Catalyst.Runtime.Registry,
       # Supervised home for extension-owned processes: one DynamicSupervisor per
       # extension owner (registered by id) under this top-level one, so purging
       # an extension can terminate its whole process subtree.

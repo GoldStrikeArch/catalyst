@@ -18,6 +18,7 @@ defmodule CatalystWeb.ShellLive do
   alias Catalyst.Agent.Event
   alias Catalyst.Session.Server
   alias CatalystWeb.Assets
+  alias CatalystWeb.UI.Registry, as: UIRegistry
 
   alias CatalystWeb.ShellLive.{
     ChatInput,
@@ -486,6 +487,10 @@ defmodule CatalystWeb.ShellLive do
     {:noreply, ExtensionActions.start(socket, {:enable, owner})}
   end
 
+  def handle_event(event, params, socket) do
+    UIRegistry.dispatch_event(socket.assigns.page, event, params, socket)
+  end
+
   @impl true
   def handle_async(:computer_panel, {:ok, snapshot}, socket) do
     {:noreply, assign(socket, computer_panel: snapshot)}
@@ -505,6 +510,10 @@ defmodule CatalystWeb.ShellLive do
       ^token -> {:noreply, assign(socket, file_search: nil, file_search_token: nil)}
       _superseded -> {:noreply, socket}
     end
+  end
+
+  def handle_async(name, result, socket) do
+    UIRegistry.dispatch_async(socket.assigns.page, name, result, socket)
   end
 
   @impl true
@@ -646,7 +655,9 @@ defmodule CatalystWeb.ShellLive do
     {:noreply, put_flash(socket, :info, "Session was replaced — reattached.")}
   end
 
-  def handle_info(_message, socket), do: {:noreply, socket}
+  def handle_info(message, socket) do
+    UIRegistry.dispatch_info(socket.assigns.page, message, socket)
+  end
 
   @impl true
   def render(assigns), do: CatalystWeb.ShellComponents.render(assigns)

@@ -107,14 +107,6 @@ defmodule Catalyst.ExtensionsFixtures do
     def execute(_args, _ctx), do: result("ok")
   end
 
-  defmodule DegradedPurgeTool do
-    @moduledoc false
-    def name, do: "degraded_purge_tool"
-    def description, do: "degraded purge regression fixture"
-    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
-    def execute(_args, _ctx), do: %{content: [], details: %{}}
-  end
-
   defmodule CacheProbeTool do
     @moduledoc false
     def name, do: "cache_probe_tool"

@@ -5,6 +5,7 @@ defmodule Catalyst.Prompt.RegistryTest do
 
   alias Catalyst.Prompt
   alias Catalyst.Prompt.{Registry, Request, Resolution}
+  alias Catalyst.Runtime.Registry, as: RuntimeRegistry
 
   defmodule FirstPolicy do
     @behaviour Prompt
@@ -34,10 +35,7 @@ defmodule Catalyst.Prompt.RegistryTest do
     Application.delete_env(:catalyst, :prompts)
     Application.delete_env(:catalyst, :prompt_policy)
 
-    case Process.whereis(Registry) do
-      nil -> start_supervised!(Registry)
-      _pid -> clear_runtime()
-    end
+    clear_runtime()
 
     on_exit(fn ->
       clear_runtime()
@@ -182,20 +180,14 @@ defmodule Catalyst.Prompt.RegistryTest do
   end
 
   defp clear_runtime do
-    case Process.whereis(Registry) do
-      pid when is_pid(pid) ->
-        Registry.runtime_entries()
-        |> Enum.each(&Registry.unregister(&1.key))
-
-      _not_started ->
-        :ok
-    end
+    Registry.runtime_entries()
+    |> Enum.each(&Registry.unregister(&1.key))
   end
 
   defp with_registry_absent(fun) do
-    case stop_supervised(Registry) do
+    case stop_supervised(RuntimeRegistry) do
       :ok ->
-        assert Process.whereis(Registry) == nil
+        assert Process.whereis(RuntimeRegistry) == nil
         fun.()
 
       {:error, _not_test_supervised} ->
@@ -204,7 +196,7 @@ defmodule Catalyst.Prompt.RegistryTest do
   end
 
   defp with_application_registry_suspended(fun) do
-    old_registry = Process.whereis(Registry)
+    old_registry = Process.whereis(RuntimeRegistry)
     supervisor = parent_supervisor(old_registry)
     ref = Process.monitor(old_registry)
     :ok = :sys.suspend(supervisor)
@@ -212,11 +204,12 @@ defmodule Catalyst.Prompt.RegistryTest do
     try do
       Process.exit(old_registry, :kill)
       assert_receive {:DOWN, ^ref, :process, ^old_registry, :killed}
-      assert Process.whereis(Registry) == nil
+      assert Process.whereis(RuntimeRegistry) == nil
       fun.()
     after
       :ok = :sys.resume(supervisor)
-      wait_for_registry(old_registry)
+      _replacement = wait_for_registry(old_registry)
+      assert :ok = Catalyst.Extensions.await_ready(5_000)
     end
   end
 
@@ -233,10 +226,10 @@ defmodule Catalyst.Prompt.RegistryTest do
   defp wait_for_registry(_old_registry, 0), do: flunk("prompt registry did not restart")
 
   defp wait_for_registry(old_registry, attempts) do
-    case Process.whereis(Registry) do
+    case Process.whereis(RuntimeRegistry) do
       pid when is_pid(pid) and pid != old_registry ->
         _ = :sys.get_state(pid)
-        :ok
+        pid
 
       _not_restarted ->
         receive do

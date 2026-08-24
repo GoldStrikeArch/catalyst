@@ -11,6 +11,7 @@ defmodule Catalyst.Flex.Baseline do
 
   alias Catalyst.Extensions
   alias Catalyst.Flex.Harness
+  alias Catalyst.Runtime.Registry, as: Runtime
 
   @ui_registry Module.concat([CatalystWeb, UI, Registry])
   @shell_live Module.concat([CatalystWeb, ShellLive])
@@ -176,7 +177,11 @@ defmodule Catalyst.Flex.Baseline do
   end
 
   defp tool_snapshot do
-    Extensions.names()
+    runtime_names =
+      for %{key: name, owner: owner} <- Runtime.list(:tool), owner != :host, do: name
+
+    (Enum.map(Catalyst.Tools.Registry.default_tools(), & &1.name()) ++ runtime_names)
+    |> Enum.uniq()
     |> Enum.sort()
     |> Map.new(fn name -> {name, Extensions.fetch(name)} end)
   end

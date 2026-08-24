@@ -1,70 +1,72 @@
 defmodule Catalyst.Context.Registry do
   @moduledoc """
-  Owner-aware runtime overlays for context policies and model thresholds.
+  Context resolution and registration over the shared runtime contribution store.
 
-  Only runtime registrations live in ETS.  Application configuration is read
+  Only runtime registrations live in `Catalyst.Runtime.Registry`. Application configuration is read
   at every resolution, so `Application.put_env/3` and `delete_env/2` remain live
-  fallbacks and a registry restart cannot freeze an old value into the table.
-  Readers also retain those fallbacks while the named ETS table is absent.
+  fallbacks and a runtime restart cannot freeze an old value into the table.
   """
 
-  use GenServer
-
   alias Catalyst.ExtensionAPI
-  alias Catalyst.Extensions.Owner
+  alias Catalyst.Runtime.Registry, as: Runtime
 
-  @table :catalyst_context_registry
   @policy_key {:policy, :default}
 
   @type model_key :: String.t() | :default
   @type threshold :: :none | pos_integer() | float()
   @type runtime_entry :: %{key: term(), value: term(), owner: term()}
 
-  @doc "Start the singleton registry."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
-
   @doc "Register the runtime default context policy."
   @spec register_policy(module(), keyword()) :: :ok | {:error, term()}
-  def register_policy(module, opts \\ []),
-    do: GenServer.call(__MODULE__, {:register, @policy_key, module, opts})
+  def register_policy(module, opts \\ []) do
+    with :ok <- validate_registration(@policy_key, module) do
+      Runtime.put(:context_policy, :default, module, Keyword.put(opts, :collision_key, nil))
+    end
+  end
 
   @doc "Register a runtime threshold for an exact model id/api or `:default`."
   @spec register_threshold(model_key(), threshold(), keyword()) :: :ok | {:error, term()}
-  def register_threshold(model_key, value, opts \\ []),
-    do: GenServer.call(__MODULE__, {:register, {:threshold, model_key}, value, opts})
+  def register_threshold(model_key, value, opts \\ []) do
+    key = {:threshold, model_key}
+
+    with :ok <- validate_registration(key, value) do
+      Runtime.put(:context_threshold, model_key, value, opts)
+    end
+  end
 
   @doc "Remove one runtime policy overlay."
   @spec unregister_policy() :: :ok
-  def unregister_policy, do: GenServer.call(__MODULE__, {:unregister, @policy_key})
+  def unregister_policy, do: Runtime.delete(:context_policy, :default)
 
   @doc "Remove one runtime threshold overlay."
   @spec unregister_threshold(model_key()) :: :ok
-  def unregister_threshold(model_key),
-    do: GenServer.call(__MODULE__, {:unregister, {:threshold, model_key}})
+  def unregister_threshold(model_key), do: Runtime.delete(:context_threshold, model_key)
 
   @doc "Remove every runtime registration owned by `owner`."
   @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
+  def unregister_owner(owner),
+    do: Runtime.purge_owner(owner, [:context_policy, :context_threshold])
 
   @doc "Owner-aware snapshot of runtime overlays (application values are not included)."
   @spec runtime_entries() :: [runtime_entry()]
   def runtime_entries do
-    case table_rows() do
-      {:ok, rows} ->
-        rows
-        |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
-        |> Enum.sort_by(&inspect(&1.key))
+    policy_entries =
+      Enum.map(Runtime.list(:context_policy), fn entry ->
+        %{key: @policy_key, value: entry.value, owner: entry.owner}
+      end)
 
-      :error ->
-        []
-    end
+    threshold_entries =
+      Enum.map(Runtime.list(:context_threshold), fn entry ->
+        %{key: {:threshold, entry.key}, value: entry.value, owner: entry.owner}
+      end)
+
+    Enum.sort_by(policy_entries ++ threshold_entries, &inspect(&1.key))
   end
 
   @doc "Resolve the effective context policy (runtime, live app config, built-in)."
   @spec policy() :: {:ok, module(), term()} | {:error, term()}
   def policy do
-    case runtime_lookup(@policy_key) do
+    case runtime_policy() do
       {:ok, module, owner} -> {:ok, module, {:extension, owner, @policy_key}}
       :error -> configured_policy()
     end
@@ -98,36 +100,6 @@ defmodule Catalyst.Context.Registry do
   def valid_model_key?(key) when is_binary(key), do: String.trim(key) != ""
   def valid_model_key?(_key), do: false
 
-  @impl true
-  def init(:ok) do
-    :ets.new(@table, [:named_table, :public, read_concurrency: true])
-    wire()
-    {:ok, :ok}
-  end
-
-  @impl true
-  def handle_call({:register, key, value, opts}, _from, state) do
-    owner = opts |> Keyword.get(:owner) |> Owner.normalize()
-
-    with :ok <- validate_registration(key, value),
-         :ok <- claim(key, owner) do
-      :ets.insert(@table, {key, value, owner})
-      {:reply, :ok, state}
-    else
-      {:error, _reason} = error -> {:reply, error, state}
-    end
-  end
-
-  def handle_call({:unregister, key}, _from, state) do
-    :ets.delete(@table, key)
-    {:reply, :ok, state}
-  end
-
-  def handle_call({:unregister_owner, owner}, _from, state) do
-    :ets.match_delete(@table, {:_, :_, owner})
-    {:reply, :ok, state}
-  end
-
   defp validate_registration(@policy_key = key, module) do
     case policy_module?(module) do
       true -> :ok
@@ -142,54 +114,28 @@ defmodule Catalyst.Context.Registry do
     end
   end
 
-  defp validate_registration(key, value),
-    do: {:error, {:invalid_registration, key, value}}
-
-  # Ownership lives in ETS column 3 (single writer: this process), so a claim
-  # is a plain lookup — no second bookkeeping structure to desync.
-  defp claim(key, owner) do
-    case runtime_lookup(key) do
-      :error -> :ok
-      {:ok, _value, ^owner} -> :ok
-      {:ok, _value, existing} -> {:error, collision(key, existing, owner)}
+  defp runtime_policy do
+    case Runtime.fetch(:context_policy, :default) do
+      {:ok, value, owner} -> {:ok, value, owner}
+      :error -> :error
     end
   end
 
-  defp collision(@policy_key, existing, attempted),
-    do: {:owner_collision, :context_policy, nil, existing, attempted}
-
-  defp collision({:threshold, model_key}, existing, attempted),
-    do: {:owner_collision, :context_threshold, model_key, existing, attempted}
-
-  defp runtime_lookup(key) do
-    case lookup_row(key) do
-      [{^key, value, owner}] -> {:ok, value, owner}
-      _missing -> :error
+  defp runtime_threshold(model_key) do
+    case Runtime.fetch(:context_threshold, model_key) do
+      {:ok, value, owner} -> {:ok, value, owner}
+      :error -> :error
     end
-  end
-
-  # The rescues wrap only the :ets call: readers keep their documented
-  # fallbacks while the table is absent; malformed rows must not read as
-  # "no overlays".
-  defp lookup_row(key) do
-    :ets.lookup(@table, key)
-  rescue
-    ArgumentError -> []
-  end
-
-  defp table_rows do
-    {:ok, :ets.tab2list(@table)}
-  rescue
-    ArgumentError -> :error
   end
 
   defp first_runtime_threshold(keys) do
     Enum.find_value(keys, :missing, fn key ->
-      registry_key = {:threshold, key}
+      case runtime_threshold(key) do
+        {:ok, value, owner} ->
+          {:ok, value, {:extension, owner, {:threshold, key}}}
 
-      case runtime_lookup(registry_key) do
-        {:ok, value, owner} -> {:ok, value, {:extension, owner, registry_key}}
-        :error -> false
+        :error ->
+          false
       end
     end)
   end
@@ -264,7 +210,9 @@ defmodule Catalyst.Context.Registry do
     register_threshold(model_key, value, Keyword.put(opts, :owner, owner))
   end
 
-  defp wire do
+  @doc false
+  @spec wire_extension_api() :: :ok
+  def wire_extension_api do
     ExtensionAPI.register_kind(:context_policy, &__MODULE__.register_extension_policy/3)
 
     ExtensionAPI.register_kind(
@@ -272,6 +220,6 @@ defmodule Catalyst.Context.Registry do
       &__MODULE__.register_extension_threshold/4
     )
 
-    ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
+    :ok
   end
 end

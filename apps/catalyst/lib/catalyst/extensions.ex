@@ -2,8 +2,10 @@ defmodule Catalyst.Extensions do
   @moduledoc """
   Runtime extension registry — the mechanism behind "self-developing" Catalyst.
 
-  Holds the live set of tool modules in an ETS table, and loads extension source
-  files (`*.ex` in `dir/0`) at runtime with `Code.compile_file/1`. Because the
+  Loads immutable bundled extension sources and user source files (`*.ex` in
+  `dir/0`) at runtime with `Code.compile_file/1`. Bundled sources load first; a
+  user file with the same basename replaces that bundled extension. Live
+  contributions, including tools, are stored in `Catalyst.Runtime.Registry`. Because the
   Elixir compiler ships in an OTP release, this works inside a packaged binary
   too — the binary stays immutable while new modules are loaded into the running
   VM from a user-writable directory.
@@ -21,7 +23,7 @@ defmodule Catalyst.Extensions do
 
   Everything a file contributes is tagged with the file's `owner` id (its
   sanitized basename). Reloading a file first **purges** that owner's prior
-  contributions (tools here, hooks/providers/UI via `ExtensionAPI.purge_owner/1`),
+  contributions through the shared owner-purge path,
   so reloads are idempotent. A file that fails to **compile** registers nothing —
   compile + classify run before any registry is touched, and the prior version
   stays active. Because `Code.compile_file/1` defines modules sequentially, a
@@ -32,9 +34,9 @@ defmodule Catalyst.Extensions do
   times out mid-way: whatever it registered before failing stays registered
   (owner-tagged, so the next reload or uninstall purges it cleanly).
 
-  Set `CATALYST_SAFE_MODE=1` (or `config :catalyst, :safe_mode, true`) to skip
-  loading extensions at boot — only built-ins are seeded, so a bad extension can't
-  brick startup. Safe mode also engages **automatically**: a boot-marker file
+  Set `CATALYST_SAFE_MODE=1` (or `config :catalyst, :safe_mode, true`) to load
+  only immutable bundled extensions at boot, so bad user code cannot brick
+  startup. Safe mode also engages **automatically**: a boot-marker file
   (`Catalyst.Extensions.BootGuard`) detects that the previous boot died while its
   extensions were active and skips loading, so a bricking extension is recovered
   by a plain relaunch. `boot_status/0` reports it; a successful explicit
@@ -61,10 +63,9 @@ defmodule Catalyst.Extensions do
     Transaction
   }
 
+  alias Catalyst.Runtime.Registry, as: Runtime
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
-  @table :catalyst_tools
-  @host_roles [:application, :registry]
   @ready_poll_ms 10
   @ready_timeout 30_000
 
@@ -75,6 +76,7 @@ defmodule Catalyst.Extensions do
           required(:owner) => String.t(),
           required(:tools) => [String.t()],
           required(:extensions) => [module()],
+          optional(:source) => :bundled | :user,
           optional(:conflicts) => [{String.t(), [module()]}],
           optional(:warning) => String.t()
         }
@@ -97,44 +99,25 @@ defmodule Catalyst.Extensions do
   @doc "All registered tool modules."
   @spec tools() :: [module()]
   def tools do
-    case tool_rows() do
-      {:ok, rows} -> rows |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
-      :error -> Catalyst.Tools.Registry.default_tools()
-    end
+    ToolRegistry.default_tools()
+    |> Map.new(&{&1.name(), &1})
+    |> Map.merge(runtime_tools())
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(&elem(&1, 1))
   end
 
   @doc "Look up a tool module by its tool name. Returns `{:ok, module}` or `:error`."
   @spec fetch(String.t()) :: {:ok, module()} | :error
   def fetch(name) do
-    case lookup_tool(name) do
-      [{^name, module}] -> {:ok, module}
-      _ -> :error
+    case Runtime.fetch(:tool, name) do
+      {:ok, module, _owner} -> {:ok, module}
+      :error -> fetch_builtin(name)
     end
   end
 
   @doc "Names of all registered tools."
   @spec names() :: [String.t()]
-  def names do
-    case tool_rows() do
-      {:ok, rows} -> Enum.map(rows, &elem(&1, 0))
-      :error -> Enum.map(ToolRegistry.default_tools(), & &1.name())
-    end
-  end
-
-  # The rescue wraps only the :ets call: while the named table is absent
-  # (registry restarting) reads fall back; a malformed row would be a real bug
-  # and must not read as "no tools".
-  defp tool_rows do
-    {:ok, :ets.tab2list(@table)}
-  rescue
-    ArgumentError -> :error
-  end
-
-  defp lookup_tool(name) do
-    :ets.lookup(@table, name)
-  rescue
-    ArgumentError -> []
-  end
+  def names, do: Enum.map(tools(), & &1.name())
 
   @doc "Register a validated tool module. `opts[:owner]` tags it for purge-on-reload."
   @spec register_tool(module(), keyword()) :: {:ok, module()} | {:error, term()}
@@ -162,36 +145,33 @@ defmodule Catalyst.Extensions do
   end
 
   @doc """
-  Register a live host lease used to coordinate extension bootstrap.
+  Register a live host lease after it has wired its extension kinds.
 
   A lease is valid only while its process remains alive. The host supplies the
-  same role again after a restart, replacing the prior lease without retaining a
+  lease again after a restart, replacing the prior value without retaining a
   monitor in the extension coordinator.
   """
-  @spec register_host(atom(), :application | :registry, pid()) :: :ok
-  def register_host(host, role, pid)
-      when is_atom(host) and role in @host_roles and is_pid(pid) do
-    :persistent_term.put({__MODULE__, :host_lease, host, role}, pid)
+  @spec register_host(atom(), pid()) :: :ok
+  def register_host(host, pid) when is_atom(host) and is_pid(pid) do
+    :persistent_term.put({__MODULE__, :host_lease, host}, pid)
     :ok
   end
 
-  @doc "Whether every required lease for `host` names a live process."
+  @doc "Whether `host` has published a live lease."
   @spec host_ready?(atom()) :: boolean()
   def host_ready?(host) when is_atom(host) do
-    Enum.all?(@host_roles, fn role ->
-      case :persistent_term.get({__MODULE__, :host_lease, host, role}, nil) do
-        pid when is_pid(pid) -> Process.alive?(pid)
-        _missing -> false
-      end
-    end)
+    case :persistent_term.get({__MODULE__, :host_lease, host}, nil) do
+      pid when is_pid(pid) -> Process.alive?(pid)
+      _missing -> false
+    end
   end
 
   @doc """
   Acknowledge that an optional host has finished wiring its extension kinds.
 
   The operation is idempotent. It starts the one deferred web bootstrap only
-  after both web leases are live, returns `{:skipped, {:host_not_ready, :web}}`
-  while either is absent, and returns
+  after the web lease is live, returns `{:skipped, {:host_not_ready, :web}}`
+  while it is absent, and returns
   `{:skipped, :extension_runtime_unavailable}` when this server is absent.
   Running and completed bootstraps return `:ok` without repeating setup.
   """
@@ -228,7 +208,8 @@ defmodule Catalyst.Extensions do
   defdelegate load_file(path), to: Load
 
   @doc """
-  (Re)load all `*.ex` files in the extensions directory.
+  (Re)load bundled extensions followed by all `*.ex` files in the user
+  extensions directory.
 
   Returns `{:ok, %{loaded: summaries, failed: [{path, reason}]}}` — per-file
   failures are reported, not swallowed. Crash-detected safe mode is cleared
@@ -436,6 +417,15 @@ defmodule Catalyst.Extensions do
     deadline
     |> Kernel.-(System.monotonic_time(:millisecond))
     |> max(0)
+  end
+
+  defp runtime_tools, do: Map.new(Runtime.list(:tool), &{&1.key, &1.value})
+
+  defp fetch_builtin(name) do
+    case Enum.find(ToolRegistry.default_tools(), &(&1.name() == name)) do
+      nil -> :error
+      module -> {:ok, module}
+    end
   end
 
   @doc """

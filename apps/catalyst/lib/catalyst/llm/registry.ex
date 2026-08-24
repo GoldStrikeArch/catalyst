@@ -1,36 +1,26 @@
 defmodule Catalyst.LLM.Registry do
   @moduledoc """
-  Runtime registry mapping a model's `api` string to its provider. Seeded at boot
-  from the built-ins plus `config :catalyst, :llm_providers`, and writable at
+  Runtime resolver mapping a model's `api` string to its provider. Built-ins
+  and `config :catalyst, :llm_providers` remain live fallback layers, and
+  the shared runtime contribution store is writable at
   runtime (`register_provider/3`) so an extension can add a new provider — or
-  override an existing one — with no restart. Backed by an ETS table like
-  `Catalyst.Extensions`; `fetch/1` reads it directly.
+  override an existing one — with no restart.
 
   Refactoring an existing provider needs no registry change at all: recompiling
   its module hot-swaps the code, and the next `stream/4` call runs the new
   version. The registry is for *adding/selecting* providers by name.
   """
 
-  use GenServer
-
   alias Catalyst.ExtensionAPI
-  alias Catalyst.Extensions.Owner
   alias Catalyst.LLM.ProviderConfig
-  alias Catalyst.OwnedIndex
-
-  @table :catalyst_llm_providers
+  alias Catalyst.Runtime.Registry, as: Runtime
 
   @builtin %{
     "faux" => Catalyst.LLM.Faux,
-    "openai-codex-responses" => Catalyst.LLM.OpenAICodex.Provider,
-    "grok-subscription-chat-completions" => Catalyst.LLM.GrokSubscription.Provider
+    "openai-codex-responses" => Catalyst.LLM.OpenAICodex.Provider
   }
 
   # ---- API ------------------------------------------------------------------
-
-  @doc "Start the (singleton, named) provider registry."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc "Resolve the provider MODULE for an api string (stable signature)."
   @spec fetch(String.t()) :: {:ok, module()} | {:error, {:unknown_api, String.t()}}
@@ -53,18 +43,11 @@ defmodule Catalyst.LLM.Registry do
   @doc "All registered providers as `%{api => %ProviderConfig{}}`."
   @spec list() :: %{String.t() => ProviderConfig.t()}
   def list do
-    case table_rows() do
-      {:ok, rows} -> Map.new(rows)
-      :error -> seed_map()
-    end
-  end
+    runtime =
+      Runtime.list(:provider)
+      |> Map.new(fn entry -> {entry.key, entry.value} end)
 
-  # The rescue wraps only the :ets call: a missing table (registry restarting)
-  # falls back to the seed layer; a malformed row is a real bug and must crash.
-  defp table_rows do
-    {:ok, :ets.tab2list(@table)}
-  rescue
-    ArgumentError -> :error
+    Map.merge(seed_map(), runtime)
   end
 
   @doc """
@@ -76,60 +59,23 @@ defmodule Catalyst.LLM.Registry do
   def register_provider(api, config, opts \\ [])
 
   def register_provider(api, %ProviderConfig{} = config, opts) when is_binary(api),
-    do: GenServer.call(__MODULE__, {:register, api, config, opts})
+    do: register(api, config, opts)
 
   def register_provider(api, module, opts) when is_binary(api) and is_atom(module),
     do: register_provider(api, %ProviderConfig{module: module}, opts)
 
   @doc "Remove a provider (restoring a built-in/config one if it was shadowed)."
   @spec unregister_provider(String.t()) :: :ok
-  def unregister_provider(api) when is_binary(api),
-    do: GenServer.call(__MODULE__, {:unregister, api})
+  def unregister_provider(api) when is_binary(api), do: Runtime.delete(:provider, api)
 
   @doc "Remove every provider registered by `owner` (extension purge hook)."
   @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
+  def unregister_owner(owner), do: Runtime.purge_owner(owner, :provider)
 
-  # ---- callbacks ------------------------------------------------------------
-
-  @impl true
-  def init(:ok) do
-    :ets.new(@table, [:named_table, :public, read_concurrency: true])
-    Enum.each(seed_map(), fn {api, cfg} -> :ets.insert(@table, {api, cfg}) end)
-    wire()
-    {:ok, OwnedIndex.new()}
-  end
-
-  @impl true
-  def handle_call({:register, api, config, opts}, _from, state) do
-    owner = Owner.normalize(opts[:owner])
-
-    case validate_provider_module(config.module) do
-      :ok ->
-        case OwnedIndex.claim(state, api, owner, track_owner: owner != Owner.host()) do
-          {:ok, state} ->
-            :ets.insert(@table, {api, config})
-            {:reply, :ok, state}
-
-          {:error, existing_owner} ->
-            error = {:owner_collision, :provider, api, existing_owner, owner}
-            {:reply, {:error, error}, state}
-        end
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+  defp register(api, config, opts) do
+    with :ok <- validate_provider_module(config.module) do
+      Runtime.put(:provider, api, config, opts)
     end
-  end
-
-  def handle_call({:unregister, api}, _from, state) do
-    drop(api)
-    {:reply, :ok, OwnedIndex.release(state, api)}
-  end
-
-  def handle_call({:unregister_owner, owner}, _from, state) do
-    {apis, state} = OwnedIndex.release_owner(state, owner)
-    Enum.each(apis, &drop/1)
-    {:reply, :ok, state}
   end
 
   defp validate_provider_module(module) do
@@ -155,25 +101,9 @@ defmodule Catalyst.LLM.Registry do
   # ---- internals ------------------------------------------------------------
 
   defp lookup(api) do
-    case lookup_row(api) do
-      [{^api, cfg}] -> cfg
-      _ -> Map.get(seed_map(), api)
-    end
-  end
-
-  defp lookup_row(api) do
-    :ets.lookup(@table, api)
-  rescue
-    ArgumentError -> []
-  end
-
-  # Drop an entry; if `api` is a built-in/config default, restore that default.
-  defp drop(api) do
-    :ets.delete(@table, api)
-
-    case Map.get(seed_map(), api) do
-      nil -> :ok
-      cfg -> :ets.insert(@table, {api, cfg})
+    case Runtime.fetch(:provider, api) do
+      {:ok, config, _owner} -> config
+      :error -> Map.get(seed_map(), api)
     end
   end
 
@@ -199,8 +129,10 @@ defmodule Catalyst.LLM.Registry do
     register_provider(api, config, owner: owner)
   end
 
-  defp wire do
+  @doc false
+  @spec wire_extension_api() :: :ok
+  def wire_extension_api do
     ExtensionAPI.register_kind(:provider, &__MODULE__.register_extension_provider/3)
-    ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
+    :ok
   end
 end

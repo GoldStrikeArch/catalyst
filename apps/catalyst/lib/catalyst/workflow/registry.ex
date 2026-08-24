@@ -1,8 +1,8 @@
 defmodule Catalyst.Workflow.Registry do
   @moduledoc """
-  Owned runtime overlay and live resolver for agent workflows.
+  Live agent-workflow resolver over the shared runtime contribution store.
 
-  Only runtime registrations live in ETS. Application configuration and
+  Only runtime registrations live in `Catalyst.Runtime.Registry`. Application configuration and
   persisted templates are read at resolution time, so changes take effect
   without restarting this process. The effective selection order is:
 
@@ -22,18 +22,15 @@ defmodule Catalyst.Workflow.Registry do
   is pinned in the selection map and runs through `Catalyst.Workflow.Runner`.
 
   An explicit unknown name is an error and never falls through to the default.
-  Reads remain useful while the ETS owner is restarting: a missing table simply
+  Reads remain useful while the runtime owner is restarting: a missing table simply
   exposes the current application or built-in layer.
   """
 
-  use GenServer
-
   alias Catalyst.ExtensionAPI
-  alias Catalyst.Extensions.Owner
   alias Catalyst.ACP.Agent, as: ACPAgent
+  alias Catalyst.Runtime.Registry, as: Runtime
   alias Catalyst.Workflow.Template
 
-  @table :catalyst_workflows
   @builtin Catalyst.Agent.Loop
   @template_runner Catalyst.Workflow.Runner
 
@@ -55,10 +52,6 @@ defmodule Catalyst.Workflow.Registry do
               template: template()
             }
   @type runtime_entry :: %{key: key(), value: module(), owner: term()}
-
-  @doc "Start the singleton workflow registry."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc "Resolve the effective workflow for a run's option collection."
   @spec resolve(keyword() | map()) :: {:ok, selection()} | {:error, term()}
@@ -111,61 +104,32 @@ defmodule Catalyst.Workflow.Registry do
   @doc "Register or refresh a runtime workflow, tagged with an optional owner."
   @spec register_workflow(term(), term(), keyword()) :: :ok | {:error, term()}
   def register_workflow(name, module, opts \\ []) when is_list(opts) do
-    GenServer.call(__MODULE__, {:register, name, module, opts})
+    key = {:workflow, name}
+
+    with :ok <- validate_registration(key, module) do
+      Runtime.put(:workflow, name, module, Keyword.put(opts, :collision_key, name))
+    end
   end
 
   @doc "Drop one runtime overlay, revealing the current lower-precedence layer."
   @spec unregister_workflow(term()) :: :ok
-  def unregister_workflow(name), do: GenServer.call(__MODULE__, {:unregister, name})
+  def unregister_workflow(name), do: Runtime.delete(:workflow, name)
 
   @doc "Drop every runtime workflow owned by `owner`."
   @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner), do: GenServer.call(__MODULE__, {:unregister_owner, owner})
+  def unregister_owner(owner), do: Runtime.purge_owner(owner, :workflow)
 
   @doc "Return the owner-aware runtime overlay in stable key order."
   @spec runtime_entries() :: [runtime_entry()]
   def runtime_entries do
-    case table_rows() do
-      {:ok, rows} ->
-        rows
-        |> Enum.map(fn {key, value, owner} -> %{key: key, value: value, owner: owner} end)
-        |> Enum.sort_by(&inspect(&1.key))
-
-      :error ->
-        []
-    end
+    Enum.map(Runtime.list(:workflow), fn entry ->
+      %{key: {:workflow, entry.key}, value: entry.value, owner: entry.owner}
+    end)
   end
 
   @doc false
   @spec table() :: atom()
-  def table, do: @table
-
-  @impl true
-  def init(:ok) do
-    :ets.new(@table, [:named_table, :public, read_concurrency: true])
-    wire_extension_api()
-    {:ok, :ok}
-  end
-
-  @impl true
-  def handle_call({:register, name, module, opts}, _from, state) do
-    key = {:workflow, name}
-
-    case validate_registration(key, module) do
-      :ok -> register(key, module, Owner.normalize(opts[:owner]), state)
-      {:error, _reason} = error -> {:reply, error, state}
-    end
-  end
-
-  def handle_call({:unregister, name}, _from, state) do
-    :ets.delete(@table, {:workflow, name})
-    {:reply, :ok, state}
-  end
-
-  def handle_call({:unregister_owner, owner}, _from, state) do
-    :ets.match_delete(@table, {:_, :_, owner})
-    {:reply, :ok, state}
-  end
+  def table, do: Runtime.table()
 
   defp default_rows do
     case resolve_default() do
@@ -195,13 +159,7 @@ defmodule Catalyst.Workflow.Registry do
   end
 
   defp runtime_names do
-    case table_rows() do
-      {:ok, rows} ->
-        for {{:workflow, name}, _module, _owner} <- rows, valid_named_workflow?(name), do: name
-
-      :error ->
-        []
-    end
+    for %{key: name} <- Runtime.list(:workflow), valid_named_workflow?(name), do: name
   end
 
   defp application_names do
@@ -352,25 +310,12 @@ defmodule Catalyst.Workflow.Registry do
   defp option(opts, _key), do: {:error, {:invalid_configuration, :workflow_options, opts}}
 
   defp runtime_lookup(key) do
-    case lookup_row(key) do
-      [{^key, module, owner}] -> {:ok, module, owner}
-      _missing -> :error
+    {:workflow, name} = key
+
+    case Runtime.fetch(:workflow, name) do
+      {:ok, module, owner} -> {:ok, module, owner}
+      :error -> :error
     end
-  end
-
-  # The rescues wrap only the :ets call: reads keep exposing the application
-  # and built-in layers while the owner table is absent; malformed rows must
-  # not read as "no overlays".
-  defp lookup_row(key) do
-    :ets.lookup(@table, key)
-  rescue
-    ArgumentError -> []
-  end
-
-  defp table_rows do
-    {:ok, :ets.tab2list(@table)}
-  rescue
-    ArgumentError -> :error
   end
 
   defp validate_registration({:workflow, name} = key, module) do
@@ -439,26 +384,6 @@ defmodule Catalyst.Workflow.Registry do
     is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :run, 4)
   end
 
-  # Ownership lives in ETS column 3 (single writer: this process), so a claim
-  # is a plain lookup — no second bookkeeping structure to desync.
-  defp register(key, module, owner, state) do
-    case runtime_lookup(key) do
-      :error -> put_registration(key, module, owner, state)
-      {:ok, _module, ^owner} -> put_registration(key, module, owner, state)
-      {:ok, _module, existing} -> collision(key, existing, owner, state)
-    end
-  end
-
-  defp put_registration(key, module, owner, state) do
-    :ets.insert(@table, {key, module, owner})
-    {:reply, :ok, state}
-  end
-
-  defp collision({:workflow, name}, existing_owner, attempted_owner, state) do
-    error = {:owner_collision, :workflow, name, existing_owner, attempted_owner}
-    {:reply, {:error, error}, state}
-  end
-
   @doc false
   @spec register_extension_workflow(ExtensionAPI.t(), name(), module(), keyword()) ::
           :ok | {:error, term()}
@@ -466,8 +391,10 @@ defmodule Catalyst.Workflow.Registry do
     register_workflow(name, module, Keyword.put(opts, :owner, owner))
   end
 
-  defp wire_extension_api do
+  @doc false
+  @spec wire_extension_api() :: :ok
+  def wire_extension_api do
     ExtensionAPI.register_kind(:workflow, &__MODULE__.register_extension_workflow/4)
-    ExtensionAPI.register_purger(&__MODULE__.unregister_owner/1)
+    :ok
   end
 end

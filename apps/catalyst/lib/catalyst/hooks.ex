@@ -23,11 +23,9 @@ defmodule Catalyst.Hooks do
   work. Decision and filter hooks remain synchronous because their return
   values control the current run.
 
-  Handlers are stored in an ETS bag (like `Catalyst.Extensions`), tagged with an
+  Handlers are contributions in `Catalyst.Runtime.Registry`, tagged with an
   `owner` so a reloaded extension can revoke its prior handlers (`unregister/1`).
-  The table is owned by `Catalyst.Hooks.TableOwner`, not by this server, so a
-  crash here cannot destroy the registered handlers (which nothing would
-  re-register). Synchronous decision/filter hooks are generation-gated and fail
+  Synchronous decision/filter hooks are generation-gated and fail
   closed: the agent loop pins one `capture_snapshot/1` per turn, snapshot
   capture refuses to observe a rebuilding extension runtime (returning
   `{:error, :extension_runtime_recovering}`), and `before_tool_call` blocks
@@ -46,13 +44,12 @@ defmodule Catalyst.Hooks do
   event when no queued update can be evicted.
   """
 
-  use GenServer
   require Logger
 
   alias Catalyst.Hooks.ObserverDispatcher
+  alias Catalyst.Runtime.Registry, as: Runtime
   alias Catalyst.Tasks
 
-  @table :catalyst_hooks
   @runtime_ready_key {__MODULE__, :runtime_ready}
   @handler_timeout_ms 10_000
   @points [
@@ -93,10 +90,6 @@ defmodule Catalyst.Hooks do
 
   # ---- API ------------------------------------------------------------------
 
-  @doc "Start the singleton hook registry."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
-
   @doc """
   Register a hook handler at `point`. `fun`'s arity depends on the point (see the
   moduledoc). `opts`: `:owner` (for `unregister/1`), `:id` (display), `:priority`
@@ -104,7 +97,19 @@ defmodule Catalyst.Hooks do
   """
   @spec register(point(), function(), keyword()) :: :ok
   def register(point, fun, opts \\ []) when is_atom(point) and is_function(fun) do
-    GenServer.call(__MODULE__, {:register, point, fun, opts})
+    seq = System.unique_integer([:positive, :monotonic])
+    owner = opts |> Keyword.get(:owner) |> Runtime.normalize_owner()
+
+    entry = %{
+      point: point,
+      id: Keyword.get(opts, :id, "h#{seq}"),
+      owner: owner,
+      priority: Keyword.get(opts, :priority, 100),
+      seq: seq,
+      fun: fun
+    }
+
+    Runtime.put(:hook, {point, seq}, entry, owner: owner)
   end
 
   @doc "Register an event observer (`fun.(event) -> any`) for every agent event."
@@ -113,7 +118,7 @@ defmodule Catalyst.Hooks do
 
   @doc "Remove every handler registered by `owner` across all points."
   @spec unregister(term()) :: :ok
-  def unregister(owner), do: GenServer.call(__MODULE__, {:unregister, owner})
+  def unregister(owner), do: Runtime.purge_owner(Runtime.normalize_owner(owner), :hook)
 
   @doc """
   Handlers registered at `point`, ordered by priority then registration order.
@@ -132,21 +137,16 @@ defmodule Catalyst.Hooks do
   @doc false
   @spec fetch_handlers(point()) :: {:ok, [handler_entry()]} | {:error, :registry_unavailable}
   def fetch_handlers(point) do
-    case :ets.whereis(@table) do
-      :undefined ->
-        {:error, :registry_unavailable}
-
-      _table ->
+    case Runtime.available?() do
+      true ->
         entries =
-          @table
-          |> :ets.lookup(point)
-          |> Enum.map(&elem(&1, 1))
-          |> Enum.sort_by(&{&1.priority, &1.seq})
+          for %{key: {^point, _seq}, value: entry} <- Runtime.list(:hook), do: entry
 
-        {:ok, entries}
+        {:ok, Enum.sort_by(entries, &{&1.priority, &1.seq})}
+
+      false ->
+        {:error, :registry_unavailable}
     end
-  rescue
-    ArgumentError -> {:error, :registry_unavailable}
   end
 
   @doc "Capture ready synchronous hook entries for one complete turn."
@@ -430,59 +430,6 @@ defmodule Catalyst.Hooks do
   @spec await_observers(term(), timeout()) :: :ok
   def await_observers(session_key \\ self(), timeout \\ 5_000) do
     ObserverDispatcher.await_idle(session_key, timeout)
-  end
-
-  # ---- callbacks ------------------------------------------------------------
-
-  @impl true
-  def init(:ok) do
-    # The table is normally created (and owned) by Catalyst.Hooks.TableOwner,
-    # started just before this server, so handlers survive a crash here.
-    # Creating it ourselves is a fallback for tests that start Hooks standalone.
-    case :ets.whereis(@table) do
-      :undefined -> :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
-      _table -> :ok
-    end
-
-    # Resume the seq counter past any surviving entries, or a restart would
-    # hand out duplicate seqs and scramble the documented "priority then
-    # registration order" tie-break.
-    next_seq =
-      @table
-      |> :ets.tab2list()
-      |> Enum.map(fn {_point, entry} -> entry.seq end)
-      |> Enum.max(fn -> -1 end)
-      |> Kernel.+(1)
-
-    {:ok, %{seq: next_seq}}
-  end
-
-  @impl true
-  def handle_call({:register, point, fun, opts}, _from, %{seq: seq} = state) do
-    entry = %{
-      point: point,
-      id: Keyword.get(opts, :id, "h#{seq}"),
-      owner: Keyword.get(opts, :owner),
-      priority: Keyword.get(opts, :priority, 100),
-      seq: seq,
-      fun: fun
-    }
-
-    :ets.insert(@table, {point, entry})
-    {:reply, :ok, %{state | seq: seq + 1}}
-  end
-
-  def handle_call({:unregister, owner}, _from, state) do
-    @table
-    |> :ets.tab2list()
-    |> Enum.each(fn {_point, entry} = obj ->
-      case entry.owner == owner do
-        true -> :ets.delete_object(@table, obj)
-        false -> :ok
-      end
-    end)
-
-    {:reply, :ok, state}
   end
 
   # ---- internals ------------------------------------------------------------

@@ -32,20 +32,22 @@ defmodule Catalyst.Tools.ReloadTool do
   end
 
   defp format_result(%{loaded: loaded, failed: failed}) do
-    case {loaded, failed} do
+    user_loaded = Enum.reject(loaded, &(&1[:source] == :bundled))
+
+    case {user_loaded, failed} do
       {[], [_ | _]} ->
         raise "Reload failed — no extension file loaded.\n" <> format_failures(failed)
 
       _ ->
-        tools = Enum.flat_map(loaded, & &1.tools)
+        tools = Enum.flat_map(user_loaded, & &1.tools)
 
         result(
-          "Reloaded #{length(loaded)} file(s). Tools: #{Enum.join(tools, ", ")}" <>
-            failures_section(failed) <> warnings_section(loaded),
+          "Reloaded #{length(user_loaded)} file(s). Tools: #{Enum.join(tools, ", ")}" <>
+            failures_section(failed) <> warnings_section(user_loaded),
           %{
-            files: length(loaded),
+            files: length(user_loaded),
             failed: length(failed),
-            warnings: Enum.count(loaded, &is_binary(&1[:warning]))
+            warnings: Enum.count(user_loaded, &is_binary(&1[:warning]))
           }
         )
     end
