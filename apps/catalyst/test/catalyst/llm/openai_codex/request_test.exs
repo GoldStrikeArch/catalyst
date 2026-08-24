@@ -4,7 +4,7 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
   alias Catalyst.{Content, Message, Model}
   alias Catalyst.Context.Tokens
   alias Catalyst.LLM.Context
-  alias Catalyst.LLM.OpenAICodex.{Provider, Request}
+  alias Catalyst.LLM.OpenAICodex.Request
 
   defmodule UnknownBlock do
     @moduledoc false
@@ -261,8 +261,5 @@ defmodule Catalyst.LLM.OpenAICodex.RequestTest do
 
     assert first == second
     assert Tokens.projection_digest(first) == Tokens.projection_digest(second)
-
-    assert {:ok, Tokens.projection_digest(first)} ==
-             Provider.context_fingerprint(model(), context, session_id: "session")
   end
 end

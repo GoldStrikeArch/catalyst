@@ -141,7 +141,7 @@ defmodule CatalystWeb.ShellLive.ExtensionsPanel do
   end
 
   defp effective_window_threshold(model, opts) do
-    note = "unanchored baseline; each request's ContextStatus is authoritative"
+    note = "coarse baseline; each request's ContextStatus is authoritative"
 
     case Window.threshold_with_source(model, %{opts: opts}) do
       {:ok, threshold, source} -> effective_row("Context threshold", threshold, source, note)
@@ -153,12 +153,10 @@ defmodule CatalystWeb.ShellLive.ExtensionsPanel do
   defp request_context_rows(%{context_status: %{} = status} = diagnostics) do
     threshold = Map.get(status, :threshold) || :none
     source = Map.get(status, :threshold_source)
-    anchored = Map.get(status, :anchored, false)
     model_id = get_in(diagnostics, [:run_metadata, :context, :model_id])
-    basis = if(anchored, do: "anchored", else: "estimated")
     model_note = if(is_binary(model_id), do: " for #{model_id}", else: "")
 
-    [effective_row("Last request threshold", threshold, source, basis <> model_note)]
+    [effective_row("Last request threshold", threshold, source, "estimated" <> model_note)]
   end
 
   defp request_context_rows(_diagnostics), do: []

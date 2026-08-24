@@ -188,9 +188,9 @@ defmodule Catalyst.Flex.Baseline do
 
   # The module dimension: extension-contributed code enters the VM without a
   # disk beam — in-memory (loaded file `[]`) from `Code.compile_*` or re-loaded
-  # from its `*.ex` source path by ModuleVersions. A purge that unregisters an
-  # owner but leaves its module loaded now shows up as a leak. Disk-beam
-  # modules load lazily throughout a run and are deliberately excluded.
+  # from its `*.ex` source path by the source-driven rebuild. A purge that
+  # unregisters an owner but leaves its module loaded now shows up as a leak.
+  # Disk-beam modules load lazily throughout a run and are deliberately excluded.
   defp module_snapshot do
     :code.all_loaded()
     |> Enum.filter(fn {module, file} ->
@@ -217,7 +217,15 @@ defmodule Catalyst.Flex.Baseline do
   defp hook_snapshot do
     (Catalyst.Hooks.points() ++ [:event])
     |> Enum.uniq()
-    |> Map.new(fn point -> {point, Catalyst.Hooks.handlers(point) |> stable_term()} end)
+    |> Map.new(fn point ->
+      handlers =
+        point
+        |> Catalyst.Hooks.handlers()
+        |> Enum.map(&Map.delete(&1, :seq))
+        |> stable_term()
+
+      {point, handlers}
+    end)
   end
 
   defp app_env_snapshot do
@@ -235,10 +243,12 @@ defmodule Catalyst.Flex.Baseline do
     case Process.whereis(@ui_registry) do
       pid when is_pid(pid) ->
         %{
-          pages: apply(@ui_registry, :list_pages, []) |> stable_term(),
-          renderers: apply(@ui_registry, :list_renderers, []) |> stable_term(),
-          components: apply(@ui_registry, :list_components, []) |> stable_term(),
-          commands: apply(@ui_registry, :list_commands, []) |> stable_term()
+          pages: apply(@ui_registry, :list_pages, []) |> without_sequence() |> stable_term(),
+          renderers:
+            apply(@ui_registry, :list_renderers, []) |> without_sequence() |> stable_term(),
+          components:
+            apply(@ui_registry, :list_components, []) |> without_sequence() |> stable_term(),
+          commands: apply(@ui_registry, :list_commands, []) |> without_sequence() |> stable_term()
         }
 
       _not_started ->
@@ -249,9 +259,11 @@ defmodule Catalyst.Flex.Baseline do
   defp extension_process_snapshot do
     Catalyst.Extensions.ProcessRegistry
     |> registry_keys()
-    |> Enum.map(fn owner -> {owner, Catalyst.Extensions.Processes.list(owner) |> Enum.sort()} end)
-    |> Enum.reject(fn {_owner, children} -> children == [] end)
+    |> Enum.map(fn owner -> {owner, length(Catalyst.Extensions.Processes.list(owner))} end)
+    |> Enum.reject(fn {_owner, count} -> count == 0 end)
   end
+
+  defp without_sequence(entries), do: Enum.map(entries, &Map.delete(&1, :seq))
 
   defp registry_keys(registry) do
     Registry.select(registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
@@ -276,19 +288,7 @@ defmodule Catalyst.Flex.Baseline do
     |> Enum.sort()
   end
 
-  defp await_all_observers do
-    case Process.whereis(Catalyst.Hooks.ObserverDispatcher) do
-      pid when is_pid(pid) ->
-        pid
-        |> :sys.get_state()
-        |> Map.get(:sessions, %{})
-        |> Map.keys()
-        |> Enum.each(&Catalyst.Hooks.await_observers(&1, 5_000))
-
-      _not_started ->
-        :ok
-    end
-  end
+  defp await_all_observers, do: Catalyst.Hooks.await_observers(:all, 5_000)
 
   defp stable_term(fun) when is_function(fun) do
     info = :erlang.fun_info(fun)

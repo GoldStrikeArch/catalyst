@@ -21,12 +21,9 @@ defmodule Catalyst.LLM.RegistryTest do
     end
   end
 
-  test "kernel and bundled providers are available" do
+  test "kernel providers are available" do
     assert {:ok, Catalyst.LLM.Faux} = Registry.fetch("faux")
     assert {:ok, Catalyst.LLM.OpenAICodex.Provider} = Registry.fetch("openai-codex-responses")
-
-    assert {:ok, Catalyst.LLM.GrokSubscription.Provider} =
-             Registry.fetch("grok-subscription-chat-completions")
 
     assert Map.has_key?(Registry.list(), "faux")
   end
@@ -64,6 +61,19 @@ defmodule Catalyst.LLM.RegistryTest do
 
     Registry.unregister_provider("faux")
     assert {:ok, Catalyst.LLM.Faux} = Registry.fetch("faux")
+  end
+
+  test "a bare implementation override preserves existing provider controls" do
+    api = "openai-codex-responses"
+    on_exit(fn -> Registry.unregister_provider(api) end)
+
+    assert :ok = Registry.register_provider(api, EchoProvider)
+
+    assert {:ok,
+            %ProviderConfig{
+              module: EchoProvider,
+              controls: Catalyst.LLM.OpenAICodex.Controls
+            }} = Registry.fetch_config(api)
   end
 
   test "extension owners cannot replace each other's provider and purge is owner-safe" do

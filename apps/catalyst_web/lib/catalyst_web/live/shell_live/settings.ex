@@ -11,9 +11,12 @@ defmodule CatalystWeb.ShellLive.Settings do
   import Phoenix.Component, only: [assign: 2]
   import Phoenix.LiveView, only: [put_flash: 3]
 
-  alias Catalyst.Auth.{OpenAIOAuth, XAIOAuth}
-  alias Catalyst.LLM.{GrokSubscription, OpenAICodex}
+  require Logger
+
+  alias Catalyst.LLM.Registry, as: LLMRegistry
+  alias Catalyst.LLM.OpenAICodex.Controls, as: DefaultControls
   alias Catalyst.Session.Server
+  alias Catalyst.Workflow
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
   alias CatalystWeb.ShellLive.SessionLifecycle
 
@@ -49,9 +52,9 @@ defmodule CatalystWeb.ShellLive.Settings do
   @spec load_codex() :: codex_prefs()
   def load_codex do
     defaults = %{
-      model: OpenAICodex.default_model_id(),
-      provider: "openai-codex",
-      effort: OpenAICodex.default_effort(),
+      model: DefaultControls.default_model_id(),
+      provider: DefaultControls.id(),
+      effort: DefaultControls.default_effort(),
       fast: false,
       transport: "auto"
     }
@@ -254,9 +257,7 @@ defmodule CatalystWeb.ShellLive.Settings do
   @doc "One combined model-catalog snapshot with the selected entry."
   @spec catalog_snapshot(codex_prefs()) :: %{models: [map()], selected: map()}
   def catalog_snapshot(prefs) do
-    models =
-      Enum.map(OpenAICodex.list_models(), &Map.put(&1, :provider, "openai-codex")) ++
-        GrokSubscription.list_models()
+    models = Enum.flat_map(controls_modules(), &catalog_models/1)
 
     case Enum.find(models, &(&1.id == prefs.model)) do
       nil ->
@@ -275,40 +276,31 @@ defmodule CatalystWeb.ShellLive.Settings do
   entry, so no provider is returned here.
   """
   @spec provider_config(codex_prefs()) :: Catalyst.Model.t()
-  def provider_config(%{provider: "grok-subscription"} = prefs),
-    do: GrokSubscription.model(prefs.model)
-
-  def provider_config(prefs), do: OpenAICodex.model(prefs.model)
+  def provider_config(prefs) do
+    controls = controls_for(provider_id(prefs))
+    controls.model(prefs.model)
+  end
 
   @doc "Converts the selected provider's controls into session run options."
   @spec run_opts(codex_prefs()) :: keyword()
-  def run_opts(%{provider: "grok-subscription"} = prefs) do
-    [reasoning_effort: prefs.effort, service_tier: nil, transport: nil]
-  end
-
   def run_opts(prefs) do
-    service_tier =
-      case prefs.fast do
-        true -> "priority"
-        false -> nil
-      end
-
-    [
-      reasoning_effort: prefs.effort,
-      service_tier: service_tier,
-      transport: prefs.transport
-    ]
+    controls = controls_for(provider_id(prefs))
+    controls.run_opts(prefs)
   end
 
   @doc "Token-store provider for the selected model."
   @spec auth_provider(codex_prefs()) :: String.t()
-  def auth_provider(%{provider: "grok-subscription"}), do: XAIOAuth.provider_id()
-  def auth_provider(_prefs), do: OpenAIOAuth.provider_id()
+  def auth_provider(prefs) do
+    controls = controls_for(provider_id(prefs))
+    controls.auth_provider()
+  end
 
   @doc "Human-facing subscription name for the selected model."
   @spec auth_label(codex_prefs()) :: String.t()
-  def auth_label(%{provider: "grok-subscription"}), do: "SuperGrok"
-  def auth_label(_prefs), do: "ChatGPT"
+  def auth_label(prefs) do
+    controls = controls_for(provider_id(prefs))
+    controls.auth_label()
+  end
 
   @doc """
   Synchronizes controls from an attached session, which is the source of truth.
@@ -456,9 +448,13 @@ defmodule CatalystWeb.ShellLive.Settings do
   defp external_backend_switch?(current, selected),
     do: external_workflow?(current) or external_workflow?(selected)
 
-  defp external_workflow?("claude-code"), do: true
-  defp external_workflow?("acp/" <> _agent_id), do: true
-  defp external_workflow?(_workflow), do: false
+  defp external_workflow?(workflow) do
+    with {:ok, selection} <- WorkflowRegistry.resolve(workflow: workflow) do
+      Workflow.session_backend(selection, workflow: workflow) != :internal
+    else
+      {:error, _reason} -> false
+    end
+  end
 
   defp backend_boundary_present?(pid) do
     snapshot = Server.state(pid)
@@ -509,25 +505,69 @@ defmodule CatalystWeb.ShellLive.Settings do
   end
 
   defp infer_provider(prefs) do
-    case Enum.any?(GrokSubscription.list_models(), &(&1.id == prefs.model)) do
-      true -> Map.put(prefs, :provider, "grok-subscription")
-      false -> Map.put(prefs, :provider, "openai-codex")
+    case Enum.find(catalog_snapshot(prefs).models, &(&1.id == prefs.model)) do
+      %{provider: provider} -> Map.put(prefs, :provider, provider)
+      nil -> Map.put(prefs, :provider, DefaultControls.id())
     end
   end
 
-  defp provider_from_model(%{api: "grok-subscription-chat-completions"}),
-    do: "grok-subscription"
+  defp provider_from_model(%{provider: provider}) when is_binary(provider) do
+    controls_for(provider).id()
+  end
 
-  defp provider_from_model(_model), do: "openai-codex"
+  defp provider_from_model(_model), do: DefaultControls.id()
 
-  defp default_effort("grok-subscription"), do: GrokSubscription.default_effort()
-  defp default_effort(_provider), do: OpenAICodex.default_effort()
+  defp default_effort(provider) do
+    controls = controls_for(provider)
+    controls.default_effort()
+  end
 
-  defp unknown_entry(%{provider: "grok-subscription", model: model}),
-    do: GrokSubscription.catalog_entry(model)
+  defp unknown_entry(%{model: model} = prefs) do
+    controls = controls_for(provider_id(prefs))
+    decorate_catalog_entry(controls.catalog_entry(model), controls)
+  end
 
-  defp unknown_entry(%{model: model}),
-    do: model |> OpenAICodex.catalog_entry() |> Map.put(:provider, "openai-codex")
+  defp catalog_models(controls) do
+    Enum.map(controls.list_models(), &decorate_catalog_entry(&1, controls))
+  rescue
+    exception ->
+      Logger.warning(
+        "[settings] provider controls #{inspect(controls)} catalog failed: " <>
+          Exception.message(exception)
+      )
+
+      []
+  catch
+    kind, reason ->
+      Logger.warning(
+        "[settings] provider controls #{inspect(controls)} catalog failed: " <>
+          Exception.format_banner(kind, reason)
+      )
+
+      []
+  end
+
+  defp decorate_catalog_entry(entry, controls) do
+    Map.merge(entry, %{provider: controls.id(), auth_label: controls.auth_label()})
+  end
+
+  defp controls_for(provider) do
+    Enum.find(controls_modules(), DefaultControls, &(&1.id() == provider))
+  end
+
+  defp provider_id(prefs), do: Map.get(prefs, :provider, DefaultControls.id())
+
+  defp controls_modules do
+    optional =
+      LLMRegistry.list()
+      |> Map.values()
+      |> Enum.map(& &1.controls)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> List.delete(DefaultControls)
+
+    [DefaultControls | optional]
+  end
 
   defp persist(key, prefs), do: :persistent_term.put(key, prefs)
 end

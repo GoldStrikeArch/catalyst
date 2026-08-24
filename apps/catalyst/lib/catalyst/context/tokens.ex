@@ -1,15 +1,14 @@
 defmodule Catalyst.Context.Tokens do
   @moduledoc """
-  Deterministic request accounting and semantic-prefix fingerprints.
+  Deterministic, provider-neutral request accounting.
 
-  Providers may export `context_fingerprint/3` and `estimate_tokens/3` for an
-  exact projection of their serialization.  Otherwise Catalyst hashes a stable
-  provider-neutral semantic projection and estimates conservatively at roughly
-  four bytes per token.  The fallback is deliberately labelled coarse; it is
-  not tokenizer-level accounting.
+  Catalyst hashes one stable semantic projection and estimates conservatively
+  at roughly four bytes per token, with separate size-based image pricing. This
+  is deliberately coarse rather than tokenizer-specific: the context guard
+  applies a conservative window threshold and re-estimates after compaction.
   """
 
-  alias Catalyst.{Content, Message, Model, Tasks, Usage}
+  alias Catalyst.{Content, Message, Model}
   alias Catalyst.LLM.Context, as: LLMContext
 
   @bytes_per_token 4
@@ -30,72 +29,47 @@ defmodule Catalyst.Context.Tokens do
   # priced as an image (which would let the model steer the context guard).
   @image_tag :__catalyst_image__
 
-  @type fingerprint_source :: :provider | :coarse
+  @type fingerprint_source :: :coarse
 
   @type estimate :: %{
           tokens: non_neg_integer(),
-          anchored: boolean(),
           context_digest: String.t(),
-          source: :provider | :coarse,
-          anchor: map() | nil
+          source: :coarse
         }
 
-  @doc "Estimate a request, using a matching persisted provider-total anchor when valid."
+  @doc "Estimate one complete request from the canonical semantic projection."
   @spec estimate(Model.t() | nil, LLMContext.t(), keyword() | map()) ::
           {:ok, estimate()} | {:error, term()}
   def estimate(model, %LLMContext{} = context, opts \\ []) do
-    with {:ok, full, source} <- estimate_with_source(model, context, opts),
-         {:ok, digest} <- context_fingerprint(model, context, opts) do
-      case find_anchor(model, context, opts) do
-        nil ->
-          {:ok,
-           %{tokens: full, anchored: false, context_digest: digest, source: source, anchor: nil}}
+    projection = provider_projection(model, context, opts)
 
-        %{total: total, suffix: suffix, index: index, digest: anchor_digest} ->
-          additions = addition_tokens(model, context, index, full, suffix, opts)
-
-          {:ok,
-           %{
-             tokens: max(full, total + additions),
-             anchored: true,
-             context_digest: digest,
-             source: source,
-             anchor: %{index: index, total_tokens: total, context_digest: anchor_digest}
-           }}
-      end
-    end
+    {:ok,
+     %{
+       tokens: estimate_projection(projection),
+       context_digest: projection_digest(projection),
+       source: :coarse
+     }}
   end
 
-  @doc "Provider-adapted or coarse token count for one exact LLM context."
+  @doc "Coarse token count for one exact LLM context."
   @spec estimate_tokens(Model.t() | nil, LLMContext.t(), keyword() | map()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def estimate_tokens(model, %LLMContext{} = context, opts \\ []) do
-    case estimate_with_source(model, context, opts) do
-      {:ok, tokens, _source} -> {:ok, tokens}
-      {:error, _reason} = error -> error
-    end
+    {:ok, estimate_projection(provider_projection(model, context, opts))}
   end
 
-  @doc "Provider-adapted or fallback SHA-256 fingerprint of request semantics."
+  @doc "SHA-256 fingerprint of the canonical request semantics."
   @spec context_fingerprint(Model.t() | nil, LLMContext.t(), keyword() | map()) ::
           {:ok, String.t()} | {:error, term()}
   def context_fingerprint(model, %LLMContext{} = context, opts \\ []) do
-    case context_fingerprint_with_source(model, context, opts) do
-      {:ok, digest, _source} -> {:ok, digest}
-      {:error, _reason} = error -> error
-    end
+    {:ok, semantic_digest(model, context, opts)}
   end
 
-  @doc "Return a request fingerprint together with whether it came from a provider adapter."
+  @doc "Return the canonical request fingerprint and its coarse source."
   @spec context_fingerprint_with_source(Model.t() | nil, LLMContext.t(), keyword() | map()) ::
           {:ok, String.t(), fingerprint_source()} | {:error, term()}
   def context_fingerprint_with_source(model, %LLMContext{} = context, opts \\ []) do
-    case adapter_call(opts, :context_fingerprint, [model, context, adapter_opts(opts)]) do
-      {:ok, digest} when is_binary(digest) -> {:ok, normalize_digest(digest), :provider}
-      :unsupported -> {:ok, semantic_digest(model, context, opts), :coarse}
-      {:error, _reason} = error -> error
-      _invalid -> {:ok, semantic_digest(model, context, opts), :coarse}
-    end
+    {:ok, semantic_digest(model, context, opts), :coarse}
   end
 
   @doc "Stable lowercase SHA-256 hex digest of the provider-semantic projection."
@@ -140,41 +114,6 @@ defmodule Catalyst.Context.Tokens do
     div(bytes + @bytes_per_token - 1, @bytes_per_token) + image_tokens(projection)
   end
 
-  @doc """
-  Attach a provider-accurate resumable digest to a successful assistant usage
-  record. Adapter-less, failed, aborted, and zero-total responses remain
-  deliberately unanchored.
-  """
-  @spec attach_context_digest(
-          Message.Assistant.t(),
-          Model.t() | nil,
-          LLMContext.t(),
-          keyword() | map()
-        ) :: Message.Assistant.t()
-  def attach_context_digest(
-        %Message.Assistant{usage: %Usage{total_tokens: total}} = assistant,
-        model,
-        context,
-        opts
-      )
-      when is_integer(total) and total > 0 and assistant.stop_reason not in [:error, :aborted] do
-    complete = %{context | messages: context.messages ++ [assistant]}
-
-    case context_fingerprint_with_source(model, complete, opts) do
-      {:ok, digest, :provider} ->
-        %{assistant | usage: %{assistant.usage | context_digest: digest}}
-
-      {:ok, _digest, :coarse} ->
-        %{assistant | usage: %{assistant.usage | context_digest: nil}}
-
-      {:error, _reason} ->
-        %{assistant | usage: %{assistant.usage | context_digest: nil}}
-    end
-  end
-
-  def attach_context_digest(%Message.Assistant{} = assistant, _model, _context, _opts),
-    do: assistant
-
   @doc "Return a stable lowercase SHA-256 digest for an already-built semantic projection."
   @spec projection_digest(term()) :: String.t()
   def projection_digest(projection) do
@@ -200,121 +139,6 @@ defmodule Catalyst.Context.Tokens do
   """
   @spec tag_image_block(map()) :: map()
   def tag_image_block(block) when is_map(block), do: Map.put(block, @image_tag, true)
-
-  defp estimate_with_source(model, context, opts) do
-    case adapter_call(opts, :estimate_tokens, [model, context, adapter_opts(opts)]) do
-      {:ok, tokens} when is_integer(tokens) and tokens >= 0 ->
-        {:ok, tokens, :provider}
-
-      :unsupported ->
-        {:ok, estimate_projection(provider_projection(model, context, opts)), :coarse}
-
-      {:error, _reason} = error ->
-        error
-
-      _invalid ->
-        {:ok, estimate_projection(provider_projection(model, context, opts)), :coarse}
-    end
-  end
-
-  defp find_anchor(model, context, opts) do
-    context.messages
-    |> Enum.with_index()
-    |> Enum.reverse()
-    |> Enum.find_value(fn
-      {%Message.Assistant{} = assistant, index} ->
-        eligible_anchor(assistant, index, model, context, opts)
-
-      _other ->
-        nil
-    end)
-  end
-
-  defp eligible_anchor(
-         %Message.Assistant{
-           stop_reason: stop,
-           usage: %Usage{total_tokens: total, context_digest: digest}
-         },
-         index,
-         model,
-         context,
-         opts
-       )
-       when stop not in [:error, :aborted] and is_integer(total) and total > 0 and
-              is_binary(digest) do
-    prefix = %{context | messages: Enum.take(context.messages, index + 1)}
-
-    case context_fingerprint_with_source(model, prefix, opts) do
-      {:ok, current, :provider} ->
-        # Content fingerprints are change detectors, not secrets, so a plain
-        # comparison is enough — no constant-time requirement.
-        case normalize_digest(digest) == current do
-          true ->
-            %{
-              total: total,
-              index: index,
-              digest: current,
-              suffix: Enum.drop(context.messages, index + 1)
-            }
-
-          false ->
-            nil
-        end
-
-      {:ok, _current, :coarse} ->
-        nil
-
-      {:error, _reason} ->
-        nil
-    end
-  end
-
-  defp eligible_anchor(_assistant, _index, _model, _context, _opts), do: nil
-
-  defp coarse_message_tokens(messages) do
-    messages
-    |> Enum.map(&message_projection/1)
-    |> estimate_projection()
-  end
-
-  defp addition_tokens(model, context, anchor_index, full, suffix, opts) do
-    prefix = %{context | messages: Enum.take(context.messages, anchor_index + 1)}
-
-    case estimate_with_source(model, prefix, opts) do
-      {:ok, prefix_tokens, _source} -> max(0, full - prefix_tokens)
-      {:error, _reason} -> coarse_message_tokens(suffix)
-    end
-  end
-
-  defp adapter_call(opts, callback, args) do
-    provider = option(opts, :provider)
-
-    case is_atom(provider) and not is_nil(provider) and Code.ensure_loaded?(provider) and
-           function_exported?(provider, callback, 3) do
-      true ->
-        timeout = adapter_timeout(opts)
-        task = Tasks.async(fn -> apply(provider, callback, args) end)
-
-        case Tasks.await(task, timeout) do
-          {:ok, result} -> result
-          {:exit, reason} -> {:error, {:context_adapter_exit, provider, callback, reason}}
-          :timeout -> {:error, {:context_adapter_timeout, provider, callback, timeout}}
-        end
-
-      false ->
-        :unsupported
-    end
-  end
-
-  defp adapter_timeout(opts) do
-    case option(opts, :adapter_timeout) do
-      timeout when is_integer(timeout) and timeout >= 0 -> timeout
-      _missing_or_invalid -> 5_000
-    end
-  end
-
-  defp adapter_opts(opts) when is_list(opts), do: Keyword.delete(opts, :provider)
-  defp adapter_opts(opts) when is_map(opts), do: Map.delete(opts, :provider)
 
   defp provider_identity(model, opts) do
     provider = option(opts, :provider)
@@ -499,19 +323,4 @@ defmodule Catalyst.Context.Tokens do
 
   defp option(opts, key) when is_list(opts), do: Keyword.get(opts, key)
   defp option(opts, key) when is_map(opts), do: Map.get(opts, key)
-
-  defp normalize_digest(digest) when byte_size(digest) == 32,
-    do: Base.encode16(digest, case: :lower)
-
-  defp normalize_digest(digest) when byte_size(digest) == 64 do
-    case Base.decode16(digest, case: :mixed) do
-      {:ok, _raw} -> String.downcase(digest)
-      :error -> hash_digest(digest)
-    end
-  end
-
-  defp normalize_digest(digest), do: hash_digest(digest)
-
-  defp hash_digest(value),
-    do: value |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
 end

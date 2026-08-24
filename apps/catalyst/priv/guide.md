@@ -27,6 +27,10 @@ user-writable directory, and is loaded into the live VM.
   and reloading reveals the bundled version again.
 - They are compiled + loaded **on boot** (so they persist across restarts) and can be loaded
   **on demand** at runtime.
+- Catalyst stages every active source in a disposable BEAM before changing the live VM. A broken
+  file leaves its prior accepted version active and cannot leak partially compiled modules. Put
+  live registrations and startup side effects in `setup/1`: top-level source expressions run only
+  in the disposable compiler and may run again on every rebuild.
 - A loaded module is a first-class part of the running system — it can call any Catalyst or
   Elixir/Erlang function, exactly as if it had shipped in the binary.
 
@@ -391,10 +395,15 @@ and a `setup(api)` callback. Inside `setup/1`, register any mix of:
   where `MyProvider` implements `Catalyst.LLM.Provider` (`stream/4`). Select it by
   starting a session whose model `api` is `"my-api"`. (Refactoring an _existing_
   provider needs no registration — just rewrite its module; the next call uses it.)
+  A provider that should appear in the shell model picker can set the config's `controls`
+  module to an implementation of `Catalyst.LLM.Controls`; picker, login, and run-option
+  behavior then arrive with the provider rather than requiring shell edits.
 - **Prompts, workflows, and context policy** — `register_prompt(api, model_key, text, opts)`
   registers exact model/API text (`opts[:purpose]` is `:system` by default or
   `:compaction`); `register_prompt_policy/3` replaces the complete prompt resolver;
-  `register_workflow/4` registers a named workflow or `:default`; and
+  `register_workflow/4` registers a named workflow or `:default`;
+  `register_workflow_source/3` adds a dynamic catalog implementing `Catalyst.Workflow.Source`;
+  `register_capability/3` grants a named run capability through a resolver; and
   `register_context_policy/3` / `register_context_threshold/4` replace context policy or
   add an exact model/API threshold. These are owner-aware runtime overlays: removing or
   reloading the extension reveals the current application, file, or built-in layer rather
@@ -407,9 +416,12 @@ and a `setup(api)` callback. Inside `setup/1`, register any mix of:
   - `:should_stop_after_turn` — `fn ctx -> true | :cont end`
     Observe every event with `Catalyst.ExtensionAPI.on(api, fn event -> ... end)`.
 - **UI** — `register_page(api, "settings", {MyPage, :render})` adds a page at `/settings`.
-  The page module may also export `handle_event/3`, `handle_info/2`, and `handle_async/3`;
+  The page module may export `mount_page(params, socket)` to initialize or refresh route state,
+  plus `handle_event/3`, `handle_info/2`, and `handle_async/3`;
   otherwise-unhandled LiveView callbacks are safely dispatched to the active page, so an
-  interactive page does not require editing `ShellLive`;
+  interactive page does not require editing `ShellLive`. Pass `match: :prefix` to own nested
+  routes and `render_mode: :live` only when the page intentionally needs direct LiveView behavior
+  (`:safe` is the isolated default);
   `register_renderer(api, :message, match_fun, render_fun)` overrides how a message or
   tool result is shown; `register_component(api, :header_extra, fun)` adds a header/
   sidebar/footer widget. Render functions are `Phoenix.Component`s.
@@ -429,7 +441,10 @@ tell at a glance what an installed extension does.
 Everything you register is tagged with the file's name (its _owner_); reinstalling the
 same file purges its old contributions first, so reloads never duplicate — including
 **module definitions**: modules your file compiled are removed from the VM on purge, and
-a module that shadowed one shipping with the app is restored from its original beam.
+a module that shadowed one shipping with the app is restored from its original beam. Each
+mutation stages all currently active sources together, then rebuilds their live projection
+from source; extension files and git history are durable state, while runtime rows and loaded
+extension modules are reconstructible.
 Installs are git-committed: **`rollback_extension`** reverts the last change (pass
 `name` to undo one extension's most recent change instead), **`reload_extensions`**
 reloads from disk. The **Extensions panel** (`/extensions`, the "Extensions" link in the
@@ -644,10 +659,10 @@ Before every ordinary provider request, a conforming workflow builds the transfo
 estimates its tokens, and applies the effective threshold. Threshold lookup is: the session's
 `context_threshold`; runtime registration for exact model id, API, then `:default`; live
 `config :catalyst, :context_thresholds`; then Catalyst's catalog/window default. The default uses
-the lower of a valid catalog auto-compact limit and 85% of the usable window when a persisted
-provider-total anchor from an exact provider fingerprint adapter matches, or 70% when only a
-provider-neutral coarse estimate is available. A real provider total without that fingerprint
-adapter remains unanchored because Catalyst cannot verify the provider's wire prefix.
+the lower of a valid catalog auto-compact limit and 70% of the usable window. Accounting uses one
+deterministic provider-neutral projection at roughly four bytes per token, with separate
+size-based image pricing. This deliberately conservative estimate is recomputed for the complete
+request and again for any staged replacement.
 
 A threshold may be a positive integer (absolute tokens), a ratio greater than zero and at most
 one, or `:none`. Ratios require a usable model window and are rounded down; an absolute value above
@@ -657,11 +672,11 @@ provider's hard limit, so a genuinely oversized request can still fail.
 When the threshold is reached, Catalyst stages a complete chronological replacement, transforms
 and re-estimates it, and persists it only if it is valid, strictly smaller, and below the limit.
 The transcript JSONL keeps a durable compaction record; older physical message lines remain in the
-append-only file, while current builds fold to the replacement. The status meter labels anchored
-versus estimated accounting and shows the effective threshold and source. `transform_context` is
-request-only: it may redact or reshape what the provider sees, but it does not persist compaction.
-The hook runs once for an ordinary request and a second time when compaction stages its replacement,
-so implementations must be deterministic, idempotent, and free of external side effects.
+append-only file, while current builds fold to the replacement. The status meter shows the estimate,
+effective threshold, and source. `transform_context` is request-only: it may redact or reshape what
+the provider sees, but it does not persist compaction. The hook runs once for an ordinary request
+and a second time when compaction stages its replacement, so implementations must be deterministic,
+idempotent, and free of external side effects.
 
 ### Workflows and their lifecycle contract
 
@@ -673,13 +688,9 @@ run, although normal BEAM hot-code loading still applies if its module is recomp
 
 Custom workflows implement `run(prompts, context, config, emit)` and may implement `describe/0`.
 Use `Catalyst.Workflow.Support` for observed emission, live per-turn tool resolution and final
-depth filtering, and provider requests through the context guard. A successful guarded
-`request_provider/5` response already carries a resumable digest when the provider implements the
-fingerprint adapter. After emitting its persisted assistant `MessageEnd`, call
-`Workflow.Support.emit_anchor_status/3` with that assistant and the returned prepared status so the
-UI records the matching provider total. Calling a provider directly is an unsupported bypass of
-those guarantees. The session server consumes emitted events, so the observable protocol remains
-part of the public contract:
+depth filtering, and provider requests through the context guard. Calling a provider directly is an
+unsupported bypass of those guarantees. The session server consumes emitted events, so the
+observable protocol remains part of the public contract:
 
 1. Emit exactly one initial `Catalyst.Agent.Event.AgentStart`.
 2. Emit `MessageEnd` for every message that must be persisted and folded, including every initial

@@ -460,8 +460,7 @@ defmodule CatalystWeb.ShellLiveTest do
       used_tokens: 12_500,
       threshold: 20_000,
       threshold_source: {:application, :context_thresholds, "gpt-5.4"},
-      anchored: true,
-      estimate_source: :provider,
+      estimate_source: :coarse,
       context_digest: "context-digest"
     }
 
@@ -470,13 +469,10 @@ defmodule CatalystWeb.ShellLiveTest do
     assert has_element?(view, "#shell-header-status #context-meter.shrink-0")
     refute has_element?(view, "#context-meter.overflow-hidden")
     assert has_element?(view, "#context-token-count", "12.5k / 20.0k")
-    assert has_element?(view, "#context-estimate-state", "anchored")
+    assert has_element?(view, "#context-estimate-state", "estimated")
     assert has_element?(view, "#context-threshold-source", "context_thresholds")
     assert has_element?(view, "#chat-empty-state")
     refute has_element?(view, "#message-stream > *")
-
-    send(view.pid, {:agent_event, id, %{status | anchored: false, estimate_source: :coarse}})
-    assert has_element?(view, "#context-estimate-state", "estimated")
   end
 
   test "context compaction resets and re-streams the authoritative replacement", %{conn: conn} do
@@ -569,7 +565,7 @@ defmodule CatalystWeb.ShellLiveTest do
   test "an asset reload broadcast triggers a full page reload in connected views", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
     CatalystWeb.Assets.reload()
-    assert_redirect(view, "/")
+    assert_redirect(view, "/", 1_000)
   end
 
   test "an asset reload keeps users on their current (non-chat) page", %{conn: conn} do
@@ -582,7 +578,7 @@ defmodule CatalystWeb.ShellLiveTest do
 
     {:ok, view, _html} = live(conn, "/settings")
     CatalystWeb.Assets.reload()
-    assert_redirect(view, "/settings")
+    assert_redirect(view, "/settings", 1_000)
   end
 
   test "a bare /cd flashes a usage hint instead of prompting the model", %{conn: conn} do

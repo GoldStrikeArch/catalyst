@@ -4,15 +4,16 @@ defmodule Catalyst.Extensions.State do
 
   The extension server owns orchestration and side effects (ETS writes,
   registry purgers, module (un)loading); this module owns the tracking
-  invariants: which owner contributed which tools/modules/metadata, the exact
-  accepted BEAM binaries per module, and degraded owners whose last purge left
-  residue. Every function here is a pure transition except
+  invariants: which owner contributed which tools/modules/metadata and degraded
+  owners whose last purge left residue. Extension source is the durable
+  definition; accepted BEAM version stacks are deliberately not retained.
+  Every function here is a pure transition except
   `record_purge_result/3`, which also logs a retained-residue warning.
   """
 
   require Logger
 
-  alias Catalyst.Extensions.{Contribution, ModuleVersions}
+  alias Catalyst.Extensions.Contribution
 
   @host_owner :host
 
@@ -29,12 +30,12 @@ defmodule Catalyst.Extensions.State do
           contrib: %{optional(term()) => MapSet.t(tool_pair())},
           owners: %{optional(String.t()) => term()},
           modules: %{optional(term()) => [module()]},
-          module_versions: ModuleVersions.t(),
+          beams: %{optional(term()) => %{optional(module()) => binary()}},
+          extensions: %{optional(term()) => [module()]},
           metadata: %{optional(term()) => map()},
           paths: %{optional(term()) => Path.t()},
           degraded: %{optional(term()) => [Catalyst.ExtensionAPI.purger_failure()]},
           setup_collisions: %{optional(reference()) => setup_entry()},
-          hook_generation: reference() | nil,
           boot_token: String.t() | nil,
           bootstrap: bootstrap()
         }
@@ -42,12 +43,12 @@ defmodule Catalyst.Extensions.State do
   defstruct contrib: %{},
             owners: %{},
             modules: %{},
-            module_versions: %{},
+            beams: %{},
+            extensions: %{},
             metadata: %{},
             paths: %{},
             degraded: %{},
             setup_collisions: %{},
-            hook_generation: nil,
             boot_token: nil,
             bootstrap: :waiting
 
@@ -92,8 +93,8 @@ defmodule Catalyst.Extensions.State do
 
   @doc """
   Assemble the tracking for an accepted contribution: replace `owner`'s tool
-  claims, module list, retained BEAMs, metadata, and source path. Pure — the
-  caller runs the registry/module side effects against the returned state.
+  claims, module and extension lists, metadata, and source path. Pure — the
+  caller runs registry and module side effects against the returned state.
   """
   @spec commit_contribution(t(), term(), Path.t(), Contribution.t()) :: t()
   def commit_contribution(%__MODULE__{} = state, owner, path, %Contribution{} = contribution) do
@@ -104,8 +105,8 @@ defmodule Catalyst.Extensions.State do
       | contrib: Map.put(state.contrib, owner, MapSet.new(pairs)),
         owners: replace_owner_claims(state.owners, owner, pairs),
         modules: Map.put(state.modules, owner, contribution.modules),
-        module_versions:
-          ModuleVersions.put(state.module_versions, owner, path, contribution.beams),
+        beams: Map.put(state.beams, owner, contribution.beams),
+        extensions: Map.put(state.extensions, owner, contribution.ext_mods),
         metadata: Map.put(state.metadata, owner, contribution.metadata),
         paths: Map.put(state.paths, owner, path)
     }
@@ -140,16 +141,17 @@ defmodule Catalyst.Extensions.State do
 
   # ---- purging ---------------------------------------------------------------
 
-  @doc "Drop every piece of `owner`'s tracking, installing the given post-purge module versions."
-  @spec drop_owner(t(), term(), ModuleVersions.t()) :: t()
-  def drop_owner(%__MODULE__{} = state, owner, module_versions) do
+  @doc "Drop every piece of `owner`'s runtime tracking."
+  @spec drop_owner(t(), term()) :: t()
+  def drop_owner(%__MODULE__{} = state, owner) do
     %{
       state
       | contrib: Map.delete(state.contrib, owner),
         owners:
           Map.reject(state.owners, fn {_name, existing_owner} -> existing_owner == owner end),
         modules: Map.delete(state.modules, owner),
-        module_versions: module_versions,
+        beams: Map.delete(state.beams, owner),
+        extensions: Map.delete(state.extensions, owner),
         metadata: Map.delete(state.metadata, owner),
         paths: Map.delete(state.paths, owner)
     }
@@ -178,22 +180,21 @@ defmodule Catalyst.Extensions.State do
   # ---- snapshots -------------------------------------------------------------
 
   @doc """
-  Everything needed to reinstate `owner`'s currently accepted version after a
-  rejected reload: exact beams, tool pairs, and metadata. `:none` (first
-  install, or incomplete tracking) makes the later restore a no-op.
+  The active contribution data needed to reinstate `owner` after a rejected
+  rebuild contribution. `:none` means the owner was not active.
   """
   @spec owner_snapshot(t(), term()) :: {:ok, map()} | :none
   def owner_snapshot(%__MODULE__{} = state, owner) do
     with {:ok, path} <- Map.fetch(state.paths, owner),
-         {:ok, modules} <- Map.fetch(state.modules, owner),
-         {:ok, beams} <- ModuleVersions.owner_beams(modules, owner, state.module_versions) do
+         {:ok, modules} <- Map.fetch(state.modules, owner) do
       pairs = state.contrib |> Map.get(owner, MapSet.new()) |> Enum.sort()
 
       {:ok,
        %{
          path: path,
          modules: modules,
-         beams: beams,
+         beams: Map.get(state.beams, owner, %{}),
+         ext_mods: Map.get(state.extensions, owner, []),
          tool_names: Enum.map(pairs, &elem(&1, 0)),
          tool_mods: Enum.map(pairs, &elem(&1, 1)),
          metadata: Map.get(state.metadata, owner, %{})

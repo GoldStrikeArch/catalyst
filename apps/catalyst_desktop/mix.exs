@@ -35,7 +35,9 @@ defmodule CatalystDesktop.MixProject do
       # Declared directly (not only transitively via :catalyst_web) because
       # CatalystDesktop.MenuBar calls Catalyst.Extensions.mark_clean_shutdown/0.
       {:catalyst, in_umbrella: true},
+      {:catalyst_features, in_umbrella: true},
       {:catalyst_web, in_umbrella: true},
+      {:catalyst_web_features, in_umbrella: true},
       {:desktop, "~> 1.5"}
     ]
   end

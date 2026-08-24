@@ -12,48 +12,17 @@ defmodule Catalyst.Application do
 
     children = [
       {Phoenix.PubSub, name: Catalyst.PubSub},
-      # Durable workflow runs are explicitly started or resumed. Boot discovery
-      # marks abandoned checkpoints interrupted but never starts their processes.
-      {Registry, keys: :unique, name: Catalyst.WorkflowRun.Registry},
-      {
-        DynamicSupervisor,
-        name: Catalyst.WorkflowRun.DynamicSupervisor,
-        strategy: :one_for_one,
-        max_restarts: 100,
-        max_seconds: 5
-      },
-      Catalyst.WorkflowRun.Bootstrap,
       # HTTP pool for LLM SSE streaming.
       {Finch, name: Catalyst.Finch},
       # Supervises the loop/tool Tasks spawned per run (and token refreshes),
       # so it must start before TokenStore.
       {Task.Supervisor, name: Catalyst.TaskSupervisor},
-      Catalyst.ACP.Supervisor,
-      # Observer entries are passed by value, so delivery has no lifecycle
-      # dependency on the extension registries. Keeping the dispatcher outside
-      # their rest-for-one group preserves admitted queues during registry
-      # recovery; committed admission retries its own rare direct restart.
-      Catalyst.Hooks.ObserverDispatcher,
       # Holds OAuth credentials, refreshes tokens on demand.
       Catalyst.Auth.TokenStore,
       # Live Codex model metadata with monotonic freshness and single-flight refresh.
       Catalyst.LLM.OpenAICodex.CatalogCache,
       # Idle Codex websocket connections between runs (delta-upload state).
       Catalyst.LLM.OpenAICodex.ConnCache,
-      # Stable owner of the per-session screenshot-geometry ETS table. Kept
-      # outside the Helper deliberately: a Helper crash must not destroy the
-      # recorded viewports, or the next click silently falls back to the
-      # default main-display mapping after a window-scoped screenshot.
-      Catalyst.Tools.Computer.Viewport,
-      # Owns the native computer-use input helper Port. Lazy: no Port (and no
-      # TCC prompt) until the first computer-use call; :permanent so the held-
-      # input release invariant survives helper crashes.
-      Catalyst.Tools.Computer.Helper,
-      # Cross-turn PTY shell sessions (shell_session tool): one Server per
-      # shell under the DynamicSupervisor, registered by shell-session id with
-      # the owning Catalyst session id as the value.
-      {Registry, keys: :unique, name: Catalyst.Tools.Shell.Registry},
-      {DynamicSupervisor, name: Catalyst.Tools.Shell.Supervisor, strategy: :one_for_one},
       # The reconstructible extension runtime. A registry restart also restarts
       # the extension coordinator, whose boot load rebuilds every contribution
       # from source instead of replaying parallel per-domain state.
@@ -96,21 +65,7 @@ defmodule Catalyst.Application do
       }
     ]
 
-    with {:ok, _sup} = ok <-
-           Supervisor.start_link(children, strategy: :one_for_one, name: Catalyst.Supervisor) do
-      register_builtin_hooks()
-      ok
-    end
-  end
-
-  # Built-in agent-loop hooks (currently: optional screenshot pruning). They
-  # live in the same runtime Hooks registry extensions use, so a reseeder keeps
-  # them registered across extension-runtime restarts and load_all reloads.
-  defp register_builtin_hooks do
-    :ok = Catalyst.Tools.Computer.Screenshots.register_hooks()
-
-    :ok =
-      Catalyst.Extensions.register_reseeder(Catalyst.Tools.Computer.Screenshots, :register_hooks)
+    Supervisor.start_link(children, strategy: :one_for_one, name: Catalyst.Supervisor)
   end
 
   @impl true

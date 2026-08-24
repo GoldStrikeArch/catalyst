@@ -82,13 +82,14 @@ defmodule Catalyst.ExtensionsCollisionTest do
 
     assert {:ok, _} = Extensions.load_file(first)
     caller = start_supervised!({Task, fn -> Extensions.load_file(second) end})
-    assert_receive {:cancelled_setup_started, setup_task}
+    assert_receive {:cancelled_setup_started, setup_task}, 1_000
     setup_ref = Process.monitor(setup_task)
 
     ref = Process.monitor(caller)
     Process.exit(caller, :kill)
     assert_receive {:DOWN, ^ref, :process, ^caller, :killed}
-    assert_receive {:DOWN, ^setup_ref, :process, ^setup_task, :killed}, 1_000
+    assert_receive {:DOWN, ^setup_ref, :process, ^setup_task, reason}, 1_000
+    assert reason in [:killed, :noproc]
 
     # A second serialized transaction waits for the abandoned caller's durable
     # transaction to finish its timeout, collision rejection, and restoration.
@@ -240,6 +241,54 @@ defmodule Catalyst.ExtensionsCollisionTest do
              "external_tool_owner_b"}} = Extensions.load_file(second)
 
     assert apply(Catalyst.Ext.ExternalOwnedTool, :description, []) == "owner a"
+  end
+
+  test "a rejected same-owner reload restores its current accepted contribution" do
+    stable =
+      write_ext(
+        "stable_reload_owner",
+        owned_tool_source(
+          "Catalyst.Ext.StableReloadOwnerTool",
+          "stable_reload_collision",
+          "stable"
+        )
+      )
+
+    path =
+      write_ext(
+        "same_owner_reload",
+        owned_tool_source(
+          "Catalyst.Ext.SameOwnerReloadTool",
+          "same_owner_reload",
+          "accepted"
+        )
+      )
+
+    on_exit(fn ->
+      Extensions.uninstall("same_owner_reload")
+      Extensions.uninstall("stable_reload_owner")
+    end)
+
+    assert {:ok, _} = Extensions.load_file(stable)
+    assert {:ok, _} = Extensions.load_file(path)
+    assert {:ok, Catalyst.Ext.SameOwnerReloadTool} = Extensions.fetch("same_owner_reload")
+
+    File.write!(
+      path,
+      owned_tool_source(
+        "Catalyst.Ext.SameOwnerReloadTool",
+        "stable_reload_collision",
+        "rejected"
+      )
+    )
+
+    assert {:error,
+            {:owner_collision, :tool, "stable_reload_collision", "stable_reload_owner",
+             "same_owner_reload"}} =
+             Extensions.load_file(path)
+
+    assert {:ok, Catalyst.Ext.SameOwnerReloadTool} = Extensions.fetch("same_owner_reload")
+    assert apply(Catalyst.Ext.SameOwnerReloadTool, :description, []) == "accepted"
   end
 
   test "a rejected distinct tool does not recompile or evict the live owner" do

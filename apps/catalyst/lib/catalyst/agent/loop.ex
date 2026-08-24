@@ -248,10 +248,8 @@ defmodule Catalyst.Agent.Loop do
     assistant =
       Support.request_provider(model, llm_ctx, config, emit, guard: false)
       |> normalize_assistant_response(model)
-      |> Support.attach_context_digest(model, llm_ctx, config)
 
     emit.(%Event.MessageEnd{message: assistant})
-    Support.emit_anchor_status(assistant, context.status, emit, model)
     {assistant, append_messages(context.context, [assistant])}
   end
 

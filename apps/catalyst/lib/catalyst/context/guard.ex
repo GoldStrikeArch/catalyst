@@ -119,7 +119,6 @@ defmodule Catalyst.Context.Guard do
       |> Map.merge(%{
         opts: Map.get(config, :opts, []),
         provider: Map.get(config, :provider),
-        anchored: estimate.anchored,
         estimate: estimate
       })
 
@@ -310,11 +309,8 @@ defmodule Catalyst.Context.Guard do
 
   defp base_tokens(llm_context) do
     empty = %{llm_context | messages: []}
-
-    case Tokens.estimate_tokens(nil, empty, []) do
-      {:ok, value} -> value
-      {:error, _reason} -> 0
-    end
+    {:ok, value} = Tokens.estimate_tokens(nil, empty, [])
+    value
   end
 
   defp estimate(config, llm_context) do
@@ -332,7 +328,6 @@ defmodule Catalyst.Context.Guard do
       used_tokens: estimate.tokens,
       threshold: nil_if_none(threshold),
       threshold_source: threshold_source,
-      anchored: estimate.anchored,
       estimate_source: estimate.source,
       context_digest: estimate.context_digest
     }

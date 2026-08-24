@@ -59,24 +59,6 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
     end
   end
 
-  @doc "Deterministic semantic request fingerprint used for context anchors."
-  @impl true
-  @spec context_fingerprint(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) ::
-          {:ok, binary()}
-  def context_fingerprint(model, context, opts) do
-    {:ok, request_digest(model, context, opts)}
-  end
-
-  @doc "Coarse-but-provider-semantic estimate of the exact Codex projection."
-  @impl true
-  @spec estimate_tokens(Catalyst.Model.t(), Catalyst.LLM.Context.t(), keyword()) ::
-          {:ok, non_neg_integer()}
-  def estimate_tokens(model, context, opts) do
-    projection = Request.semantic_projection(model, context, opts)
-
-    {:ok, Tokens.estimate_projection(projection)}
-  end
-
   # The Codex backend requires the `chatgpt-account-id` header; without a
   # usable account id every request would 401 opaquely, so fail loudly here
   # (PI throws "Could not extract account ID" for the same reason).

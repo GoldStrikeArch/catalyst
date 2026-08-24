@@ -493,6 +493,16 @@ defmodule Catalyst.Session.ServerTest do
     tmp: tmp,
     model: model
   } do
+    owner = "session_server_external_workflow"
+
+    assert :ok =
+             Catalyst.Workflow.Registry.register_workflow(
+               "external-test",
+               Catalyst.Test.ExternalWorkflow,
+               owner: owner
+             )
+
+    on_exit(fn -> Catalyst.Workflow.Registry.unregister_owner(owner) end)
     {_id, pid} = start(tmp, model, [])
 
     assert :ok =
@@ -502,18 +512,10 @@ defmodule Catalyst.Session.ServerTest do
              })
 
     assert {:error, :backend_switch_requires_new_session} =
-             Server.configure(pid, opts: [workflow: "claude-code"])
+             Server.configure(pid, opts: [workflow: "external-test"])
 
     assert {:error, :backend_switch_requires_new_session} =
-             Server.configure(pid, opts: [loop: Catalyst.ClaudeCode.Workflow])
-
-    assert {:error, :backend_switch_requires_new_session} =
-             Server.configure(pid,
-               opts: [
-                 loop: Catalyst.ACP.Workflow,
-                 acp_agent: %{id: "fixture"}
-               ]
-             )
+             Server.configure(pid, opts: [loop: Catalyst.Test.ExternalWorkflow])
 
     refute Keyword.has_key?(Server.state(pid).opts, :workflow)
     refute Keyword.has_key?(Server.state(pid).opts, :loop)
@@ -542,36 +544,10 @@ defmodule Catalyst.Session.ServerTest do
     assert %{running: true, messages: []} = Server.state(pid)
 
     assert {:error, :backend_switch_requires_new_session} =
-             Server.configure(pid, opts: [loop: Catalyst.ClaudeCode.Workflow])
+             Server.configure(pid, opts: [loop: Catalyst.Test.ExternalWorkflow])
 
     send(worker, {:release_blocking_workflow, ref})
     assert_receive {:agent_event, ^id, %Event.AgentEnd{}}, 1_000
-  end
-
-  test "a populated ACP session rejects changing its explicit agent identity", %{tmp: tmp} do
-    {:ok, %{id: id, pid: pid}} =
-      Manager.start_session(
-        cwd: tmp,
-        provider: nil,
-        model: nil,
-        opts: [
-          loop: Catalyst.ACP.Workflow,
-          acp_agent: %{id: "first"}
-        ]
-      )
-
-    on_exit(fn -> Manager.stop(id) end)
-
-    assert :ok =
-             Server.append_recovered(pid, %Message.Assistant{
-               content: Content.text("existing"),
-               timestamp: Message.now()
-             })
-
-    assert {:error, :backend_switch_requires_new_session} =
-             Server.configure(pid, opts: [acp_agent: %{id: "second"}])
-
-    assert Server.state(pid).opts[:acp_agent] == %{id: "first"}
   end
 
   test "events from a dead run are dropped (abort race)", %{tmp: tmp, model: model} do

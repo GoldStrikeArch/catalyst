@@ -320,11 +320,11 @@ defmodule Catalyst.ExtensionsFixtures do
     '''
   end
 
-  @doc "Top-level source that signals `:compile_parent` and then hangs the compiler."
-  @spec compile_hang_source() :: String.t()
-  def compile_hang_source do
-    ~S'''
-    send(:persistent_term.get({Catalyst.ExtensionsFixtures, :compile_parent}), :compile_started)
+  @doc "Top-level source that writes `marker` and then hangs the isolated compiler."
+  @spec compile_hang_source(Path.t()) :: String.t()
+  def compile_hang_source(marker) do
+    """
+    File.write!(#{inspect(marker)}, "started")
 
     receive do
       :never -> :ok
@@ -333,7 +333,7 @@ defmodule Catalyst.ExtensionsFixtures do
     defmodule Catalyst.Ext.CompileHang do
       def marker, do: :never
     end
-    '''
+    """
   end
 
   @doc "Extension whose setup/1 signals `:setup_parent` and then hangs."

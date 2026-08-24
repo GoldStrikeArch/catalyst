@@ -116,7 +116,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
         Extensions.load_all()
       end)
 
-    assert_receive {:boot_revision_setup, setup}
+    assert_receive {:boot_revision_setup, setup}, 2_000
     send(setup, :continue)
     assert {:ok, %{failed: []}} = Task.await(explicit, 5_000)
     drain_stray_setups()
@@ -176,7 +176,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
     end
   end
 
-  test "a compiler from a dead generation cannot leave code live in safe mode" do
+  test "an isolated compiler from a dead generation cannot leave code live in safe mode" do
     # A prior test may have restarted the server and left its supervised boot
     # workflow queued on the load lock. Settle that generation before adding a
     # source whose top-level compiler intentionally blocks.
@@ -184,28 +184,28 @@ defmodule Catalyst.Extensions.BootGuardTest do
 
     File.mkdir_p!(Extensions.dir())
     path = Path.join(Extensions.dir(), "stale_compile_probe.ex")
-    token = make_ref()
-    previous_probe = Application.fetch_env(:catalyst, :stale_compile_probe)
+    marker = Path.join(Extensions.dir(), "stale_compile_started")
+    previous_timeout = Application.fetch_env(:catalyst, :extension_compile_timeout)
     previous_safe_mode = Application.fetch_env(:catalyst, :safe_mode)
-    Application.put_env(:catalyst, :stale_compile_probe, {self(), token})
+    Application.put_env(:catalyst, :extension_compile_timeout, 500)
     Application.put_env(:catalyst, :safe_mode, false)
 
-    File.write!(path, ~S"""
-    {test, token} = Application.fetch_env!(:catalyst, :stale_compile_probe)
-    send(test, {:compile_paused, self(), token})
-
-    receive do
-      {:continue_compile, ^token} -> :ok
-    end
-
+    File.write!(path, """
     defmodule Catalyst.Ext.StaleCompileProbe do
       def loaded?, do: true
+    end
+
+    File.write!(#{inspect(marker)}, "started")
+
+    receive do
+      :never -> :ok
     end
     """)
 
     on_exit(fn ->
       File.rm(path)
-      restore_env(:stale_compile_probe, previous_probe)
+      File.rm(marker)
+      restore_env(:extension_compile_timeout, previous_timeout)
       restore_env(:safe_mode, previous_safe_mode)
       _ = Extensions.load_all()
     end)
@@ -217,7 +217,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
         Extensions.load_file(path)
       end)
 
-    assert_receive {:compile_paused, compiler, ^token}
+    wait_until(fn -> File.exists?(marker) end)
     Application.put_env(:catalyst, :safe_mode, true)
 
     extensions = Process.whereis(Extensions)
@@ -229,57 +229,51 @@ defmodule Catalyst.Extensions.BootGuardTest do
     # transaction keeps the load lock but the replacement never needs it.
     replacement = wait_for_replacement!(extensions)
 
-    send(compiler, {:continue_compile, token})
-    # Generous deadline: the resumed compile still runs a full bounded-task
-    # pipeline plus the replacement's init before the rejection surfaces.
-    assert {:error, :stale_extension_generation} = Task.await(load, 15_000)
+    assert {:error, :timeout} = Task.await(load, 5_000)
     wait_until(fn -> match?(%{bootstrap: :complete}, :sys.get_state(replacement, 5_000)) end)
     assert Extensions.boot_status() == {:safe_mode, :env}
     refute Code.ensure_loaded?(Catalyst.Ext.StaleCompileProbe)
   end
 
-  test "safe-mode restart drains modules from a killed boot compiler" do
+  test "safe-mode restart does not wait for or inherit an isolated boot compiler" do
     File.mkdir_p!(Extensions.dir())
     path = Path.join(Extensions.dir(), "boot_compile_leak_probe.ex")
-    token = make_ref()
-    previous_probe = Application.fetch_env(:catalyst, :boot_compile_leak_probe)
+    marker = Path.join(Extensions.dir(), "boot_compile_started")
+    previous_timeout = Application.fetch_env(:catalyst, :extension_compile_timeout)
     previous_safe_mode = Application.fetch_env(:catalyst, :safe_mode)
-    Application.put_env(:catalyst, :boot_compile_leak_probe, {self(), token})
+    Application.put_env(:catalyst, :extension_compile_timeout, 500)
     Application.put_env(:catalyst, :safe_mode, false)
 
-    File.write!(path, ~S"""
+    File.write!(path, """
     defmodule Catalyst.Ext.BootCompileLeakProbe do
       def loaded?, do: true
     end
 
-    {test, token} = Application.fetch_env!(:catalyst, :boot_compile_leak_probe)
-    send(test, {:boot_compile_paused, self(), token})
+    File.write!(#{inspect(marker)}, "started")
 
     receive do
-      {:continue_boot_compile, ^token} -> :ok
-    after
-      2_000 -> :ok
+      :never -> :ok
     end
     """)
 
     on_exit(fn ->
       File.rm(path)
-      restore_env(:boot_compile_leak_probe, previous_probe)
+      File.rm(marker)
+      restore_env(:extension_compile_timeout, previous_timeout)
       restore_env(:safe_mode, previous_safe_mode)
       _ = Extensions.load_all()
     end)
 
     refute Code.ensure_loaded?(Catalyst.Ext.BootCompileLeakProbe)
 
-    # Trigger a REAL boot load (a server restart) and pause its compiler
-    # mid-file, with the probe module already defined in the VM.
+    # Trigger a real boot load and pause its isolated compiler after the probe
+    # has been defined only in that disposable VM.
     BootGuard.mark_ok()
 
     capture_log(fn ->
-      restart_extensions()
-      assert_receive {:boot_compile_paused, compiler, ^token}, 5_000
-      assert Code.ensure_loaded?(Catalyst.Ext.BootCompileLeakProbe)
-      compiler_ref = Process.monitor(compiler)
+      restart_extensions(await_ready?: false)
+      wait_until(fn -> File.exists?(marker) end)
+      refute Code.ensure_loaded?(Catalyst.Ext.BootCompileLeakProbe)
 
       Application.put_env(:catalyst, :safe_mode, true)
       extensions = Process.whereis(Extensions)
@@ -288,16 +282,10 @@ defmodule Catalyst.Extensions.BootGuardTest do
       assert_receive {:DOWN, ^ref, :process, ^extensions, :killed}
 
       replacement = wait_for_replacement!(extensions)
-      send(compiler, {:continue_boot_compile, token})
-
-      # The surviving boot compiler finishes, its work is rejected as a dead
-      # generation, and the compiled module is drained from the VM without
-      # disturbing the replacement's safe-mode status.
-      assert_receive {:DOWN, ^compiler_ref, :process, ^compiler, _reason}, 5_000
-      wait_until(fn -> match?(%{bootstrap: :complete}, :sys.get_state(replacement, 5_000)) end)
+      assert Process.whereis(Extensions) == replacement
+      assert :ok = Extensions.await_ready()
       assert Extensions.boot_status() == {:safe_mode, :env}
-      wait_until(fn -> not Catalyst.Extensions.CompilerTracer.provisional?() end)
-      wait_until(fn -> not Code.ensure_loaded?(Catalyst.Ext.BootCompileLeakProbe) end)
+      refute Code.ensure_loaded?(Catalyst.Ext.BootCompileLeakProbe)
     end)
   end
 
@@ -441,7 +429,7 @@ defmodule Catalyst.Extensions.BootGuardTest do
     refute File.exists?(Path.join(Path.dirname(extensions), "guide.md"))
   end
 
-  defp restart_extensions do
+  defp restart_extensions(opts \\ []) do
     pid = Process.whereis(Extensions)
     assert pid, "expected Catalyst.Extensions to be running"
     ref = Process.monitor(pid)
@@ -459,6 +447,12 @@ defmodule Catalyst.Extensions.BootGuardTest do
     # The name registers before init/1 runs; sync so callers observe the new
     # boot's published status, not the previous generation's.
     _ = :sys.get_state(Process.whereis(Extensions))
+
+    case Keyword.get(opts, :await_ready?, true) do
+      true -> _result = Extensions.await_ready(15_000)
+      false -> :ok
+    end
+
     :ok
   end
 

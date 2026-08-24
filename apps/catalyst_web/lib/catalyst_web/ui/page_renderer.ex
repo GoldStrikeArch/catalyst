@@ -11,22 +11,14 @@ defmodule CatalystWeb.UI.PageRenderer do
 
   alias CatalystWeb.UI.{Registry, SafeRender}
 
-  @trusted_pages [
-    CatalystWeb.Pages.ChatPage,
-    CatalystWeb.Pages.PromptsPage,
-    CatalystWeb.Pages.WorkflowsPage,
-    CatalystWeb.Pages.ExtensionsPage,
-    CatalystWeb.Pages.ComputerPage
-  ]
-
   @doc "Renders the active registered page, falling back to the built-in chat page."
   @spec render(map()) :: Phoenix.LiveView.Rendered.t() | {:safe, iodata()}
   def render(assigns) do
-    {module, function} = page_target(assigns.page)
+    {module, function, mode} = page_target(assigns.page)
 
-    case module in @trusted_pages do
-      true -> apply(module, function, [assigns])
-      false -> safely_render_page(module, function, assigns)
+    case mode do
+      :live -> apply(module, function, [assigns])
+      :safe -> safely_render_page(module, function, assigns)
     end
   end
 
@@ -43,9 +35,9 @@ defmodule CatalystWeb.UI.PageRenderer do
   end
 
   defp page_target(page) do
-    case Registry.fetch_page(page) do
-      {:ok, target} -> target
-      :error -> {CatalystWeb.Pages.ChatPage, :render}
+    case Registry.fetch_page_entry(page) do
+      {:ok, entry} -> {entry.mod, entry.fun, entry.render_mode}
+      :error -> {CatalystWeb.Pages.ChatPage, :render, :live}
     end
   end
 

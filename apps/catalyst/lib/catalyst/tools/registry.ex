@@ -1,7 +1,8 @@
 defmodule Catalyst.Tools.Registry do
   @moduledoc """
-  The set of built-in tools, plus validated metadata used to look tools up and
-  advertise them to providers.
+  The kernel tool set, plus validated metadata used to look tools up and
+  advertise them to providers. Optional bundled tools register through
+  `Catalyst.ExtensionAPI` and join the effective tool set at run time.
 
   Metadata callbacks are extension code, so they are evaluated under a bounded
   task when a tool is registered and cached with the module's BEAM fingerprint.
@@ -23,20 +24,13 @@ defmodule Catalyst.Tools.Registry do
     Fd,
     Sd,
     AstGrep,
-    Computer,
     DevelopTool,
     InstallExtension,
     ReloadTool,
     RollbackTool,
     ReadLog,
     ListAgents,
-    SpawnAgent,
-    AppleScript,
-    OpenApp,
-    ListApps,
-    Clipboard,
-    Fetch,
-    ShellSession
+    SpawnAgent
   }
 
   @default [
@@ -49,20 +43,13 @@ defmodule Catalyst.Tools.Registry do
     Edit,
     Sd,
     AstGrep,
-    Computer,
     DevelopTool,
     InstallExtension,
     ReloadTool,
     RollbackTool,
     ReadLog,
     ListAgents,
-    SpawnAgent,
-    Fetch,
-    AppleScript,
-    OpenApp,
-    ListApps,
-    Clipboard,
-    ShellSession
+    SpawnAgent
   ]
 
   @metadata_timeout 1_000
@@ -89,11 +76,11 @@ defmodule Catalyst.Tools.Registry do
   @typedoc "Tool name => validated entry lookup map, as built by `index/1`."
   @type index :: %{optional(String.t()) => entry()}
 
-  @doc "The default tool module list."
+  @doc "The always-available kernel tool module list."
   @spec default_tools() :: [module()]
   def default_tools, do: @default
 
-  @doc "Validate and cache every built-in tool definition during application startup."
+  @doc "Validate and cache every kernel tool definition during application startup."
   @spec validate_defaults() :: :ok | {:error, term()}
   def validate_defaults, do: validate_defaults(@default)
 

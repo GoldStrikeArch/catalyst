@@ -201,7 +201,7 @@ defmodule Catalyst.Context.ResourceCleanupTest do
           context_window: 1_000
         },
         tools: [],
-        opts: [context_threshold: 100, summary_cleanup_mode: mode]
+        opts: [context_threshold: 400, summary_cleanup_mode: mode]
       )
 
     on_exit(fn ->

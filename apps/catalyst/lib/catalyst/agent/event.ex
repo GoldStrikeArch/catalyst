@@ -78,7 +78,6 @@ defmodule Catalyst.Agent.Event do
       :used_tokens,
       :threshold,
       :threshold_source,
-      :anchored,
       :estimate_source,
       :context_digest
     ]
@@ -87,7 +86,6 @@ defmodule Catalyst.Agent.Event do
             used_tokens: non_neg_integer(),
             threshold: pos_integer() | nil,
             threshold_source: term(),
-            anchored: boolean(),
             estimate_source: atom(),
             context_digest: String.t() | nil
           }

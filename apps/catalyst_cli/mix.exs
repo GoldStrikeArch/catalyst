@@ -25,7 +25,8 @@ defmodule CatalystCli.MixProject do
 
   defp deps do
     [
-      {:catalyst, in_umbrella: true}
+      {:catalyst, in_umbrella: true},
+      {:catalyst_features, in_umbrella: true}
     ]
   end
 

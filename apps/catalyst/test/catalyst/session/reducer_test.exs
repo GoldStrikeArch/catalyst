@@ -119,7 +119,6 @@ defmodule Catalyst.Session.ReducerTest do
       used_tokens: 123,
       threshold: 456,
       threshold_source: :builtin,
-      anchored: true,
       estimate_source: :provider,
       context_digest: String.duplicate("a", 64)
     }

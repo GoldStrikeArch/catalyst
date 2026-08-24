@@ -14,12 +14,9 @@ defmodule Catalyst.Workflow.Registry do
     5. the live `:agent_loop` application setting; and
     6. `Catalyst.Agent.Loop`.
 
-  The template store module is configured as `:workflow_template_store` and
-  defaults to `Catalyst.Workflow.Store`. It must expose `list/0` and
-  `fetch/1`, returning `{:ok, [template]}` and
-  `{:ok, template} | :error | {:error, reason}` respectively. Validated
-  templates must have a non-empty binary `:id`. A selected template
-  is pinned in the selection map and runs through `Catalyst.Workflow.Runner`.
+  Dynamic workflow families such as configured external agents and durable
+  templates are contributed through `Catalyst.Workflow.Source`. The core
+  resolver has no knowledge of their storage or execution modules.
 
   An explicit unknown name is an error and never falls through to the default.
   Reads remain useful while the runtime owner is restarting: a missing table simply
@@ -27,20 +24,17 @@ defmodule Catalyst.Workflow.Registry do
   """
 
   alias Catalyst.ExtensionAPI
-  alias Catalyst.ACP.Agent, as: ACPAgent
   alias Catalyst.Runtime.Registry, as: Runtime
-  alias Catalyst.Workflow.Template
 
   @builtin Catalyst.Agent.Loop
-  @template_runner Catalyst.Workflow.Runner
 
   @type name :: String.t() | :default
   @type key :: {:workflow, name()}
-  @type template :: Template.t()
   @type source ::
           {:session, :loop}
           | {:runtime, term(), key()}
-          | {:application, {:workflows, name()} | {:acp_agent, String.t()} | :agent_loop}
+          | {:application, {:workflows, name()} | :agent_loop}
+          | {:source, term(), module()}
           | {:template, map()}
           | :builtin
   @type selection ::
@@ -49,7 +43,7 @@ defmodule Catalyst.Workflow.Registry do
               name: String.t(),
               module: module(),
               source: source(),
-              template: template()
+              template: term()
             }
   @type runtime_entry :: %{key: key(), value: module(), owner: term()}
 
@@ -139,7 +133,7 @@ defmodule Catalyst.Workflow.Registry do
   end
 
   defp named_rows do
-    (runtime_names() ++ application_names() ++ template_names())
+    (runtime_names() ++ application_names() ++ source_names())
     |> Enum.uniq()
     |> Enum.sort()
     |> Enum.flat_map(&named_row/1)
@@ -162,9 +156,7 @@ defmodule Catalyst.Workflow.Registry do
     for %{key: name} <- Runtime.list(:workflow), valid_named_workflow?(name), do: name
   end
 
-  defp application_names do
-    configured_workflow_names() ++ configured_acp_names()
-  end
+  defp application_names, do: configured_workflow_names()
 
   defp configured_workflow_names do
     case Application.fetch_env(:catalyst, :workflows) do
@@ -176,23 +168,10 @@ defmodule Catalyst.Workflow.Registry do
     end
   end
 
-  defp configured_acp_names do
-    case ACPAgent.list() do
-      {:ok, agents} -> Enum.map(agents, &"acp/#{&1.id}")
-      {:error, _reason} -> []
-    end
-  end
-
-  defp template_names do
-    case template_store_call(:list, []) do
-      {:ok, templates} when is_list(templates) ->
-        for template <- templates,
-            {:ok, name} <- [template_id(template)],
-            do: name
-
-      _missing_or_invalid ->
-        []
-    end
+  defp source_names do
+    Runtime.list(:workflow_source)
+    |> Enum.flat_map(fn %{value: module} -> source_list(module) end)
+    |> Enum.filter(&valid_named_workflow?/1)
   end
 
   defp resolve_options({:present, loop}, _workflow) when not is_nil(loop) do
@@ -265,17 +244,7 @@ defmodule Catalyst.Workflow.Registry do
     end
   end
 
-  defp missing_application_workflow("acp/" <> id, :required) when id != "" do
-    case ACPAgent.fetch(id) do
-      {:ok, _agent} ->
-        validate_application_module({:acp_agent, id}, Catalyst.ACP.Workflow)
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  defp missing_application_workflow(name, :required), do: resolve_template(name)
+  defp missing_application_workflow(name, :required), do: resolve_source(name)
 
   defp missing_application_workflow(:default, :optional), do: application_agent_loop()
 
@@ -330,51 +299,55 @@ defmodule Catalyst.Workflow.Registry do
 
   defp valid_named_workflow?(name), do: is_binary(name) and String.trim(name) != ""
 
-  defp resolve_template(name) do
-    case template_store_call(:fetch, [name]) do
-      {:ok, template} -> validate_template(name, template)
-      :error -> {:error, {:unknown_workflow, name}}
-      {:error, :not_found} -> {:error, {:unknown_workflow, name}}
-      {:error, reason} -> {:error, {:workflow_template_store, reason}}
-      other -> {:error, {:invalid_workflow_template_store_response, :fetch, other}}
+  defp resolve_source(name) do
+    Runtime.list(:workflow_source)
+    |> Enum.reduce_while({:error, {:unknown_workflow, name}}, fn entry, _missing ->
+      case source_fetch(entry.value, name) do
+        :error -> {:cont, {:error, {:unknown_workflow, name}}}
+        {:error, _reason} = error -> {:halt, error}
+        {:ok, module} -> {:halt, validate_source_module(module, entry, %{})}
+        {:ok, module, metadata} -> {:halt, validate_source_module(module, entry, metadata)}
+      end
+    end)
+  end
+
+  defp validate_source_module(module, entry, metadata) when is_map(metadata) do
+    case valid_workflow_module?(module) do
+      true ->
+        source = Map.get(metadata, :source, {:source, entry.owner, entry.value})
+
+        case Map.fetch(metadata, :template) do
+          {:ok, template} -> {:ok, module, source, template}
+          :error -> {:ok, module, source}
+        end
+
+      false ->
+        {:error, {:invalid_workflow_source_module, entry.value, module}}
     end
   end
 
-  defp validate_template(name, %Template{id: name} = template),
-    do: {:ok, @template_runner, {:template, template_metadata(template)}, template}
+  defp validate_source_module(_module, entry, metadata),
+    do: {:error, {:invalid_workflow_source_metadata, entry.value, metadata}}
 
-  defp validate_template(name, %Template{id: other}),
-    do: {:error, {:workflow_template_name_mismatch, name, other}}
-
-  defp validate_template(name, template),
-    do: {:error, {:invalid_workflow_template, name, template}}
-
-  defp template_id(%Template{id: name}), do: {:ok, name}
-
-  defp template_id(_template), do: :error
-
-  defp template_metadata(%Template{} = template) do
-    %{
-      id: template.id,
-      name: template.name,
-      version: template.version,
-      digest: Template.digest(template)
-    }
+  defp source_list(module) do
+    case safe_source_call(module, :list, []) do
+      names when is_list(names) -> names
+      _invalid -> []
+    end
   end
 
-  defp template_store_call(function, arguments) do
-    store =
-      Application.get_env(
-        :catalyst,
-        :workflow_template_store,
-        Catalyst.Workflow.Store
-      )
+  defp source_fetch(module, name), do: safe_source_call(module, :fetch, [name])
 
-    case is_atom(store) and Code.ensure_loaded?(store) and
-           function_exported?(store, function, length(arguments)) do
-      true -> apply(store, function, arguments)
+  defp safe_source_call(module, function, arguments) do
+    case is_atom(module) and Code.ensure_loaded?(module) and
+           function_exported?(module, function, length(arguments)) do
+      true -> apply(module, function, arguments)
       false -> :error
     end
+  rescue
+    _exception -> :error
+  catch
+    _kind, _reason -> :error
   end
 
   defp without_template({:ok, module, source, _template}), do: {:ok, module, source}
@@ -392,9 +365,33 @@ defmodule Catalyst.Workflow.Registry do
   end
 
   @doc false
+  @spec register_extension_source(ExtensionAPI.t(), module(), keyword()) ::
+          :ok | {:error, term()}
+  def register_extension_source(%ExtensionAPI{owner: owner}, module, opts) do
+    case valid_source_module?(module) do
+      true ->
+        Runtime.put(
+          :workflow_source,
+          module,
+          module,
+          opts |> Keyword.put(:owner, owner) |> Keyword.put(:collision_key, module)
+        )
+
+      false ->
+        {:error, {:invalid_workflow_source, module}}
+    end
+  end
+
+  @doc false
   @spec wire_extension_api() :: :ok
   def wire_extension_api do
     ExtensionAPI.register_kind(:workflow, &__MODULE__.register_extension_workflow/4)
+    ExtensionAPI.register_kind(:workflow_source, &__MODULE__.register_extension_source/3)
     :ok
+  end
+
+  defp valid_source_module?(module) do
+    is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :list, 0) and
+      function_exported?(module, :fetch, 1)
   end
 end

@@ -7,41 +7,6 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
   alias Catalyst.LLM.OpenAICodex.Catalog
   alias Catalyst.Prompt.Registry, as: PromptRegistry
   alias Catalyst.Session.RunContext
-  alias Catalyst.Workflow.Template
-
-  defmodule TemplateStore do
-    def list, do: {:ok, [template()]}
-    def fetch("pinned-template"), do: {:ok, template()}
-    def fetch(_name), do: :error
-
-    defp template do
-      {:ok, template} =
-        Catalyst.Workflow.Template.new(%{
-          "version" => 1,
-          "id" => "pinned-template",
-          "name" => "Pinned template",
-          "description" => "Pinned test template",
-          "stages" => [
-            %{
-              "id" => "pinned-step",
-              "name" => "Pinned step",
-              "prompt" => "Pinned step",
-              "preset" => "implementation",
-              "tool_profile" => "coding",
-              "model" => "inherit",
-              "reasoning_effort" => "high",
-              "inputs" => ["goal"],
-              "artifact" => "result",
-              "inactivity_timeout_ms" => 30_000,
-              "timeout_ms" => 60_000,
-              "max_attempts" => 3
-            }
-          ]
-        })
-
-      template
-    end
-  end
 
   setup do
     previous_timeout = Application.fetch_env(:catalyst, :prompt_policy_timeout)
@@ -63,45 +28,6 @@ defmodule Catalyst.Session.RunContextBoundaryTest do
     end)
 
     :ok
-  end
-
-  test "template selections are pinned in run config and diagnostics" do
-    previous_store = Application.fetch_env(:catalyst, :workflow_template_store)
-    Application.put_env(:catalyst, :workflow_template_store, TemplateStore)
-
-    on_exit(fn -> restore_env(:workflow_template_store, previous_store) end)
-    template = TemplateStore.fetch("pinned-template") |> elem(1)
-    digest = Template.digest(template)
-
-    state =
-      model("template-model", "template-provider")
-      |> build_state()
-      |> Map.update!(:opts, fn opts ->
-        opts
-        |> Keyword.delete(:loop)
-        |> Keyword.put(:workflow, "pinned-template")
-      end)
-
-    assert {:ok, run} =
-             RunContext.build(state, self(), make_ref(), Catalyst.LLM.Faux)
-
-    assert run.config.loop == Catalyst.Workflow.Runner
-
-    assert %{
-             name: "pinned-template",
-             module: Catalyst.Workflow.Runner,
-             source:
-               {:template,
-                %{
-                  id: "pinned-template",
-                  name: "Pinned template",
-                  version: 1,
-                  digest: ^digest
-                }},
-             template: ^template
-           } = run.config.workflow
-
-    assert run.metadata.workflow == run.config.workflow
   end
 
   test "worker prompt failures are normalized at the supervised task boundary" do

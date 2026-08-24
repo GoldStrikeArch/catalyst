@@ -9,11 +9,6 @@ defmodule Catalyst.Test.ReplacementCleanupProvider do
   end
 
   @impl true
-  def estimate_tokens(model, context, opts) do
-    Catalyst.Test.SummaryCleanupProvider.estimate_tokens(model, context, opts)
-  end
-
-  @impl true
   def cleanup_session(session_id) do
     case Application.get_env(:catalyst, :summary_cleanup_test_pid) do
       pid when is_pid(pid) -> send(pid, {:summary_cleanup, __MODULE__, session_id})

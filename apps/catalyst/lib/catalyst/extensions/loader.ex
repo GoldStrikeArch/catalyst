@@ -1,69 +1,73 @@
 defmodule Catalyst.Extensions.Loader do
   @moduledoc """
-  Task-isolated compile, classification, metadata, and setup pipeline for one
-  extension source file.
+  Isolated compile, classification, metadata, and setup pipeline for extension
+  source files.
 
-  This module never mutates Catalyst registries. `Catalyst.Extensions` commits
-  a successful contribution to ETS and owner tracking, then asks this loader to
-  run its setup callbacks. That keeps extension-authored code outside the
-  registry GenServer and preserves compile-before-purge semantics.
+  Compilation happens in a short-lived external BEAM. A broken or hostile
+  compile therefore cannot redefine modules in the live VM, and all selected
+  sources are staged before the runtime projection is rebuilt. This module
+  mutates no Catalyst registry; setup callbacks run only after staged binaries
+  have been accepted and loaded by `Catalyst.Extensions.Load`.
   """
 
   require Logger
 
   alias Catalyst.{Extension, ExtensionAPI, Tasks}
-  alias Catalyst.Extensions.{CompilerTracer, Contribution}
+  alias Catalyst.Extensions.{Contribution, Modules}
+  alias Catalyst.Tools.Exec
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @compile_timeout 30_000
   @setup_timeout 30_000
+  @stage_output_limit 1_000_000
+  @executable_suffix if(:os.type() == {:win32, :nt}, do: ".exe", else: "")
 
   @typedoc "A compiled file's registry-neutral contribution."
   @type contribution :: Contribution.t()
 
-  @doc "Compile and classify one source file within a bounded task."
-  @spec compile(Path.t()) :: {:ok, contribution()} | {:error, term(), [module()]}
-  def compile(path) do
-    case compile_tracked(path) do
-      {:ok, contribution, trace_ref} ->
-        CompilerTracer.acknowledge(trace_ref)
-        {:ok, contribution}
+  @typedoc "One source tagged with its precedence layer."
+  @type source_path :: {:bundled | :user, Path.t()}
 
-      {:error, reason, emitted_modules, trace_ref} ->
-        CompilerTracer.acknowledge(trace_ref)
-        {:error, reason, emitted_modules}
+  @doc "Compile and classify one source file in an isolated BEAM."
+  @spec compile(Path.t()) :: {:ok, contribution()} | {:error, term()}
+  def compile(path) do
+    case compile_many([{:user, path}]) do
+      [{:user, ^path, result}] -> result
+    end
+  end
+
+  @doc "Stage all selected sources in one disposable BEAM, preserving source order."
+  @spec compile_many([source_path()]) ::
+          [{:bundled | :user, Path.t(), {:ok, contribution()} | {:error, term()}}]
+  def compile_many(paths) do
+    request_path = scratch_path("request")
+    response_path = scratch_path("response")
+    request = %{paths: paths, timeout: compile_timeout()}
+
+    try do
+      File.write!(request_path, :erlang.term_to_binary(request))
+      run_stage(request_path, response_path, length(paths))
+      read_stage_response(response_path)
+    after
+      File.rm(request_path)
+      File.rm(response_path)
     end
   end
 
   @doc false
-  @spec compile_tracked(Path.t()) ::
-          {:ok, contribution(), reference()} | {:error, term(), [module()], reference()}
-  def compile_tracked(path) do
-    with_compiler_options(fn ->
-      collector = self()
-      trace_ref = make_ref()
-      gate = make_ref()
+  @spec classify_compiled([{module(), binary()}]) :: {:ok, contribution()} | {:error, term()}
+  def classify_compiled(compiled) do
+    modules = Enum.map(compiled, &elem(&1, 0))
+    {extension_modules, tool_modules} = classify(modules)
 
-      task =
-        Tasks.async(fn ->
-          receive do
-            {^gate, :compile} -> compile_and_classify(path, collector, trace_ref)
-          end
-        end)
-
-      :ok = CompilerTracer.reserve(trace_ref, task.pid)
-      send(task.pid, {gate, :compile})
-      outcome = Tasks.await(task, compile_timeout())
-      emitted_modules = CompilerTracer.collect(trace_ref)
-
-      case outcome do
-        {:ok, {:ok, contribution}} -> {:ok, contribution, trace_ref}
-        {:ok, {:error, reason}} -> {:error, reason, emitted_modules, trace_ref}
-        {:exit, reason} -> {:error, {:exit, reason}, emitted_modules, trace_ref}
-        :timeout -> {:error, :timeout, emitted_modules, trace_ref}
-      end
-    end)
+    with {:ok, definitions} <- tool_definitions(tool_modules) do
+      {:ok, contribution(compiled, extension_modules, tool_modules, definitions)}
+    end
   end
+
+  @doc false
+  @spec load(Path.t(), contribution()) :: :ok | {:error, term()}
+  def load(path, %Contribution{beams: beams}), do: Modules.load(path, beams)
 
   @doc """
   Run every `setup/1` callback in bounded work and collect cleanly surfaced
@@ -83,26 +87,6 @@ defmodule Catalyst.Extensions.Loader do
     end
   end
 
-  defp compile_and_classify(path, collector, trace_ref) do
-    CompilerTracer.start(collector, trace_ref)
-
-    try do
-      compiled = compile_extension_file(path)
-      modules = Enum.map(compiled, &elem(&1, 0))
-      {extension_modules, tool_modules} = classify(modules)
-
-      with {:ok, definitions} <- tool_definitions(tool_modules) do
-        {:ok, contribution(compiled, extension_modules, tool_modules, definitions)}
-      end
-    rescue
-      error -> {:error, {:compile, Exception.message(error)}}
-    catch
-      kind, reason -> {:error, {:compile, {kind, reason}}}
-    after
-      CompilerTracer.stop()
-    end
-  end
-
   defp contribution(compiled, extension_modules, tool_modules, definitions) do
     %Contribution{
       modules: Enum.map(compiled, &elem(&1, 0)),
@@ -113,23 +97,6 @@ defmodule Catalyst.Extensions.Loader do
       metadata: Extension.metadata_of(extension_modules)
     }
   end
-
-  defp with_compiler_options(fun) do
-    previous = Code.compiler_options()
-
-    Code.compiler_options(
-      ignore_module_conflict: true,
-      tracers: Enum.uniq([CompilerTracer | previous.tracers])
-    )
-
-    try do
-      fun.()
-    after
-      Code.compiler_options(previous)
-    end
-  end
-
-  defp compile_extension_file(path), do: Code.compile_file(path)
 
   defp classify(modules) do
     modules
@@ -251,5 +218,100 @@ defmodule Catalyst.Extensions.Loader do
 
   defp setup_timeout do
     Application.get_env(:catalyst, :extension_setup_timeout, @setup_timeout)
+  end
+
+  defp run_stage(request_path, response_path, count) do
+    {executable, runtime_env, runtime_args} = stage_runtime()
+
+    env = [
+      {"CATALYST_EXTENSION_STAGE_REQUEST", request_path},
+      {"CATALYST_EXTENSION_STAGE_RESPONSE", response_path}
+      | runtime_env
+    ]
+
+    args =
+      ["+S", "2:2", "+SDio", "1", "+SDcpu", "1", "-noshell", "-noinput"] ++
+        runtime_args ++
+        code_path_args() ++
+        ["-eval", "'Elixir.Catalyst.Extensions.StageCompiler':run_from_env()."]
+
+    timeout = max(count, 1) * compile_timeout() + 5_000
+
+    case Exec.collect(executable, args,
+           env: env,
+           timeout: timeout,
+           max_output_bytes: @stage_output_limit
+         ) do
+      {:ok, %{status: 0}} ->
+        :ok
+
+      {:ok, %{status: status, out: out}} ->
+        case File.exists?(response_path) do
+          true -> :ok
+          false -> raise "stage compiler exited #{status}: #{out}"
+        end
+
+      {:error, reason} ->
+        raise "stage compiler failed: #{inspect(reason)}"
+    end
+  end
+
+  defp read_stage_response(path) do
+    case path |> File.read!() |> :erlang.binary_to_term() do
+      {:stage_crash, reason} -> raise "stage compiler crashed: #{inspect(reason)}"
+      results when is_list(results) -> results
+    end
+  end
+
+  defp code_path_args do
+    :code.get_path()
+    |> Enum.map(&List.to_string/1)
+    |> Enum.flat_map(&["-pa", &1])
+  end
+
+  @doc false
+  @spec stage_executable(Path.t(), String.t()) :: Path.t()
+  def stage_executable(root, version) do
+    bin_dir = Path.join(root, "erts-#{version}/bin")
+    erl = Path.join(bin_dir, executable_name("erl"))
+    erlexec = Path.join(bin_dir, executable_name("erlexec"))
+
+    Enum.find([erl, erlexec], &File.regular?/1) || erl
+  end
+
+  @doc false
+  @spec stage_boot(Path.t()) :: Path.t()
+  def stage_boot(root) do
+    installed = Path.join(root, "bin/start_clean.boot")
+    release = Path.wildcard(Path.join(root, "releases/*/start_clean.boot"))
+
+    [installed | release]
+    |> Enum.find(&File.regular?/1)
+    |> case do
+      nil -> Path.rootname(installed)
+      path -> Path.rootname(path)
+    end
+  end
+
+  defp stage_runtime do
+    root = List.to_string(:code.root_dir())
+    version = List.to_string(:erlang.system_info(:version))
+    executable = stage_executable(root, version)
+    bin_dir = Path.dirname(executable)
+
+    {executable,
+     [
+       {"ROOTDIR", root},
+       {"BINDIR", bin_dir},
+       {"EMU", "beam"},
+       {"PROGNAME", Path.basename(executable)}
+     ], ["-boot", stage_boot(root), "-boot_var", "RELEASE_LIB", Path.join(root, "lib")]}
+  end
+
+  defp executable_name(name), do: name <> @executable_suffix
+
+  defp scratch_path(kind) do
+    id = System.unique_integer([:positive, :monotonic])
+    Path.join(System.tmp_dir!(), "catalyst_extension_stage_#{kind}_#{id}")
   end
 end

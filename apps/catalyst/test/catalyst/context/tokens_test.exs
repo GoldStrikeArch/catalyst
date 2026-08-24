@@ -1,31 +1,10 @@
 defmodule Catalyst.Context.TokensTest do
   use ExUnit.Case, async: true
 
-  alias Catalyst.{Content, Message, Model, Usage}
+  alias Catalyst.{Content, Message, Model}
   alias Catalyst.Context.Tokens
   alias Catalyst.LLM.Context, as: LLMContext
   alias Catalyst.LLM.OpenAICodex.Request
-
-  setup do
-    _ = Task.Supervisor.start_link(name: Catalyst.LLM.AdapterSupervisor)
-    :ok
-  end
-
-  defmodule Adapter do
-    @behaviour Catalyst.LLM.Provider
-
-    @impl true
-    def stream(_model, _context, _opts, _sink), do: {:error, :not_used}
-
-    @impl true
-    def context_fingerprint(model, context, opts) do
-      digest = Tokens.semantic_digest(model, context, opts)
-      {:ok, :crypto.hash(:sha256, "adapter:" <> digest)}
-    end
-
-    @impl true
-    def estimate_tokens(_model, context, _opts), do: {:ok, 10 + length(context.messages) * 10}
-  end
 
   defmodule NoAdapter do
     @behaviour Catalyst.LLM.Provider
@@ -48,67 +27,14 @@ defmodule Catalyst.Context.TokensTest do
     }
   end
 
-  test "provider adapters supply the estimate and resumable anchor fingerprint" do
-    prior = %LLMContext{system_prompt: "system", messages: [Message.user("hello")], tools: []}
-
-    assistant = %Message.Assistant{
-      content: Content.text("answer"),
-      usage: %Usage{total_tokens: 100},
-      stop_reason: :stop
-    }
-
-    anchored = Tokens.attach_context_digest(assistant, model(), prior, provider: Adapter)
-    refute is_nil(anchored.usage.context_digest)
-    assert byte_size(anchored.usage.context_digest) == 64
-
-    next = %{prior | messages: prior.messages ++ [anchored, Message.user("more")]}
-
-    assert {:ok, estimate} = Tokens.estimate(model(), next, provider: Adapter)
-    assert estimate.source == :provider
-    assert estimate.anchored
-    assert estimate.tokens > 100
-
-    changed = %{next | system_prompt: "changed"}
-    assert {:ok, changed_estimate} = Tokens.estimate(model(), changed, provider: Adapter)
-    refute changed_estimate.anchored
-  end
-
-  test "adapter-less providers with real totals remain coarsely estimated and unanchored" do
+  test "all providers use one deterministic coarse estimate" do
     context = %LLMContext{system_prompt: "system", messages: [Message.user("hello")], tools: []}
 
-    assistant = %Message.Assistant{
-      content: Content.text("answer"),
-      usage: %Usage{total_tokens: 100, context_digest: "untrusted-provider-digest"},
-      stop_reason: :stop
-    }
-
-    attached = Tokens.attach_context_digest(assistant, model(), context, provider: NoAdapter)
-    assert attached.usage.context_digest == nil
-
-    request = %{context | messages: context.messages ++ [attached, Message.user("more")]}
-
-    assert {:ok, estimate} = Tokens.estimate(model(), request, provider: NoAdapter)
-    refute estimate.anchored
-    assert estimate.source == :coarse
-  end
-
-  test "legacy, zero-total, and failed usage remain unanchored" do
-    context = %LLMContext{messages: [Message.user("hello")], tools: []}
-
-    for assistant <- [
-          %Message.Assistant{usage: %Usage{total_tokens: 0}, stop_reason: :stop},
-          %Message.Assistant{usage: %Usage{total_tokens: 10}, stop_reason: :error},
-          %Message.Assistant{usage: %Usage{total_tokens: 10}, stop_reason: :aborted}
-        ] do
-      assert Tokens.attach_context_digest(assistant, model(), context, provider: Adapter).usage.context_digest ==
-               nil
-    end
-
-    legacy = %Message.Assistant{usage: %Usage{total_tokens: 100}, stop_reason: :stop}
-    request = %{context | messages: context.messages ++ [legacy]}
-
-    assert {:ok, %{anchored: false, source: :coarse}} =
-             Tokens.estimate(model(), request, provider: NoAdapter)
+    assert {:ok, first} = Tokens.estimate(model(), context, provider: NoAdapter)
+    assert {:ok, second} = Tokens.estimate(model(), context, provider: NoAdapter)
+    assert first == second
+    assert first.source == :coarse
+    assert byte_size(first.context_digest) == 64
   end
 
   test "the coarse fallback covers instructions, tools, structured content, and images" do
@@ -206,47 +132,6 @@ defmodule Catalyst.Context.TokensTest do
     assert codex_digest(model(), context) == codex_digest(model(), changed_thinking)
 
     assert codex_digest(model(), context) == codex_digest(model(), changed_redaction)
-  end
-
-  defmodule TimeoutAdapter do
-    @moduledoc false
-    @behaviour Catalyst.LLM.Provider
-    @impl true
-    def stream(_, _, _, _), do: {:error, :not_used}
-
-    # Deliberately slower than the 10ms adapter deadline the test configures —
-    # this simulates a wedged adapter, it is not a test-synchronization sleep.
-    @impl true
-    def estimate_tokens(_, _, _) do
-      Process.sleep(100)
-      {:ok, 100}
-    end
-  end
-
-  defmodule CrashAdapter do
-    @behaviour Catalyst.LLM.Provider
-    @impl true
-    def stream(_, _, _, _), do: {:error, :not_used}
-    @impl true
-    def estimate_tokens(_, _, _), do: raise("adapter crash")
-  end
-
-  test "adapter timeouts and crashes are handled gracefully" do
-    # Ensure supervisor is running (it should be in tests if started by app)
-    # But for isolation we might need to start it if not present.
-    _ = Task.Supervisor.start_link(name: Catalyst.LLM.AdapterSupervisor)
-
-    ctx = %LLMContext{messages: [], tools: []}
-
-    # Timeout
-    assert {:error, {:context_adapter_timeout, TimeoutAdapter, :estimate_tokens, 10}} =
-             Tokens.estimate_tokens(model(), ctx, provider: TimeoutAdapter, adapter_timeout: 10)
-
-    # Crash
-    assert {:error,
-            {:context_adapter_exit, CrashAdapter, :estimate_tokens,
-             {%RuntimeError{message: "adapter crash"}, _stack}}} =
-             Tokens.estimate_tokens(model(), ctx, provider: CrashAdapter)
   end
 
   test "Codex semantic projection stays equivalent to the wire encoder" do

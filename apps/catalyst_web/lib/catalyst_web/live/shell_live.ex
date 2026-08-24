@@ -27,8 +27,7 @@ defmodule CatalystWeb.ShellLive do
     ExtensionActions,
     RunDiagnostics,
     SessionLifecycle,
-    Settings,
-    Workflows
+    Settings
   }
 
   @impl true
@@ -69,7 +68,6 @@ defmodule CatalystWeb.ShellLive do
         thread_sidebar: %{projects: []}
       )
       |> stream_configure(:prompt_rows, dom_id: & &1.id)
-      |> Workflows.init()
       |> Conversation.init()
       |> allow_upload(:image,
         accept: ~w(.png .jpg .jpeg .gif .webp),
@@ -94,11 +92,12 @@ defmodule CatalystWeb.ShellLive do
 
   @impl true
   def handle_params(params, _uri, socket) do
-    page = Map.get(params, "page", "chat")
+    page = route_page(params)
 
     {:noreply,
      socket
      |> change_page(page)
+     |> UIRegistry.prepare_page(page, params)
      |> refresh_shell_chrome()
      |> maybe_refresh_panel()}
   end
@@ -158,43 +157,7 @@ defmodule CatalystWeb.ShellLive do
     )
   end
 
-  defp maybe_refresh_panel(%{assigns: %{page: "workflows"}} = socket) do
-    Workflows.refresh(socket)
-  end
-
-  # The /computer backend snapshot (grants, capture readiness, screens,
-  # windows, helper liveness) costs up to five synchronous backend round-trips,
-  # each with a multi-second helper call budget — so it is NEVER computed
-  # inside a LiveView callback (a wedged-but-alive helper would freeze the
-  # whole shell, chat included). The cheap availability part is assigned
-  # immediately and the queries run in a start_async task; the page renders
-  # the cached snapshot until the result lands. Triggered on navigation and
-  # discrete setting changes; the explicit Refresh button re-queries via
-  # "refresh_computer_state". Still lazy: nothing runs at boot, and nothing is
-  # queried when the backend is unavailable.
-  defp maybe_refresh_panel(%{assigns: %{page: "computer"}} = socket) do
-    start_computer_refresh(socket)
-  end
-
   defp maybe_refresh_panel(socket), do: socket
-
-  # The disconnected (static-render) pass assigns only the cheap pending state:
-  # its process exits right after rendering, so a query result could never be
-  # delivered — the connected mount's handle_params queries again anyway.
-  defp start_computer_refresh(socket) do
-    pending = CatalystWeb.Pages.ComputerPage.pending_state()
-    socket = assign(socket, computer_panel: pending)
-
-    case pending.available? and connected?(socket) do
-      true ->
-        start_async(socket, :computer_panel, fn ->
-          CatalystWeb.Pages.ComputerPage.backend_state()
-        end)
-
-      false ->
-        socket
-    end
-  end
 
   # Sessions intentionally are not stopped from terminate/2. Reconnects, page
   # refreshes, and self-triggered UI reloads must be able to reattach.
@@ -379,39 +342,6 @@ defmodule CatalystWeb.ShellLive do
     {:noreply, finish_prompt_action(socket, result, "Prompt reset to inherited behavior.")}
   end
 
-  def handle_event("workflow_select", %{"id" => id}, socket),
-    do: {:noreply, Workflows.select(socket, id)}
-
-  def handle_event("workflow_create", _params, socket),
-    do: {:noreply, Workflows.create(socket)}
-
-  def handle_event("workflow_clone", %{"id" => id}, socket),
-    do: {:noreply, Workflows.clone(socket, id)}
-
-  def handle_event("workflow_add_stage", %{"preset" => preset}, socket),
-    do: {:noreply, Workflows.add_stage(socket, preset)}
-
-  def handle_event("workflow_select_stage", %{"id" => id}, socket),
-    do: {:noreply, Workflows.select_stage(socket, id)}
-
-  def handle_event("workflow_update_stage", %{"stage_id" => id} = params, socket),
-    do: {:noreply, Workflows.update_stage(socket, id, Map.delete(params, "stage_id"))}
-
-  def handle_event("workflow_move_stage", %{"id" => id, "direction" => direction}, socket),
-    do: {:noreply, Workflows.move_stage(socket, id, direction)}
-
-  def handle_event("workflow_delete_stage", %{"id" => id}, socket),
-    do: {:noreply, Workflows.delete_stage(socket, id)}
-
-  def handle_event("workflow_save", params, socket),
-    do: {:noreply, Workflows.save(socket, params)}
-
-  def handle_event("workflow_delete", _params, socket),
-    do: {:noreply, Workflows.delete(socket)}
-
-  def handle_event("workflow_resume_run", %{"id" => id}, socket),
-    do: {:noreply, Workflows.resume_run(socket, id)}
-
   # The grant changes which tools the next run advertises, so the resolved
   # prompt/tool preview and the panel snapshots are recomputed with it.
   def handle_event("toggle_computer_use", _params, socket) do
@@ -420,29 +350,6 @@ defmodule CatalystWeb.ShellLive do
      |> Settings.toggle_computer_use()
      |> RunDiagnostics.preview()
      |> maybe_refresh_panel()}
-  end
-
-  # Explicit /computer "Refresh": re-query the backend snapshot on demand
-  # (grants, capture readiness, previews, helper liveness) — asynchronously,
-  # like every other snapshot; render itself never queries.
-  def handle_event("refresh_computer_state", _params, socket) do
-    {:noreply, start_computer_refresh(socket)}
-  end
-
-  # The desktop wxWebView cannot navigate x-apple.systempreferences: links
-  # ("unsupported URL"), so the page sends a pane key and the locally-running
-  # server hands the resolved deep link to open(1). Unknown keys are ignored —
-  # the client can never route an arbitrary string into the command.
-  def handle_event("open_system_settings", %{"pane" => pane}, socket) do
-    case CatalystWeb.Pages.ComputerPage.settings_url(pane) do
-      {:ok, url} ->
-        open_url = open_url_fun()
-        Task.Supervisor.start_child(Catalyst.TaskSupervisor, fn -> open_url.(url) end)
-        {:noreply, socket}
-
-      :error ->
-        {:noreply, put_flash(socket, :error, "Unknown settings pane: #{inspect(pane)}")}
-    end
   end
 
   def handle_event("toggle_diagnostics", _params, socket) do
@@ -492,15 +399,6 @@ defmodule CatalystWeb.ShellLive do
   end
 
   @impl true
-  def handle_async(:computer_panel, {:ok, snapshot}, socket) do
-    {:noreply, assign(socket, computer_panel: snapshot)}
-  end
-
-  def handle_async(:computer_panel, {:exit, reason}, socket) do
-    {:noreply,
-     assign(socket, computer_panel: CatalystWeb.Pages.ComputerPage.failed_state(reason))}
-  end
-
   def handle_async({:file_search, _token}, {:ok, result}, socket) do
     {:noreply, ChatInput.apply_search(socket, result)}
   end
@@ -517,9 +415,6 @@ defmodule CatalystWeb.ShellLive do
   end
 
   @impl true
-  def handle_info({:workflow_run_event, _id, event}, socket),
-    do: {:noreply, Workflows.run_event(socket, event)}
-
   def handle_info({:agent_event, id, event}, socket) do
     case id == socket.assigns.session_id do
       true ->
@@ -791,7 +686,11 @@ defmodule CatalystWeb.ShellLive do
   defp maybe_refresh_after_event(socket, _event), do: socket
 
   defp page_path("chat"), do: ~p"/"
-  defp page_path(page), do: ~p"/#{page}"
+  defp page_path(page), do: "/" <> page
+
+  defp route_page(%{"path" => []}), do: "chat"
+  defp route_page(%{"path" => segments}) when is_list(segments), do: Enum.join(segments, "/")
+  defp route_page(_params), do: "chat"
 
   defp toggle_chrome_menu(current, "model"), do: toggle_menu(current, :model)
   defp toggle_chrome_menu(current, "effort"), do: toggle_menu(current, :effort)
@@ -813,13 +712,6 @@ defmodule CatalystWeb.ShellLive do
       true -> "SuperGrok"
       false -> "ChatGPT"
     end
-  end
-
-  # Config-injectable like :login_fun, so tests never open System Settings.
-  defp open_url_fun do
-    Application.get_env(:catalyst_web, :open_url_fun, fn url ->
-      System.cmd("/usr/bin/open", [url], stderr_to_stdout: true)
-    end)
   end
 
   defp format_error(reason) when is_binary(reason), do: reason
