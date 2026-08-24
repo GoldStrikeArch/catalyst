@@ -4,7 +4,7 @@ defmodule Catalyst.Workflow.RegistryTest do
   import Catalyst.EnvCase, only: [restore_env: 2]
 
   alias Catalyst.Runtime.Registry, as: RuntimeRegistry
-  alias Catalyst.Workflow.{Registry, Template}
+  alias Catalyst.Workflow.Registry
 
   defmodule WorkflowA do
     @behaviour Catalyst.Workflow
@@ -27,57 +27,21 @@ defmodule Catalyst.Workflow.RegistryTest do
     def nope, do: :ok
   end
 
-  defmodule TemplateStore do
-    def list do
-      {:ok, Application.get_env(:catalyst, :workflow_registry_test_templates, [])}
-    end
-
-    def fetch(name) do
-      case Enum.find(Application.get_env(:catalyst, :workflow_registry_test_templates, []), fn
-             %Catalyst.Workflow.Template{id: ^name} -> true
-             _template -> false
-           end) do
-        nil -> :error
-        template -> {:ok, template}
-      end
-    end
-  end
-
   setup do
     previous = %{
       workflows: Application.fetch_env(:catalyst, :workflows),
-      acp_agents: Application.fetch_env(:catalyst, :acp_agents),
-      agent_loop: Application.fetch_env(:catalyst, :agent_loop),
-      workflow_template_store: Application.fetch_env(:catalyst, :workflow_template_store),
-      workflow_registry_test_templates:
-        Application.fetch_env(:catalyst, :workflow_registry_test_templates)
+      agent_loop: Application.fetch_env(:catalyst, :agent_loop)
     }
 
     Application.delete_env(:catalyst, :workflows)
-    Application.delete_env(:catalyst, :acp_agents)
     Application.delete_env(:catalyst, :agent_loop)
-    Application.put_env(:catalyst, :workflow_template_store, TemplateStore)
-    Application.put_env(:catalyst, :workflow_registry_test_templates, [])
 
     owner = "workflow_registry_test_#{System.unique_integer([:positive])}"
-    Registry.unregister_owner("external_agents")
 
     on_exit(fn ->
       Registry.unregister_owner(owner)
-
-      Registry.register_workflow("claude-code", Catalyst.ClaudeCode.Workflow,
-        owner: "external_agents"
-      )
-
       restore_env(:workflows, previous.workflows)
-      restore_env(:acp_agents, previous.acp_agents)
       restore_env(:agent_loop, previous.agent_loop)
-      restore_env(:workflow_template_store, previous.workflow_template_store)
-
-      restore_env(
-        :workflow_registry_test_templates,
-        previous.workflow_registry_test_templates
-      )
     end)
 
     {:ok, owner: owner}
@@ -165,110 +129,6 @@ defmodule Catalyst.Workflow.RegistryTest do
 
     assert {:ok, %{name: :default, module: Catalyst.Agent.Loop, source: :builtin}} =
              Registry.resolve([])
-  end
-
-  test "configured ACP agents are live generic workflow entries" do
-    Application.put_env(:catalyst, :acp_agents, [
-      %{
-        "id" => "fixture",
-        "name" => "Fixture",
-        "command" => "fixture",
-        "args" => [],
-        "env" => %{}
-      }
-    ])
-
-    assert {:ok,
-            %{
-              name: "acp/fixture",
-              module: Catalyst.ACP.Workflow,
-              source: {:application, {:acp_agent, "fixture"}}
-            }} = Registry.resolve(workflow: "acp/fixture")
-
-    assert Enum.any?(Registry.list(), &(&1.name == "acp/fixture"))
-
-    Application.put_env(:catalyst, :acp_agents, [])
-    assert {:error, {:unknown_acp_agent, "fixture"}} = Registry.resolve(workflow: "acp/fixture")
-  end
-
-  test "persisted templates resolve through the generic runner with pinned data" do
-    template = template("review", "Review")
-    digest = Template.digest(template)
-
-    Application.put_env(:catalyst, :workflow_registry_test_templates, [template])
-
-    assert {:ok,
-            %{
-              name: "review",
-              module: Catalyst.Workflow.Runner,
-              source: {:template, %{id: "review", name: "Review", version: 1, digest: ^digest}},
-              template: ^template
-            }} = Registry.resolve(workflow: "review")
-
-    assert {:ok, Catalyst.Workflow.Runner} = Registry.fetch("review")
-  end
-
-  test "module workflows retain precedence over templates", %{owner: owner} do
-    template = template("review", "Review")
-    Application.put_env(:catalyst, :workflow_registry_test_templates, [template])
-    Application.put_env(:catalyst, :workflows, %{"review" => WorkflowA})
-
-    assert {:ok, %{module: WorkflowA, source: {:application, {:workflows, "review"}}}} =
-             Registry.resolve(workflow: "review")
-
-    assert :ok = Registry.register_workflow("review", WorkflowB, owner: owner)
-
-    assert {:ok, %{module: WorkflowB, source: {:runtime, ^owner, {:workflow, "review"}}}} =
-             Registry.resolve(workflow: "review")
-  end
-
-  test "list/0 includes templates and omits malformed template rows" do
-    alpha = template("alpha", "Alpha")
-    digest = Template.digest(alpha)
-
-    Application.put_env(
-      :catalyst,
-      :workflow_registry_test_templates,
-      [%{id: "  "}, alpha, :malformed]
-    )
-
-    assert Registry.list() == [
-             %{name: :default, module: Catalyst.Agent.Loop, source: :builtin},
-             %{
-               name: "alpha",
-               module: Catalyst.Workflow.Runner,
-               source: {:template, %{id: "alpha", name: "Alpha", version: 1, digest: digest}},
-               template: alpha
-             }
-           ]
-  end
-
-  defp template(id, name) do
-    {:ok, template} =
-      Template.new(%{
-        "version" => 1,
-        "id" => id,
-        "name" => name,
-        "description" => "Test workflow",
-        "stages" => [
-          %{
-            "id" => "review",
-            "name" => "Review",
-            "prompt" => "Review the goal.",
-            "preset" => "code_review",
-            "tool_profile" => "inspect",
-            "model" => "inherit",
-            "reasoning_effort" => "high",
-            "inputs" => ["goal"],
-            "artifact" => "review",
-            "inactivity_timeout_ms" => 30_000,
-            "timeout_ms" => 60_000,
-            "max_attempts" => 3
-          }
-        ]
-      })
-
-    template
   end
 
   test "full selection precedence is deterministic", %{owner: owner} do

@@ -169,7 +169,7 @@ defmodule CatalystWeb.UI.RegistryTest do
   end
 
   describe "crash recovery" do
-    test "a safe-mode Extensions generation revokes prior UI, hooks, and modules" do
+    test "a safe-mode coordinator restart revokes prior UI, hooks, and modules" do
       %{owner: owner} = install_fixture!("ui_chat_page")
       assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
 
@@ -189,6 +189,7 @@ defmodule CatalystWeb.UI.RegistryTest do
 
       new_extensions = wait_for_restart!(Catalyst.Extensions, extensions)
       _ = :sys.get_state(new_extensions)
+      assert :ok = Catalyst.Extensions.await_ready(15_000)
 
       assert Catalyst.Extensions.boot_status() == {:safe_mode, :env}
       assert {:ok, {CatalystWeb.Pages.ChatPage, :render}} = Registry.fetch_page("chat")
@@ -201,7 +202,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       assert :error = Registry.fetch_page("stale-generation")
     end
 
-    test "an in-flight stale registration cannot purge the replacement generation" do
+    test "an in-flight stale registration cannot affect the replacement runtime" do
       owner = "generation_gate_owner"
       path = "generation-gate-page"
       previous_handler = :persistent_term.get({ExtensionAPI, :kind, :page})
@@ -225,17 +226,15 @@ defmodule CatalystWeb.UI.RegistryTest do
 
       assert_receive {:dispatch_waiting, blocked, ^gate}
 
-      stale_generation = Catalyst.Extensions.generation_token()
       extensions = Process.whereis(Catalyst.Extensions)
       ref = Process.monitor(extensions)
       Process.exit(extensions, :kill)
       assert_receive {:DOWN, ^ref, :process, ^extensions, :killed}
 
       new_extensions = wait_for_restart!(Catalyst.Extensions, extensions)
-      # Sync with the replacement's init: it publishes a fresh generation
-      # token, making the in-flight registration's captured generation stale.
+      # Sync with the replacement's init. API handles are leased to their
+      # originating coordinator pid, so the in-flight handle is now stale.
       _ = :sys.get_state(new_extensions)
-      refute Catalyst.Extensions.generation_token() == stale_generation
 
       send(blocked, {:continue, gate})
       assert {:error, :stale_extension_generation} = Task.await(task, 5_000)
@@ -248,6 +247,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       assert {:ok, {__MODULE__, :render}} = Registry.fetch_page(path)
 
       assert {:ok, %{failed: []}} = Catalyst.Extensions.load_all()
+      assert :ok = Catalyst.Extensions.await_ready(15_000)
       CatalystWeb.Application.register_web_tools()
     end
   end
@@ -260,9 +260,7 @@ defmodule CatalystWeb.UI.RegistryTest do
     result = Registry.register_extension_page(api, path, target, opts)
     send(test, {:dispatch_waiting, self(), gate})
 
-    # Bounded: this block runs inside the global generation gate — if the test
-    # fails before releasing it, an unbounded receive would wedge every later
-    # ExtensionAPI dispatch in the suite.
+    # Bounded so a failed test cannot leave this probe task behind indefinitely.
     receive do
       {:continue, ^gate} -> result
     after

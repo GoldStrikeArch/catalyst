@@ -26,27 +26,6 @@ defmodule Catalyst.Workflow.SupportTest do
     end
   end
 
-  defmodule AnchoringProvider do
-    @behaviour Catalyst.LLM.Provider
-
-    @impl true
-    def stream(model, _context, opts, _sink) do
-      {:ok,
-       %Catalyst.Message.Assistant{
-         content: Catalyst.Content.text("anchored"),
-         model: model && model.id,
-         usage: %Catalyst.Usage{total_tokens: Keyword.fetch!(opts, :total_tokens)},
-         stop_reason: :stop,
-         timestamp: Catalyst.Message.now()
-       }}
-    end
-
-    @impl true
-    def context_fingerprint(model, context, opts) do
-      {:ok, Catalyst.Context.Tokens.semantic_digest(model, context, opts)}
-    end
-  end
-
   defmodule Guard do
     def prepare_request(context, config, emit, opts) do
       send(config.test_pid, {:guard_called, context, config, emit, opts})
@@ -59,7 +38,6 @@ defmodule Catalyst.Workflow.SupportTest do
            used_tokens: 10,
            threshold: 100,
            threshold_source: :test,
-           anchored: false,
            estimate_source: :coarse,
            context_digest: "before"
          },
@@ -160,93 +138,6 @@ defmodule Catalyst.Workflow.SupportTest do
 
     assert guarded_config.model == model
     assert_receive {:provider_called, ^model, _}
-  end
-
-  test "guarded provider responses attach digests and expose shared anchor status emission" do
-    model = %Catalyst.Model{id: "anchored-model", api: "test"}
-    context = %Catalyst.LLM.Context{system_prompt: "system", messages: [], tools: []}
-
-    config = %{
-      provider: AnchoringProvider,
-      opts: [total_tokens: 42],
-      test_pid: self()
-    }
-
-    emit = fn event -> send(self(), {:anchor_event, event}) end
-
-    assert {:ok, assistant, prepared} =
-             Support.request_provider(model, context, config, emit, guard: Guard)
-
-    assert is_binary(assistant.usage.context_digest)
-    assert :ok = Support.emit_anchor_status(assistant, prepared.status, emit)
-
-    assert_receive {:anchor_event,
-                    %Event.ContextStatus{
-                      used_tokens: 42,
-                      anchored: true,
-                      estimate_source: :provider,
-                      threshold: 100
-                    }}
-  end
-
-  test "anchored status recomputes a built-in threshold for the anchored ratio" do
-    model = %Catalyst.Model{id: "anchored-window", api: "test", context_window: 100_000}
-
-    status = %Event.ContextStatus{
-      used_tokens: 60_000,
-      threshold: 70_000,
-      threshold_source: :builtin,
-      anchored: false,
-      estimate_source: :coarse,
-      context_digest: "pre-request"
-    }
-
-    assistant = %Catalyst.Message.Assistant{
-      content: [],
-      stop_reason: :stop,
-      usage: %Catalyst.Usage{total_tokens: 60_000, context_digest: "anchored-digest"}
-    }
-
-    emit = fn event -> send(self(), {:anchor_event, event}) end
-    assert :ok = Support.emit_anchor_status(assistant, status, emit, model)
-
-    # 100_000 window * 0.85 anchored ratio, not the unanchored 70_000 the
-    # pre-request estimate resolved.
-    assert_receive {:anchor_event,
-                    %Event.ContextStatus{
-                      anchored: true,
-                      threshold: 85_000,
-                      threshold_source: :builtin
-                    }}
-  end
-
-  test "anchored status reuses explicit anchor-independent thresholds unchanged" do
-    model = %Catalyst.Model{id: "anchored-window", api: "test", context_window: 100_000}
-
-    status = %Event.ContextStatus{
-      used_tokens: 60_000,
-      threshold: 64_000,
-      threshold_source: {:session, :context_threshold},
-      anchored: false,
-      estimate_source: :coarse,
-      context_digest: "pre-request"
-    }
-
-    assistant = %Catalyst.Message.Assistant{
-      content: [],
-      stop_reason: :stop,
-      usage: %Catalyst.Usage{total_tokens: 60_000, context_digest: "anchored-digest"}
-    }
-
-    emit = fn event -> send(self(), {:anchor_event, event}) end
-    assert :ok = Support.emit_anchor_status(assistant, status, emit, model)
-
-    assert_receive {:anchor_event,
-                    %Event.ContextStatus{
-                      anchored: true,
-                      threshold: 64_000,
-                      threshold_source: {:session, :context_threshold}
-                    }}
   end
 
   test "an unavailable guard and invalid providers are tagged" do

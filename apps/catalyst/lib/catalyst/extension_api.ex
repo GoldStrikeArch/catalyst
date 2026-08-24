@@ -2,9 +2,8 @@ defmodule Catalyst.ExtensionAPI do
   @moduledoc """
   The facade passed to `Catalyst.Extension.setup/1`. It carries the extension's
   provenance (`owner`) and exposes `register_*` functions for every
-  extension kind. Handles also capture the originating extension server and
-  runtime generation. Registration through a stale handle is rejected, including
-  a generation change that races a subsystem handler call.
+  extension kind. Handles capture the originating extension server so setup
+  collision reports return to the load operation that created them.
 
   Each *kind* has a validation handler wired by its domain facade, so
   `apps/catalyst` never depends on `apps/catalyst_web`. Accepted contributions
@@ -17,12 +16,11 @@ defmodule Catalyst.ExtensionAPI do
 
   require Logger
 
-  defstruct [:owner, :load_ref, :generation, :server]
+  defstruct [:owner, :load_ref, :server]
 
   @type t :: %__MODULE__{
           owner: String.t() | nil,
           load_ref: reference() | nil,
-          generation: reference() | nil,
           server: GenServer.server()
         }
 
@@ -32,7 +30,6 @@ defmodule Catalyst.ExtensionAPI do
     %__MODULE__{
       owner: owner,
       load_ref: load_ref,
-      generation: Catalyst.Extensions.Transaction.generation(),
       server: Catalyst.Extensions.Transaction.server()
     }
   end
@@ -132,6 +129,20 @@ defmodule Catalyst.ExtensionAPI do
     remember_owner_collision(api, result)
   end
 
+  @doc "Register a dynamic named-workflow source."
+  @spec register_workflow_source(t(), module(), keyword()) :: term()
+  def register_workflow_source(api, module, opts \\ []) do
+    result = dispatch(api, :workflow_source, [module, opts])
+    remember_owner_collision(api, result)
+  end
+
+  @doc "Register a run-capability resolver."
+  @spec register_capability(t(), atom(), (map() -> boolean())) :: term()
+  def register_capability(api, name, resolver) do
+    result = dispatch(api, :capability, [name, resolver])
+    remember_owner_collision(api, result)
+  end
+
   @doc "Register the runtime-default context policy."
   @spec register_context_policy(t(), module(), keyword()) :: term()
   def register_context_policy(api, module, opts \\ []) do
@@ -192,41 +203,26 @@ defmodule Catalyst.ExtensionAPI do
   def start_child(api, child_spec), do: dispatch(api, :process, [child_spec])
 
   defp dispatch(%__MODULE__{} = api, kind, args) do
-    Catalyst.Extensions.Transaction.with_generation_gate(fn ->
-      case Catalyst.Extensions.generation_current?(api.generation) do
-        true -> dispatch_current(api, kind, args)
-        false -> {:error, :stale_extension_generation}
-      end
-    end)
-  end
+    case current_server?(api.server) do
+      true ->
+        result =
+          case :persistent_term.get({__MODULE__, :kind, kind}, nil) do
+            nil -> {:error, {:unsupported_kind, kind}}
+            handler -> apply(handler, [api | args])
+          end
 
-  defp dispatch_current(api, kind, args) do
-    result =
-      case :persistent_term.get({__MODULE__, :kind, kind}, nil) do
-        nil -> {:error, {:unsupported_kind, kind}}
-        handler -> apply(handler, [api | args])
-      end
+        case current_server?(api.server) do
+          true -> result
+          false -> {:error, :stale_extension_generation}
+        end
 
-    case Catalyst.Extensions.generation_current?(api.generation) do
-      true -> result
-      false -> purge_stale_registration(api.owner)
+      false ->
+        {:error, :stale_extension_generation}
     end
   end
 
-  defp purge_stale_registration(owner) do
-    case purge_owner(owner) do
-      {:ok, _purged} ->
-        :ok
-
-      {:error, failures} ->
-        Logger.warning(
-          "[extension_api] stale-generation purge for #{inspect(owner)} left residue: " <>
-            inspect(failures)
-        )
-    end
-
-    {:error, :stale_extension_generation}
-  end
+  defp current_server?(server),
+    do: is_pid(server) and Process.whereis(Catalyst.Extensions) == server
 
   # Every registry emits the one unified collision shape
   # `{:owner_collision, kind, key, existing, attempted}` (key `nil` for the

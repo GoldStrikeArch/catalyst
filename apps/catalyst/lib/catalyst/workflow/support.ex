@@ -9,10 +9,9 @@ defmodule Catalyst.Workflow.Support do
   """
 
   alias Catalyst.Agent.Event
-  alias Catalyst.Context.{Guard, Tokens, Window}
+  alias Catalyst.Context.Guard
   alias Catalyst.Session.EventSink
   alias Catalyst.Message
-  alias Catalyst.Tools.Computer.Availability
   alias Catalyst.Tools.Profiles
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
@@ -73,17 +72,11 @@ defmodule Catalyst.Workflow.Support do
   @doc """
   The capabilities this run grants, as declared by tools' `capabilities/0`.
 
-  `:computer_use` is granted only when the session option (or the
-  `config :catalyst, :computer_use` default) is enabled **and** the machine can
-  actually run the backend — see `Catalyst.Tools.Computer.Availability`.
+  Capability definitions come from the shared extension registry. The kernel
+  does not know which optional capabilities exist.
   """
   @spec granted_capabilities(map()) :: [atom()]
-  def granted_capabilities(config) when is_map(config) do
-    case computer_use_granted?(config) do
-      true -> [:computer_use]
-      false -> []
-    end
-  end
+  def granted_capabilities(config) when is_map(config), do: Catalyst.Capabilities.granted(config)
 
   @doc "Return the unexpanded selector retained for child-session inheritance."
   @spec tool_source(map()) :: term()
@@ -131,12 +124,10 @@ defmodule Catalyst.Workflow.Support do
 
   The default path prepares the exact request with `Context.Guard`, streams the
   prepared provider context, and returns the prepared value alongside the
-  provider outcome. Successful assistant responses receive a resumable digest
-  when the provider implements the fingerprint adapter and return as
-  `{:ok, assistant, prepared}`. After persisting the assistant `MessageEnd`, call
-  `emit_anchor_status/3` to publish the matching total. Provider failures return
+  provider outcome as `{:ok, assistant, prepared}`. Provider failures return
   `{:error, reason, prepared}` so a workflow can keep an accepted compaction in
-  its local context. Guard failures return the guard's ordinary `{:error, reason}`.
+  its local context. Guard failures return the guard's ordinary
+  `{:error, reason}`.
 
   The fifth argument is reserved for internal requests such as compaction:
   `guard: false` deliberately bypasses recursive guarding and retains the
@@ -160,76 +151,12 @@ defmodule Catalyst.Workflow.Support do
     end
   end
 
-  @doc "Attach a provider-accurate resumable digest to a successful assistant response."
-  @spec attach_context_digest(
-          Message.Assistant.t(),
-          Catalyst.Model.t() | nil,
-          Catalyst.LLM.Context.t(),
-          map()
-        ) :: Message.Assistant.t()
-  def attach_context_digest(%Message.Assistant{} = assistant, model, llm_context, config) do
-    Tokens.attach_context_digest(assistant, model, llm_context, token_options(config))
-  end
-
-  @doc """
-  Emit the post-persistence anchored status for a digested assistant response.
-
-  A built-in threshold resolved for an unanchored pre-request estimate used the
-  conservative ratio; the anchored status recomputes it for the model so the
-  meter matches what the next anchored request will enforce. Explicit
-  session/registry/application thresholds are anchor-independent and reused.
-  """
-  @spec emit_anchor_status(
-          Message.Assistant.t(),
-          Event.ContextStatus.t() | nil,
-          function(),
-          Catalyst.Model.t() | nil
-        ) :: :ok
-  def emit_anchor_status(assistant, status, emit, model \\ nil)
-
-  def emit_anchor_status(
-        %Message.Assistant{
-          stop_reason: reason,
-          usage: %Catalyst.Usage{total_tokens: total, context_digest: digest}
-        },
-        %Event.ContextStatus{} = status,
-        emit,
-        model
-      )
-      when reason not in [:error, :aborted] and total > 0 and is_binary(digest) and
-             is_function(emit, 1) do
-    {threshold, threshold_source} = anchored_threshold(status, model)
-
-    emit.(%Event.ContextStatus{
-      used_tokens: total,
-      threshold: threshold,
-      threshold_source: threshold_source,
-      anchored: true,
-      estimate_source: :provider,
-      context_digest: digest
-    })
-
-    :ok
-  end
-
-  def emit_anchor_status(%Message.Assistant{}, _status, _emit, _model), do: :ok
-
-  defp anchored_threshold(%Event.ContextStatus{threshold_source: :builtin} = status, model) do
-    case Window.builtin_threshold(model, true) do
-      {:ok, value, :builtin} -> {value, :builtin}
-      :missing -> {status.threshold, status.threshold_source}
-    end
-  end
-
-  defp anchored_threshold(status, _model), do: {status.threshold, status.threshold_source}
-
   defp guarded_request(guard, model, context, config, emit, opts) do
     config = Map.put(config, :model, model)
 
     with {:ok, prepared} <- call_guard(guard, context, config, emit, opts) do
       case stream_provider(model, prepared.llm_context, config, emit) do
         {:ok, %Message.Assistant{} = assistant} ->
-          assistant = attach_context_digest(assistant, model, prepared.llm_context, config)
           {:ok, assistant, prepared}
 
         {:ok, assistant} ->
@@ -258,12 +185,6 @@ defmodule Catalyst.Workflow.Support do
     |> Keyword.put_new(:persist_event, Map.get(config, :persist_event))
     |> Keyword.put_new(:session_id, option(config, :session_id, nil))
     |> Keyword.put_new(:cwd, Map.get(config, :cwd))
-  end
-
-  defp token_options(config) do
-    config
-    |> Map.get(:opts, [])
-    |> Keyword.put(:provider, Map.get(config, :provider))
   end
 
   defp stream_provider(model, context, config, emit) do
@@ -327,23 +248,5 @@ defmodule Catalyst.Workflow.Support do
     Enum.reject(tools, fn module ->
       module |> ToolRegistry.capabilities_of() |> Enum.any?(&(&1 not in granted))
     end)
-  end
-
-  # Child sessions (agent_depth > 0) never see the app-env fallback:
-  # `RunConfig.inheritable_opts/1` strips `:computer_use` so a child "says
-  # nothing", and letting the global default answer for it would silently
-  # re-grant every subagent full machine control when the operator sets
-  # `config :catalyst, :computer_use, true` — the prompt-injection escape
-  # hatch the denylist exists to close.
-  defp computer_use_granted?(config) do
-    enabled? = option(config, :computer_use, app_default_computer_use(config))
-    enabled? == true and Availability.available?()
-  end
-
-  defp app_default_computer_use(config) do
-    case non_negative(option(config, :agent_depth, 0), 0) do
-      0 -> Application.get_env(:catalyst, :computer_use, false)
-      _child -> false
-    end
   end
 end

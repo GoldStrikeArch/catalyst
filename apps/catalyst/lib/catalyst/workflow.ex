@@ -30,7 +30,16 @@ defmodule Catalyst.Workflow do
   @doc "Return optional diagnostic metadata describing the workflow."
   @callback describe() :: term()
 
-  @optional_callbacks describe: 0, provider_required?: 0
+  @doc """
+  Return the durable session-backend identity for this selection.
+
+  Workflows that wrap an external conversation should return a stable,
+  non-`:internal` value. Catalyst uses it to prevent changing conversation
+  backends after a session has history. Ordinary workflows omit this callback.
+  """
+  @callback session_backend(Registry.selection(), keyword() | map()) :: term()
+
+  @optional_callbacks describe: 0, provider_required?: 0, session_backend: 2
 
   @doc "Return whether `module` requires a provider, defaulting to `true`."
   @spec provider_required?(module()) :: boolean()
@@ -38,6 +47,15 @@ defmodule Catalyst.Workflow do
     case function_exported?(module, :provider_required?, 0) do
       true -> module.provider_required?()
       false -> true
+    end
+  end
+
+  @doc "Return a workflow's stable session backend, defaulting to `:internal`."
+  @spec session_backend(Registry.selection(), keyword() | map()) :: term()
+  def session_backend(%{module: module} = selection, opts) do
+    case function_exported?(module, :session_backend, 2) do
+      true -> module.session_backend(selection, opts)
+      false -> :internal
     end
   end
 

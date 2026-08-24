@@ -206,6 +206,11 @@ defmodule Catalyst.Umbrella.MixProject do
     File.cp_r!("apps/catalyst_web/assets", Path.join(ws, "assets"))
     File.cp_r!("apps/catalyst_web/lib/catalyst_web", Path.join(ws, "lib/catalyst_web"))
 
+    File.cp_r!(
+      "apps/catalyst_web_features/lib/catalyst_web",
+      Path.join(ws, "lib/catalyst_web_features")
+    )
+
     # JS deps esbuild resolves via NODE_PATH, heroicons (its tailwind plugin reads
     # SVGs via a path relative to vendor/), and the generated colocated hooks.
     for d <- ~w(phoenix phoenix_html phoenix_live_view heroicons) do
@@ -228,7 +233,8 @@ defmodule Catalyst.Umbrella.MixProject do
 
     File.write!(
       Path.join(ws, "assets/css/app.css"),
-      ~s[\n/* catalyst:extensions-source */\n@source "#{ext_dir}";\n],
+      ~s[\n/* catalyst:bundled-features-source */\n@source "../../lib/catalyst_web_features";\n] <>
+        ~s[\n/* catalyst:extensions-source */\n@source "#{ext_dir}";\n],
       [:append]
     )
 
@@ -459,7 +465,12 @@ defmodule Catalyst.Umbrella.MixProject do
     [
       # run `mix setup` in all child apps
       setup: ["cmd mix setup"],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --check-unused", "format", "test"],
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --check-unused",
+        "format",
+        "cmd mix test"
+      ],
       # flexibility tier only (it also runs as part of plain `mix test`)
       "test.flex": [
         "do --app catalyst --app catalyst_web cmd mix test --only flexibility"

@@ -62,7 +62,7 @@ defmodule Catalyst.Context.WindowTest do
              Window.threshold_with_source(model, %{context_threshold: 1_001})
   end
 
-  test "built-in thresholds conservatively combine catalog limit and anchored ratio" do
+  test "built-in thresholds conservatively combine catalog limit and one coarse ratio" do
     model = %Model{
       id: "model",
       api: "openai-codex-responses",
@@ -70,14 +70,13 @@ defmodule Catalyst.Context.WindowTest do
       auto_compact_token_limit: 999_999
     }
 
-    assert {:ok, 66_500, :builtin} = Window.builtin_threshold(model, false)
-    assert {:ok, 80_750, :builtin} = Window.builtin_threshold(model, true)
+    assert {:ok, 66_500, :builtin} = Window.builtin_threshold(model)
 
     no_window = %Model{id: "model", api: "api", auto_compact_token_limit: 12_000}
-    assert {:ok, 12_000, :builtin} = Window.builtin_threshold(no_window, false)
+    assert {:ok, 12_000, :builtin} = Window.builtin_threshold(no_window)
 
     tiny = %Model{id: "model", api: "api", context_window: 1, auto_compact_token_limit: 10}
-    assert :missing = Window.builtin_threshold(tiny, false)
+    assert :missing = Window.builtin_threshold(tiny)
 
     assert {:error, {:context_ratio_without_window, 0.8, {:session, :context_threshold}}} =
              Window.threshold_with_source(no_window, %{context_threshold: 0.8})

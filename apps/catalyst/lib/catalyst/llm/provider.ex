@@ -34,28 +34,5 @@ defmodule Catalyst.LLM.Provider do
   @doc "Release provider resources retained for a session; optional providers may omit it."
   @callback cleanup_session(session_id :: String.t()) :: :ok
 
-  @doc """
-  Return a stable fingerprint of the exact provider-visible request semantics.
-
-  Generated transport values such as replay ids must not affect the result.
-  Return `:unsupported` when the provider cannot supply an exact projection.
-  """
-  @callback context_fingerprint(
-              model :: Catalyst.Model.t() | nil,
-              context :: Catalyst.LLM.Context.t(),
-              opts :: keyword()
-            ) :: {:ok, binary()} | :unsupported
-
-  @doc """
-  Estimate the tokens in the exact provider-visible request projection.
-
-  Return `:unsupported` to use Catalyst's provider-neutral coarse estimate.
-  """
-  @callback estimate_tokens(
-              model :: Catalyst.Model.t() | nil,
-              context :: Catalyst.LLM.Context.t(),
-              opts :: keyword()
-            ) :: {:ok, non_neg_integer()} | :unsupported
-
-  @optional_callbacks cleanup_session: 1, context_fingerprint: 3, estimate_tokens: 3
+  @optional_callbacks cleanup_session: 1
 end

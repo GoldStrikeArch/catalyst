@@ -587,8 +587,8 @@ defmodule CatalystWeb.ShellComponents do
     })
   end
 
-  defp subscription_name(%{provider: "grok-subscription"}), do: "SuperGrok"
-  defp subscription_name(_entry), do: "ChatGPT"
+  defp subscription_name(%{auth_label: label}), do: label
+  defp subscription_name(_entry), do: "Subscription"
 
   defp workflow_form(prefs) do
     to_form(%{"workflow" => prefs.workflow || ""})
@@ -694,7 +694,6 @@ defmodule CatalystWeb.ShellComponents do
       assign(assigns,
         used: used,
         threshold: threshold,
-        state_label: if(assigns.status[:anchored], do: "anchored", else: "estimated"),
         source_label: source_label(assigns.status[:threshold_source])
       )
 
@@ -719,13 +718,9 @@ defmodule CatalystWeb.ShellComponents do
       </span>
       <span
         id="context-estimate-state"
-        class={[
-          "font-medium",
-          @status[:anchored] && "text-ok",
-          !@status[:anchored] && "text-muted"
-        ]}
+        class="font-medium text-muted"
       >
-        {@state_label}
+        estimated
       </span>
       <span id="context-threshold-source" class="hidden max-w-24 truncate text-faint xl:inline">
         {@source_label}

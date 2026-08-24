@@ -3,12 +3,12 @@ defmodule Catalyst.Extensions do
   Runtime extension registry — the mechanism behind "self-developing" Catalyst.
 
   Loads immutable bundled extension sources and user source files (`*.ex` in
-  `dir/0`) at runtime with `Code.compile_file/1`. Bundled sources load first; a
-  user file with the same basename replaces that bundled extension. Live
-  contributions, including tools, are stored in `Catalyst.Runtime.Registry`. Because the
-  Elixir compiler ships in an OTP release, this works inside a packaged binary
-  too — the binary stays immutable while new modules are loaded into the running
-  VM from a user-writable directory.
+  `dir/0`) at runtime. Bundled sources load first; a user file with the same
+  basename replaces that bundled extension. Live contributions, including
+  tools, are stored in `Catalyst.Runtime.Registry`. Because the Elixir compiler
+  ships in an OTP release, this works inside a packaged binary too — the binary
+  stays immutable while new modules are loaded into the running VM from a
+  user-writable directory.
 
   A loaded file can contribute more than tools. Each compiled module is
   classified:
@@ -25,14 +25,16 @@ defmodule Catalyst.Extensions do
   sanitized basename). Reloading a file first **purges** that owner's prior
   contributions through the shared owner-purge path,
   so reloads are idempotent. A file that fails to **compile** registers nothing —
-  compile + classify run before any registry is touched, and the prior version
-  stays active. Because `Code.compile_file/1` defines modules sequentially, a
-  multi-module file can fail with its first modules already redefined in the VM:
-  Catalyst retains the exact BEAM binaries from every accepted load and restores
-  those binaries on failure; newly introduced partial modules are removed. Once
-  a file compiles, its registration is committed even if a `setup/1` raises or
-  times out mid-way: whatever it registered before failing stays registered
-  (owner-tagged, so the next reload or uninstall purges it cleanly).
+  all selected sources are compiled and classified in a disposable external
+  BEAM before any live registry or module is touched, and the prior accepted
+  version stays active. A successful stage rebuilds the runtime projection from
+  source. The current active contribution's reconstructible binary cache
+  restores a prior owner if live registration rejects its staged contribution;
+  no accepted-BEAM history is retained. Once a file compiles, its registration
+  is committed even if a
+  `setup/1` raises or times out mid-way: whatever it registered before failing
+  stays registered (owner-tagged, so the next reload or uninstall purges it
+  cleanly).
 
   Set `CATALYST_SAFE_MODE=1` (or `config :catalyst, :safe_mode, true`) to load
   only immutable bundled extensions at boot, so bad user code cannot brick
@@ -68,8 +70,6 @@ defmodule Catalyst.Extensions do
 
   @ready_poll_ms 10
   @ready_timeout 30_000
-
-  @runtime_generation_key {__MODULE__, :runtime_generation}
 
   @typedoc "Per-file load summary. `:conflicts` is present only when this file redefines modules another loaded file also defines."
   @type summary :: %{
@@ -239,24 +239,11 @@ defmodule Catalyst.Extensions do
     GenServer.call(server, {:record_setup_collision, load_ref, reason})
   end
 
-  @doc false
-  @spec generation_token() :: reference() | nil
-  def generation_token, do: :persistent_term.get(@runtime_generation_key, nil)
-
-  @doc false
-  @spec generation_current?(reference() | nil) :: boolean()
-  def generation_current?(generation) when is_reference(generation),
-    do: generation == generation_token()
-
-  def generation_current?(_generation), do: false
-
   @doc """
   Run `fun` under the extensions load lock — the same lock `load_file/1`,
-  `load_all/0`, `disable/1`… take. The function runs in a supervised,
-  caller-independent transaction process, so it must not depend on the
-  caller's mailbox or process dictionary. Calls nested by that transaction
-  are re-entrant; this lets the installer compose write → load → commit into
-  one critical section that a concurrent load cannot interleave or abandon.
+  `load_all/0`, `disable/1`… take. Calls nested by that transaction are
+  re-entrant; this lets the installer compose write → load → commit into one
+  critical section that a concurrent load cannot interleave.
   """
   @spec locked((-> result)) :: result when result: term()
   def locked(fun) when is_function(fun, 0), do: Transaction.run(fun)
@@ -483,14 +470,13 @@ defmodule Catalyst.Extensions do
             | {:safe_mode, :env | :crash_detected}
             | {:load_failed, term()},
           safe_mode?: boolean(),
-          generation: reference() | nil,
           owners: [snapshot_owner()]
         }
 
   @doc """
-  Bounded, UI-safe summary of the extension runtime: boot status, the current
-  runtime generation, and every live owner — including degraded owners and
-  their `purge_failures` — with a per-owner process count.
+  Bounded, UI-safe summary of the extension runtime: boot status and every live
+  owner — including degraded owners and their `purge_failures` — with a
+  per-owner process count.
 
   Process counts are computed in one supervised task with a deadline
   (`config :catalyst, :extensions_snapshot_timeout`, default 1000 ms), because
@@ -507,7 +493,6 @@ defmodule Catalyst.Extensions do
     %{
       boot_status: boot_status(),
       safe_mode?: safe_mode?(),
-      generation: generation_token(),
       owners: Enum.map(owners, &Map.put(&1, :process_count, Map.get(counts, &1.owner, :unknown)))
     }
   end

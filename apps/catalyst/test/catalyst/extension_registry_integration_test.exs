@@ -255,11 +255,6 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
     assert {:ok, Catalyst.Context.Window, :builtin} = ContextRegistry.policy()
     assert {:ok, Catalyst.Tools.SpawnAgent} = Extensions.fetch("spawn_agent")
     assert {:ok, Catalyst.Tools.ListAgents} = Extensions.fetch("list_agents")
-
-    assert {:ok, Catalyst.LLM.GrokSubscription.Provider} =
-             Catalyst.LLM.Registry.fetch("grok-subscription-chat-completions")
-
-    assert Enum.any?(Extensions.list_loaded(), &(&1.owner == "grok_subscription"))
   end
 
   defp assert_collision_rolls_back(%{name: name, seed: seed, collide: collide, error: error}) do

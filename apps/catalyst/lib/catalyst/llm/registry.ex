@@ -16,8 +16,12 @@ defmodule Catalyst.LLM.Registry do
   alias Catalyst.Runtime.Registry, as: Runtime
 
   @builtin %{
-    "faux" => Catalyst.LLM.Faux,
-    "openai-codex-responses" => Catalyst.LLM.OpenAICodex.Provider
+    "faux" => %ProviderConfig{module: Catalyst.LLM.Faux, name: "faux"},
+    "openai-codex-responses" => %ProviderConfig{
+      module: Catalyst.LLM.OpenAICodex.Provider,
+      name: "openai-codex-responses",
+      controls: Catalyst.LLM.OpenAICodex.Controls
+    }
   }
 
   # ---- API ------------------------------------------------------------------
@@ -61,8 +65,15 @@ defmodule Catalyst.LLM.Registry do
   def register_provider(api, %ProviderConfig{} = config, opts) when is_binary(api),
     do: register(api, config, opts)
 
-  def register_provider(api, module, opts) when is_binary(api) and is_atom(module),
-    do: register_provider(api, %ProviderConfig{module: module}, opts)
+  def register_provider(api, module, opts) when is_binary(api) and is_atom(module) do
+    config =
+      case lookup(api) do
+        %ProviderConfig{} = current -> %{current | module: module}
+        nil -> %ProviderConfig{module: module}
+      end
+
+    register_provider(api, config, opts)
+  end
 
   @doc "Remove a provider (restoring a built-in/config one if it was shadowed)."
   @spec unregister_provider(String.t()) :: :ok
@@ -73,7 +84,8 @@ defmodule Catalyst.LLM.Registry do
   def unregister_owner(owner), do: Runtime.purge_owner(owner, :provider)
 
   defp register(api, config, opts) do
-    with :ok <- validate_provider_module(config.module) do
+    with :ok <- validate_provider_module(config.module),
+         :ok <- validate_controls_module(config.controls) do
       Runtime.put(:provider, api, config, opts)
     end
   end
@@ -98,6 +110,24 @@ defmodule Catalyst.LLM.Registry do
     _, _ -> :ok
   end
 
+  defp validate_controls_module(nil), do: :ok
+
+  defp validate_controls_module(module) when is_atom(module) do
+    with {:module, ^module} <- Code.ensure_loaded(module),
+         [] <-
+           Enum.reject(
+             Catalyst.LLM.Controls.callbacks(),
+             &function_exported?(module, elem(&1, 0), elem(&1, 1))
+           ) do
+      :ok
+    else
+      {:error, _reason} -> {:error, {:controls_module_not_found, module}}
+      missing -> {:error, {:missing_controls_callbacks, module, missing}}
+    end
+  end
+
+  defp validate_controls_module(_module), do: {:error, :invalid_controls_module}
+
   # ---- internals ------------------------------------------------------------
 
   defp lookup(api) do
@@ -108,18 +138,15 @@ defmodule Catalyst.LLM.Registry do
   end
 
   defp seed_map do
-    builtins =
-      Map.new(@builtin, fn {api, mod} -> {api, %ProviderConfig{module: mod, name: api}} end)
-
     overrides =
       :catalyst
       |> Application.get_env(:llm_providers, %{})
       |> Map.new(fn {api, v} -> {api, normalize(v)} end)
 
-    Map.merge(builtins, overrides)
+    Map.merge(@builtin, overrides)
   end
 
-  defp normalize(%ProviderConfig{} = c), do: c
+  defp normalize(%ProviderConfig{} = config), do: config
   defp normalize(module) when is_atom(module), do: %ProviderConfig{module: module}
 
   @doc false

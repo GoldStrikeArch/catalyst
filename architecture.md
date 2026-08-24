@@ -15,16 +15,16 @@ structural code editing, request-time context safety, and supervised child sessi
 > **available**, and `rg`/`fd`/`sd`/`ast-grep` all installed.
 
 **Beyond PI parity — "modify everything at runtime."** Catalyst leans on BEAM hot code loading
-to make the running app self-modifiable: _everything is a registry + hooks + hot-swap._ Tools,
-LLM providers, purpose-aware prompts, workflows, context policy, agent-loop hooks, and the UI
-(pages, renderers, panels, CSS/JS) are each an
-ETS-backed registry — most seeded from built-ins at boot, while the prompt/workflow/context
-registries hold runtime overlays over live application/file/built-in fallbacks (§11) — writable
-at runtime through one unified `Catalyst.ExtensionAPI`. The agent compiles and loads new modules into the live VM (the Elixir
+to make the running app self-modifiable: _everything is a contribution + resolver + hot-swap._
+Tools, LLM providers, purpose-aware prompts, workflows, capabilities, context policy, agent-loop
+hooks, and the UI (pages, renderers, panels, CSS/JS) share one owner-aware runtime table. Domain
+facades validate their entries and resolve application/file/kernel fallbacks (§11), while one
+unified `Catalyst.ExtensionAPI` writes every contribution kind. The agent compiles and loads new modules into the live VM (the Elixir
 compiler ships in the release) and uses them on the next turn/render — **even inside the
 packaged `.app`**. This is the subject of **§11**; the rest of the document describes the PI
-core those registries sit on top of. The umbrella also carries a 4th app, **`catalyst_cli`**, a
-headless (no-wx) release used to prove packaged hot-loading.
+kernel beneath it. Optional shipped features are compiled in separate feature apps and activated
+by immutable `priv/builtins/*.ex` installers through that same API. The umbrella also carries
+**`catalyst_cli`**, a headless (no-wx) release used to prove packaged hot-loading.
 
 ---
 
@@ -81,11 +81,11 @@ catalyst/                      # umbrella
         tasks.ex paths.ex ids.ex                    # shared task, path, and id helpers
         files/atomic_write.ex                      # shared atomic replacement + mode preservation
         agent/{event.ex, loop.ex, tool_runner.ex, children.ex, children/table_owner.ex}
-        hooks.ex hooks/observer_dispatcher.ex       # hooks + ordered bounded event observers (§11)
+        hooks.ex hooks/observer.ex                  # hooks + PubSub-backed event observers (§11)
         runtime/registry.ex                         # one owner-aware live contribution table (§11)
         system_prompt.ex prompt.ex prompt/{request.ex,resolution.ex,config.ex,registry.ex}
                                                    # purpose/model-aware prompt resolution (§11)
-        workflow.ex workflow/{registry.ex,support.ex}
+        workflow.ex workflow/{registry.ex,source.ex,support.ex}
         context/{policy.ex,registry.ex,tokens.ex,window.ex,guard.ex,compaction.ex,
                  transcript.ex,summarizer.ex}      # request guard + persistent compaction (§4/§9)
         extension.ex extension_api.ex              # extension behaviour + unified API (§11)
@@ -93,8 +93,8 @@ catalyst/                      # umbrella
         extensions/{server.ex, load.ex, presenter.ex,
                     versioning.ex, boot_guard.ex, processes.ex, state.ex,
                     contribution.ex,
-                    transaction.ex, module_versions.ex, sources.ex,
-                    installer.ex, loader.ex, compiler_tracer.ex}
+                    transaction.ex, modules.ex, sources.ex,
+                    installer.ex, loader.ex, stage_compiler.ex}
                                                    # git versioning + crash-safe boot + isolated loading
                                                    # + shared write→load→commit pipeline w/ self-mod kill switch (§11)
         debug.ex                                   # per-session debug log (§12)
@@ -112,15 +112,18 @@ catalyst/                      # umbrella
                self_mod_report.ex}
                                                    # …+ self-modification and child-session tools (§5/§11)
         llm/{provider.ex, provider_config.ex, registry.ex, event.ex, context.ex,
-             sse.ex, faux.ex, openai_codex.ex, grok_subscription.ex,
+             sse.ex, faux.ex, openai_codex.ex,
              openai_codex/{bounded_buffer.ex, catalog.ex, catalog_cache.ex, catalog_cache/state.ex,
                            conn_cache.ex, provider.ex,
                            request.ex, sse_transport.ex, stream_parser.ex, headers.ex,
                            web_socket.ex}}
-      priv/builtins/*.ex                           # immutable optional providers/workflows loaded via ExtensionAPI
         auth/{token_store.ex, openai_oauth.ex, callback_server.ex,
               callback_server/handler.ex, jwt.ex, pkce.ex}
         application.ex
+    catalyst_features/         # compiled optional features; no application process
+      lib/catalyst/            # computer/PTY/fetch, ACP/Claude, Grok, comparison,
+                               # workflow templates + durable workflow runs
+      priv/builtins/*.ex       # thin installers: registrations + owner-tagged supervisors
     catalyst_web/              # Phoenix + LiveView — catch-all shell + UI registries
       lib/catalyst_web/
         {endpoint.ex, router.ex, application.ex, assets.ex}
@@ -136,6 +139,9 @@ catalyst/                      # umbrella
                                                    # validated facades over the shared runtime registry (§11)
         tools/{rebuild_assets.ex, reload_ui.ex}    # web-side self-mod tools (§11)
         components/* controllers/*
+    catalyst_web_features/     # optional interactive pages backed by catalyst_features
+      lib/catalyst_web/        # computer, workflows, and comparison page modules
+      priv/builtins/*.ex       # page registrations through ExtensionAPI
     catalyst_desktop/          # Desktop.Window child + release/packaging (depends on web)
       lib/catalyst_desktop.ex
     catalyst_cli/              # headless (no-wx) release — proves packaged hot-loading
@@ -144,11 +150,13 @@ catalyst/                      # umbrella
   config/{config.exs, dev.exs, prod.exs, runtime.exs, test.exs}
 ```
 
-The boundary is enforced by app dependencies: `catalyst` carries no Phoenix; `catalyst_web`
-depends on `catalyst`; `catalyst_desktop` depends on `catalyst_web`. This keeps the agent
-core runnable headless (iex/escript/tests) and lets the LLM core be extracted later. The core
-never references `catalyst_web` directly — UI extension _kinds_ are dispatched through
-`:persistent_term` (§11) so the dependency arrow only ever points web → core.
+The boundary is enforced by app dependencies: `catalyst` carries no Phoenix;
+`catalyst_features` depends only on the kernel; `catalyst_web` depends only on the kernel; and
+`catalyst_web_features` joins the two without creating a core-to-web dependency. The desktop
+release includes both feature apps, while `catalyst_cli` includes only headless features. This
+keeps the kernel runnable alone and makes the dependency arrows point feature → kernel and
+web → kernel. UI extension _kinds_ are dispatched through `:persistent_term` (§11), so core never
+references `catalyst_web` directly.
 
 ---
 
@@ -158,10 +166,7 @@ never references `catalyst_web` directly — UI extension _kinds_ are dispatched
 Catalyst.Application (top, in apps/catalyst)
 ├── {Phoenix.PubSub, name: Catalyst.PubSub}
 ├── {Finch, name: Catalyst.Finch}                 # SSE streaming + token HTTP
-├── {Task.Supervisor, name: Catalyst.TaskSupervisor}        # run, hook, metadata, refresh tasks
-├── Catalyst.Hooks.ObserverDispatcher             # ordered, bounded async event observers — deliberately
-│                                                 #   OUTSIDE the extension group: observer entries are passed
-│                                                 #   by value, so admitted queues survive registry recovery
+├── {Task.Supervisor, name: Catalyst.TaskSupervisor}        # run, hook observer, metadata, refresh tasks
 ├── Catalyst.Auth.TokenStore                      # GenServer, single-flight token refresh
 ├── Catalyst.LLM.OpenAICodex.CatalogCache         # live model metadata, single-flight refresh
 ├── Catalyst.LLM.OpenAICodex.ConnCache            # idle Codex ws conns between runs (delta-upload state, §6)
@@ -171,6 +176,9 @@ Catalyst.Application (top, in apps/catalyst)
 │   ├── {Registry, keys: :unique, name: Catalyst.Extensions.ProcessRegistry}  # owner -> ext supervisor (§11)
 │   ├── {DynamicSupervisor, name: Catalyst.Extensions.ProcessSupervisor}      # extension-owned processes (§11)
 │   └── Catalyst.Extensions                       # last: rebuilds the live table from extension source (§11)
+│       └── owner trees started by bundled installers as needed
+│           # ACP, computer helper/viewport, PTY shells, and workflow-run coordinators are
+│           # feature processes, not unconditional Catalyst.Application children
 ├── {Registry, keys: :unique, name: Catalyst.Session.Registry}
 ├── AgentChildrenSupervisor (:rest_for_one)
 │   ├── Catalyst.Agent.Children.TableOwner          # lease/index ETS survives coordinator restarts
@@ -195,6 +203,9 @@ The shared runtime registry boots **before** any session and the extension coord
 facades are plain modules: they read owner-aware overlays from that table, then resolve current
 application/file/built-in layers. If the table restarts, `:rest_for_one` restarts the coordinator
 and rebuilds enabled contributions coherently from source (§11).
+Compiled feature apps have no application callback or unconditional process tree. Their immutable
+installers activate registrations and start owner-tagged supervisors; safe mode loads these bundled
+installers but skips user sources.
 
 ---
 
@@ -260,28 +271,24 @@ request meets the threshold, it stages a policy-supplied chronological replaceme
 transform once more to that candidate, and accepts it only after transcript validation, strict
 token progress, and a below-threshold re-estimate. Only then does it emit durable
 `ContextCompacted`. `Session.EventSink` synchronously appends it before the session folds or
-broadcasts the replacement, then hands the committed notification to ordered observer delivery;
+broadcasts the replacement, then publishes the committed notification to event observers;
 observer callbacks remain outside the Session GenServer. An append failure leaves both live and
 restored transcripts unchanged and aborts the provider request. A rejected candidate changes
 nothing. Internal summarizer requests bypass recursive guarding.
 
-`Context.Tokens` uses optional provider `context_fingerprint/3` and `estimate_tokens/3` adapters;
-otherwise it uses a deterministic provider-neutral SHA-256 projection and a conservative coarse
-estimate. `OpenAICodex.Request` owns both the Codex wire encoder and its stable semantic projection:
-the latter reuses the same message/tool conversion while omitting only generated assistant replay
-ids and normalizing JSON-equivalent schemas/arguments. A successful assistant usage total becomes
-an anchor only when a provider fingerprint adapter produced its digest and that digest still
-matches the current semantic prefix. A fallback digest remains useful for change detection but is
-never an anchor. Status therefore explicitly distinguishes provider/coarse and anchored/unanchored
-accounting.
+`Context.Tokens` uses one deterministic provider-neutral SHA-256 projection and a conservative
+coarse estimate of roughly four bytes per token, with separate size-based image pricing.
+`OpenAICodex.Request` retains its own semantic projection for transport continuation and
+delta-upload identity; that transport optimization is not a second context-accounting policy.
+The guard always re-estimates the complete provider-visible context and any staged replacement.
 
 `Context.Window` resolves the policy runtime overlay → current `:context_policy` → built-in, and
 its threshold in this order: session `context_threshold`; runtime exact model id/API/`:default`;
 current `:context_thresholds` for those keys; then the lower of a valid catalog auto-compact limit
-and 85% of the usable window when anchored or 70% when unanchored. A positive integer is absolute,
-a ratio in `(0, 1]` is applied to the effective window, and `:none` explicitly disables Catalyst
-compaction (not the provider's hard limit). An absolute value above the usable window or a ratio
-without one is a tagged configuration error.
+and 70% of the usable window. A positive integer is absolute, a ratio in `(0, 1]` is applied to the
+effective window, and `:none` explicitly disables Catalyst compaction (not the provider's hard
+limit). An absolute value above the usable window or a ratio without one is a tagged configuration
+error.
 
 ### Parent and child session topology
 
@@ -356,8 +363,8 @@ tool-result cards, and thinking — CSS rather than re-render because stream/ign
 never re-render on assign changes. Spinners stay visible; the session is never touched.
 `ContextCompacted` resets and re-streams the replacement transcript; `ContextStatus` updates
 footer context diagnostics without adding a chat block. The footer shows used tokens,
-effective threshold/source, anchored versus estimated state, and read-only prompt
-text/digest/provenance from the current or last-successful run. A toggleable sidebar lists
+effective threshold/source, estimated state, and read-only prompt text/digest/provenance from the
+current or last-successful run. A toggleable sidebar lists
 **projects** (unique `cwd`s) and **threads** (`Session.Server`s). New/switch never stop
 sibling sessions; close stops the process and drops the catalog entry.
 
@@ -680,11 +687,14 @@ transcripts. Consumer-specific overrides such as `:auth_path`, `:sessions_root`,
 - **Core (`apps/catalyst`):** `phoenix_pubsub`, `finch`, `mint_web_socket` (Codex websocket
   transport), `req`, `jason`, `muontrap`, `ex_json_schema`, `bandit`/`plug` (OAuth callback
   server; also the test websocket server via `websock_adapter`, test-only).
+- **Bundled features (`apps/catalyst_features`):** the compiled ACP/Claude, Grok, computer/PTY,
+  fetch, comparison, and workflow implementations; `floki` belongs here rather than in the kernel.
 - **Web/desktop:** `phoenix`, `phoenix_live_view`, `bandit`, `desktop`, `esbuild`, `tailwind`;
-  packaging via `desktop_deployment` (GUI `.app`) and `burrito` (headless `catalyst_cli`).
+  `catalyst_web_features` holds the optional computer/workflow/comparison pages; packaging uses
+  `desktop_deployment` (GUI `.app`) and `burrito` (headless `catalyst_cli`).
 - **Later:** `joken` (verified JWT), `ecto_sqlite3`.
-- **Note:** runtime extensibility (§11) added **no new deps** — it is plain BEAM hot code loading
-  (`Code.compile_file/1` + ETS registries), which is exactly why it works inside the packaged app.
+- **Note:** runtime extensibility (§11) added **no new deps** — it is plain BEAM compilation and
+  hot code loading plus ETS, which is exactly why it works inside the packaged app.
 
 ---
 
@@ -699,23 +709,28 @@ kernel fallback data. The table is a reconstructible projection of source, not a
 The enabler is BEAM hot code loading: behavior lives in plain modules the loop/UI call fresh, so
 loading a new version changes behavior on the next call/render — even in the packaged release (the
 Elixir compiler ships in it). Self-modification is **auto-allowed**; the safety net is **bounded
-compile with exact accepted-BEAM restoration + git versioning + safe-mode boot (manual AND
-automatic, see below)** (no approval cards — an approval gate can be added _as an extension_ via
-the `before_tool_call` hook). Compilation occurs in the live VM, so it is not a side-effect-free
-dry run: emitted modules are immediately installed and must be restored if a later expression in
-the file fails.
+isolated staging + source-driven rebuild + git versioning + safe-mode boot (manual AND automatic,
+see below)** (no approval cards — an approval gate can be added _as an extension_ via the
+`before_tool_call` hook). Compilation occurs in a disposable external BEAM, so a failed or hanging
+compile cannot mutate the live VM. Top-level source expressions run in that staging VM; live side
+effects belong in the bounded, owner-tracked `setup/1` callback.
 
 **Unified API.** `Catalyst.Extension` is a behaviour (`setup(api) :: :ok | {:error, term}`, plus
 optional `metadata/0` — merged into `Extensions.list_loaded/0` and shown on the `/extensions`
 panel). `Catalyst.ExtensionAPI` is the facade an extension's `setup/1` receives —
 `register_tool` / `register_provider` / `register_prompt` / `register_prompt_policy` /
-`register_workflow` / `register_context_policy` / `register_context_threshold` /
+`register_workflow` / `register_workflow_source` / `register_capability` /
+`register_context_policy` / `register_context_threshold` /
 `register_hook` / `on` / `register_renderer` / `register_component` / `register_page` /
 `register_command` / `start_child` — each tagged with the
 owning file's `ext_id`. Web-only kinds (renderers/components/pages/commands) are dispatched through
 `:persistent_term` so **core never depends on `catalyst_web`**. Direct host registrations use the
 reserved `:host` owner; they may refresh their own names but cannot detach or replace an
 extension-owned tool/provider.
+Provider configs may carry a `Catalyst.LLM.Controls` module, which supplies model catalog,
+model construction, auth labels/ids, and run-option translation to the shell. The bundled Grok
+feature therefore contributes its full picker/login behavior with its provider registration;
+`catalyst_web` has no Grok module reference or provider-name branch.
 
 **Extension processes.** `ExtensionAPI.start_child(api, child_spec)` gives extensions a supervised
 home for long-lived processes (watchers, pollers, client connections): each owner gets its own
@@ -728,21 +743,20 @@ without touching the shared Registry partition. This also recovers from a child 
 callback that never returns.
 
 **Loader.** `Catalyst.Extensions` (the lifecycle coordinator) loads immutable sources from each
-loaded Catalyst application's `priv/builtins/` directory, then `.ex` files from
-`~/.catalyst/extensions/`: compile → classify each module (`setup/1`-exporting extension vs
-tool-shaped) → **purge previous registrations by `ext_id`** from the shared registry → commit.
+available Catalyst application's `priv/builtins/` directory, then `.ex` files from
+`~/.catalyst/extensions/`: stage all selected sources in one disposable BEAM → classify each module
+(`setup/1`-exporting extension vs tool-shaped) → **purge previous registrations by `ext_id`** from
+the shared registry → rebuild the live projection in source order.
 Both source classes use the same contribution API and owner convention. A user file with the same
 basename loads second and replaces the bundled feature as a unit; removing it reveals the bundled
 version on the next rebuild. Bundled files are upgrade-owned and are never mutated by
-disable/rollback operations. It
-compiles **before registry purge/commit**. Every accepted load retains its exact emitted BEAM
-binaries in an owner/version stack. If a later compile fails partway, or its contribution is
-rejected, those accepted binaries are restored and newly introduced partial modules are removed;
-the edited broken source is never used as the rollback source. Purging also undoes **module
-definitions**: every module the owner's file compiled is tracked, the next accepted extension
-version is restored when owners overlap, and a shadowed application module falls back to its
-original code-path beam. Thus a broken file registers nothing new and cannot leave a partially
-compiled definition live.
+disable/rollback operations. Every source compiles and classifies **before registry purge/commit**.
+A compile failure retains that owner's currently active contribution while other valid sources can
+still rebuild. If live registration rejects a staged owner, the current runtime contribution cache
+restores its prior modules and registrations. No accepted-BEAM history or compiler journal is
+durable: extension files define the desired state and git holds history. Purging undoes **module
+definitions**; a shadowed application module falls back to its original code-path beam. Thus a
+broken file registers nothing new and cannot leave a partially compiled definition live.
 `Catalyst.Extensions.Versioning` `git init`s the dir and commits each successful install
 (scoped to the installed file, so unrelated dirty edits stay out of the commit), so
 `rollback_extension` is a `git revert` + reload. Loads, installs, reload/disable/enable and
@@ -754,12 +768,14 @@ and disable's purge. This is independent of the extension-process tree's shorter
 shutdown deadline, after which that tree is killed.
 `Catalyst.Extensions` remains the stable public facade, registered process name, and supervisor
 child id. Its GenServer implementation lives in `Extensions.Server`; serialized compile/setup,
-lifecycle, rollback, and prior-version restoration live in `Extensions.Load`; and user-facing
+lifecycle, rollback, and source rebuild live in `Extensions.Load`; isolated multi-file staging
+lives in `Extensions.StageCompiler`; module load and release-code restoration live in
+`Extensions.Modules`; and user-facing
 status/error rendering lives in the pure `Extensions.Presenter`. Typed ownership transitions
 (claim tracking, contribution commit, module-conflict checks, owner drop/snapshot, purge-result
-recording) live in `Extensions.State`; caller-independent locking and generation capture live in
-`Transaction`; accepted BEAM stacks and every restoration operation live in `ModuleVersions`;
-and all source discovery, owner derivation, and managed-path checks live in `Sources`. A loader
+recording) live in `Extensions.State`; caller-independent load locking and coordinator pinning live
+in `Transaction`; and all source discovery, owner derivation, and managed-path checks live in
+`Sources`. A loader
 contribution is a typed `%Extensions.Contribution{}`, and `Runtime.Registry` normalizes missing
 owners to the reserved `:host` id. A failed purge does not forget the owner: its
 entry stays tracked as `:degraded` with per-subsystem `purge_failures`, so live residue is never
@@ -784,18 +800,13 @@ runtime restarts `Catalyst.Extensions`, which recompiles enabled source files an
 table. During that window each domain resolver falls through to current application/file/built-in
 defaults. There are no per-domain table owners or replay logs to reconcile; accepted source files
 are the authority and git is their history. Each load transaction and `ExtensionAPI` handle is
-pinned to the `Catalyst.Extensions` server generation that created it, so returned work that
-outlives a restart is rejected instead of committing into the replacement runtime. Before a
-safe-mode generation publishes readiness, it revokes the prior generation's recorded owners and
-restores or removes their accepted modules. Extension API dispatch takes a generation gate around
-its current-generation check and handler call; a load that discovers its captured generation is
-stale restores every compiler-traced candidate before releasing the load lock. Compiler workers
-reserve a provisional entry before their start gate and journal emitted modules in
-`:persistent_term`, but replacement does **not** currently invoke
-`CompilerTracer.drain_provisional/0`. Reproducing an orphan compiler and benchmarking the
-persistent-term write/global-GC cost are explicit follow-ups before that store or recovery path is
-changed. Boot generation checks prevent an older asynchronous result from overwriting a newer
-explicit outcome.
+pinned to the `Catalyst.Extensions` server process that created it, so returned work that outlives a
+restart is rejected instead of committing through a stale handle. Before safe-mode readiness, the
+new coordinator revokes the prior runtime's recorded owners and restores or removes their accepted
+modules. Isolated compiler workers cannot install code in the live VM, so a failed or abandoned
+stage has no compiler journal or partial modules to drain. Bootstrap work reports only to the
+coordinator pid that started it; if that process exits, the replacement independently rebuilds from
+source.
 
 **Crash-safe boot (`Catalyst.Extensions.BootGuard`).** `CATALYST_SAFE_MODE=1` loads immutable
 bundled extensions but skips all user extension code; the boot marker makes this **automatic**:
@@ -821,13 +832,17 @@ is permitted but invalidates request probes and provider delta reuse.
 
 `Catalyst.Workflow.Registry` selects a session `opts[:loop]` module, named
 `opts[:workflow]`, runtime/application default, live `:agent_loop`, then `Catalyst.Agent.Loop`.
+Named workflow catalogs that live outside the kernel implement `Catalyst.Workflow.Source` and
+register through `register_workflow_source/3`; ACP descriptors and persisted workflow templates
+therefore participate without hardcoded branches in the registry. Optional run capabilities are
+resolved similarly through `Catalyst.Capabilities`: a feature registers a named resolver, and
+`Workflow.Support` applies the resulting grants after tool resolution. Computer use is one such
+capability rather than a kernel special case.
 Unknown explicit names fail rather than falling through. Selection data is pinned per run, but
 ordinary BEAM semantics still apply if the selected module is hot-reloaded. A conforming workflow
-uses `Workflow.Support`; guarded successful provider responses come back with a provider-accurate
-context digest when the provider implements the fingerprint adapter, and the workflow emits the
-shared post-persistence anchor status after its `MessageEnd`. A sovereign workflow that calls the
-provider directly bypasses context guarding and observer/capability helpers and is unsupported. It
-must emit one initial `AgentStart`,
+uses `Workflow.Support`, which applies the same coarse request accounting and compaction policy as
+the built-in loop. A sovereign workflow that calls the provider directly bypasses context guarding
+and observer/capability helpers and is unsupported. It must emit one initial `AgentStart`,
 `MessageEnd` for every persistable user/assistant/tool-result message, normally balanced tool
 boundaries/results, and one final `AgentEnd`. Normal return does not synthesize missing lifecycle
 events; brutal task cancellation can interrupt a boundary pair.
@@ -847,28 +862,12 @@ extension directory, or the boot-marker path, and removes only its own contribut
 
 **Hook points (`Catalyst.Hooks`, shared runtime contributions).** Six PI-style points, wired into `agent/loop.ex` +
 `tool_runner.ex`, **no-op when empty**. Decision/filter handlers run in isolated supervised tasks
-with a deadline. Read-only observers are delivered by `ObserverDispatcher`: one directly
-supervised callback process at a time per session, ordered within a session and concurrent across
-sessions. A crashing or hanging callback is logged, killed, and skipped. Per-session admission is
-bounded; streamed `MessageUpdate`/`ToolExecutionUpdate` events may be dropped at saturation, while
-ordinary structural events evict an older queued update or apply backpressure. Successfully
-persisted compactions freeze the first complete handler snapshot read from the durable handler
-table (committed admission deliberately does not wait on hook-runtime readiness, so a
-still-bootstrapping extension generation cannot strand a session) and are admitted to an ordered
-waiting lane before broadcast, without running
-observer callbacks in the Session GenServer. Direct dispatcher/registry downtime retries only
-admission against that frozen snapshot, bounded by a configurable deadline
-(`:event_sink_deadline_ms`, default 500 ms); at the deadline the observer handoff is dropped with
-a logged warning while persistence and PubSub delivery are unaffected. Queue overload never drops an admitted compaction, but a dispatcher
-crash after acknowledgement can lose queued callback work and an ambiguous failed admission can
-be retried, so observers must tolerate both process loss and duplicate delivery. Host-synthesized
-failure/abort lifecycle
-events use bounded non-blocking admission: they evict a queued update when possible and otherwise
-may be dropped from observer delivery under saturation (PubSub delivery is unaffected). Admission
-and enqueue are one GenServer operation, eliminating leaked pre-cast reservations. The dispatcher
-is supervised outside the extension-runtime group so admitted queues survive registry recovery.
-Generation tokens prevent a stale runtime from publishing readiness, so synchronous hook snapshots
-cannot observe a fresh but incomplete contribution table:
+with a deadline. Read-only observers are plain PubSub subscribers, one supervised task per
+registered callback. Each callback has ordinary BEAM mailbox ordering and backpressure; a slow or
+failed observer affects only its own subscriber process and never runs in the session or agent-loop
+process. Observer registration remains owner-tagged in `Runtime.Registry`, so source rebuild,
+reload, and uninstall revoke delivery. Synchronous hook snapshots are captured only after extension
+bootstrap readiness and remain immutable for one turn:
 
 | Point                    | Where                                                | Power                                                                                                        |
 | ------------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -877,7 +876,7 @@ cannot observe a fresh but incomplete contribution table:
 | `after_tool_call`        | after execute, before `ToolExecutionEnd`             | rewrite the result tuple                                                                                     |
 | `prepare_next_turn`      | after `TurnEnd` (every turn, incl. the natural stop) | return `%{context, config}` for the next turn                                                                |
 | `should_stop_after_turn` | after every turn                                     | force-stop the loop AND skip the follow-up queue                                                             |
-| `on` / `notify`          | `emit` wrapper + durable/synthetic event sinks        | ordered observers; lossy updates, lossless committed compactions, bounded synthetic lifecycle admission       |
+| `on` / `notify`          | `emit` wrapper + durable/synthetic event sinks        | asynchronous PubSub observers with per-subscriber mailbox ordering                                             |
 
 **Registries that resolve live.** `Catalyst.LLM.Registry` (§6) resolves providers;
 `Catalyst.Prompt.Registry`, `Catalyst.Workflow.Registry`, and `Catalyst.Context.Registry` hold
@@ -892,10 +891,14 @@ stale boot value. Their `runtime_entries/0` results expose `key`, `value`, and `
 diagnostics. `CatalystWeb.UI.Registry` resolves **pages / renderers / components / commands**.
 `CatalystWeb.UI.MessageRenderer` dispatches transcript rendering to registered renderers
 (newest-first, `match_fun`) falling back to built-ins. Routing is **catch-all**: one
-`CatalystWeb.ShellLive` is mounted at `/` and `/:page` (router ships this once), and
+`CatalystWeb.ShellLive` is mounted at `/` and `/*path` (router ships this once), and
 `handle_params` resolves the page registry by path — so a new page (`/settings`) is a registry
-write, no router recompile. Page modules may own `handle_event/3`, `handle_info/2`, and
-`handle_async/3`; `ShellLive` safely dispatches otherwise-unhandled callbacks to the active page.
+write, no router recompile. Exact pages are the default; `match: :prefix` lets one page own nested
+paths such as `/compare/:id`. Page modules may initialize route state with `mount_page/2` and own
+`handle_event/3`, `handle_info/2`, and `handle_async/3`; `ShellLive` safely dispatches
+otherwise-unhandled callbacks to the active page. `render_mode: :safe` isolates ordinary extension
+render failures, while trusted interactive pages opt into `:live` rendering without a hardcoded
+module whitelist.
 The chat itself is just a registered page (`Pages.ChatPage`), and
 the commands registry is dogfooded the same way: `/cd` is a seeded built-in command, and every
 `/name [arg]` chat message dispatches through `UI.Registry.fetch_command/1` (crash-isolated
@@ -922,7 +925,7 @@ of this relative to the live bundled app.
 built-in page (`Pages.ExtensionsPage`, registered exactly like `Pages.ChatPage`, so it also
 dogfoods the page registry). It renders a data snapshot (`panel_data/0`, rebuilt by `ShellLive`
 on navigation, after each action, and at `AgentEnd`) of: loaded extensions
-(via `Extensions.snapshot/0`, the bounded UI summary — boot status, generation, and each
+(via `Extensions.snapshot/0`, the bounded UI summary — boot status and each
 `list_loaded/0` owner entry (owner/file/tools/modules/status) augmented with a process count
 computed in one supervised deadline-bounded task, degrading to `:unknown` rather than blocking
 the render path), disabled extensions
@@ -967,6 +970,9 @@ machine the way a person does: see the screen, click and type, drive native apps
 network, and hold interactive shells open. **Off by default; full machine access by design when
 on** — there is no sandbox and no approval UI (the counterweight is the `before_tool_call`
 gate recipe in `guide.md`, plus off-by-default, non-inheritance, and untrusted marking).
+The implementation lives in `catalyst_features`, its page lives in `catalyst_web_features`, and
+immutable installers register its tools, capability resolver, screenshot hook, page, and supervised
+process trees. None of those processes is an unconditional kernel child.
 
 - **Capability seam.** Tools declare `capabilities/0` (optional callback on `Catalyst.Tools.Tool`,
   default `[]`, cached in the Registry's validated `definition`). `Workflow.Support.

@@ -178,15 +178,15 @@ defmodule Catalyst.ExtensionsLoadTest do
 
   test "a hanging extension compile is timed out without blocking the registry GenServer" do
     put_env(:extension_compile_timeout, 200)
-    put_parent!(:compile_parent)
     compiler_options = Code.compiler_options()
+    marker = Path.join(Extensions.dir(), "compile_started")
 
     on_exit(fn -> Extensions.uninstall("compile_probe") end)
 
-    path = write_ext("compile_hang", compile_hang_source())
+    path = write_ext("compile_hang", compile_hang_source(marker))
     task = Task.async(fn -> Extensions.load_file(path) end)
 
-    assert_receive :compile_started, 1_000
+    assert wait_for_file(marker, 1_000)
     assert {:ok, _} = Extensions.register_tool(SetupOnlyTool, owner: "compile_probe")
     assert {:error, :timeout} = Task.await(task, 1_000)
     assert Code.compiler_options() == compiler_options
@@ -258,7 +258,7 @@ defmodule Catalyst.ExtensionsLoadTest do
       )
 
     assert {:ok, %{failed: []}} =
-             Load.boot_load_bundled(Extensions.generation_token())
+             Load.boot_load_bundled()
 
     assert {:ok, bundled_tool} = Extensions.fetch("replaceable_tool")
     assert bundled_tool.description() == "bundled"
@@ -366,19 +366,19 @@ defmodule Catalyst.ExtensionsLoadTest do
 
   test "tool registration metadata is bounded outside the Extensions server" do
     put_env(:tool_metadata_timeout, 100)
-    put_parent!(:tool_metadata_parent)
+    marker = Path.join(Extensions.dir(), "tool_metadata_started")
 
     path =
       write_ext(
         "hanging_tool_metadata",
-        ~S'''
+        """
         defmodule Catalyst.Ext.HangingToolMetadata do
           use Catalyst.Tools.Tool
           @impl true
           def name, do: "hanging_tool_metadata"
           @impl true
           def description do
-            send(:persistent_term.get({Catalyst.ExtensionsFixtures, :tool_metadata_parent}), :tool_metadata_started)
+            File.write!(#{inspect(marker)}, "started")
 
             receive do
               :never -> "unreachable"
@@ -389,48 +389,48 @@ defmodule Catalyst.ExtensionsLoadTest do
           @impl true
           def execute(_args, _ctx), do: result("ok")
         end
-        '''
+        """
       )
 
     task = Task.async(fn -> Extensions.load_file(path) end)
-    assert_receive :tool_metadata_started
+    assert wait_for_file(marker, 1_000)
 
     assert {:ok, Catalyst.Tools.Read} = Extensions.fetch("read")
 
     assert {:error, {:tool_metadata_timeout, Catalyst.Ext.HangingToolMetadata}} =
-             Task.await(task, 1_000)
+             Task.await(task, 5_000)
   end
 
   test "extension metadata is bounded and cached after a successful load" do
     put_env(:extension_metadata_timeout, 50)
-    put_parent!(:metadata_parent)
+    marker = Path.join(Extensions.dir(), "metadata_calls")
 
     cached =
       write_ext(
         "cached_metadata",
-        ~S'''
+        """
         defmodule Catalyst.Ext.CachedMetadata do
           use Catalyst.Extension
           @impl true
           def metadata do
-            send(:persistent_term.get({Catalyst.ExtensionsFixtures, :metadata_parent}), :metadata_called)
+            File.write!(#{inspect(marker)}, "called\n", [:append])
             %{name: "cached"}
           end
           @impl true
           def setup(_api), do: :ok
         end
-        '''
+        """
       )
 
     assert {:ok, _} = Extensions.load_file(cached)
-    assert_receive :metadata_called
+    assert File.read!(marker) == "called\n"
 
     assert Enum.find(Extensions.list_loaded(), &(&1.owner == "cached_metadata")).metadata == %{
              name: "cached"
            }
 
     _ = Extensions.list_loaded()
-    refute_receive :metadata_called
+    assert File.read!(marker) == "called\n"
 
     hanging =
       write_ext(
@@ -452,5 +452,26 @@ defmodule Catalyst.ExtensionsLoadTest do
 
     assert {:ok, _} = Extensions.load_file(hanging)
     assert Enum.find(Extensions.list_loaded(), &(&1.owner == "hanging_metadata")).metadata == %{}
+  end
+
+  defp wait_for_file(path, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_for_file(path, deadline)
+  end
+
+  defp do_wait_for_file(path, deadline) do
+    cond do
+      File.exists?(path) ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        receive do
+        after
+          10 -> do_wait_for_file(path, deadline)
+        end
+    end
   end
 end

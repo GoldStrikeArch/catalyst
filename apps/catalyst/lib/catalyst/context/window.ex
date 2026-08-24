@@ -93,10 +93,8 @@ defmodule Catalyst.Context.Window do
   defdelegate companion_id(session_id), to: Summarizer
 
   @doc false
-  @spec builtin_threshold(Catalyst.Model.t() | nil, boolean()) ::
-          {:ok, pos_integer(), :builtin} | :missing
-  def builtin_threshold(model, anchored?),
-    do: builtin_source(model, effective_window(model), anchored?)
+  @spec builtin_threshold(Catalyst.Model.t() | nil) :: {:ok, pos_integer(), :builtin} | :missing
+  def builtin_threshold(model), do: builtin_source(model, effective_window(model))
 
   defp threshold_source(:session, _model, _window, context) do
     opts = Map.get(context, :opts, []) || []
@@ -115,12 +113,12 @@ defmodule Catalyst.Context.Window do
 
   defp threshold_source(:registry, model, _window, _context), do: Registry.threshold(model)
 
-  defp threshold_source(:builtin, model, window, context),
-    do: builtin_source(model, window, Map.get(context, :anchored, false))
+  defp threshold_source(:builtin, model, window, _context),
+    do: builtin_source(model, window)
 
-  defp builtin_source(model, window, anchored?) do
+  defp builtin_source(model, window) do
     case Enum.filter(
-           [catalog_limit(model, window), ratio_limit(window, anchored?)],
+           [catalog_limit(model, window), ratio_limit(window)],
            &positive_integer?/1
          ) do
       [] -> :missing
@@ -188,10 +186,9 @@ defmodule Catalyst.Context.Window do
     end
   end
 
-  defp ratio_limit({:ok, window}, anchored?),
-    do: floor(window * if(anchored?, do: 0.85, else: 0.70))
+  defp ratio_limit({:ok, window}), do: floor(window * 0.70)
 
-  defp ratio_limit(:error, _anchored?), do: nil
+  defp ratio_limit(:error), do: nil
 
   defp fetch_positive(context, key) do
     case Map.get(context, key) do

@@ -312,9 +312,9 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   prompt policy/text, named/default workflows, and context policy/thresholds, with live
   application/file/built-in fallbacks and extension purge/collision semantics. System and
   compaction prompts resolve independently by exact model id/API/default with digest and ordered
-  provenance. Model catalog context metadata feeds request-time token fingerprinting, anchored or
-  coarse estimates, absolute/ratio/disabled thresholds (`:none` explicitly disables Catalyst
-  compaction), and staged persistent compaction; durable
+  provenance. Model catalog context metadata feeds one conservative request-time estimate,
+  absolute/ratio/disabled thresholds (`:none` explicitly disables Catalyst compaction), and staged
+  persistent compaction; durable
   `ContextCompacted` JSONL replacements and transient `ContextStatus` drive resume and the chat
   meter. `Catalyst.Workflow`/`Workflow.Support` make the built-in loop and extensions share
   observed events, final tool capability filtering, and the context-guard provider seam.
@@ -328,27 +328,26 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   shared `Session.EventSink` for durable, ordinary, and synthetic observer semantics. GUI sessions
   persist model and thinking-level changes together as one authoritative `settings_snapshot`
   before installing them in memory, while retaining read compatibility with the two legacy entry
-  types. GUI sessions resolve providers through `LLM.Registry`, and tool execution consumes one validated, generation-
-  pinned registry entry instead of calling extension metadata twice. CLI controlled exits mark the
+  types. GUI sessions resolve providers through `LLM.Registry`, and tool execution consumes one
+  validated turn-pinned registry entry instead of calling extension metadata twice. CLI controlled exits mark the
   boot clean, while self-test uses an exclusive temporary source and never touches user extension
   state. Live extension ownership now resides in one `Runtime.Registry` table shared by tools,
   hooks, providers, prompts, workflows, context, and UI; each domain facade retains only validation
   and fallback resolution. Codex token accounting and request construction share one projection.
   The stable `Extensions` facade delegates its
-  GenServer state owner, serialized lifecycle saga, pure presentation, source rules, and exact BEAM
-  restoration to `Server`, `Load`, `Presenter`, `Sources`, and `ModuleVersions`; the obsolete
+  GenServer state owner, serialized lifecycle saga, pure presentation, source rules, and module
+  restoration to `Server`, `Load`, `Presenter`, `Sources`, and `Modules`; the obsolete
   `RunConfig.build/3`/`resolve_loop/1`
   entry points and the `ModuleScan` module were removed (`Session.RunConfig` itself remains the
   heavily used host-side run preflight). Extension setup now has one host-controlled
   `:waiting | :running | :complete` bootstrap and one web-host readiness lease. Runtime table loss
   restarts the coordinator and rebuilds enabled contributions from source; per-domain table owners
-  and the UI persistent-term replay log are gone. Extension transactions and
-  API handles are generation-pinned, prior runtime footprints are revoked before restart/safe-mode
-  readiness, and stale asynchronous boot work cannot run after or replace newer explicit outcomes.
-  Returned stale compilations restore their traced candidates. The provisional compiler journal
-  remains in persistent term, but replacement does not currently drain it; an orphan-compiler
-  reproduction and benchmark are required before wiring `drain_provisional/0` or replacing its
-  storage. Extension-owner teardown is bounded even when a child
+  and the UI persistent-term replay log are gone. Extension transactions pin the coordinator pid,
+  prior runtime footprints are revoked before restart/safe-mode readiness, and stale asynchronous
+  boot work cannot register into a replacement coordinator or replace newer explicit outcomes.
+  Compilation now stages in a disposable BEAM, so returned stale work cannot mutate live code and
+  no provisional compiler journal or accepted-BEAM version stack remains. Extension-owner teardown
+  is bounded even when a child
   start callback or shutdown never returns, while preserving the shared process registry. Core
   state/config types, behaviour callback docs, reverse chunk accumulation, and
   concurrent provider cleanup tighten the idiomatic Elixir/OTP boundaries; the former core compile
@@ -376,8 +375,8 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   images inside `function_call_output` are accepted (kept as a permanent opt-in `:live_wire` test);
   estimator repro measured a ~1 MB image at **263k phantom tokens**. (C1) Image token accounting
   fixed: digest+bytes projection in both coarse and Codex-semantic paths, per-image cost
-  `max(1_024, div(bytes, 600))` (1 MB ≈ 1.7k, 5 MB ≈ 8.7k); wire bodies unchanged; **all persisted
-  anchors invalidate once** (sessions re-anchor on the next response — expected, harmless). (C2)
+  `max(1_024, div(bytes, 600))` (1 MB ≈ 1.7k, 5 MB ≈ 8.7k); wire bodies unchanged. The former
+  persisted-anchor accounting was subsequently replaced by one provider-neutral coarse estimate. (C2)
   `capabilities/0` tool callback + registry-cached gate in `Workflow.Support.filter_capabilities/2`;
   `:computer_use` session opt (default off), **not inheritable by child sessions**; header
   "Computer" toggle (new `machine_prefs` persistent_term) + `/computer` page (grant status, helper
@@ -411,18 +410,26 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   `:live_wire` 1/1.** Remaining manual residue (needs a human at the keyboard): packaged-`.app`
   TCC grant flow + rebuild re-grant, revoked-grant `/computer` reporting, and the LibreOffice
   zero-screenshot drive (LibreOffice not installed).
-- **P7 — Kernel simplification / extension dogfooding — IN PROGRESS.** The live contribution
+- **P7 — Kernel simplification / extension dogfooding — IN PROGRESS (feature and source-rebuild
+  slices complete).** The live contribution
   plane is now one `Catalyst.Runtime.Registry` table instead of parallel owner-aware registries,
   table-owner processes, and UI replay state. Domain modules retain validation and pure fallback
   resolution. Registered pages can own otherwise-unhandled LiveView events, infos, and async
   results, so UI features no longer require edits to the shell event router. Immutable
   `priv/builtins/*.ex` sources now load through the same `Catalyst.ExtensionAPI` path before user
-  extensions and remain available in safe mode; same-named user sources replace them. Grok and
-  direct Claude workflow registration now dogfood `ExtensionAPI`. Moving their multi-file
-  implementations exposed that per-file generation cancellation is not an atomic bundle boundary,
-  so implementation modules remain compiled until the loader can stage a whole bundled feature.
-  Next: add that atomic source-bundle boundary, move the process-owning satellites behind it, then
-  replace incremental extension repair with source-driven rebuilds.
+  extensions and remain available in safe mode; same-named user sources replace them. The compiled
+  optional implementation is now isolated in `catalyst_features` and `catalyst_web_features`;
+  immutable installers activate it through the ordinary contribution API. ACP/Claude, Grok,
+  comparison, computer/PTY/fetch, workflow templates, and durable workflow runs no longer live in
+  the kernel or boot as unconditional kernel children. Their long-lived processes are owner-tagged
+  extension subtrees. Generic workflow-source, capability-resolver, prefix-page, page-mount, and
+  page callback seams replaced feature-specific branches in workflow/session/ShellLive code.
+  Headless CLI and desktop releases include the appropriate compiled feature apps, preserving the
+  shipped surface while the kernel remains independently runnable. Extension compilation now stages
+  every active source in a disposable external BEAM before any live mutation. Successful stages
+  rebuild the runtime projection from source; compile failures retain the prior active owner, and
+  rejected live contributions use only the current reconstructible contribution cache. The compiler tracer,
+  provisional journal, and accepted-BEAM version stacks are gone.
 - **Next options:** notarize for distribution (the launcher step must then re-sign inside-out +
   re-sign the dmg); replace the placeholder icon; optional approval gate as an extension via the
   `before_tool_call` hook (a panel toggle could install it); optional `self_test/0` extension

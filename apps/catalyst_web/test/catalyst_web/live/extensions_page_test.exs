@@ -169,14 +169,13 @@ defmodule CatalystWeb.ExtensionsPageTest do
 
     assert is_integer(builtin_threshold.value)
     assert builtin_threshold.source == :builtin
-    assert builtin_threshold.note =~ "unanchored baseline"
+    assert builtin_threshold.note =~ "coarse baseline"
 
     with_request =
       ExtensionsPage.panel_data(model, [], %{
         context_status: %{
           threshold: 85_000,
-          threshold_source: :builtin,
-          anchored: true
+          threshold_source: :builtin
         },
         run_metadata: %{context: %{model_id: "run-snapshot-model"}}
       })
@@ -186,7 +185,7 @@ defmodule CatalystWeb.ExtensionsPageTest do
 
     assert request_threshold.value == 85_000
     assert request_threshold.source == :builtin
-    assert request_threshold.note == "anchored for run-snapshot-model"
+    assert request_threshold.note == "estimated for run-snapshot-model"
   end
 
   test "panel data is built on the bounded snapshot" do

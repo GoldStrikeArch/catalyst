@@ -11,7 +11,14 @@ defmodule Catalyst.Extensions.Sources do
   replaces its bundled counterpart when sources are loaded in precedence order.
   """
 
-  @bundled_apps [:catalyst, :catalyst_web, :catalyst_desktop, :catalyst_cli]
+  @bundled_apps [
+    :catalyst,
+    :catalyst_features,
+    :catalyst_web,
+    :catalyst_web_features,
+    :catalyst_desktop,
+    :catalyst_cli
+  ]
 
   @doc "Return the configured runtime extension directory."
   @spec dir() :: Path.t()
@@ -102,7 +109,11 @@ defmodule Catalyst.Extensions.Sources do
 
   defp default_bundled_dirs do
     @bundled_apps
-    |> Enum.filter(&(not is_nil(Application.spec(&1, :vsn))))
-    |> Enum.map(&Application.app_dir(&1, "priv/builtins"))
+    |> Enum.flat_map(fn app ->
+      case :code.lib_dir(app) do
+        path when is_list(path) -> [Path.join(List.to_string(path), "priv/builtins")]
+        {:error, :bad_name} -> []
+      end
+    end)
   end
 end

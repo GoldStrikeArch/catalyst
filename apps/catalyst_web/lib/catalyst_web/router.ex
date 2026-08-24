@@ -1,7 +1,7 @@
 defmodule CatalystWeb.Router do
   @moduledoc """
   HTTP routes. Everything renders through `CatalystWeb.ShellLive`: `/` plus a
-  `/:page` catch-all that resolves runtime-registered pages from
+  `/*path` catch-all that resolves runtime-registered pages from
   `CatalystWeb.UI.Registry` — no router recompile per extension page.
   """
   use CatalystWeb, :router
@@ -27,9 +27,7 @@ defmodule CatalystWeb.Router do
 
     # One LiveView for everything; the catch-all resolves runtime-registered
     # pages by path (e.g. /settings) with no router recompile per page.
-    live "/compare", ComparisonLive, :index
-    live "/compare/:id", ComparisonLive, :show
     live "/", ShellLive, :index
-    live "/:page", ShellLive, :page
+    live "/*path", ShellLive, :page
   end
 end

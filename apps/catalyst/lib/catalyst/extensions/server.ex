@@ -17,7 +17,7 @@ defmodule Catalyst.Extensions.Server do
     BootGuard,
     Contribution,
     Load,
-    ModuleVersions,
+    Modules,
     Sources,
     State
   }
@@ -27,7 +27,6 @@ defmodule Catalyst.Extensions.Server do
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @server Catalyst.Extensions
-  @runtime_generation_key {Catalyst.Extensions, :runtime_generation}
   @runtime_footprint_key {Catalyst.Extensions, :runtime_footprint}
   @reseeders_key {Catalyst.Extensions, :reseeders}
   @boot_status_key {Catalyst.Extensions, :boot_status}
@@ -40,11 +39,12 @@ defmodule Catalyst.Extensions.Server do
 
   @impl true
   def init(:ok) do
-    :persistent_term.put(@runtime_generation_key, make_ref())
     wire_core_kinds()
-    hook_generation = Hooks.begin_runtime_generation()
+    :ok = Hooks.begin_runtime_rebuild()
 
-    state = %{State.new() | hook_generation: hook_generation}
+    state =
+      State.new()
+      |> revoke_prior_runtime()
 
     cond do
       Catalyst.Extensions.safe_mode?() ->
@@ -75,7 +75,6 @@ defmodule Catalyst.Extensions.Server do
     log_safe_mode(status)
 
     state
-    |> revoke_prior_generation()
     |> start_bootstrap(:bundled)
   end
 
@@ -90,11 +89,11 @@ defmodule Catalyst.Extensions.Server do
     )
   end
 
-  defp revoke_prior_generation(state) do
+  defp revoke_prior_runtime(state) do
     runtime_footprint()
     |> Enum.reduce(state, fn {owner, modules}, current ->
       purge_result = ExtensionAPI.purge_owner(owner)
-      Enum.each(modules, &ModuleVersions.restore_original/1)
+      Enum.each(modules, &Modules.restore_original/1)
       State.record_purge_result(current, owner, purge_result)
     end)
     |> persist_footprint()
@@ -115,13 +114,13 @@ defmodule Catalyst.Extensions.Server do
   @impl true
   def handle_continue({:bootstrap, mode}, state) do
     server = self()
-    generation = Catalyst.Extensions.generation_token()
 
     case Tasks.start_background(fn ->
-           result = bootstrap_workflow(mode, generation)
-           send(server, {:bootstrap_finished, generation, mode, result})
+           result = bootstrap_workflow(mode)
+           send(server, {:bootstrap_finished, mode, result})
          end) do
-      {:ok, _pid} ->
+      {:ok, pid} ->
+        link_bootstrap(pid)
         {:noreply, state}
 
       {:error, reason} ->
@@ -130,16 +129,16 @@ defmodule Catalyst.Extensions.Server do
     end
   end
 
-  @impl true
-  def handle_info({:bootstrap_finished, generation, mode, result}, state) do
-    case Catalyst.Extensions.generation_current?(generation) do
-      true ->
-        finish_boot_load(mode, result)
-        {:noreply, complete_bootstrap(state)}
+  defp link_bootstrap(pid) do
+    Process.link(pid)
+  catch
+    :error, :noproc -> :ok
+  end
 
-      false ->
-        {:noreply, state}
-    end
+  @impl true
+  def handle_info({:bootstrap_finished, mode, result}, state) do
+    finish_boot_load(mode, result)
+    {:noreply, complete_bootstrap(state)}
   end
 
   # Compatibility test seam for injecting stale boot results without knowing
@@ -194,12 +193,7 @@ defmodule Catalyst.Extensions.Server do
     end
   end
 
-  def handle_call({:explicit_load_finished, generation}, _from, state) do
-    case Catalyst.Extensions.generation_current?(generation) do
-      true -> explicit_load_finished(state)
-      false -> {:reply, {:error, :stale_extension_generation}, state}
-    end
-  end
+  def handle_call(:explicit_load_finished, _from, state), do: explicit_load_finished(state)
 
   def handle_call({:register, module, definition, opts}, _from, state) do
     {result, state} = do_register(module, definition, opts, state)
@@ -239,29 +233,6 @@ defmodule Catalyst.Extensions.Server do
     {:reply, collisions, %{state | setup_collisions: remaining}}
   end
 
-  def handle_call({:purge_gone, live_owners}, _from, state) do
-    state =
-      state.modules
-      |> Map.keys()
-      |> Enum.concat(Map.keys(state.degraded))
-      |> Enum.concat(Map.keys(runtime_footprint()))
-      |> Enum.uniq()
-      |> Enum.reject(&MapSet.member?(live_owners, &1))
-      |> Enum.reduce(state, fn owner, current -> purge_owner(owner, current) end)
-
-    {:reply, :ok, persist_footprint(state)}
-  end
-
-  def handle_call({:purge_partial_compile, candidates}, _from, state) do
-    restore_compiled_modules(candidates, state, "failed multi-module compile")
-    {:reply, :ok, state}
-  end
-
-  def handle_call({:purge_rejected_compile, candidates}, _from, state) do
-    restore_compiled_modules(candidates, state, "rejected compiled contribution")
-    {:reply, :ok, state}
-  end
-
   def handle_call({:commit_load, owner, path, contribution}, _from, state) do
     {result, state} = commit_load(owner, path, contribution, state)
     {:reply, result, persist_footprint(state)}
@@ -294,8 +265,8 @@ defmodule Catalyst.Extensions.Server do
   def handle_call(:runtime_readiness, _from, state) do
     readiness =
       case {state.bootstrap, Hooks.capture_snapshot([])} do
-        {:complete, {:ok, %{generation: generation}}} ->
-          {:ready, generation}
+        {:complete, {:ok, _snapshot}} ->
+          {:ready, :current}
 
         _recovering ->
           :recovering
@@ -349,32 +320,25 @@ defmodule Catalyst.Extensions.Server do
     {:reply, :ok, state}
   end
 
-  defp boot_load(generation) do
-    result = Load.boot_load(generation)
-    record_boot_outcome(generation, result)
+  defp boot_load do
+    result = Load.boot_load()
+    record_boot_outcome(result)
     result
   catch
     kind, reason ->
-      record_boot_outcome(generation, {:error, {kind, reason}})
+      record_boot_outcome({:error, {kind, reason}})
       {:error, {kind, reason}}
   end
 
-  defp bundled_boot_load(generation) do
-    Load.boot_load_bundled(generation)
+  defp bundled_boot_load do
+    Load.boot_load_bundled()
   catch
     kind, reason -> {:error, {kind, reason}}
   end
 
-  defp record_boot_outcome(generation, result) do
-    case Catalyst.Extensions.generation_current?(generation) do
-      true -> record_current_boot_outcome(result)
-      false -> :ok
-    end
-  end
-
-  defp record_current_boot_outcome({:ok, %{failed: []}}), do: :ok
-  defp record_current_boot_outcome({:ok, %{failed: failures}}), do: boot_load_failed(failures)
-  defp record_current_boot_outcome({:error, reason}), do: boot_load_failed(reason)
+  defp record_boot_outcome({:ok, %{failed: []}}), do: :ok
+  defp record_boot_outcome({:ok, %{failed: failures}}), do: boot_load_failed(failures)
+  defp record_boot_outcome({:error, reason}), do: boot_load_failed(reason)
 
   defp boot_load_failed(reason) do
     Logger.error(
@@ -393,6 +357,7 @@ defmodule Catalyst.Extensions.Server do
     Catalyst.Prompt.Registry.wire_extension_api()
     Catalyst.Workflow.Registry.wire_extension_api()
     Catalyst.Context.Registry.wire_extension_api()
+    Catalyst.Capabilities.wire_extension_api()
   end
 
   defp reseeders, do: :persistent_term.get(@reseeders_key, %{})
@@ -401,13 +366,13 @@ defmodule Catalyst.Extensions.Server do
     not is_nil(Application.spec(:catalyst_web, :vsn))
   end
 
-  defp bootstrap_workflow(mode, generation) do
+  defp bootstrap_workflow(mode) do
     run_nonfatal_bootstrap_step(:guide_publication, &ensure_guide/0)
     run_nonfatal_bootstrap_step(:reseeding, &run_reseeders_bounded/0)
 
     case mode do
-      :load -> boot_load(generation)
-      :bundled -> bundled_boot_load(generation)
+      :load -> boot_load()
+      :bundled -> bundled_boot_load()
       :skip_load -> :skipped
     end
   end
@@ -443,7 +408,7 @@ defmodule Catalyst.Extensions.Server do
   defp complete_bootstrap(%{bootstrap: :complete} = state), do: state
 
   defp complete_bootstrap(state) do
-    :ok = Hooks.mark_runtime_ready(state.hook_generation)
+    :ok = Hooks.mark_runtime_ready()
     %{state | bootstrap: :complete}
   end
 
@@ -516,10 +481,6 @@ defmodule Catalyst.Extensions.Server do
     )
   end
 
-  defp restore_compiled_modules(candidates, state, context) do
-    ModuleVersions.restore_candidates(candidates, state.module_versions, context)
-  end
-
   defp commit_load(owner, path, %Contribution{} = contribution, state) do
     case State.tool_owner_conflicts(state, owner, contribution.tool_names) do
       [] ->
@@ -533,25 +494,21 @@ defmodule Catalyst.Extensions.Server do
   defp commit_contribution(owner, path, contribution, state) do
     conflicts = State.module_conflicts(state, owner, contribution.modules)
     log_conflicts(owner, conflicts)
-    committed = State.commit_contribution(state, owner, path, contribution)
 
     try do
-      purge_result =
-        purge_owner_effects(owner, state,
-          keep_modules: contribution.modules,
-          module_versions: committed.module_versions
-        )
+      purge_result = purge_owner_effects(owner, state)
 
       Enum.each(Contribution.pairs(contribution), fn {name, module} ->
         :ok = Runtime.put(:tool, name, module, owner: owner)
       end)
 
       result = build_summary(owner, contribution.tool_names, contribution.ext_mods, conflicts)
+      committed = State.commit_contribution(state, owner, path, contribution)
       {{:ok, result}, State.record_purge_result(committed, owner, purge_result)}
     rescue
-      error -> {{:error, {:register, Exception.message(error)}}, committed}
+      error -> {{:error, {:register, Exception.message(error)}}, state}
     catch
-      kind, reason -> {{:error, {:register, {kind, reason}}}, committed}
+      kind, reason -> {{:error, {:register, {kind, reason}}}, state}
     end
   end
 
@@ -587,35 +544,20 @@ defmodule Catalyst.Extensions.Server do
     end
   end
 
-  defp purge_owner(owner, state, opts \\ []) do
-    module_versions = ModuleVersions.drop_owner(state.module_versions, owner)
-    purge_opts = Keyword.put(opts, :module_versions, module_versions)
-    purge_result = purge_owner_effects(owner, state, purge_opts)
+  defp purge_owner(owner, state) do
+    purge_result = purge_owner_effects(owner, state)
 
     state
-    |> State.drop_owner(owner, module_versions)
+    |> State.drop_owner(owner)
     |> State.record_purge_result(owner, purge_result)
   end
 
-  defp purge_owner_effects(owner, state, opts) do
-    keep = MapSet.new(Keyword.get(opts, :keep_modules, []))
-    module_versions = Keyword.fetch!(opts, :module_versions)
-
-    removed_modules =
-      state.modules
-      |> Map.get(owner, [])
-      |> Enum.reject(&MapSet.member?(keep, &1))
-
-    Enum.each(
-      removed_modules,
-      &ModuleVersions.restore_removed(&1, owner, state.module_versions, module_versions)
-    )
-
+  defp purge_owner_effects(owner, state) do
     pairs = Map.get(state.contrib, owner, MapSet.new())
 
     pairs
     |> Enum.map(&elem(&1, 1))
-    |> Enum.concat(removed_modules)
+    |> Enum.concat(Map.get(state.modules, owner, []))
     |> Enum.uniq()
     |> Enum.each(&ToolRegistry.invalidate/1)
 

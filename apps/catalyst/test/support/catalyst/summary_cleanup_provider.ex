@@ -16,14 +16,6 @@ defmodule Catalyst.Test.SummaryCleanupProvider do
   end
 
   @impl true
-  def estimate_tokens(_model, context, _opts) do
-    case Enum.any?(context.messages, &old_history?/1) do
-      true -> {:ok, 200}
-      false -> {:ok, max(1, length(context.messages) * 10)}
-    end
-  end
-
-  @impl true
   def cleanup_session(session_id) do
     case Application.get_env(:catalyst, :summary_cleanup_test_pid) do
       pid when is_pid(pid) -> send(pid, {:summary_cleanup, __MODULE__, session_id})
@@ -62,14 +54,6 @@ defmodule Catalyst.Test.SummaryCleanupProvider do
       timestamp: Message.now()
     }
   end
-
-  defp old_history?(%Message.User{content: content}) do
-    content
-    |> Content.text_of()
-    |> String.contains?("old history")
-  end
-
-  defp old_history?(_message), do: false
 
   defp notify(message) do
     case Application.get_env(:catalyst, :summary_cleanup_test_pid) do

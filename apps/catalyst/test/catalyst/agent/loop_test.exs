@@ -1,5 +1,5 @@
 defmodule Catalyst.Agent.LoopTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Catalyst.Agent.Loop
   alias Catalyst.Agent.Event

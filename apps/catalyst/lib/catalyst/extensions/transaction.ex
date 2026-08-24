@@ -2,28 +2,23 @@ defmodule Catalyst.Extensions.Transaction do
   @moduledoc """
   Serializes extension compilation and lifecycle transactions.
 
-  Work runs in a supervised caller-independent task. Nested transactions are
-  re-entrant in that task, allowing install operations to compose file writes,
-  compilation, and commit under one lock. Each outer transaction captures the
-  current `Catalyst.Extensions` server and runtime generation; nested API calls
-  remain pinned to that generation instead of accidentally mutating a server
-  that restarted while the transaction was in flight.
-
-  Extension API dispatch uses a separate generation gate. That gate serializes
-  an in-flight registration with generation publication and prior-owner purge,
-  without deadlocking setup callbacks that already run beneath the load lock in
-  their own monitored processes. Runtime replacement takes the load lock before
-  this gate, matching the load/setup → dispatch order.
+  Nested transactions are re-entrant, allowing install operations to compose
+  file writes, compilation, and projection rebuild under one global lock. The
+  extension sources are durable state; a coordinator restart rebuilds their
+  runtime projection rather than preserving an in-flight generation.
   """
 
   @load_lock {Catalyst.Extensions, :load_lock}
-  @generation_gate {Catalyst.Extensions, :generation_gate}
   @context_key {Catalyst.Extensions, :load_context}
-  @generation_context_key {Catalyst.Extensions, :generation_context}
   @server_key {Catalyst.Extensions, :load_server}
-  @generation_key {Catalyst.Extensions, :load_generation}
 
-  @doc "Run a zero-arity function under the global extension load lock."
+  @doc """
+  Run a zero-arity function under the global extension load lock.
+
+  The outer transaction is detached from its caller so a caller exit cannot
+  interrupt an already committed extension setup. Nested transactions remain
+  in the same task and reuse the lock.
+  """
   @spec run((-> result)) :: result when result: term()
   def run(fun) when is_function(fun, 0) do
     case Process.get(@context_key, false) do
@@ -33,38 +28,33 @@ defmodule Catalyst.Extensions.Transaction do
   end
 
   @doc false
-  @spec with_generation_gate((-> result)) :: result when result: term()
-  def with_generation_gate(fun) when is_function(fun, 0) do
-    case Process.get(@generation_context_key, false) do
+  @spec run_inline((-> result)) :: result when result: term()
+  def run_inline(fun) when is_function(fun, 0) do
+    case Process.get(@context_key, false) do
       true -> fun.()
-      false -> generation_gate(fun)
+      false -> with_lock(current_server(), fun)
     end
   end
 
   @doc false
   @spec server() :: GenServer.server()
   def server do
-    Process.get(@server_key, Process.whereis(Catalyst.Extensions) || Catalyst.Extensions)
+    Process.get(@server_key, current_server())
   end
 
-  @doc false
-  @spec generation() :: reference() | nil
-  def generation, do: Process.get(@generation_key, Catalyst.Extensions.generation_token())
-
   defp run_task(fun) do
-    server = Process.whereis(Catalyst.Extensions) || Catalyst.Extensions
-    generation = Catalyst.Extensions.generation_token()
+    server = current_server()
 
-    case start_task(server, generation, fun) do
+    case start_task(server, fun) do
       {:ok, task} -> await_task(task)
-      :error -> with_lock(server, generation, fun)
+      :error -> with_lock(server, fun)
     end
   end
 
-  defp start_task(server, generation, fun) do
+  defp start_task(server, fun) do
     task =
       Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-        capture_outcome(fn -> with_lock(server, generation, fun) end)
+        capture_outcome(fn -> with_lock(server, fun) end)
       end)
 
     {:ok, task}
@@ -86,20 +76,18 @@ defmodule Catalyst.Extensions.Transaction do
     kind, reason -> {:raised, kind, reason, __STACKTRACE__}
   end
 
-  defp with_lock(server, generation, fun) do
+  defp with_lock(server, fun) do
     :global.trans(
       {@load_lock, self()},
       fn ->
         Process.put(@context_key, true)
         Process.put(@server_key, server)
-        Process.put(@generation_key, generation)
 
         try do
           fun.()
         after
           Process.delete(@context_key)
           Process.delete(@server_key)
-          Process.delete(@generation_key)
         end
       end,
       [node()],
@@ -107,20 +95,5 @@ defmodule Catalyst.Extensions.Transaction do
     )
   end
 
-  defp generation_gate(fun) do
-    :global.trans(
-      {@generation_gate, self()},
-      fn ->
-        Process.put(@generation_context_key, true)
-
-        try do
-          fun.()
-        after
-          Process.delete(@generation_context_key)
-        end
-      end,
-      [node()],
-      :infinity
-    )
-  end
+  defp current_server, do: Process.whereis(Catalyst.Extensions) || Catalyst.Extensions
 end

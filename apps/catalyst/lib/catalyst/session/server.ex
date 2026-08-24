@@ -829,34 +829,9 @@ defmodule Catalyst.Session.Server do
 
   defp workflow_backend(opts) do
     with {:ok, selection} <- WorkflowRegistry.resolve(opts) do
-      {:ok, backend_identity(selection, opts)}
+      {:ok, Catalyst.Workflow.session_backend(selection, opts)}
     end
   end
-
-  defp backend_identity(%{module: Catalyst.ClaudeCode.Workflow}, _opts),
-    do: {:external, :claude_code}
-
-  defp backend_identity(%{module: Catalyst.ACP.Workflow} = selection, opts),
-    do: {:external, :acp, acp_agent_identity(selection, opts)}
-
-  defp backend_identity(%{name: "claude-code"}, _opts), do: {:external, :claude_code}
-
-  defp backend_identity(%{name: "acp/" <> id}, _opts), do: {:external, :acp, id}
-
-  defp backend_identity(_selection, _opts), do: :internal
-
-  defp acp_agent_identity(selection, opts) do
-    case Keyword.fetch(opts, :acp_agent) do
-      {:ok, %Catalyst.ACP.Agent{id: id}} -> id
-      {:ok, %{id: id}} when is_binary(id) -> id
-      {:ok, %{"id" => id}} when is_binary(id) -> id
-      {:ok, configured} -> {:configured, configured}
-      :error -> selected_acp_agent(selection)
-    end
-  end
-
-  defp selected_acp_agent(%{name: "acp/" <> id}), do: id
-  defp selected_acp_agent(%{name: name}), do: {:workflow, name}
 
   defp validate_backend_transition(backend, backend), do: :ok
 

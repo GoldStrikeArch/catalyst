@@ -18,10 +18,10 @@ defmodule Catalyst.Hooks do
     * `:should_stop_after_turn` — force the loop to stop (decision, `(ctx) -> true | :cont`)
 
   Plus a fire-and-forget observer channel (`on/2` + `notify/2`) for every
-  `Catalyst.Agent.Event`. Event observers are dispatched asynchronously in a
-  bounded per-session queue; they cannot delay token streaming or other loop
-  work. Decision and filter hooks remain synchronous because their return
-  values control the current run.
+  `Catalyst.Agent.Event`. Each observer is a PubSub subscriber with its own
+  mailbox, so observer work cannot delay token streaming or other loop work.
+  Decision and filter hooks remain synchronous because their return values
+  control the current run.
 
   Handlers are contributions in `Catalyst.Runtime.Registry`, tagged with an
   `owner` so a reloaded extension can revoke its prior handlers (`unregister/1`).
@@ -30,23 +30,17 @@ defmodule Catalyst.Hooks do
   capture refuses to observe a rebuilding extension runtime (returning
   `{:error, :extension_runtime_recovering}`), and `before_tool_call` blocks
   rather than proceeding without its gates. Only the fire-and-forget observer
-  channel (`notify/2`) reads live ETS and stays fail-open. **Every
+  channel (`notify/2`) uses PubSub and stays fail-open. **Every synchronous
   handler runs in an isolated supervised process under a deadline
   (`:hook_handler_timeout`, default 10s): a crashing, throwing, or hanging hook
-  is logged and skipped — it can never take down or wedge a run.** Synchronous
-  decision/filter hooks use awaitable tasks. Observer callbacks use a single
-  dispatcher-managed task each, with no nested per-event task. Observer
-  admission is capped by `:hook_observer_queue_limit` (default 256 accepted
-  events per session). Ordinary overload drops stream updates but preserves
-  structural lifecycle events with update eviction/backpressure; committed
-  compactions use an ordered lossless waiting lane. Host-synthesized lifecycle
-  admission is non-blocking and bounded, so it may drop the newest synthetic
-  event when no queued update can be evicted.
+  is logged and skipped — it can never take down or wedge a run.** Observer
+  callbacks run in their subscriber process; failures are logged and isolated,
+  while ordinary BEAM mailbox ordering and backpressure apply.
   """
 
   require Logger
 
-  alias Catalyst.Hooks.ObserverDispatcher
+  alias Catalyst.Hooks.Observer
   alias Catalyst.Runtime.Registry, as: Runtime
   alias Catalyst.Tasks
 
@@ -80,7 +74,6 @@ defmodule Catalyst.Hooks do
 
   @typedoc "An immutable selection of synchronous hook entries for one turn."
   @type snapshot :: %{
-          generation: reference() | :standalone,
           handlers: %{optional(point()) => [handler_entry()]}
         }
 
@@ -95,7 +88,7 @@ defmodule Catalyst.Hooks do
   moduledoc). `opts`: `:owner` (for `unregister/1`), `:id` (display), `:priority`
   (lower runs first, default 100).
   """
-  @spec register(point(), function(), keyword()) :: :ok
+  @spec register(point(), function(), keyword()) :: :ok | {:error, term()}
   def register(point, fun, opts \\ []) when is_atom(point) and is_function(fun) do
     seq = System.unique_integer([:positive, :monotonic])
     owner = opts |> Keyword.get(:owner) |> Runtime.normalize_owner()
@@ -109,22 +102,51 @@ defmodule Catalyst.Hooks do
       fun: fun
     }
 
-    Runtime.put(:hook, {point, seq}, entry, owner: owner)
+    register_entry(entry)
   end
 
   @doc "Register an event observer (`fun.(event) -> any`) for every agent event."
-  @spec on((term() -> term()), keyword()) :: :ok
+  @spec on((term() -> term()), keyword()) :: :ok | {:error, term()}
   def on(fun, opts \\ []) when is_function(fun, 1), do: register(:event, fun, opts)
 
   @doc "Remove every handler registered by `owner` across all points."
   @spec unregister(term()) :: :ok
-  def unregister(owner), do: Runtime.purge_owner(Runtime.normalize_owner(owner), :hook)
+  def unregister(owner) do
+    owner = Runtime.normalize_owner(owner)
+    observers = owner_observers(owner)
+    :ok = Runtime.purge_owner(owner, :hook)
+    Observer.stop(observers)
+  end
+
+  defp register_entry(%{point: :event} = entry) do
+    key = {:event, entry.seq}
+
+    with :ok <- Runtime.put(:hook, key, entry, owner: entry.owner),
+         {:ok, observer} <- Observer.start(entry),
+         :ok <- Runtime.put(:hook, key, Map.put(entry, :observer, observer), owner: entry.owner) do
+      :ok
+    else
+      {:error, reason} = error ->
+        :ok = Runtime.delete(:hook, key)
+        Logger.warning("[hooks] could not start observer #{entry.id}: #{inspect(reason)}")
+        error
+    end
+  end
+
+  defp register_entry(entry) do
+    Runtime.put(:hook, {entry.point, entry.seq}, entry, owner: entry.owner)
+  end
+
+  defp owner_observers(owner) do
+    for %{owner: ^owner, value: %{point: :event, observer: observer}} <- Runtime.list(:hook),
+        do: observer
+  end
 
   @doc """
   Handlers registered at `point`, ordered by priority then registration order.
 
-  Fail-open live read used by the observer paths (`notify/2`, `notify_async/2`);
-  synchronous gates and filters go through `capture_snapshot/1` instead.
+  Fail-open live read used for introspection; synchronous gates and filters go
+  through `capture_snapshot/1` instead.
   """
   @spec handlers(point()) :: [handler_entry()]
   def handlers(point) do
@@ -154,10 +176,10 @@ defmodule Catalyst.Hooks do
   def capture_snapshot(points \\ @sync_points) when is_list(points) do
     points = Enum.uniq(points)
 
-    with {:ok, generation} <- ready_generation(),
+    with true <- runtime_ready?(),
          {:ok, entries} <- snapshot_handlers(points),
-         true <- same_ready_generation?(generation) do
-      {:ok, %{generation: generation, handlers: entries}}
+         true <- runtime_ready?() do
+      {:ok, %{handlers: entries}}
     else
       _not_stable -> {:error, :extension_runtime_recovering}
     end
@@ -173,68 +195,20 @@ defmodule Catalyst.Hooks do
   end
 
   @doc false
-  @spec begin_runtime_generation() :: reference()
-  def begin_runtime_generation do
-    generation = make_ref()
-    :persistent_term.put(@runtime_ready_key, %{generation: generation, ready?: false})
-    generation
-  end
+  @spec begin_runtime_rebuild() :: :ok
+  def begin_runtime_rebuild, do: :persistent_term.put(@runtime_ready_key, false)
 
   @doc false
-  @spec invalidate_runtime_generation() :: :ok
-  def invalidate_runtime_generation do
-    _generation = begin_runtime_generation()
-    :ok
-  end
+  @spec mark_runtime_ready() :: :ok
+  def mark_runtime_ready, do: :persistent_term.put(@runtime_ready_key, true)
 
   @doc false
-  @spec mark_runtime_ready(reference()) :: :ok
-  def mark_runtime_ready(generation) when is_reference(generation) do
-    update_runtime_generation(generation, true)
-  end
-
-  @doc false
-  @spec end_runtime_generation(reference()) :: :ok
-  def end_runtime_generation(generation) when is_reference(generation) do
-    update_runtime_generation(generation, false)
-  end
+  @spec invalidate_runtime() :: :ok
+  def invalidate_runtime, do: begin_runtime_rebuild()
 
   @doc false
   @spec runtime_ready?() :: boolean()
-  def runtime_ready? do
-    case runtime_generation() do
-      %{ready?: ready?} -> ready?
-      ready? when is_boolean(ready?) -> ready?
-    end
-  end
-
-  defp ready_generation do
-    case runtime_generation() do
-      %{generation: generation, ready?: true} -> {:ok, generation}
-      true -> {:ok, :standalone}
-      _not_ready -> {:error, :registry_unavailable}
-    end
-  end
-
-  defp same_ready_generation?(:standalone), do: runtime_generation() == true
-
-  defp same_ready_generation?(generation) do
-    match?(%{generation: ^generation, ready?: true}, runtime_generation())
-  end
-
-  defp runtime_generation do
-    :persistent_term.get(@runtime_ready_key, true)
-  end
-
-  defp update_runtime_generation(generation, ready?) do
-    case :persistent_term.get(@runtime_ready_key, nil) do
-      %{generation: ^generation} = state ->
-        :persistent_term.put(@runtime_ready_key, %{state | ready?: ready?})
-
-      _stale_generation ->
-        :ok
-    end
-  end
+  def runtime_ready?, do: :persistent_term.get(@runtime_ready_key, true)
 
   # ---- hot path --------------------------------------------------------------
 
@@ -395,42 +369,28 @@ defmodule Catalyst.Hooks do
   defp valid_tool_result?(_result), do: false
 
   @doc """
-  Queue an event for asynchronous observer delivery under `session_key`.
+  Broadcast an event for asynchronous observer delivery under `session_key`.
 
-  Returns promptly after bounded admission. When that session already has the
-  configured maximum accepted work, stream updates return
-  `{:dropped, :queue_full}`. Structural events replace an older queued update
-  or wait for capacity, preserving lifecycle completion. Omitting the key
-  groups events by the calling process, which preserves ordering for direct
-  loop/test callers.
+  Returns after PubSub has placed the event in each subscriber mailbox.
+  Omitting the key uses the calling process as the session identity.
   """
-  @spec notify(term()) :: ObserverDispatcher.enqueue_result()
+  @spec notify(term()) :: :ok
   def notify(event), do: notify(event, self())
 
-  @doc "Queue an event under an explicit session key; see `notify/1`."
-  @spec notify(term(), term()) :: ObserverDispatcher.enqueue_result()
+  @doc "Broadcast an event under an explicit session key; see `notify/1`."
+  @spec notify(term(), term()) :: :ok
   def notify(event, session_key) do
-    ObserverDispatcher.enqueue(session_key || self(), event, handlers(:event))
+    Observer.broadcast(session_key || self(), event)
   end
 
-  @doc """
-  Queue a host-synthesized event without backpressuring its OTP callback.
-
-  At capacity, an older queued stream update is evicted. When every slot is a
-  structural event, the newest synthetic event is dropped rather than growing
-  an unbounded waiting queue; PubSub delivery is independent of this observer
-  overload policy.
-  """
+  @doc "Broadcast a host-synthesized event without running observer callbacks inline."
   @spec notify_async(term(), term()) :: :ok
-  def notify_async(event, session_key) do
-    ObserverDispatcher.enqueue_async(session_key || self(), event, handlers(:event))
-  end
+  def notify_async(event, session_key), do: notify(event, session_key)
 
-  @doc "Wait until every accepted observer event for `session_key` is complete."
+  @doc "Wait until every current observer has processed its prior mailbox entries."
   @spec await_observers(term(), timeout()) :: :ok
-  def await_observers(session_key \\ self(), timeout \\ 5_000) do
-    ObserverDispatcher.await_idle(session_key, timeout)
-  end
+  def await_observers(_session_key \\ self(), timeout \\ 5_000),
+    do: Observer.await(length(handlers(:event)), timeout)
 
   # ---- internals ------------------------------------------------------------
 

@@ -37,6 +37,8 @@ defmodule CatalystWeb.UI.Registry do
       mod: mod,
       fun: fun,
       label: opts[:label] || page_label(path),
+      match: Keyword.get(opts, :match, :exact),
+      render_mode: Keyword.get(opts, :render_mode, :safe),
       owner: opts[:owner],
       seq: seq
     }
@@ -47,10 +49,39 @@ defmodule CatalystWeb.UI.Registry do
   @doc "The `{module, function}` registered for a page path. Returns `{:ok, {mod, fun}}` or `:error`."
   @spec fetch_page(String.t()) :: {:ok, {module(), atom()}} | :error
   def fetch_page(path) do
-    case runtime_value(@page_kind, path) || builtin_page(path) do
+    case page_entry(path) do
       %{mod: mod, fun: fun} -> {:ok, {mod, fun}}
       nil -> :error
     end
+  end
+
+  @doc "Return the complete active page registration."
+  @spec fetch_page_entry(String.t()) :: {:ok, map()} | :error
+  def fetch_page_entry(path) do
+    case page_entry(path) do
+      nil -> :error
+      entry -> {:ok, entry}
+    end
+  end
+
+  @doc "Initialize or refresh the active page for route parameters."
+  @spec prepare_page(Phoenix.LiveView.Socket.t(), String.t(), map()) ::
+          Phoenix.LiveView.Socket.t()
+  def prepare_page(socket, path, params) do
+    case fetch_page(path) do
+      {:ok, {module, _render}} ->
+        case exports?(module, :mount_page, 2) do
+          true -> module.mount_page(params, socket)
+          false -> socket
+        end
+
+      :error ->
+        socket
+    end
+  rescue
+    exception ->
+      log_dispatch_failure(path, :mount_page, Exception.message(exception))
+      socket
   end
 
   @doc "All registered pages (`%{path, label, ...}`), sorted by label."
@@ -253,7 +284,7 @@ defmodule CatalystWeb.UI.Registry do
 
   defp dispatch_page(path, callback, args, socket) do
     with {:ok, {module, _render}} <- fetch_page(path),
-         true <- function_exported?(module, callback, length(args)) do
+         true <- exports?(module, callback, length(args)) do
       module
       |> apply(callback, args)
       |> valid_dispatch_result(socket, module, callback)
@@ -268,6 +299,13 @@ defmodule CatalystWeb.UI.Registry do
     kind, reason ->
       log_dispatch_failure(path, callback, Exception.format(kind, reason, __STACKTRACE__))
       {:noreply, socket}
+  end
+
+  defp exports?(module, callback, arity) do
+    case Code.ensure_loaded(module) do
+      {:module, ^module} -> function_exported?(module, callback, arity)
+      {:error, _reason} -> false
+    end
   end
 
   defp valid_dispatch_result({:noreply, %Phoenix.LiveView.Socket{}} = result, _, _, _), do: result
@@ -297,11 +335,17 @@ defmodule CatalystWeb.UI.Registry do
     [
       %{path: "chat", mod: CatalystWeb.Pages.ChatPage, label: "Chat"},
       %{path: "prompts", mod: CatalystWeb.Pages.PromptsPage, label: "Models & Prompts"},
-      %{path: "workflows", mod: CatalystWeb.Pages.WorkflowsPage, label: "Workflows"},
-      %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"},
-      %{path: "computer", mod: CatalystWeb.Pages.ComputerPage, label: "Computer"}
+      %{path: "extensions", mod: CatalystWeb.Pages.ExtensionsPage, label: "Extensions"}
     ]
-    |> Enum.map(&Map.merge(&1, %{fun: :render, owner: nil, seq: 0}))
+    |> Enum.map(
+      &Map.merge(&1, %{
+        fun: :render,
+        match: :exact,
+        render_mode: :live,
+        owner: nil,
+        seq: 0
+      })
+    )
   end
 
   defp builtin_commands do
@@ -320,6 +364,17 @@ defmodule CatalystWeb.UI.Registry do
   defp normalize_target(mod) when is_atom(mod), do: {mod, :render}
 
   defp page_label(path), do: path |> String.replace("_", " ") |> String.capitalize()
+
+  defp page_entry(path) do
+    runtime_value(@page_kind, path) ||
+      Enum.find(runtime_values(@page_kind), &prefix_match?(&1, path)) ||
+      builtin_page(path)
+  end
+
+  defp prefix_match?(%{match: :prefix, path: prefix}, path),
+    do: path == prefix or String.starts_with?(path, prefix <> "/")
+
+  defp prefix_match?(_entry, _path), do: false
 
   defp safe_match(match, value) do
     match.(value)
