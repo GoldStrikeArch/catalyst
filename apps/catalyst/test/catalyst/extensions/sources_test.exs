@@ -13,11 +13,14 @@ defmodule Catalyst.Extensions.SourcesTest do
       )
 
     previous = Application.fetch_env(:catalyst, :extensions_dir)
+    previous_bundled = Application.fetch_env(:catalyst, :bundled_extensions_dirs)
     Application.put_env(:catalyst, :extensions_dir, root)
+    Application.put_env(:catalyst, :bundled_extensions_dirs, [])
     File.mkdir_p!(root)
 
     on_exit(fn ->
       restore_env(:extensions_dir, previous)
+      restore_env(:bundled_extensions_dirs, previous_bundled)
       File.rm_rf!(root)
     end)
 
@@ -47,6 +50,22 @@ defmodule Catalyst.Extensions.SourcesTest do
     assert Sources.index_by_owner([first, equivalent, colliding]) == %{
              "my_tool" => Enum.sort([Path.expand(first), Path.expand(colliding)])
            }
+  end
+
+  test "discovers immutable bundled sources in configured directory order", %{root: root} do
+    first_dir = Path.join(root, "first")
+    second_dir = Path.join(root, "second")
+    File.mkdir_p!(first_dir)
+    File.mkdir_p!(second_dir)
+
+    first = Path.join(first_dir, "bundled.ex")
+    second = Path.join(second_dir, "other.ex")
+    ignored = Path.join(first_dir, "README.md")
+    Enum.each([first, second, ignored], &File.write!(&1, "# probe\n"))
+
+    Application.put_env(:catalyst, :bundled_extensions_dirs, [first_dir, second_dir])
+
+    assert Sources.bundled_files() == [first, second]
   end
 
   test "managed checks reject siblings and accept descendants", %{root: root} do

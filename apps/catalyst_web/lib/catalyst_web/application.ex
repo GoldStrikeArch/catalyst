@@ -15,14 +15,6 @@ defmodule CatalystWeb.Application do
     end
 
     children = [
-      # Serializes and retains the exact live UI contribution replay log. It
-      # starts before the table owner so rest-for-one table recovery keeps it.
-      CatalystWeb.UI.Contributions,
-      # Owns the ETS table independently so UI registrations survive a
-      # CatalystWeb.UI.Registry process restart.
-      CatalystWeb.UI.TableOwner,
-      # Runtime UI registry: pages, renderers, components, commands.
-      CatalystWeb.UI.Registry,
       # Start to serve requests, typically the last entry
       CatalystWeb.Endpoint,
       # Bounded digest-addressed store for transcript images served out of
@@ -44,6 +36,7 @@ defmodule CatalystWeb.Application do
     children
     |> Supervisor.start_link(opts)
     |> complete_start(fn supervisor ->
+      CatalystWeb.UI.Registry.wire_extension_api()
       register_web_tools()
 
       # Re-registered on every Catalyst.Extensions restart: a registry-chain
@@ -54,7 +47,7 @@ defmodule CatalystWeb.Application do
       # Publish host readiness last. This notification may start the deferred
       # extension bootstrap immediately, so host-owned tool claims and their
       # restart reseeder must already be installed.
-      Catalyst.Extensions.register_host(:web, :application, supervisor)
+      Catalyst.Extensions.register_host(:web, supervisor)
       bootstrap_extensions()
     end)
   end

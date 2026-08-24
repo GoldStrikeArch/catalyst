@@ -9,6 +9,7 @@ defmodule Catalyst.ExtensionsLoadTest do
   alias Catalyst.{Content, Message, Model}
   alias Catalyst.Agent.Loop
   alias Catalyst.Extensions
+  alias Catalyst.Extensions.Load
   alias Catalyst.ExtensionsFixtures.SetupOnlyTool
   alias Catalyst.Tools.DevelopTool
 
@@ -224,6 +225,55 @@ defmodule Catalyst.ExtensionsLoadTest do
       assert Enum.any?(loaded, &(&1.owner == "goodfile"))
       assert Extensions.format_error(reason) =~ "badfile.ex"
     end)
+  end
+
+  test "bundled sources load in safe mode and same-named user sources override them" do
+    bundled_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "catalyst_bundled_#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    previous = Application.fetch_env(:catalyst, :bundled_extensions_dirs)
+    File.mkdir_p!(bundled_dir)
+    Application.put_env(:catalyst, :bundled_extensions_dirs, [bundled_dir])
+
+    on_exit(fn ->
+      Extensions.uninstall("replaceable")
+      Catalyst.EnvCase.restore_env(:bundled_extensions_dirs, previous)
+      File.rm_rf!(bundled_dir)
+    end)
+
+    bundled_path = Path.join(bundled_dir, "replaceable.ex")
+
+    File.write!(
+      bundled_path,
+      owned_tool_source("Catalyst.Ext.ReplaceableTool", "replaceable_tool", "bundled")
+    )
+
+    user_path =
+      write_ext(
+        "replaceable",
+        owned_tool_source("Catalyst.Ext.ReplaceableTool", "replaceable_tool", "user")
+      )
+
+    assert {:ok, %{failed: []}} =
+             Load.boot_load_bundled(Extensions.generation_token())
+
+    assert {:ok, bundled_tool} = Extensions.fetch("replaceable_tool")
+    assert bundled_tool.description() == "bundled"
+
+    assert {:ok, %{failed: []}} = Extensions.load_all()
+    assert {:ok, user_tool} = Extensions.fetch("replaceable_tool")
+    assert user_tool.description() == "user"
+
+    assert [entry] = Enum.filter(Extensions.list_loaded(), &(&1.owner == "replaceable"))
+    assert entry.path == user_path
+
+    File.rm!(user_path)
+    assert {:ok, %{failed: []}} = Extensions.load_all()
+    assert {:ok, restored_tool} = Extensions.fetch("replaceable_tool")
+    assert restored_tool.description() == "bundled"
   end
 
   test "redefining another owner's module is warned about and surfaced in the summary" do

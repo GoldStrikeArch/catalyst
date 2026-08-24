@@ -52,6 +52,19 @@ defmodule Catalyst.Extensions.Load do
   end
 
   @doc false
+  @spec boot_load_bundled(reference() | nil) ::
+          {:ok, Catalyst.Extensions.load_result()} | {:error, term()}
+  def boot_load_bundled(generation) do
+    Transaction.run(fn ->
+      case generation == Transaction.generation() and
+             Catalyst.Extensions.generation_current?(generation) do
+        true -> do_load_bundled()
+        false -> {:error, :stale_extension_generation}
+      end
+    end)
+  end
+
+  @doc false
   @spec reload_after_wiring() ::
           {:ok, Catalyst.Extensions.load_result()} | {:error, term()} | {:skipped, term()}
   def reload_after_wiring do
@@ -181,22 +194,32 @@ defmodule Catalyst.Extensions.Load do
     # than the state-owning GenServer or its init callback.
     Versioning.ensure_repo(Sources.dir())
 
-    paths = Sources.enabled_files()
+    bundled_paths = Sources.bundled_files()
+    user_paths = Sources.enabled_files()
+
+    with :ok <- ensure_distinct_owners(Sources.index_by_owner(bundled_paths)),
+         :ok <- ensure_distinct_owners(Sources.index_by_owner(user_paths)) do
+      load_paths(tag_paths(bundled_paths, :bundled) ++ tag_paths(user_paths, :user))
+    end
+  end
+
+  defp do_load_bundled do
+    paths = Sources.bundled_files()
 
     with :ok <- ensure_distinct_owners(Sources.index_by_owner(paths)) do
-      load_paths(paths)
+      load_paths(tag_paths(paths, :bundled))
     end
   end
 
   defp load_paths(paths) do
-    live_owners = MapSet.new(paths, &Sources.owner/1)
+    live_owners = MapSet.new(paths, fn {_source, path} -> Sources.owner(path) end)
     :ok = server_call({:purge_gone, live_owners})
 
     {loaded, failed} =
-      Enum.reduce(paths, {[], []}, fn path, {ok, bad} ->
+      Enum.reduce(paths, {[], []}, fn {source, path}, {ok, bad} ->
         case compile_and_load(path, Sources.owner(path)) do
           {:ok, summary} ->
-            {[summary | ok], bad}
+            {[Map.put(summary, :source, source) | ok], bad}
 
           {:error, reason} ->
             Logger.warning("[extensions] failed to load #{path}: #{inspect(reason)}")
@@ -206,6 +229,8 @@ defmodule Catalyst.Extensions.Load do
 
     {:ok, %{loaded: Enum.reverse(loaded), failed: Enum.reverse(failed)}}
   end
+
+  defp tag_paths(paths, source), do: Enum.map(paths, &{source, &1})
 
   defp do_load_file(path) do
     owner = Sources.owner(path)

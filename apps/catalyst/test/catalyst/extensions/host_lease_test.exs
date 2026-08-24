@@ -4,29 +4,22 @@ defmodule Catalyst.Extensions.HostLeaseTest do
   alias Catalyst.Extensions
 
   @host :host_lease_test
-  @roles [:application, :registry]
 
   setup do
-    on_exit(fn ->
-      Enum.each(@roles, &:persistent_term.erase({Extensions, :host_lease, @host, &1}))
-    end)
+    on_exit(fn -> :persistent_term.erase({Extensions, :host_lease, @host}) end)
 
     :ok
   end
 
-  test "readiness requires live application and registry leases" do
-    application = start_lease_process(:host_lease_application)
-    registry = start_lease_process(:host_lease_registry)
+  test "readiness follows the host's live lease" do
+    host = start_lease_process(:host_lease)
 
-    Extensions.register_host(@host, :application, application)
-    refute Extensions.host_ready?(@host)
-
-    Extensions.register_host(@host, :registry, registry)
+    Extensions.register_host(@host, host)
     assert Extensions.host_ready?(@host)
 
-    ref = Process.monitor(registry)
-    Process.exit(registry, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^registry, :killed}
+    ref = Process.monitor(host)
+    Process.exit(host, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^host, :killed}
 
     refute Extensions.host_ready?(@host)
   end

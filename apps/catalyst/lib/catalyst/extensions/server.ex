@@ -3,8 +3,9 @@ defmodule Catalyst.Extensions.Server do
   State-owning GenServer behind the stable `Catalyst.Extensions` facade.
 
   The process remains registered as `Catalyst.Extensions`. It owns canonical
-  contribution state and the live tool table; filesystem, compiler, and
-  lifecycle sagas run in `Catalyst.Extensions.Load`.
+  extension lifecycle state; live contributions are stored in
+  `Catalyst.Runtime.Registry`, while filesystem and compiler sagas run in
+  `Catalyst.Extensions.Load`.
   """
 
   use GenServer
@@ -17,17 +18,15 @@ defmodule Catalyst.Extensions.Server do
     Contribution,
     Load,
     ModuleVersions,
-    Owner,
-    Processes,
     Sources,
     State
   }
 
   alias Catalyst.Files.AtomicWrite
+  alias Catalyst.Runtime.Registry, as: Runtime
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
   @server Catalyst.Extensions
-  @table :catalyst_tools
   @runtime_generation_key {Catalyst.Extensions, :runtime_generation}
   @runtime_footprint_key {Catalyst.Extensions, :runtime_footprint}
   @reseeders_key {Catalyst.Extensions, :reseeders}
@@ -42,8 +41,6 @@ defmodule Catalyst.Extensions.Server do
   @impl true
   def init(:ok) do
     :persistent_term.put(@runtime_generation_key, make_ref())
-    :ets.new(@table, [:named_table, :public, read_concurrency: true])
-    seed_builtins()
     wire_core_kinds()
     hook_generation = Hooks.begin_runtime_generation()
 
@@ -79,17 +76,17 @@ defmodule Catalyst.Extensions.Server do
 
     state
     |> revoke_prior_generation()
-    |> start_bootstrap(:skip_load)
+    |> start_bootstrap(:bundled)
   end
 
   defp log_safe_mode({:safe_mode, :env}) do
-    Logger.info("[extensions] safe mode (CATALYST_SAFE_MODE) — skipping extension load")
+    Logger.info("[extensions] safe mode (CATALYST_SAFE_MODE) — loading bundled extensions only")
   end
 
   defp log_safe_mode({:safe_mode, :crash_detected}) do
     Logger.warning(
-      "[extensions] previous boot died while extensions were active — skipping extension " <>
-        "load. Fix the files in #{Sources.dir()} and run the reload_extensions tool."
+      "[extensions] previous boot died while user extensions were active — loading bundled " <>
+        "extensions only. Fix the files in #{Sources.dir()} and run the reload_extensions tool."
     )
   end
 
@@ -362,6 +359,12 @@ defmodule Catalyst.Extensions.Server do
       {:error, {kind, reason}}
   end
 
+  defp bundled_boot_load(generation) do
+    Load.boot_load_bundled(generation)
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
   defp record_boot_outcome(generation, result) do
     case Catalyst.Extensions.generation_current?(generation) do
       true -> record_current_boot_outcome(result)
@@ -381,18 +384,15 @@ defmodule Catalyst.Extensions.Server do
     put_boot_status({:load_failed, reason})
   end
 
-  defp seed_builtins do
-    Enum.each(ToolRegistry.default_tools(), &insert/1)
-  end
-
   defp wire_core_kinds do
     ExtensionAPI.register_kind(:tool, &Catalyst.Extensions.register_extension_tool/2)
     ExtensionAPI.register_kind(:hook, &Catalyst.Extensions.register_extension_hook/4)
     ExtensionAPI.register_kind(:event, &Catalyst.Extensions.register_extension_observer/3)
     ExtensionAPI.register_kind(:process, &Catalyst.Extensions.start_extension_process/2)
-
-    ExtensionAPI.register_purger(&Hooks.unregister/1)
-    ExtensionAPI.register_purger(&Processes.stop_owner/1)
+    Catalyst.LLM.Registry.wire_extension_api()
+    Catalyst.Prompt.Registry.wire_extension_api()
+    Catalyst.Workflow.Registry.wire_extension_api()
+    Catalyst.Context.Registry.wire_extension_api()
   end
 
   defp reseeders, do: :persistent_term.get(@reseeders_key, %{})
@@ -407,6 +407,7 @@ defmodule Catalyst.Extensions.Server do
 
     case mode do
       :load -> boot_load(generation)
+      :bundled -> bundled_boot_load(generation)
       :skip_load -> :skipped
     end
   end
@@ -422,6 +423,10 @@ defmodule Catalyst.Extensions.Server do
 
   defp bootstrap_start_failed(:load, reason) do
     boot_load_failed({:bootstrap_start_failed, reason})
+  end
+
+  defp bootstrap_start_failed(:bundled, reason) do
+    Logger.error("[extensions] could not load bundled extensions: #{inspect(reason)}")
   end
 
   defp bootstrap_start_failed(:skip_load, reason) do
@@ -538,7 +543,7 @@ defmodule Catalyst.Extensions.Server do
         )
 
       Enum.each(Contribution.pairs(contribution), fn {name, module} ->
-        :ets.insert(@table, {name, module})
+        :ok = Runtime.put(:tool, name, module, owner: owner)
       end)
 
       result = build_summary(owner, contribution.tool_names, contribution.ext_mods, conflicts)
@@ -574,25 +579,12 @@ defmodule Catalyst.Extensions.Server do
 
   defp do_register(module, definition, opts, state) do
     name = definition.name
-    owner = Owner.normalize(opts[:owner])
+    owner = Runtime.normalize_owner(opts[:owner])
 
-    case State.tool_owner(state, name) do
-      nil ->
-        :ets.insert(@table, {name, module})
-        {{:ok, module}, State.track(state, name, module, owner)}
-
-      ^owner ->
-        :ets.insert(@table, {name, module})
-        {{:ok, module}, State.track(state, name, module, owner)}
-
-      existing_owner ->
-        {{:error, {:owner_collision, :tool, name, existing_owner, owner}}, state}
+    case Runtime.put(:tool, name, module, owner: owner) do
+      :ok -> {{:ok, module}, State.track(state, name, module, owner)}
+      {:error, reason} -> {{:error, reason}, state}
     end
-  end
-
-  defp insert(module) do
-    :ets.insert(@table, {module.name(), module})
-    {:ok, module}
   end
 
   defp purge_owner(owner, state, opts \\ []) do
@@ -620,16 +612,6 @@ defmodule Catalyst.Extensions.Server do
     )
 
     pairs = Map.get(state.contrib, owner, MapSet.new())
-    builtins = builtins_index()
-
-    Enum.each(pairs, fn {name, module} ->
-      :ets.delete_object(@table, {name, module})
-
-      case {:ets.member(@table, name), Map.get(builtins, name)} do
-        {false, builtin} when not is_nil(builtin) -> :ets.insert(@table, {name, builtin})
-        _present_or_missing -> :ok
-      end
-    end)
 
     pairs
     |> Enum.map(&elem(&1, 1))
@@ -650,8 +632,4 @@ defmodule Catalyst.Extensions.Server do
   defp runtime_footprint, do: :persistent_term.get(@runtime_footprint_key, %{})
 
   defp boot_stable_ms, do: Application.get_env(:catalyst, :boot_stable_ms, 10_000)
-
-  defp builtins_index do
-    Map.new(ToolRegistry.default_tools(), &{&1.name(), &1})
-  end
 end

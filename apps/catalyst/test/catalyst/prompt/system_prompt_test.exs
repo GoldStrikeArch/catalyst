@@ -25,11 +25,7 @@ defmodule Catalyst.Prompt.SystemPromptTest do
     Application.delete_env(:catalyst, :prompts)
     Application.put_env(:catalyst, :prompts_dir, prompts_dir)
     Application.put_env(:catalyst, :system_prompt_path, system_path)
-
-    case Process.whereis(Registry) do
-      nil -> start_supervised!(Registry)
-      _pid -> clear_runtime()
-    end
+    clear_runtime()
 
     on_exit(fn ->
       clear_runtime()
@@ -273,13 +269,7 @@ defmodule Catalyst.Prompt.SystemPromptTest do
   end
 
   defp clear_runtime do
-    case Process.whereis(Registry) do
-      pid when is_pid(pid) ->
-        Registry.runtime_entries()
-        |> Enum.each(&Registry.unregister(&1.key))
-
-      _not_started ->
-        :ok
-    end
+    Registry.runtime_entries()
+    |> Enum.each(&Registry.unregister(&1.key))
   end
 end

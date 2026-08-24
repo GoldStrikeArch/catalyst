@@ -3,6 +3,7 @@ defmodule Catalyst.Workflow.RegistryTest do
 
   import Catalyst.EnvCase, only: [restore_env: 2]
 
+  alias Catalyst.Runtime.Registry, as: RuntimeRegistry
   alias Catalyst.Workflow.{Registry, Template}
 
   defmodule WorkflowA do
@@ -43,8 +44,6 @@ defmodule Catalyst.Workflow.RegistryTest do
   end
 
   setup do
-    ensure_registry_started()
-
     previous = %{
       workflows: Application.fetch_env(:catalyst, :workflows),
       acp_agents: Application.fetch_env(:catalyst, :acp_agents),
@@ -61,11 +60,14 @@ defmodule Catalyst.Workflow.RegistryTest do
     Application.put_env(:catalyst, :workflow_registry_test_templates, [])
 
     owner = "workflow_registry_test_#{System.unique_integer([:positive])}"
+    Registry.unregister_owner("external_agents")
 
     on_exit(fn ->
-      if Process.whereis(Registry) do
-        Registry.unregister_owner(owner)
-      end
+      Registry.unregister_owner(owner)
+
+      Registry.register_workflow("claude-code", Catalyst.ClaudeCode.Workflow,
+        owner: "external_agents"
+      )
 
       restore_env(:workflows, previous.workflows)
       restore_env(:acp_agents, previous.acp_agents)
@@ -419,29 +421,38 @@ defmodule Catalyst.Workflow.RegistryTest do
       default: WorkflowB
     })
 
-    assert true = :ets.delete(Registry.table())
-    assert Registry.runtime_entries() == []
-    assert {:ok, WorkflowA} = Registry.fetch("review")
-    assert {:ok, %{module: WorkflowB}} = Registry.resolve([])
+    with_runtime_absent(fn ->
+      assert Registry.runtime_entries() == []
+      assert {:ok, WorkflowA} = Registry.fetch("review")
+      assert {:ok, %{module: WorkflowB}} = Registry.resolve([])
+      assert catch_exit(Registry.unregister_owner(owner))
+    end)
+  end
 
-    extensions = Process.whereis(Catalyst.Extensions)
-    assert is_pid(extensions)
-    extensions_ref = Process.monitor(extensions)
+  defp with_runtime_absent(fun) do
+    runtime = Process.whereis(RuntimeRegistry)
+    supervisor = parent_supervisor(runtime)
+    ref = Process.monitor(runtime)
+    :ok = :sys.suspend(supervisor)
 
-    # Writes do not self-heal a sabotaged table (the registry owns its table
-    # in init, like its sibling registries): the write crashes the process and
-    # supervision restarts it with a fresh table, keeping the shared test VM
-    # healthy without changing the missing-table read contract.
-    pid = Process.whereis(Registry)
-    ref = Process.monitor(pid)
-    assert catch_exit(Registry.unregister_owner(owner))
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+    try do
+      Process.exit(runtime, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^runtime, :killed}
+      assert Process.whereis(RuntimeRegistry) == nil
+      fun.()
+    after
+      :ok = :sys.resume(supervisor)
+      _replacement = wait_for_restart(RuntimeRegistry, runtime)
+      assert :ok = Catalyst.Extensions.await_ready(5_000)
+    end
+  end
 
-    new_pid = wait_for_restart(Registry, pid)
-    _ = :sys.get_state(new_pid)
-    assert is_reference(:ets.whereis(Registry.table()))
-    assert_receive {:DOWN, ^extensions_ref, :process, ^extensions, _reason}
-    assert_extension_runtime_ready(extensions)
+  defp parent_supervisor(pid) do
+    {:dictionary, dictionary} = Process.info(pid, :dictionary)
+
+    dictionary
+    |> Keyword.fetch!(:"$ancestors")
+    |> List.first()
   end
 
   # Sanctioned poll: a supervisor restart re-registers the name with no
@@ -457,21 +468,5 @@ defmodule Catalyst.Workflow.RegistryTest do
       2_000,
       "#{inspect(name)} did not restart after the sabotaged write"
     )
-  end
-
-  # Registry is in a :rest_for_one runtime. Seeing its replacement process is
-  # not enough: downstream registries are still stopping and restarting, and
-  # test teardown must not race that recovery or leak it into the next test.
-  defp assert_extension_runtime_ready(old_pid) do
-    _replacement = wait_for_restart(Catalyst.Extensions, old_pid)
-
-    assert :ok = Catalyst.Extensions.await_ready(5_000)
-  end
-
-  defp ensure_registry_started do
-    case Process.whereis(Registry) do
-      nil -> start_supervised!(Registry)
-      _pid -> :ok
-    end
   end
 end

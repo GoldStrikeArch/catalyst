@@ -5,7 +5,6 @@ defmodule CatalystWeb.ExtensionsBootstrapTest do
   alias Catalyst.Extensions.BootGuard
   alias CatalystWeb.UI.Registry
 
-  @roles [:application, :registry]
   @test_pid_key :extensions_bootstrap_test_pid
   @page "bootstrap-probe"
 
@@ -20,7 +19,7 @@ defmodule CatalystWeb.ExtensionsBootstrapTest do
     previous_dir = Application.fetch_env(:catalyst, :extensions_dir)
     previous_safe_mode = Application.fetch_env(:catalyst, :safe_mode)
     previous_test_pid = Application.fetch_env(:catalyst_web, @test_pid_key)
-    previous_leases = Map.new(@roles, &{&1, host_lease(&1)})
+    previous_lease = host_lease()
 
     File.mkdir_p!(extensions_dir)
     Application.put_env(:catalyst, :extensions_dir, extensions_dir)
@@ -34,7 +33,7 @@ defmodule CatalystWeb.ExtensionsBootstrapTest do
       restore_env(:catalyst, :extensions_dir, previous_dir)
       restore_env(:catalyst, :safe_mode, previous_safe_mode)
       restore_env(:catalyst_web, @test_pid_key, previous_test_pid)
-      restore_leases(previous_leases)
+      restore_lease(previous_lease)
       BootGuard.mark_ok()
 
       _replacement = restart_extensions!()
@@ -49,24 +48,22 @@ defmodule CatalystWeb.ExtensionsBootstrapTest do
     {:ok, extensions_dir: extensions_dir}
   end
 
-  test "web bootstrap waits for both live leases and runs setup exactly once" do
+  test "web bootstrap waits for a live lease and runs setup exactly once" do
     assert Application.spec(:catalyst_web, :vsn)
     assert {:skipped, {:host_not_ready, :web}} = Extensions.bootstrap()
     refute_received {:bootstrap_probe_setup, _pid}
     assert Registry.fetch_page(@page) == :error
 
-    application = start_lease!(:bootstrap_application)
-    stale_registry = start_lease!(:bootstrap_stale_registry)
-    Extensions.register_host(:web, :application, application)
-    Extensions.register_host(:web, :registry, stale_registry)
+    stale_host = start_lease!(:bootstrap_stale_host)
+    Extensions.register_host(:web, stale_host)
 
-    stale_ref = Process.monitor(stale_registry)
-    Process.exit(stale_registry, :kill)
-    assert_receive {:DOWN, ^stale_ref, :process, ^stale_registry, :killed}
+    stale_ref = Process.monitor(stale_host)
+    Process.exit(stale_host, :kill)
+    assert_receive {:DOWN, ^stale_ref, :process, ^stale_host, :killed}
     assert {:skipped, {:host_not_ready, :web}} = Extensions.bootstrap()
 
-    registry = start_lease!(:bootstrap_registry)
-    Extensions.register_host(:web, :registry, registry)
+    host = start_lease!(:bootstrap_host)
+    Extensions.register_host(:web, host)
     assert :ok = Extensions.bootstrap()
 
     # Generous window: the probe compiles + runs setup in a background
@@ -211,23 +208,18 @@ defmodule CatalystWeb.ExtensionsBootstrapTest do
   end
 
   defp register_live_web_leases do
-    Extensions.register_host(:web, :application, Process.whereis(CatalystWeb.Supervisor))
-    Extensions.register_host(:web, :registry, Process.whereis(Registry))
+    supervisor = Process.whereis(CatalystWeb.Supervisor)
+    Extensions.register_host(:web, supervisor)
   end
 
   defp erase_web_leases do
-    Enum.each(@roles, &:persistent_term.erase({Extensions, :host_lease, :web, &1}))
+    :persistent_term.erase({Extensions, :host_lease, :web})
   end
 
-  defp host_lease(role),
-    do: :persistent_term.get({Extensions, :host_lease, :web, role}, :missing)
+  defp host_lease, do: :persistent_term.get({Extensions, :host_lease, :web}, :missing)
 
-  defp restore_leases(leases) do
-    Enum.each(leases, fn
-      {role, :missing} -> :persistent_term.erase({Extensions, :host_lease, :web, role})
-      {role, pid} -> :persistent_term.put({Extensions, :host_lease, :web, role}, pid)
-    end)
-  end
+  defp restore_lease(:missing), do: :persistent_term.erase({Extensions, :host_lease, :web})
+  defp restore_lease(pid), do: :persistent_term.put({Extensions, :host_lease, :web}, pid)
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)

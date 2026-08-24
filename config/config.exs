@@ -36,12 +36,10 @@ config :catalyst,
   shell_session_idle_ms: 15 * 60 * 1000,
   shell_session_max: 4
 
-# Local external-agent experiments. Both workflows are providerless; ACP agents
-# are externally installed executables and are never downloaded by Catalyst.
+# Local ACP agents are externally installed executables and are never downloaded
+# by Catalyst. The providerless Claude Code workflow is registered by the
+# immutable `external_agents` bundled extension.
 config :catalyst,
-  workflows: %{
-    "claude-code" => Catalyst.ClaudeCode.Workflow
-  },
   acp_agents: [
     %{
       "id" => "claude",

@@ -6,14 +6,13 @@ defmodule Catalyst.ExtensionAPI do
   runtime generation. Registration through a stale handle is rejected, including
   a generation change that races a subsystem handler call.
 
-  Decoupling: each *kind* is backed by a handler registered at boot by the
-  subsystem that owns it — so `apps/catalyst` (core) never has to depend on
-  `apps/catalyst_web`. Core wires `:tool`, `:hook`, `:event`; the provider
-  registry wires `:provider`; the web UI registry wires `:renderer`, `:component`,
-  `:page`, `:command`. A `register_*` call for a kind that nothing has wired yet
+  Each *kind* has a validation handler wired by its domain facade, so
+  `apps/catalyst` never depends on `apps/catalyst_web`. Accepted contributions
+  share `Catalyst.Runtime.Registry`; domain handlers retain their own validation
+  and fallback rules. A `register_*` call for a kind that nothing has wired yet
   returns `{:error, {:unsupported_kind, kind}}` rather than crashing.
 
-  Handlers and purgers live in `:persistent_term` (read-mostly, set once at boot).
+  Kind handlers live in `:persistent_term` (read-mostly, set once at boot).
   """
 
   require Logger
@@ -46,25 +45,7 @@ defmodule Catalyst.ExtensionAPI do
     :persistent_term.put({__MODULE__, :kind, kind}, handler)
   end
 
-  @doc """
-  Register an owner-purge function. Before a file is (re)loaded, every purger is
-  called with the extension's owner id so its registries can drop that owner's
-  prior entries. (Tools are purged inline by `Catalyst.Extensions` to avoid a
-  self-call; hooks/providers/UI register purgers here.)
-
-  Purgers are keyed by stable identity — `{module, function, arity}` for
-  external captures like `&Mod.fun/1` — so re-registering after the defining
-  module is hot-reloaded *replaces* the prior entry. (Capture equality would
-  treat the new capture as different, accumulating stale funs that raise
-  `:badfun` on every purge, forever.) Anonymous funs have no stable identity
-  and fall back to the fun itself as key.
-  """
-  @spec register_purger((term() -> any())) :: :ok
-  def register_purger(fun) when is_function(fun, 1) do
-    :persistent_term.put({__MODULE__, :purgers}, Map.put(purger_map(), purger_key(fun), fun))
-  end
-
-  @typedoc "Stable purger identity: `{module, function, arity}` for external captures, else the fun itself."
+  @typedoc "Stable identity of one built-in owner cleanup operation."
   @type purger_key :: {module(), atom(), arity()} | (term() -> any())
 
   @typedoc "One purger's failure: its key plus the caught `{kind, reason}`."
@@ -80,7 +61,13 @@ defmodule Catalyst.ExtensionAPI do
   """
   @spec purge_owner(term()) :: {:ok, [purger_key()]} | {:error, [purger_failure()]}
   def purge_owner(owner) do
-    results = Enum.map(purger_map(), fn {key, fun} -> {key, run_purger(fun, owner)} end)
+    purgers = [
+      {{Catalyst.Runtime.Registry, :purge_owner, 1}, &Catalyst.Runtime.Registry.purge_owner/1},
+      {{Catalyst.Extensions.Processes, :stop_owner, 1},
+       &Catalyst.Extensions.Processes.stop_owner/1}
+    ]
+
+    results = Enum.map(purgers, fn {key, fun} -> {key, run_purger(fun, owner)} end)
 
     case for {key, {:error, reason}} <- results, do: {key, reason} do
       [] -> {:ok, Enum.map(results, &elem(&1, 0))}
@@ -104,21 +91,6 @@ defmodule Catalyst.ExtensionAPI do
       )
 
       {:error, {kind, reason}}
-  end
-
-  defp purger_map, do: :persistent_term.get({__MODULE__, :purgers}, %{})
-
-  defp purger_key(fun) do
-    case Function.info(fun, :type) do
-      {:type, :external} ->
-        {:module, mod} = Function.info(fun, :module)
-        {:name, name} = Function.info(fun, :name)
-        {:arity, arity} = Function.info(fun, :arity)
-        {mod, name, arity}
-
-      _ ->
-        fun
-    end
   end
 
   # ---- registration facade --------------------------------------------------
@@ -184,20 +156,31 @@ defmodule Catalyst.ExtensionAPI do
 
   @doc "Register a UI renderer for `kind` values matching `match`."
   @spec register_renderer(t(), atom(), (term() -> boolean()), function()) :: term()
-  def register_renderer(api, kind, match, fun), do: dispatch(api, :renderer, [kind, match, fun])
+  def register_renderer(api, kind, match, fun) do
+    result = dispatch(api, :renderer, [kind, match, fun])
+    remember_owner_collision(api, result)
+  end
 
   @doc "Register a UI slot component."
   @spec register_component(t(), atom(), function(), keyword()) :: term()
-  def register_component(api, slot, fun, opts \\ []),
-    do: dispatch(api, :component, [slot, fun, opts])
+  def register_component(api, slot, fun, opts \\ []) do
+    result = dispatch(api, :component, [slot, fun, opts])
+    remember_owner_collision(api, result)
+  end
 
   @doc "Register a UI page at `path`."
   @spec register_page(t(), String.t(), module() | {module(), atom()}, keyword()) :: term()
-  def register_page(api, path, module, opts \\ []), do: dispatch(api, :page, [path, module, opts])
+  def register_page(api, path, module, opts \\ []) do
+    result = dispatch(api, :page, [path, module, opts])
+    remember_owner_collision(api, result)
+  end
 
   @doc "Register a command-palette command."
   @spec register_command(t(), String.t(), keyword()) :: term()
-  def register_command(api, name, opts \\ []), do: dispatch(api, :command, [name, opts])
+  def register_command(api, name, opts \\ []) do
+    result = dispatch(api, :command, [name, opts])
+    remember_owner_collision(api, result)
+  end
 
   @doc """
   Start a supervised, owner-tagged process (any child spec) under

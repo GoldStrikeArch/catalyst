@@ -21,6 +21,10 @@ user-writable directory, and is loaded into the live VM.
   home" when an override is set.
 - Extensions live in **`~/.catalyst/extensions/*.ex`** (one module per file is fine; multiple
   is fine too).
+- Catalyst-distributed optional features use the same API from immutable
+  **`Application.app_dir(app, "priv/builtins/")`** sources. Bundled sources load first. A user
+  extension with the same filename replaces that bundled feature as a unit; removing the user file
+  and reloading reveals the bundled version again.
 - They are compiled + loaded **on boot** (so they persist across restarts) and can be loaded
   **on demand** at runtime.
 - A loaded module is a first-class part of the running system — it can call any Catalyst or
@@ -402,7 +406,10 @@ and a `setup(api)` callback. Inside `setup/1`, register any mix of:
   - `:prepare_next_turn` — `fn {context, config}, ctx -> {:ok, {context, config}} end`
   - `:should_stop_after_turn` — `fn ctx -> true | :cont end`
     Observe every event with `Catalyst.ExtensionAPI.on(api, fn event -> ... end)`.
-- **UI** — `register_page(api, "settings", {MyPage, :render})` adds a page at `/settings`;
+- **UI** — `register_page(api, "settings", {MyPage, :render})` adds a page at `/settings`.
+  The page module may also export `handle_event/3`, `handle_info/2`, and `handle_async/3`;
+  otherwise-unhandled LiveView callbacks are safely dispatched to the active page, so an
+  interactive page does not require editing `ShellLive`;
   `register_renderer(api, :message, match_fun, render_fun)` overrides how a message or
   tool result is shown; `register_component(api, :header_extra, fun)` adds a header/
   sidebar/footer widget. Render functions are `Phoenix.Component`s.
@@ -428,10 +435,12 @@ Installs are git-committed: **`rollback_extension`** reverts the last change (pa
 reloads from disk. The **Extensions panel** (`/extensions`, the "Extensions" link in the
 header) lists everything that is loaded/registered — extensions, tools, providers,
 hooks, pages, renderers, components, commands — with per-extension **reload / roll
-back / disable** buttons; _disable_ renames the file to `.ex.disabled` (purged now,
-skipped at boot) until re-enabled. Safe mode loads only built-ins: set
+back / disable** buttons; _disable_ renames a user file to `.ex.disabled` (purged now,
+skipped at boot) until re-enabled. Immutable bundled extensions cannot be disabled or rolled back
+in place; install a same-named user extension to replace one. Safe mode loads bundled extensions
+but no user code: set
 `CATALYST_SAFE_MODE=1` manually, or it engages **automatically** when the previous boot
-crashed while extensions were active (a boot-marker file detects it; a successful
+crashed while user extensions were active (a boot-marker file detects it; a successful
 `reload_extensions` — or the panel's "Load extensions now" button — clears it, and the
 UI shows a banner while it is active).
 

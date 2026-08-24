@@ -3,10 +3,9 @@ defmodule Catalyst.ExtensionsPurgeTest do
   use ExUnit.Case, async: false
 
   import Catalyst.ExtensionsFixtures
-  import ExUnit.CaptureLog
 
   alias Catalyst.Extensions
-  alias Catalyst.ExtensionsFixtures.{CacheProbeTool, DegradedPurgeTool}
+  alias Catalyst.ExtensionsFixtures.CacheProbeTool
 
   setup do
     setup_extensions_dir()
@@ -75,39 +74,6 @@ defmodule Catalyst.ExtensionsPurgeTest do
     assert {:ok, Catalyst.Ext.ExternalDisableTool} = Extensions.fetch("external_disable_tool")
   end
 
-  test "a failing purger leaves the owner tracked as degraded, never forgotten" do
-    purgers_key = {Catalyst.ExtensionAPI, :purgers}
-    previous_purgers = :persistent_term.get(purgers_key, %{})
-    owner = "degraded_purge_owner"
-
-    on_exit(fn ->
-      :persistent_term.put(purgers_key, previous_purgers)
-      Extensions.uninstall(owner)
-    end)
-
-    assert {:ok, _module} = Extensions.register_tool(DegradedPurgeTool, owner: owner)
-
-    Catalyst.ExtensionAPI.register_purger(fn
-      ^owner -> raise "purger boom"
-      _other_owner -> :ok
-    end)
-
-    log = capture_log(fn -> assert :ok = Extensions.uninstall(owner) end)
-    assert log =~ "purger boom"
-    assert log =~ "degraded"
-
-    # The tool itself is gone, but the owner stays tracked with the failure.
-    assert Extensions.fetch("degraded_purge_tool") == :error
-    assert [info] = Enum.filter(Extensions.list_loaded(), &(&1.owner == owner))
-    assert info.status == :degraded
-    assert [{_purger_key, {:error, %RuntimeError{message: "purger boom"}}}] = info.purge_failures
-
-    # Once the purger is fixed, a retried purge clears the degraded entry.
-    :persistent_term.put(purgers_key, previous_purgers)
-    assert :ok = Extensions.uninstall(owner)
-    refute Enum.any?(Extensions.list_loaded(), &(&1.owner == owner))
-  end
-
   test "purging an owner invalidates its tool registry metadata cache" do
     owner = "cache_invalidate_owner"
     cache_key = {{Catalyst.Tools.Registry, :definition}, CacheProbeTool}
@@ -134,86 +100,4 @@ defmodule Catalyst.ExtensionsPurgeTest do
     registered = :persistent_term.get(reseeders_key, %{})
     assert Enum.all?(funs, &Map.has_key?(registered, {__MODULE__, &1}))
   end
-
-  test "uninstall uses the configured lifecycle deadline beyond a graceful phase" do
-    purgers_key = {Catalyst.ExtensionAPI, :purgers}
-    probe_key = {__MODULE__, :lifecycle_purger_probe}
-    previous_purgers = :persistent_term.get(purgers_key, %{})
-    previous_timeout = Application.fetch_env(:catalyst, :extension_lifecycle_call_timeout)
-    test = self()
-
-    Application.put_env(:catalyst, :extension_lifecycle_call_timeout, 250)
-
-    Catalyst.ExtensionAPI.register_purger(fn owner ->
-      case :persistent_term.get(probe_key, nil) do
-        %{owner: ^owner, gate: gate} ->
-          send(test, {:lifecycle_purger_entered, owner, self(), gate})
-
-          receive do
-            {:release_lifecycle_purger, ^gate} -> :ok
-          after
-            1_000 -> :ok
-          end
-
-        _other_owner ->
-          :ok
-      end
-    end)
-
-    on_exit(fn ->
-      :persistent_term.erase(probe_key)
-      :persistent_term.put(purgers_key, previous_purgers)
-      restore_timeout(previous_timeout)
-      _ = :sys.get_state(Extensions)
-    end)
-
-    owner = "lifecycle_grace_probe"
-    gate = make_ref()
-    :persistent_term.put(probe_key, %{owner: owner, gate: gate})
-
-    uninstall =
-      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
-        Extensions.uninstall(owner)
-      end)
-
-    assert_receive {:lifecycle_purger_entered, ^owner, server, ^gate}
-    Process.send_after(self(), {:graceful_phase_elapsed, gate}, 50)
-    assert_receive {:graceful_phase_elapsed, ^gate}
-    assert Task.yield(uninstall, 0) == nil
-
-    send(server, {:release_lifecycle_purger, gate})
-    assert Task.await(uninstall, 500) == :ok
-
-    timeout_owner = "lifecycle_timeout_probe"
-    timeout_gate = make_ref()
-    :persistent_term.put(probe_key, %{owner: timeout_owner, gate: timeout_gate})
-
-    caller =
-      spawn(fn ->
-        outcome =
-          try do
-            {:return, Extensions.uninstall(timeout_owner)}
-          catch
-            :exit, reason -> {:exit, reason}
-          end
-
-        send(test, {:lifecycle_uninstall_outcome, self(), outcome})
-      end)
-
-    assert_receive {:lifecycle_purger_entered, ^timeout_owner, ^server, ^timeout_gate}
-    Process.send_after(server, {:release_lifecycle_purger, timeout_gate}, 500)
-
-    assert_receive {:lifecycle_uninstall_outcome, ^caller, {:exit, reason}}, 400
-    assert inspect(reason) =~ "timeout"
-
-    # Synchronize after the delayed release so the global server and purger
-    # registry are quiescent before cleanup restores the shared test state.
-    _ = :sys.get_state(Extensions)
-  end
-
-  defp restore_timeout(:error),
-    do: Application.delete_env(:catalyst, :extension_lifecycle_call_timeout)
-
-  defp restore_timeout({:ok, timeout}),
-    do: Application.put_env(:catalyst, :extension_lifecycle_call_timeout, timeout)
 end

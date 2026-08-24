@@ -12,7 +12,21 @@ defmodule CatalystWeb.ShellLiveTest do
 
   defmodule SettingsPage do
     use CatalystWeb, :html
-    def render(assigns), do: ~H|<div>SETTINGS-PAGE-CONTENT</div>|
+
+    def render(assigns) do
+      assigns =
+        Phoenix.Component.assign(assigns, :settings_count, Map.get(assigns, :settings_count, 0))
+
+      ~H"""
+      <div>SETTINGS-PAGE-CONTENT</div>
+      <button id="settings-counter" phx-click="settings_increment">{@settings_count}</button>
+      """
+    end
+
+    def handle_event("settings_increment", _params, socket) do
+      count = Map.get(socket.assigns, :settings_count, 0)
+      {:noreply, Phoenix.Component.assign(socket, :settings_count, count + 1)}
+    end
   end
 
   defmodule BrokenPage do
@@ -39,6 +53,18 @@ defmodule CatalystWeb.ShellLiveTest do
     {:ok, view, _html} = live(conn, "/settings")
     assert has_element?(view, "#catalyst-shell", "SETTINGS-PAGE-CONTENT")
     assert has_element?(view, "#shell-page-nav", "Settings")
+  end
+
+  test "a runtime-registered page handles its own events", %{conn: conn} do
+    on_exit(fn -> Registry.unregister_owner("event_page") end)
+
+    Registry.register_page("settings", SettingsPage, owner: "event_page", label: "Settings")
+
+    {:ok, view, _html} = live(conn, "/settings")
+    assert has_element?(view, "#settings-counter", "0")
+
+    view |> element("#settings-counter") |> render_click()
+    assert has_element?(view, "#settings-counter", "1")
   end
 
   test "an extension page that raises at diff time falls back to chat", %{conn: conn} do

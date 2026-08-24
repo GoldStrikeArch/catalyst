@@ -10,6 +10,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
   alias Catalyst.LLM.Registry, as: LLMRegistry
   alias Catalyst.Extensions.BootGuard
   alias Catalyst.Prompt.Registry, as: PromptRegistry
+  alias Catalyst.Runtime.Registry, as: RuntimeRegistry
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
 
   @direct_owner "registry_direct_owner"
@@ -29,14 +30,10 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
     :ok
   end
 
-  test "registry purgers use stable external captures" do
-    purgers = :persistent_term.get({ExtensionAPI, :purgers}, %{})
-
-    for registry <- [PromptRegistry, WorkflowRegistry, ContextRegistry, LLMRegistry] do
-      key = {registry, :unregister_owner, 1}
-      assert %{^key => purger} = purgers
-      assert Function.info(purger, :type) == {:type, :external}
-    end
+  test "domain registries share one owner purge path" do
+    assert {:ok, purged} = ExtensionAPI.purge_owner(@direct_owner)
+    assert {RuntimeRegistry, :purge_owner, 1} in purged
+    assert {Catalyst.Extensions.Processes, :stop_owner, 1} in purged
   end
 
   test "kind handlers use stable external captures" do
@@ -235,6 +232,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
       File.rm(path)
       BootGuard.mark_ok()
       restart_extension_runtime!()
+      Catalyst.ExtensionsFixtures.await_bootstrap!()
       BootGuard.mark_ok()
     end)
 
@@ -243,6 +241,7 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
 
     Application.put_env(:catalyst, :safe_mode, true)
     restart_extension_runtime!()
+    Catalyst.ExtensionsFixtures.await_bootstrap!()
 
     assert Extensions.boot_status() == {:safe_mode, :env}
     refute owner_registered?("registry_safe_mode")
@@ -256,6 +255,11 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
     assert {:ok, Catalyst.Context.Window, :builtin} = ContextRegistry.policy()
     assert {:ok, Catalyst.Tools.SpawnAgent} = Extensions.fetch("spawn_agent")
     assert {:ok, Catalyst.Tools.ListAgents} = Extensions.fetch("list_agents")
+
+    assert {:ok, Catalyst.LLM.GrokSubscription.Provider} =
+             Catalyst.LLM.Registry.fetch("grok-subscription-chat-completions")
+
+    assert Enum.any?(Extensions.list_loaded(), &(&1.owner == "grok_subscription"))
   end
 
   defp assert_collision_rolls_back(%{name: name, seed: seed, collide: collide, error: error}) do

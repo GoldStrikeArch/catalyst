@@ -9,6 +9,16 @@ The apps:
 - `apps/catalyst_desktop` — native desktop shell (elixir-desktop/wx) wrapping `catalyst_web`
 - `apps/catalyst_cli` — headless CLI (Burrito-packaged release)
 
+## Kernel boundary
+
+- Treat Catalyst as a self-modifying harness, not a catalog of built-in products.
+- New optional capabilities should ship through `Catalyst.ExtensionAPI` (as bundled extensions when
+  they are distributed with Catalyst). If a feature cannot be expressed as an extension, add the
+  smallest reusable seam to the kernel instead of wiring that feature directly into core.
+- Live contributions belong in `Catalyst.Runtime.Registry`. Domain modules validate and resolve
+  fallbacks; do not add another owner-aware GenServer, ETS table, table-owner process, or replay log.
+- Extension files and git history are durable state. Runtime tables are reconstructible projections.
+
 ## Project workflow
 
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues (it compiles with warnings-as-errors, checks unused deps, formats, and runs tests)

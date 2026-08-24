@@ -4,7 +4,6 @@ defmodule CatalystWeb.UI.RegistryTest do
   @moduletag :flexibility
 
   alias Catalyst.ExtensionAPI
-  alias CatalystWeb.UI.Contributions
   alias CatalystWeb.UI.Registry
 
   @owner "ui_registry_test_owner"
@@ -16,12 +15,6 @@ defmodule CatalystWeb.UI.RegistryTest do
   end
 
   test "extension wiring uses stable external captures" do
-    purgers = :persistent_term.get({ExtensionAPI, :purgers}, %{})
-    purger_key = {Registry, :purge_extension_owner, 1}
-
-    assert %{^purger_key => purger} = purgers
-    assert Function.info(purger, :type) == {:type, :external}
-
     handlers = %{
       renderer: {:register_extension_renderer, 4},
       component: {:register_extension_component, 4},
@@ -66,6 +59,15 @@ defmodule CatalystWeb.UI.RegistryTest do
 
       Registry.unregister_owner(@owner)
       assert :error = Registry.fetch_page("scratch")
+    end
+
+    test "a different owner cannot silently displace a live page" do
+      Registry.register_page("owned", {__MODULE__, :fake_render}, owner: @owner)
+
+      assert {:error, {:owner_collision, :ui_page, "owned", @owner, "other-owner"}} =
+               Registry.register_page("owned", CatalystWeb.Pages.ChatPage, owner: "other-owner")
+
+      assert {:ok, {__MODULE__, :fake_render}} = Registry.fetch_page("owned")
     end
 
     test "extension facades force the real owner over a spoofed :owner option" do
@@ -167,106 +169,6 @@ defmodule CatalystWeb.UI.RegistryTest do
   end
 
   describe "crash recovery" do
-    test "a registry restart retains accepted built-ins and extension contributions" do
-      install_fixture!("ui_chat_page")
-      assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
-
-      pid = Process.whereis(Registry)
-      ref = Process.monitor(pid)
-      Process.exit(pid, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
-
-      new_pid = wait_for_restart!(Registry, pid)
-      _ = :sys.get_state(new_pid)
-
-      assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
-      assert {:ok, %{owner: nil}} = Registry.fetch_command("cd")
-
-      remove_installed_fixture!("ui_chat_page")
-      assert {:ok, {CatalystWeb.Pages.ChatPage, :render}} = Registry.fetch_page("chat")
-    end
-
-    test "table-loss recovery does not query Extensions from Registry.init" do
-      extensions = Process.whereis(Catalyst.Extensions)
-      :sys.suspend(extensions)
-
-      try do
-        :ets.delete_all_objects(:catalyst_ui)
-
-        pid = Process.whereis(Registry)
-        ref = Process.monitor(pid)
-        Process.exit(pid, :kill)
-        assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
-
-        new_pid = wait_for_restart!(Registry, pid)
-        assert %{seq: _seq} = :sys.get_state(new_pid, 500)
-      after
-        :sys.resume(extensions)
-      end
-
-      assert {:ok, {CatalystWeb.Pages.ChatPage, :render}} = Registry.fetch_page("chat")
-    end
-
-    test "registry recovery removes ETS entries absent from the authoritative log" do
-      Registry.register_page("stale-replay", {__MODULE__, :fake_render}, owner: @owner)
-      assert {:ok, {__MODULE__, :fake_render}} = Registry.fetch_page("stale-replay")
-
-      :ok = Contributions.drop_owner(@owner)
-
-      pid = Process.whereis(Registry)
-      ref = Process.monitor(pid)
-      Process.exit(pid, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
-
-      new_pid = wait_for_restart!(Registry, pid)
-      _ = :sys.get_state(new_pid)
-
-      assert :error = Registry.fetch_page("stale-replay")
-    end
-
-    test "a table-owner restart replays accepted UI contributions" do
-      install_fixture!("ui_chat_page")
-      assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
-
-      old_owner = Process.whereis(CatalystWeb.UI.TableOwner)
-      old_registry = Process.whereis(Registry)
-      owner_ref = Process.monitor(old_owner)
-      registry_ref = Process.monitor(old_registry)
-      Process.exit(old_owner, :kill)
-
-      assert_receive {:DOWN, ^owner_ref, :process, ^old_owner, :killed}
-      assert_receive {:DOWN, ^registry_ref, :process, ^old_registry, _reason}
-
-      _new_owner = wait_for_restart!(CatalystWeb.UI.TableOwner, old_owner)
-      new_registry = wait_for_restart!(Registry, old_registry)
-      _ = :sys.get_state(new_registry)
-
-      assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
-
-      remove_installed_fixture!("ui_chat_page")
-      assert {:ok, {CatalystWeb.Pages.ChatPage, :render}} = Registry.fetch_page("chat")
-    end
-
-    test "the replay log survives its own supervised restart" do
-      install_fixture!("ui_chat_page")
-      assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
-
-      contributions = Process.whereis(CatalystWeb.UI.Contributions)
-      registry = Process.whereis(Registry)
-      contributions_ref = Process.monitor(contributions)
-      Process.exit(contributions, :kill)
-      assert_receive {:DOWN, ^contributions_ref, :process, ^contributions, :killed}
-
-      _new_contributions = wait_for_restart!(CatalystWeb.UI.Contributions, contributions)
-      new_registry = wait_for_restart!(Registry, registry)
-      _ = :sys.get_state(new_registry)
-
-      assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
-
-      remove_installed_fixture!("ui_chat_page")
-      assert {:ok, {CatalystWeb.Pages.ChatPage, :render}} = Registry.fetch_page("chat")
-    end
-
     test "a safe-mode Extensions generation revokes prior UI, hooks, and modules" do
       %{owner: owner} = install_fixture!("ui_chat_page")
       assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
@@ -347,51 +249,6 @@ defmodule CatalystWeb.UI.RegistryTest do
 
       assert {:ok, %{failed: []}} = Catalyst.Extensions.load_all()
       CatalystWeb.Application.register_web_tools()
-    end
-
-    test "table recovery replays live entries without activating current disk edits" do
-      install_fixture!("ui_chat_page")
-      accepted_path = Path.join(Catalyst.Extensions.dir(), "ui_chat_page.ex")
-      File.write!(accepted_path, "this current edit is intentionally not valid Elixir")
-
-      unaccepted_path =
-        write_extension!(
-          "unaccepted_ui_recovery",
-          ~S"""
-          defmodule Catalyst.Ext.UnacceptedRecoveryPage do
-            def render(assigns), do: assigns
-          end
-
-          defmodule Catalyst.Ext.UnacceptedRecoveryExtension do
-            use Catalyst.Extension
-
-            @impl true
-            def setup(api) do
-              Catalyst.ExtensionAPI.register_page(
-                api,
-                "unaccepted-recovery",
-                Catalyst.Ext.UnacceptedRecoveryPage
-              )
-            end
-          end
-          """
-        )
-
-      old_owner = Process.whereis(CatalystWeb.UI.TableOwner)
-      old_registry = Process.whereis(Registry)
-      owner_ref = Process.monitor(old_owner)
-      Process.exit(old_owner, :kill)
-      assert_receive {:DOWN, ^owner_ref, :process, ^old_owner, :killed}
-
-      _new_owner = wait_for_restart!(CatalystWeb.UI.TableOwner, old_owner)
-      new_registry = wait_for_restart!(Registry, old_registry)
-      _ = :sys.get_state(new_registry)
-
-      assert {:ok, {Catalyst.Ext.FlexChatPage, :render}} = Registry.fetch_page("chat")
-      assert :error = Registry.fetch_page("unaccepted-recovery")
-
-      File.rm!(unaccepted_path)
-      remove_installed_fixture!("ui_chat_page")
     end
   end
 
