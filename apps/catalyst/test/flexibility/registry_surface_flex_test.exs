@@ -58,15 +58,25 @@ defmodule Catalyst.Flex.RegistrySurfaceFlexTest do
              MapSet.new([
                :agent_files,
                :app_env,
-               :context_runtime,
                :prompt_files,
-               :prompt_runtime,
-               :workflow_runtime
+               :runtime
              ])
 
-    assert Enum.any?(changed.prompt_runtime, &(&1.key == {:text, :system, "flex-model"}))
-    assert Enum.any?(changed.workflow_runtime, &(&1.key == {:workflow, "flex-workflow"}))
-    assert Enum.any?(changed.context_runtime, &(&1.key == {:threshold, "flex-model"}))
+    assert Enum.any?(
+             changed.runtime,
+             &(&1.kind == :prompt and &1.key == {:text, :system, "flex-model"})
+           )
+
+    assert Enum.any?(
+             changed.runtime,
+             &(&1.kind == :workflow and &1.key == "flex-workflow")
+           )
+
+    assert Enum.any?(
+             changed.runtime,
+             &(&1.kind == :context_threshold and &1.key == "flex-model")
+           )
+
     assert {"flex-model.md", "file prompt bytes"} in changed.prompt_files
     assert {"flex-review.md", "agent prompt bytes"} in changed.agent_files
 
@@ -83,9 +93,7 @@ defmodule Catalyst.Flex.RegistrySurfaceFlexTest do
   end
 
   defp unregister_owner(owner) do
-    :ok = PromptRegistry.unregister_owner(owner)
-    :ok = WorkflowRegistry.unregister_owner(owner)
-    :ok = ContextRegistry.unregister_owner(owner)
+    :ok = Catalyst.Runtime.Registry.purge_owner(owner)
   end
 
   defp snapshot_files(paths) do

@@ -89,9 +89,7 @@ defmodule CatalystWeb.ExtensionsPageTest do
              )
 
     on_exit(fn ->
-      Catalyst.Prompt.Registry.unregister_owner(owner)
-      Catalyst.Workflow.Registry.unregister_owner(owner)
-      Catalyst.Context.Registry.unregister_owner(owner)
+      Catalyst.Runtime.Registry.purge_owner(owner)
     end)
 
     {:ok, view, _html} = live(conn, "/extensions")
@@ -136,7 +134,10 @@ defmodule CatalystWeb.ExtensionsPageTest do
 
   test "custom context policies defer threshold diagnostics without invoking callbacks" do
     previous_policy =
-      Enum.find(ContextRegistry.runtime_entries(), &(&1.key == {:policy, :default}))
+      case Catalyst.Runtime.Registry.fetch(:context_policy, :default) do
+        {:ok, value, owner} -> %{value: value, owner: owner}
+        :error -> nil
+      end
 
     ContextRegistry.unregister_policy()
 

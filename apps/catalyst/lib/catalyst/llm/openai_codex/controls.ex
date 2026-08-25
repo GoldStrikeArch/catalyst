@@ -31,6 +31,12 @@ defmodule Catalyst.LLM.OpenAICodex.Controls do
   def auth_label, do: "ChatGPT"
 
   @impl true
+  def login, do: Catalyst.Auth.login_openai_codex()
+
+  @impl true
+  def refresh_auth(creds), do: Catalyst.Auth.OpenAIOAuth.refresh(creds["refresh"])
+
+  @impl true
   def run_opts(prefs) do
     [
       reasoning_effort: prefs.effort,

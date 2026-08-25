@@ -6,8 +6,8 @@ defmodule CatalystWeb.ComputerUseTest do
   import Phoenix.LiveViewTest
 
   alias Catalyst.Session.{Manager, Server}
+  alias CatalystWeb.Components.ComputerControl
   alias CatalystWeb.Pages.ComputerPage
-  alias CatalystWeb.ShellLive.Settings
 
   @machine_prefs_ptr {CatalystWeb.ShellLive, :machine_prefs}
   @codex_prefs_ptr {CatalystWeb.ShellLive, :codex_prefs}
@@ -383,31 +383,19 @@ defmodule CatalystWeb.ComputerUseTest do
   end
 
   describe "audit regressions" do
-    # AUDIT: `Settings.sync_from_session/1` reconciles only `codex_prefs` from
-    # the attached session's authoritative opts; `machine_prefs` is a global
-    # persistent_term that is never reconciled. A session configured directly
-    # (`Server.configure(pid, opts: [computer_use: true])`), or a second view of
-    # a different session, therefore renders the safety toggle in a state the
-    # session does not have.
+    # AUDIT: the behavior-owning component must reconcile from the attached
+    # session's authoritative opts rather than showing stale persisted state.
     @tag :audit
     test "syncing from a session reconciles the computer-use toggle" do
-      # The attached session is armed; the (global, per-browser) preference is
-      # not. sync_from_session/1 is the reconciliation point and must cover the
-      # capability, exactly as it covers effort/transport/fast.
-      socket =
-        %Phoenix.LiveView.Socket{}
-        |> Phoenix.Component.assign(%{
-          session_model: nil,
-          session_opts: [computer_use: true, reasoning_effort: "high"],
-          codex_prefs: Settings.load_codex(),
-          machine_prefs: %{computer_use: false}
-        })
+      :persistent_term.put(@machine_prefs_ptr, %{computer_use: false})
 
-      synced = Settings.sync_from_session(socket)
+      assert {:ok, synced} =
+               ComputerControl.update(
+                 %{shell: %{session_opts: [computer_use: true]}},
+                 %Phoenix.LiveView.Socket{}
+               )
 
-      assert synced.assigns.codex_prefs.effort == "high"
-
-      assert synced.assigns.machine_prefs.computer_use == true,
+      assert synced.assigns.enabled == true,
              "the toggle stayed off for a session that has computer use on"
     end
 

@@ -14,6 +14,7 @@ defmodule Catalyst.Extensions.Contribution do
             ext_mods: [],
             tool_mods: [],
             tool_names: [],
+            tool_entries: %{},
             metadata: %{}
 
   @type t :: %__MODULE__{
@@ -22,6 +23,7 @@ defmodule Catalyst.Extensions.Contribution do
           ext_mods: [module()],
           tool_mods: [module()],
           tool_names: [String.t()],
+          tool_entries: Catalyst.Tools.Registry.index(),
           metadata: map()
         }
 

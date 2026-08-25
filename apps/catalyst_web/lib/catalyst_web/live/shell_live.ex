@@ -43,14 +43,12 @@ defmodule CatalystWeb.ShellLive do
         login_state: :idle,
         login_ref: nil,
         login_provider: nil,
+        login_label: nil,
         boot_status: Catalyst.Extensions.boot_status(),
         ext_panel: nil,
-        computer_panel: nil,
         ext_action: nil,
         codex_prefs: codex_prefs,
         ui_prefs: Settings.load_ui(),
-        machine_prefs: Settings.load_machine(),
-        workflow_prefs: Settings.load_workflow(),
         session_model: nil,
         session_opts: [],
         file_search: nil,
@@ -112,8 +110,8 @@ defmodule CatalystWeb.ShellLive do
     assign(socket,
       codex_catalog: catalog.models,
       selected_codex_entry: catalog.selected,
-      workflow_options: Settings.workflow_options(socket.assigns.workflow_prefs),
-      shell_pages: CatalystWeb.UI.Registry.list_pages()
+      shell_pages: CatalystWeb.UI.Registry.list_pages(),
+      runtime_revision: Catalyst.Runtime.Registry.revision()
     )
   end
 
@@ -260,10 +258,17 @@ defmodule CatalystWeb.ShellLive do
 
   def handle_event("login", _params, socket) do
     provider = Settings.auth_provider(socket.assigns.codex_prefs)
-    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, login_fun(provider))
+    label = Settings.auth_label(socket.assigns.codex_prefs)
+    login = configured_login_fun(provider, Settings.login_fun(socket.assigns.codex_prefs))
+    task = Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, login)
 
     {:noreply,
-     assign(socket, login_state: :pending, login_ref: task.ref, login_provider: provider)}
+     assign(socket,
+       login_state: :pending,
+       login_ref: task.ref,
+       login_provider: provider,
+       login_label: label
+     )}
   end
 
   def handle_event("logout", _params, socket) do
@@ -304,17 +309,6 @@ defmodule CatalystWeb.ShellLive do
     {:noreply, Settings.toggle_quiet(socket)}
   end
 
-  # Workflow choice applies to the session's NEXT run; the options list is
-  # recomputed so an unavailable marker row appears/disappears with the choice.
-  def handle_event("select_workflow", %{"workflow" => value}, socket) do
-    {:noreply,
-     socket
-     |> assign(chrome_menu: nil)
-     |> Settings.select_workflow(value)
-     |> refresh_shell_chrome()
-     |> maybe_refresh_panel()}
-  end
-
   def handle_event("toggle_chrome_menu", %{"menu" => menu}, socket) do
     next = toggle_chrome_menu(socket.assigns.chrome_menu, menu)
     {:noreply, assign(socket, chrome_menu: next, diagnostics_open: false)}
@@ -340,16 +334,6 @@ defmodule CatalystWeb.ShellLive do
       end
 
     {:noreply, finish_prompt_action(socket, result, "Prompt reset to inherited behavior.")}
-  end
-
-  # The grant changes which tools the next run advertises, so the resolved
-  # prompt/tool preview and the panel snapshots are recomputed with it.
-  def handle_event("toggle_computer_use", _params, socket) do
-    {:noreply,
-     socket
-     |> Settings.toggle_computer_use()
-     |> RunDiagnostics.preview()
-     |> maybe_refresh_panel()}
   end
 
   def handle_event("toggle_diagnostics", _params, socket) do
@@ -430,6 +414,10 @@ defmodule CatalystWeb.ShellLive do
     end
   end
 
+  def handle_info({:ui_component, module, action}, socket) when is_atom(module) do
+    UIRegistry.dispatch_component(module, action, socket)
+  end
+
   def handle_info(:reload_assets, socket) do
     {:noreply, redirect(socket, to: page_path(socket.assigns.page))}
   end
@@ -449,7 +437,7 @@ defmodule CatalystWeb.ShellLive do
   def handle_info({ref, result}, %{assigns: %{login_ref: ref}} = socket) do
     Process.demonitor(ref, [:flush])
     completed_provider = socket.assigns.login_provider
-    label = auth_label(completed_provider)
+    label = socket.assigns.login_label
     selected_provider = Settings.auth_provider(socket.assigns.codex_prefs)
 
     case result do
@@ -466,7 +454,8 @@ defmodule CatalystWeb.ShellLive do
            logged_in: logged_in,
            login_state: :idle,
            login_ref: nil,
-           login_provider: nil
+           login_provider: nil,
+           login_label: nil
          )
          |> put_flash(:info, "Signed in to #{label}.")}
 
@@ -475,7 +464,12 @@ defmodule CatalystWeb.ShellLive do
 
         {:noreply,
          socket
-         |> assign(login_state: {:error, message}, login_ref: nil, login_provider: nil)
+         |> assign(
+           login_state: {:error, message},
+           login_ref: nil,
+           login_provider: nil,
+           login_label: nil
+         )
          |> put_flash(:error, "Sign-in failed: #{message}")}
     end
   end
@@ -486,7 +480,8 @@ defmodule CatalystWeb.ShellLive do
      |> assign(
        login_state: {:error, inspect(reason)},
        login_ref: nil,
-       login_provider: nil
+       login_provider: nil,
+       login_label: nil
      )
      |> put_flash(:error, "Sign-in crashed.")}
   end
@@ -694,24 +689,15 @@ defmodule CatalystWeb.ShellLive do
 
   defp toggle_chrome_menu(current, "model"), do: toggle_menu(current, :model)
   defp toggle_chrome_menu(current, "effort"), do: toggle_menu(current, :effort)
-  defp toggle_chrome_menu(current, "workflow"), do: toggle_menu(current, :workflow)
   defp toggle_chrome_menu(_current, _menu), do: nil
 
   defp toggle_menu(current, menu) when current == menu, do: nil
   defp toggle_menu(_current, menu), do: menu
 
-  defp login_fun(provider) do
-    case provider == Catalyst.Auth.XAIOAuth.provider_id() do
-      true -> Application.get_env(:catalyst_web, :grok_login_fun, &Catalyst.Auth.login_grok/0)
-      false -> Application.get_env(:catalyst_web, :login_fun, &Catalyst.Auth.login_openai_codex/0)
-    end
-  end
-
-  defp auth_label(provider) do
-    case provider == Catalyst.Auth.XAIOAuth.provider_id() do
-      true -> "SuperGrok"
-      false -> "ChatGPT"
-    end
+  defp configured_login_fun(provider, fallback) do
+    :catalyst_web
+    |> Application.get_env(:provider_login_funs, %{})
+    |> Map.get(provider, Application.get_env(:catalyst_web, :login_fun, fallback))
   end
 
   defp format_error(reason) when is_binary(reason), do: reason

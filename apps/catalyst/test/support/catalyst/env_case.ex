@@ -49,8 +49,12 @@ defmodule Catalyst.EnvCase do
 
   @doc "Snapshot the current runtime `{:policy, :default}` entry of a registry."
   @spec runtime_policy(module()) :: map() | nil
-  def runtime_policy(registry) do
-    Enum.find(registry.runtime_entries(), &(&1.key == {:policy, :default}))
+  def runtime_policy(Catalyst.Prompt.Registry) do
+    runtime_entry(:prompt, {:policy, :default})
+  end
+
+  def runtime_policy(Catalyst.Context.Registry) do
+    runtime_entry(:context_policy, :default)
   end
 
   @doc "Restore a snapshot taken with `runtime_policy/1` (no-op when it was absent)."
@@ -59,5 +63,12 @@ defmodule Catalyst.EnvCase do
 
   def restore_runtime_policy(registry, entry) do
     registry.register_policy(entry.value, owner: entry.owner)
+  end
+
+  defp runtime_entry(kind, key) do
+    case Catalyst.Runtime.Registry.fetch(kind, key) do
+      {:ok, value, owner} -> %{key: key, value: value, owner: owner}
+      :error -> nil
+    end
   end
 end

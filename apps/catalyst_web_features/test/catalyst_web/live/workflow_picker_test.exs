@@ -25,7 +25,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
     owner = "workflow_picker_test_#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
-      WorkflowRegistry.unregister_owner(owner)
+      Catalyst.Runtime.Registry.purge_owner(owner)
       restore_prefs(previous_prefs)
     end)
 
@@ -39,6 +39,8 @@ defmodule CatalystWeb.WorkflowPickerTest do
     {:ok, pid} = Manager.whereis(session_id(view))
     pid
   end
+
+  defp sync_parent(view), do: :sys.get_state(view.pid)
 
   test "selecting a workflow configures the live session and new sessions inherit it", %{
     conn: conn,
@@ -54,6 +56,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
     refute Keyword.has_key?(Server.state(pid).opts, :workflow)
 
     view |> form("#workflow-form") |> render_change(%{"workflow" => "review"})
+    sync_parent(view)
 
     # Reconfigured in place: same session process, next run gets the workflow.
     assert session_pid(view) == pid
@@ -68,6 +71,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
 
     # The empty value returns to the default chain and DELETES the key.
     view |> form("#workflow-form") |> render_change(%{"workflow" => ""})
+    sync_parent(view)
     refute Keyword.has_key?(Server.state(new_pid).opts, :workflow)
   end
 
@@ -82,14 +86,16 @@ defmodule CatalystWeb.WorkflowPickerTest do
     pid = session_pid(view)
 
     view |> form("#workflow-form") |> render_change(%{"workflow" => "review"})
+    sync_parent(view)
     assert Server.state(pid).opts[:workflow] == "review"
 
     # Purged between the render and the pick: the rendered select still lists
     # "doomed", but selecting it must be rejected by live validation.
     :ok = WorkflowRegistry.unregister_workflow("doomed")
 
-    html = view |> form("#workflow-form") |> render_change(%{"workflow" => "doomed"})
-    assert html =~ "no longer available"
+    view |> form("#workflow-form") |> render_change(%{"workflow" => "doomed"})
+    sync_parent(view)
+    assert has_element?(view, "#flash-error", "no longer available")
 
     assert Server.state(pid).opts[:workflow] == "review"
     assert :persistent_term.get(@workflow_prefs_ptr) == %{workflow: "review"}
@@ -115,9 +121,10 @@ defmodule CatalystWeb.WorkflowPickerTest do
     File.rm!(store_path)
     File.mkdir_p!(store_path)
 
-    html = view |> form("#workflow-form") |> render_change(%{"workflow" => "review"})
+    view |> form("#workflow-form") |> render_change(%{"workflow" => "review"})
+    sync_parent(view)
 
-    assert html =~ "could not select workflow"
+    assert has_element?(view, "#flash-error", "could not select workflow")
     assert :persistent_term.get(@workflow_prefs_ptr) == %{workflow: nil}
     refute Keyword.has_key?(Server.state(pid).opts, :workflow)
     assert has_element?(view, "#workflow-select option[value=''][selected]")
@@ -133,9 +140,10 @@ defmodule CatalystWeb.WorkflowPickerTest do
     pid = session_pid(view)
 
     view |> form("#workflow-form") |> render_change(%{"workflow" => "review"})
+    sync_parent(view)
     assert Server.state(pid).opts[:workflow] == "review"
 
-    :ok = WorkflowRegistry.unregister_owner(owner)
+    :ok = Catalyst.Runtime.Registry.purge_owner(owner)
 
     # The next chrome refresh (patch navigation) recomputes the options; the
     # vanished selection must stay visible — and selected — rather than letting
@@ -147,6 +155,7 @@ defmodule CatalystWeb.WorkflowPickerTest do
     # picking default recovers from the header.
     assert Server.state(pid).opts[:workflow] == "review"
     view |> form("#workflow-form") |> render_change(%{"workflow" => ""})
+    sync_parent(view)
     refute Keyword.has_key?(Server.state(pid).opts, :workflow)
   end
 end

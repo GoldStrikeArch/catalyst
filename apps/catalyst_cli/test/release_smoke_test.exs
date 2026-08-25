@@ -95,12 +95,12 @@ defmodule CatalystCli.ReleaseSmokeTest do
       end
     end)
 
-    case {
-      Catalyst.Prompt.Registry.runtime_entries(),
-      Catalyst.Workflow.Registry.runtime_entries(),
-      Catalyst.Context.Registry.runtime_entries()
-    } do
-      {[], [], []} -> :ok
+    runtime_overlays =
+      Catalyst.Runtime.Registry.list_all()
+      |> Enum.filter(&(&1.kind in [:prompt, :workflow, :context_policy, :context_threshold]))
+
+    case runtime_overlays do
+      [] -> :ok
       entries -> raise "release registries booted with runtime overlays: #{inspect(entries)}"
     end
 

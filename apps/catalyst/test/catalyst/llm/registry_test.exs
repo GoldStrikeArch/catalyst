@@ -42,14 +42,14 @@ defmodule Catalyst.LLM.RegistryTest do
 
   test "unregister_owner removes only that owner's providers" do
     on_exit(fn ->
-      Registry.unregister_owner("ownerA")
+      Catalyst.Runtime.Registry.purge_owner("ownerA")
       Registry.unregister_provider("p1")
     end)
 
     Registry.register_provider("p1", EchoProvider, owner: "ownerA")
     assert {:ok, EchoProvider} = Registry.fetch("p1")
 
-    Registry.unregister_owner("ownerA")
+    Catalyst.Runtime.Registry.purge_owner("ownerA")
     assert {:error, _} = Registry.fetch("p1")
   end
 
@@ -78,8 +78,8 @@ defmodule Catalyst.LLM.RegistryTest do
 
   test "extension owners cannot replace each other's provider and purge is owner-safe" do
     on_exit(fn ->
-      Registry.unregister_owner("provider_owner_a")
-      Registry.unregister_owner("provider_owner_b")
+      Catalyst.Runtime.Registry.purge_owner("provider_owner_a")
+      Catalyst.Runtime.Registry.purge_owner("provider_owner_b")
       Registry.unregister_provider("faux")
     end)
 
@@ -90,10 +90,10 @@ defmodule Catalyst.LLM.RegistryTest do
 
     assert {:ok, EchoProvider} = Registry.fetch("faux")
 
-    :ok = Registry.unregister_owner("provider_owner_b")
+    :ok = Catalyst.Runtime.Registry.purge_owner("provider_owner_b")
     assert {:ok, EchoProvider} = Registry.fetch("faux")
 
-    :ok = Registry.unregister_owner("provider_owner_a")
+    :ok = Catalyst.Runtime.Registry.purge_owner("provider_owner_a")
     assert {:ok, Catalyst.LLM.Faux} = Registry.fetch("faux")
   end
 
@@ -107,7 +107,7 @@ defmodule Catalyst.LLM.RegistryTest do
              Registry.register_provider("owned-api", Catalyst.LLM.Demo)
 
     assert {:ok, EchoProvider} = Registry.fetch("owned-api")
-    assert :ok = Registry.unregister_owner("provider_extension")
+    assert :ok = Catalyst.Runtime.Registry.purge_owner("provider_extension")
     assert {:error, {:unknown_api, "owned-api"}} = Registry.fetch("owned-api")
   end
 

@@ -14,7 +14,6 @@ defmodule Catalyst.Context.Registry do
 
   @type model_key :: String.t() | :default
   @type threshold :: :none | pos_integer() | float()
-  @type runtime_entry :: %{key: term(), value: term(), owner: term()}
 
   @doc "Register the runtime default context policy."
   @spec register_policy(module(), keyword()) :: :ok | {:error, term()}
@@ -41,27 +40,6 @@ defmodule Catalyst.Context.Registry do
   @doc "Remove one runtime threshold overlay."
   @spec unregister_threshold(model_key()) :: :ok
   def unregister_threshold(model_key), do: Runtime.delete(:context_threshold, model_key)
-
-  @doc "Remove every runtime registration owned by `owner`."
-  @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner),
-    do: Runtime.purge_owner(owner, [:context_policy, :context_threshold])
-
-  @doc "Owner-aware snapshot of runtime overlays (application values are not included)."
-  @spec runtime_entries() :: [runtime_entry()]
-  def runtime_entries do
-    policy_entries =
-      Enum.map(Runtime.list(:context_policy), fn entry ->
-        %{key: @policy_key, value: entry.value, owner: entry.owner}
-      end)
-
-    threshold_entries =
-      Enum.map(Runtime.list(:context_threshold), fn entry ->
-        %{key: {:threshold, entry.key}, value: entry.value, owner: entry.owner}
-      end)
-
-    Enum.sort_by(policy_entries ++ threshold_entries, &inspect(&1.key))
-  end
 
   @doc "Resolve the effective context policy (runtime, live app config, built-in)."
   @spec policy() :: {:ok, module(), term()} | {:error, term()}
@@ -208,18 +186,5 @@ defmodule Catalyst.Context.Registry do
           :ok | {:error, term()}
   def register_extension_threshold(%ExtensionAPI{owner: owner}, model_key, value, opts) do
     register_threshold(model_key, value, Keyword.put(opts, :owner, owner))
-  end
-
-  @doc false
-  @spec wire_extension_api() :: :ok
-  def wire_extension_api do
-    ExtensionAPI.register_kind(:context_policy, &__MODULE__.register_extension_policy/3)
-
-    ExtensionAPI.register_kind(
-      :context_threshold,
-      &__MODULE__.register_extension_threshold/4
-    )
-
-    :ok
   end
 end

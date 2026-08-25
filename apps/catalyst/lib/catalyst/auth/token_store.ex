@@ -12,7 +12,8 @@ defmodule Catalyst.Auth.TokenStore do
   require Logger
 
   alias Catalyst.Tasks
-  alias Catalyst.Auth.{OpenAIOAuth, XAIOAuth}
+  alias Catalyst.Auth.OpenAIOAuth
+  alias Catalyst.LLM.Registry, as: LLMRegistry
   alias Catalyst.Files.AtomicWrite
 
   @skew_ms 60_000
@@ -216,8 +217,8 @@ defmodule Catalyst.Auth.TokenStore do
   end
 
   # The legacy global override remains the first choice so extensions and tests
-  # keep their existing contract. Built-in providers otherwise dispatch to the
-  # OAuth flow that issued their stored credentials.
+  # keep their existing contract. Providers otherwise own refresh through the
+  # same controls module that supplies their login UI.
   defp refresh(provider, creds) do
     case Application.get_env(:catalyst, :oauth_refresh_fun) do
       fun when is_function(fun, 1) -> fun.(creds["refresh"])
@@ -226,10 +227,25 @@ defmodule Catalyst.Auth.TokenStore do
   end
 
   defp refresh_provider(provider, creds) do
-    case provider == XAIOAuth.provider_id() do
-      true -> XAIOAuth.refresh(creds)
-      false -> OpenAIOAuth.refresh(creds["refresh"])
+    case controls_for_auth_provider(provider) do
+      {:ok, controls} -> controls.refresh_auth(creds)
+      :error -> OpenAIOAuth.refresh(creds["refresh"])
     end
+  end
+
+  defp controls_for_auth_provider(provider) do
+    LLMRegistry.list()
+    |> Map.values()
+    |> Enum.find_value(:error, fn
+      %{controls: controls} when is_atom(controls) ->
+        case controls.auth_provider() == provider do
+          true -> {:ok, controls}
+          false -> nil
+        end
+
+      _without_controls ->
+        nil
+    end)
   end
 
   # A fresh login (`put/2`) during an in-flight refresh supersedes it: waiters

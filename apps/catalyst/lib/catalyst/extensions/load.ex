@@ -12,14 +12,7 @@ defmodule Catalyst.Extensions.Load do
 
   alias Catalyst.ExtensionAPI
 
-  alias Catalyst.Extensions.{
-    Contribution,
-    Loader,
-    Modules,
-    Sources,
-    Transaction,
-    Versioning
-  }
+  alias Catalyst.Extensions.{Contribution, Loader, Modules, Sources, Versioning}
 
   @server Catalyst.Extensions
   @suppressed_key {__MODULE__, :suppressed_owners}
@@ -28,12 +21,12 @@ defmodule Catalyst.Extensions.Load do
   @doc false
   @spec load_file(Path.t()) ::
           {:ok, Catalyst.Extensions.summary()} | {:error, term()}
-  def load_file(path), do: Transaction.run(fn -> do_load_file(path) end)
+  def load_file(path), do: Catalyst.Extensions.locked(fn -> do_load_file(path) end)
 
   @doc false
   @spec load_all() :: {:ok, Catalyst.Extensions.load_result()} | {:error, term()}
   def load_all do
-    Transaction.run(fn ->
+    Catalyst.Extensions.locked(fn ->
       result = do_load_all()
       finish_explicit_load(result)
     end)
@@ -41,7 +34,7 @@ defmodule Catalyst.Extensions.Load do
 
   @doc false
   @spec boot_load() :: {:ok, Catalyst.Extensions.load_result()} | {:error, term()}
-  def boot_load, do: Transaction.run_inline(&do_load_all/0)
+  def boot_load, do: Catalyst.Extensions.locked_inline(&do_load_all/0)
 
   @doc false
   @spec boot_load_bundled() :: {:ok, Catalyst.Extensions.load_result()} | {:error, term()}
@@ -52,7 +45,7 @@ defmodule Catalyst.Extensions.Load do
           {:ok, Catalyst.Extensions.load_result()} | {:error, term()} | {:skipped, term()}
   def reload_after_wiring do
     case Catalyst.Extensions.boot_status() do
-      :ok -> Transaction.run(&do_load_all/0)
+      :ok -> Catalyst.Extensions.locked(&do_load_all/0)
       status -> {:skipped, status}
     end
   end
@@ -60,7 +53,7 @@ defmodule Catalyst.Extensions.Load do
   @doc false
   @spec uninstall(String.t()) :: :ok
   def uninstall(owner) do
-    Transaction.run(fn ->
+    Catalyst.Extensions.locked(fn ->
       suppress(owner)
 
       case server_call({:owner_snapshot, owner}) do
@@ -89,7 +82,7 @@ defmodule Catalyst.Extensions.Load do
   @doc false
   @spec reload(String.t()) :: {:ok, Catalyst.Extensions.summary()} | {:error, term()}
   def reload(owner) do
-    Transaction.run(fn ->
+    Catalyst.Extensions.locked(fn ->
       case file_for(owner) do
         {:ok, path} -> do_load_file(path)
         :error -> {:error, :no_file}
@@ -100,7 +93,7 @@ defmodule Catalyst.Extensions.Load do
   @doc false
   @spec disable(String.t()) :: {:ok, Path.t()} | {:error, term()}
   def disable(owner) do
-    Transaction.run(fn ->
+    Catalyst.Extensions.locked(fn ->
       case file_for(owner) do
         {:ok, path} ->
           disable_file(owner, path)
@@ -115,7 +108,7 @@ defmodule Catalyst.Extensions.Load do
   @spec enable(String.t()) ::
           {:ok, Catalyst.Extensions.summary()} | {:error, term()}
   def enable(owner) do
-    Transaction.run(fn ->
+    Catalyst.Extensions.locked(fn ->
       case disabled_file_for(owner) do
         {:ok, disabled} -> enable_file(owner, disabled)
         :error -> {:error, :no_file}
@@ -127,7 +120,7 @@ defmodule Catalyst.Extensions.Load do
   @spec rollback(String.t() | nil) ::
           {:ok, Catalyst.Extensions.load_result()} | {:error, term()}
   def rollback(owner) when is_binary(owner) or is_nil(owner) do
-    Transaction.run(fn ->
+    Catalyst.Extensions.locked(fn ->
       with :ok <- rollback_source(owner) do
         case load_all() do
           {:ok, result} -> {:ok, result}
@@ -258,9 +251,9 @@ defmodule Catalyst.Extensions.Load do
               Enum.any?(contribution.modules, &MapSet.member?(loaded_modules, &1))
 
           case apply_contribution(path, owner, contribution, prior_owner, load?) do
-            {:ok, summary} ->
-              entry = %{path: path, contribution: contribution}
-              loaded_modules = track_loaded_modules(loaded_modules, contribution, load?)
+            {:ok, summary, accepted} ->
+              entry = %{path: path, contribution: accepted}
+              loaded_modules = track_loaded_modules(loaded_modules, accepted, load?)
 
               {loaded ++ [Map.put(summary, :source, source)], failed,
                Map.put(desired, owner, entry), loaded_modules}
@@ -284,8 +277,12 @@ defmodule Catalyst.Extensions.Load do
 
   defp apply_contribution(path, owner, contribution, prior, load?) do
     with :ok <- maybe_load(path, contribution, load?),
-         {:ok, summary} <- server_call({:commit_load, owner, path, contribution}) do
-      finish_setup(owner, contribution, summary, prior)
+         {:ok, accepted} <- Loader.prepare_tools(contribution),
+         {:ok, summary} <- server_call({:commit_load, owner, path, accepted}) do
+      case finish_setup(owner, accepted, summary, prior) do
+        {:ok, finished} -> {:ok, finished, accepted}
+        {:error, _reason} = error -> error
+      end
     else
       {:error, reason} = error ->
         :ok = restore_rejected(owner, prior, contribution.modules)
@@ -369,10 +366,12 @@ defmodule Catalyst.Extensions.Load do
 
   defp restore_rejected(owner, snapshot, _modules) do
     :ok = Modules.load(snapshot.path, snapshot.beams)
-    contribution = snapshot_contribution(snapshot)
+    staged = snapshot_contribution(snapshot)
 
-    case server_call({:commit_load, owner, snapshot.path, contribution}) do
-      {:ok, _summary} -> restore_prior_setup(owner, contribution)
+    with {:ok, contribution} <- Loader.prepare_tools(staged),
+         {:ok, _summary} <- server_call({:commit_load, owner, snapshot.path, contribution}) do
+      restore_prior_setup(owner, contribution)
+    else
       {:error, reason} -> log_failed_restore(owner, reason)
     end
   end

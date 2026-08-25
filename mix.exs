@@ -79,6 +79,7 @@ defmodule Catalyst.Umbrella.MixProject do
         precommit: :test,
         dialyzer: :dev,
         "test.flex": :test,
+        "test.kernel": :test,
         "test.release": :test,
         "test.computer": :test
       ]
@@ -475,6 +476,8 @@ defmodule Catalyst.Umbrella.MixProject do
       "test.flex": [
         "do --app catalyst --app catalyst_web cmd mix test --only flexibility"
       ],
+      # Kernel tier: feature applications are neither selected nor started.
+      "test.kernel": ["do --app catalyst --app catalyst_web cmd mix test"],
       # release smoke tier (excluded from plain `mix test`; builds a real release)
       "test.release": ["do --app catalyst_cli cmd mix test --only release"],
       # real-desktop computer-use tier (excluded from plain `mix test`; drives

@@ -34,15 +34,6 @@ defmodule Catalyst.Capabilities do
   def register_extension_capability(_api, name, resolver),
     do: {:error, {:invalid_capability, name, resolver}}
 
-  @doc false
-  @spec wire_extension_api() :: :ok
-  def wire_extension_api do
-    ExtensionAPI.register_kind(
-      :capability,
-      &__MODULE__.register_extension_capability/3
-    )
-  end
-
   defp safely_granted?(resolver, config) do
     resolver.(config) == true
   rescue

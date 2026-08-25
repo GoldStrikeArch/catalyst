@@ -19,6 +19,7 @@ defmodule CatalystWeb.ShellLive.ExtensionsPanel do
   alias Catalyst.Extensions.Versioning
   alias Catalyst.LLM
   alias Catalyst.Prompt.Registry, as: PromptRegistry
+  alias Catalyst.Runtime.Registry, as: Runtime
   alias Catalyst.Session.RunContext
   alias Catalyst.Workflow.Registry, as: WorkflowRegistry
   alias CatalystWeb.UI
@@ -48,9 +49,9 @@ defmodule CatalystWeb.ShellLive.ExtensionsPanel do
       tools: tool_rows(owner_by_tool),
       providers: provider_rows(),
       hooks: hook_rows(),
-      prompt_runtime: PromptRegistry.runtime_entries(),
-      workflow_runtime: WorkflowRegistry.runtime_entries(),
-      context_runtime: Registry.runtime_entries(),
+      prompt_runtime: runtime_rows(:prompt, & &1),
+      workflow_runtime: runtime_rows(:workflow, &{:workflow, &1}),
+      context_runtime: context_runtime_rows(),
       effective: effective_rows(model, opts, diagnostics),
       pages: UI.Registry.list_pages(),
       commands: UI.Registry.list_commands(),
@@ -86,6 +87,17 @@ defmodule CatalystWeb.ShellLive.ExtensionsPanel do
     for point <- Hooks.points(), entry <- Hooks.handlers(point) do
       %{point: point, id: entry.id, owner: entry.owner, priority: entry.priority}
     end
+  end
+
+  defp runtime_rows(kind, key_fun) do
+    Enum.map(Runtime.list(kind), fn entry ->
+      %{key: key_fun.(entry.key), value: entry.value, owner: entry.owner}
+    end)
+  end
+
+  defp context_runtime_rows do
+    runtime_rows(:context_policy, fn :default -> {:policy, :default} end) ++
+      runtime_rows(:context_threshold, &{:threshold, &1})
   end
 
   defp effective_rows(model, opts, diagnostics) do

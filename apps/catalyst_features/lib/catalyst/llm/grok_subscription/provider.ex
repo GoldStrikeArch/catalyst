@@ -7,7 +7,7 @@ defmodule Catalyst.LLM.GrokSubscription.Provider do
   @behaviour Catalyst.LLM.Provider
 
   alias Catalyst.{Content, Ids, Message, Usage}
-  alias Catalyst.Auth.{TokenStore, XAIOAuth}
+  alias Catalyst.Auth.TokenStore
 
   alias Catalyst.LLM.GrokSubscription.{
     Request,
@@ -15,7 +15,7 @@ defmodule Catalyst.LLM.GrokSubscription.Provider do
     Transport
   }
 
-  @auth_provider XAIOAuth.provider_id()
+  @auth_provider "xai-grok"
 
   @impl true
   @spec stream(
@@ -46,7 +46,7 @@ defmodule Catalyst.LLM.GrokSubscription.Provider do
       {:error, reason} ->
         {:error,
          "not authenticated (#{inspect(reason)}). Sign in to SuperGrok from the sign-in button " <>
-           "(or run Catalyst.Auth.login_grok/0)."}
+           "(or run Catalyst.Auth.XAILogin.login/0)."}
     end
   end
 

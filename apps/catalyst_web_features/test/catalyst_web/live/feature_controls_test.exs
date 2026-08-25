@@ -36,7 +36,7 @@ defmodule CatalystWeb.FeatureControlsTest do
       restore_prefs(@codex_prefs_ptr, previous_codex_prefs)
       restore_prefs(@workflow_prefs_ptr, previous_workflow_prefs)
       restore_catalog(previous_models)
-      Application.delete_env(:catalyst_web, :grok_login_fun)
+      Application.delete_env(:catalyst_web, :provider_login_funs)
     end)
 
     :ok
@@ -45,10 +45,12 @@ defmodule CatalystWeb.FeatureControlsTest do
   test "Grok 4.6 selects the direct subscription provider and SuperGrok auth", %{conn: conn} do
     parent = self()
 
-    Application.put_env(:catalyst_web, :grok_login_fun, fn ->
-      send(parent, :grok_login_called)
-      {:ok, "xai-user"}
-    end)
+    Application.put_env(:catalyst_web, :provider_login_funs, %{
+      "xai-grok" => fn ->
+        send(parent, :grok_login_called)
+        {:ok, "xai-user"}
+      end
+    })
 
     {:ok, view, _html} = live(conn, "/")
     pid = session_pid(view)

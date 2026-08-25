@@ -33,6 +33,12 @@ defmodule Catalyst.LLM.Controls do
   @doc "Human-facing subscription name."
   @callback auth_label() :: String.t()
 
+  @doc "Run this provider's interactive sign-in flow."
+  @callback login() :: {:ok, String.t() | nil} | {:error, term()}
+
+  @doc "Refresh credentials previously issued by this provider."
+  @callback refresh_auth(map()) :: {:ok, map()} | {:error, term()}
+
   @doc "Translate provider-neutral shell preferences into session run options."
   @callback run_opts(map()) :: keyword()
 
@@ -48,6 +54,8 @@ defmodule Catalyst.LLM.Controls do
       default_effort: 0,
       auth_provider: 0,
       auth_label: 0,
+      login: 0,
+      refresh_auth: 1,
       run_opts: 1
     ]
   end

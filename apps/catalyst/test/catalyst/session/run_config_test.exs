@@ -102,7 +102,7 @@ defmodule Catalyst.Session.RunConfigTest do
     Application.put_env(:catalyst, :summary_cleanup_test_pid, test_pid)
 
     on_exit(fn ->
-      Registry.unregister_owner(owner)
+      Catalyst.Runtime.Registry.purge_owner(owner)
       Application.delete_env(:catalyst, :blocking_cleanup_test_pid)
       Application.delete_env(:catalyst, :summary_cleanup_test_pid)
     end)

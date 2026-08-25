@@ -25,11 +25,11 @@ defmodule CatalystWeb.UI.PageRenderer do
   @doc "Renders all runtime components registered for a named shell slot."
   @spec render_components(atom(), map()) :: Phoenix.LiveView.Rendered.t()
   def render_components(slot, assigns) do
-    assigns = assign(assigns, :__slot_functions__, Registry.components(slot))
+    assigns = assign(assigns, :__slot_entries__, Registry.component_entries(slot))
 
     ~H"""
-    <%= for function <- @__slot_functions__ do %>
-      {safely_render_component(function, assigns)}
+    <%= for entry <- @__slot_entries__ do %>
+      {render_component_entry(entry, assigns)}
     <% end %>
     """
   end
@@ -49,7 +49,24 @@ defmodule CatalystWeb.UI.PageRenderer do
     )
   end
 
-  defp safely_render_component(function, assigns) do
+  defp render_component_entry(%{type: :function, target: function}, assigns) do
     SafeRender.forced_iodata(fn -> function.(assigns) end, "slot component", fn -> nil end)
+  end
+
+  defp render_component_entry(%{type: :live_component} = entry, assigns) do
+    assigns =
+      assign(assigns,
+        __component_module__: entry.target,
+        __component_id__: entry.id,
+        __component_shell__: assigns
+      )
+
+    ~H"""
+    <.live_component
+      module={@__component_module__}
+      id={@__component_id__}
+      shell={@__component_shell__}
+    />
+    """
   end
 end

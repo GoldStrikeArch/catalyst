@@ -20,16 +20,16 @@ defmodule Catalyst.Context.RegistryTest do
     previous_policy = Application.fetch_env(:catalyst, :context_policy)
     previous_thresholds = Application.fetch_env(:catalyst, :context_thresholds)
 
-    Registry.unregister_owner(:host)
-    Registry.unregister_owner("registry-test-a")
-    Registry.unregister_owner("registry-test-b")
+    Catalyst.Runtime.Registry.purge_owner(:host)
+    Catalyst.Runtime.Registry.purge_owner("registry-test-a")
+    Catalyst.Runtime.Registry.purge_owner("registry-test-b")
     Application.delete_env(:catalyst, :context_policy)
     Application.delete_env(:catalyst, :context_thresholds)
 
     on_exit(fn ->
-      Registry.unregister_owner(:host)
-      Registry.unregister_owner("registry-test-a")
-      Registry.unregister_owner("registry-test-b")
+      Catalyst.Runtime.Registry.purge_owner(:host)
+      Catalyst.Runtime.Registry.purge_owner("registry-test-a")
+      Catalyst.Runtime.Registry.purge_owner("registry-test-b")
       restore_env(:context_policy, previous_policy)
       restore_env(:context_thresholds, previous_thresholds)
     end)
@@ -64,7 +64,7 @@ defmodule Catalyst.Context.RegistryTest do
     assert {:ok, :none, {:extension, "registry-test-a", {:threshold, "model-id"}}} =
              Registry.threshold(model)
 
-    Registry.unregister_owner("registry-test-a")
+    Catalyst.Runtime.Registry.purge_owner("registry-test-a")
 
     Application.put_env(:catalyst, :context_thresholds, %{"model-api" => 12, default: 13})
 

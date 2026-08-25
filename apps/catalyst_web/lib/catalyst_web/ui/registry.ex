@@ -20,11 +20,11 @@ defmodule CatalystWeb.UI.Registry do
   @renderer_kind :ui_renderer
   @component_kind :ui_component
   @command_kind :ui_command
-  @ui_kinds [@page_kind, @renderer_kind, @component_kind, @command_kind]
 
   @type kind :: :message | :block
   @type target :: module() | {module(), atom()}
   @type render_fun :: (map() -> Phoenix.LiveView.Rendered.t())
+  @type component_target :: render_fun() | module()
 
   @doc "Register (replace) a page at `path`. `target` is a module (uses `render/1`) or `{module, fun}`."
   @spec register_page(String.t(), target(), keyword()) :: :ok | {:error, term()}
@@ -151,22 +151,121 @@ defmodule CatalystWeb.UI.Registry do
     |> Enum.sort_by(& &1.seq, :desc)
   end
 
-  @doc "Register a slot component (`fun.(assigns) -> rendered`)."
-  @spec register_component(atom(), render_fun(), keyword()) :: :ok | {:error, term()}
-  def register_component(slot, fun, opts \\ []) do
+  @doc """
+  Register a shell-slot contribution.
+
+  A function is rendered through the legacy crash-isolated render boundary. A
+  LiveComponent module owns its local events and may export `session_options/0`
+  and `handle_shell_action/2` when it needs to affect the parent session.
+  """
+  @spec register_component(atom(), component_target(), keyword()) :: :ok | {:error, term()}
+  def register_component(slot, target, opts \\ []) do
     seq = sequence()
-    entry = %{fun: fun, owner: opts[:owner], seq: seq}
-    Runtime.put(@component_kind, {slot, seq}, entry, opts)
+    key = {slot, seq}
+
+    with {:ok, component} <- normalize_component(target) do
+      entry =
+        component
+        |> Map.merge(%{
+          id: opts[:id] || "runtime-component-#{slot}-#{seq}",
+          owner: opts[:owner],
+          seq: seq
+        })
+
+      Runtime.put(@component_kind, key, entry, opts)
+    end
   end
 
-  @doc "Component render functions for a slot, newest first."
+  @doc "Legacy component render functions for a slot, newest first."
   @spec components(atom()) :: [render_fun()]
   def components(slot) do
+    slot
+    |> component_entries()
+    |> Enum.flat_map(fn
+      %{type: :function, target: fun} -> [fun]
+      %{type: :live_component} -> []
+    end)
+  end
+
+  @doc "Complete component registrations for a slot, newest first."
+  @spec component_entries(atom()) :: [map()]
+  def component_entries(slot) do
     @component_kind
     |> runtime_values()
     |> Enum.filter(&(&1.slot == slot))
     |> Enum.sort_by(& &1.seq, :desc)
-    |> Enum.map(& &1.fun)
+  end
+
+  @doc "Session options contributed by registered behavior-owning components."
+  @spec session_options() :: keyword()
+  def session_options do
+    @component_kind
+    |> runtime_values()
+    |> Enum.sort_by(& &1.seq)
+    |> Enum.reduce([], fn
+      %{type: :live_component, target: module}, opts ->
+        case exports?(module, :session_options, 0) do
+          true -> merge_session_options(module, opts)
+          false -> opts
+        end
+
+      _function_component, opts ->
+        opts
+    end)
+  end
+
+  @doc "Dispatch a LiveComponent action after verifying that module is still registered."
+  @spec dispatch_component(module(), term(), Phoenix.LiveView.Socket.t()) ::
+          {:noreply, Phoenix.LiveView.Socket.t()}
+  def dispatch_component(module, action, socket) do
+    registered? =
+      @component_kind
+      |> runtime_values()
+      |> Enum.any?(&(&1.type == :live_component and &1.target == module))
+
+    case registered? and exports?(module, :handle_shell_action, 2) do
+      true ->
+        {:noreply, valid_component_socket(module.handle_shell_action(action, socket), socket)}
+
+      false ->
+        {:noreply, socket}
+    end
+  rescue
+    exception ->
+      Logger.error(
+        "UI component #{inspect(module)} action failed: #{Exception.message(exception)}"
+      )
+
+      {:noreply, socket}
+  end
+
+  defp merge_session_options(module, opts) do
+    case module.session_options() do
+      component_opts when is_list(component_opts) -> Keyword.merge(opts, component_opts)
+      invalid -> log_invalid_session_options(module, invalid, opts)
+    end
+  rescue
+    exception ->
+      Logger.error(
+        "UI component #{inspect(module)} session options failed: #{Exception.message(exception)}"
+      )
+
+      opts
+  catch
+    kind, reason ->
+      Logger.error(
+        "UI component #{inspect(module)} session options failed: #{inspect({kind, reason})}"
+      )
+
+      opts
+  end
+
+  defp log_invalid_session_options(module, invalid, opts) do
+    Logger.warning(
+      "UI component #{inspect(module)} returned invalid session options: #{inspect(invalid)}"
+    )
+
+    opts
   end
 
   @doc "All registered slot components (`%{slot, owner, seq}`), newest first."
@@ -212,10 +311,6 @@ defmodule CatalystWeb.UI.Registry do
     end
   end
 
-  @doc "Remove every UI contribution made by `owner`."
-  @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner), do: Runtime.purge_owner(owner, @ui_kinds)
-
   @doc false
   @spec register_extension_renderer(ExtensionAPI.t(), kind(), function(), render_fun()) ::
           :ok | {:error, term()}
@@ -224,10 +319,10 @@ defmodule CatalystWeb.UI.Registry do
   end
 
   @doc false
-  @spec register_extension_component(ExtensionAPI.t(), atom(), render_fun(), keyword()) ::
+  @spec register_extension_component(ExtensionAPI.t(), atom(), component_target(), keyword()) ::
           :ok | {:error, term()}
-  def register_extension_component(%ExtensionAPI{owner: owner}, slot, fun, opts) do
-    register_component(slot, fun, Keyword.put(opts, :owner, owner))
+  def register_extension_component(%ExtensionAPI{owner: owner}, slot, target, opts) do
+    register_component(slot, target, Keyword.put(opts, :owner, owner))
   end
 
   @doc false
@@ -278,6 +373,21 @@ defmodule CatalystWeb.UI.Registry do
   defp display_owner(owner), do: owner
 
   defp sequence, do: System.unique_integer([:positive, :monotonic])
+
+  defp normalize_component(fun) when is_function(fun, 1),
+    do: {:ok, %{type: :function, target: fun}}
+
+  defp normalize_component(module) when is_atom(module) do
+    case Code.ensure_loaded(module) do
+      {:module, ^module} -> {:ok, %{type: :live_component, target: module}}
+      {:error, reason} -> {:error, {:component_module_not_found, module, reason}}
+    end
+  end
+
+  defp normalize_component(_target), do: {:error, :invalid_component_target}
+
+  defp valid_component_socket(%Phoenix.LiveView.Socket{} = socket, _fallback), do: socket
+  defp valid_component_socket(_invalid, fallback), do: fallback
 
   defp builtin_page(path), do: Enum.find(builtin_pages(), &(&1.path == path))
   defp builtin_command(name), do: Enum.find(builtin_commands(), &(&1.name == name))

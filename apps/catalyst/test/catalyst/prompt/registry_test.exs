@@ -46,27 +46,6 @@ defmodule Catalyst.Prompt.RegistryTest do
     :ok
   end
 
-  test "runtime text overlays live application values and removal reveals the current value" do
-    Application.put_env(:catalyst, :prompts, %{system: %{default: "application v1"}})
-
-    assert {:ok, "application v1", {:application, {:prompts, :system, :default}}} =
-             Registry.lookup_text(:system, :default)
-
-    assert :ok = Registry.register_prompt(:default, "runtime", owner: "prompt-owner")
-
-    assert {:ok, "runtime", {:extension, "prompt-owner", {:text, :system, :default}}} =
-             Registry.lookup_text(:system, :default)
-
-    Application.put_env(:catalyst, :prompts, %{system: %{default: "application v2"}})
-    assert :ok = Registry.unregister_owner("prompt-owner")
-
-    assert {:ok, "application v2", {:application, {:prompts, :system, :default}}} =
-             Registry.lookup_text(:system, :default)
-
-    Application.delete_env(:catalyst, :prompts)
-    assert :error = Registry.lookup_text(:system, :default)
-  end
-
   test "same-owner replacement is allowed and cross-owner collisions preserve the first entry" do
     key = {:text, :compaction, "gpt-test"}
 
@@ -96,32 +75,18 @@ defmodule Catalyst.Prompt.RegistryTest do
     assert :ok = Registry.register_prompt("a", "A", owner: "owner-a")
     assert :ok = Registry.register_policy(FirstPolicy, owner: "owner-a")
 
-    assert :ok = Registry.unregister_owner("owner-a")
+    assert :ok = Catalyst.Runtime.Registry.purge_owner("owner-a")
 
     assert :error = Registry.runtime_text(:system, "a")
     assert {:ok, "B", "owner-b"} = Registry.runtime_text(:system, "b")
     assert {:ok, Catalyst.SystemPrompt, :builtin} = Registry.policy()
   end
 
-  test "runtime_entries returns a stable sorted owner-aware view" do
-    assert :ok = Registry.register_prompt("z", "Z", owner: "owner-z")
-    assert :ok = Registry.register_policy(FirstPolicy, owner: "owner-policy")
-    assert :ok = Registry.register_prompt("a", "A", owner: "owner-a")
-
-    assert Registry.runtime_entries() == [
-             %{key: {:policy, :default}, value: FirstPolicy, owner: "owner-policy"},
-             %{key: {:text, :system, "a"}, value: "A", owner: "owner-a"},
-             %{key: {:text, :system, "z"}, value: "Z", owner: "owner-z"}
-           ]
-  end
-
   test "policy selection is runtime then live application then built-in" do
     assert {:ok, Catalyst.SystemPrompt, :builtin} = Registry.policy()
-    assert {:ok, Catalyst.SystemPrompt} = Registry.fetch_policy()
 
     Application.put_env(:catalyst, :prompt_policy, FirstPolicy)
     assert {:ok, FirstPolicy, {:application, :prompt_policy}} = Registry.policy()
-    assert {:ok, FirstPolicy} = Registry.fetch_policy()
 
     assert :ok = Registry.register_policy(SecondPolicy, owner: "policy-owner")
 
@@ -129,7 +94,7 @@ defmodule Catalyst.Prompt.RegistryTest do
              Registry.policy()
 
     Application.delete_env(:catalyst, :prompt_policy)
-    assert :ok = Registry.unregister_owner("policy-owner")
+    assert :ok = Catalyst.Runtime.Registry.purge_owner("policy-owner")
     assert {:ok, Catalyst.SystemPrompt, :builtin} = Registry.policy()
   end
 
@@ -146,7 +111,7 @@ defmodule Catalyst.Prompt.RegistryTest do
     assert {:error, {:invalid_registration, {:policy, :default}, String}} =
              Registry.register_policy(String)
 
-    assert Registry.runtime_entries() == []
+    assert RuntimeRegistry.list(:prompt) == []
   end
 
   test "malformed live policy configuration is tagged" do
@@ -155,15 +120,11 @@ defmodule Catalyst.Prompt.RegistryTest do
   end
 
   test "reads still use live application fallback while the ETS table is absent" do
-    Application.put_env(:catalyst, :prompts, %{system: %{default: "without ETS"}})
     Application.put_env(:catalyst, :prompt_policy, FirstPolicy)
 
     with_registry_absent(fn ->
-      assert {:ok, "without ETS", {:application, {:prompts, :system, :default}}} =
-               Registry.lookup_text(:system, :default)
-
       assert {:ok, FirstPolicy, {:application, :prompt_policy}} = Registry.policy()
-      assert Registry.runtime_entries() == []
+      assert RuntimeRegistry.list(:prompt) == []
     end)
   end
 
@@ -180,8 +141,8 @@ defmodule Catalyst.Prompt.RegistryTest do
   end
 
   defp clear_runtime do
-    Registry.runtime_entries()
-    |> Enum.each(&Registry.unregister(&1.key))
+    RuntimeRegistry.list(:prompt)
+    |> Enum.each(&RuntimeRegistry.delete(:prompt, &1.key))
   end
 
   defp with_registry_absent(fun) do

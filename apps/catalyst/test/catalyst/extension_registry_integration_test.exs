@@ -341,20 +341,25 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
   end
 
   defp owner_registered?(owner) do
-    Enum.any?([PromptRegistry, WorkflowRegistry, ContextRegistry], fn registry ->
-      Enum.any?(registry.runtime_entries(), &(&1.owner == owner))
-    end)
+    Enum.any?(Catalyst.Runtime.Registry.list_all(), &(&1.owner == owner))
   end
 
   defp runtime_entry(registry, key) do
-    case Enum.find(registry.runtime_entries(), &(&1.key == key)) do
-      %{value: value, owner: owner} -> %{value: value, owner: owner}
-      nil -> nil
+    {kind, storage_key} = storage_key(registry, key)
+
+    case Catalyst.Runtime.Registry.fetch(kind, storage_key) do
+      {:ok, value, owner} -> %{value: value, owner: owner}
+      :error -> nil
     end
   end
 
   defp key_registered?(registry, key),
-    do: Enum.any?(registry.runtime_entries(), &(&1.key == key))
+    do: not is_nil(runtime_entry(registry, key))
+
+  defp storage_key(PromptRegistry, key), do: {:prompt, key}
+  defp storage_key(WorkflowRegistry, {:workflow, name}), do: {:workflow, name}
+  defp storage_key(ContextRegistry, {:policy, :default}), do: {:context_policy, :default}
+  defp storage_key(ContextRegistry, {:threshold, model}), do: {:context_threshold, model}
 
   defp write_extension!(owner, source) do
     path = Path.join(Extensions.dir(), owner <> ".ex")

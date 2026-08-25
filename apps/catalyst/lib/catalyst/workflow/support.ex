@@ -47,11 +47,17 @@ defmodule Catalyst.Workflow.Support do
   def resolve_turn_tools(config) when is_map(config) do
     source = tool_source(config)
     tools = resolve_tools(config)
+    modules = MapSet.new(tools)
+
+    index =
+      source
+      |> Catalyst.Extensions.tool_index()
+      |> Map.filter(fn {_name, entry} -> MapSet.member?(modules, entry.module) end)
 
     config
     |> Map.put(:tool_source, source)
     |> Map.put(:tools, tools)
-    |> Map.put(:tool_index, ToolRegistry.index(tools))
+    |> Map.put(:tool_index, index)
   end
 
   @doc """

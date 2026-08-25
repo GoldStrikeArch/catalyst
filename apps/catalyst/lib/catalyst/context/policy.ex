@@ -1,3 +1,20 @@
+defmodule Catalyst.Context.Compaction do
+  @moduledoc """
+  A context policy's proposed chronological transcript replacement.
+
+  The replacement is advisory until `Catalyst.Context.Guard` validates the
+  message shape and recomputes authoritative accounting for the staged request.
+  """
+
+  @enforce_keys [:replacement]
+  defstruct [:replacement, :summary]
+
+  @type t :: %__MODULE__{
+          replacement: [Catalyst.Message.t()],
+          summary: Catalyst.Message.User.t() | nil
+        }
+end
+
 defmodule Catalyst.Context.Policy do
   @moduledoc """
   Behaviour for request-time context thresholds and persistent compaction.

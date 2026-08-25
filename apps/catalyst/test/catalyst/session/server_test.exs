@@ -502,7 +502,7 @@ defmodule Catalyst.Session.ServerTest do
                owner: owner
              )
 
-    on_exit(fn -> Catalyst.Workflow.Registry.unregister_owner(owner) end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner(owner) end)
     {_id, pid} = start(tmp, model, [])
 
     assert :ok =

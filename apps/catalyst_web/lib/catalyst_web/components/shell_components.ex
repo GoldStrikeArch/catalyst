@@ -24,7 +24,6 @@ defmodule CatalystWeb.ShellComponents do
     assigns =
       assign(assigns,
         codex_form: codex_form(assigns.codex_prefs),
-        workflow_form: workflow_form(assigns.workflow_prefs),
         diagnostic_prompt: diagnostic_prompt(assigns),
         diagnostic_workflow: metadata_value(assigns.run_metadata, :workflow),
         diagnostic_context: metadata_value(assigns.run_metadata, :context)
@@ -77,14 +76,6 @@ defmodule CatalystWeb.ShellComponents do
               {page.label}
             </.link>
           </nav>
-
-          <.link
-            navigate={~p"/compare"}
-            id="comparison-nav"
-            class="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-muted transition hover:bg-raised hover:text-ink"
-          >
-            <.icon name="hero-squares-2x2" class="size-3" /> Compare
-          </.link>
 
           {PageRenderer.render_components(:header_extra, assigns)}
 
@@ -159,15 +150,12 @@ defmodule CatalystWeb.ShellComponents do
                 prompt_preview={@prompt_preview}
                 diagnostics_open={@diagnostics_open}
                 ui_prefs={@ui_prefs}
-                machine_prefs={@machine_prefs}
-                workflow_form={@workflow_form}
-                workflow_options={@workflow_options}
-                workflow_prefs={@workflow_prefs}
                 codex_form={@codex_form}
                 codex_catalog={@codex_catalog}
                 selected_codex_entry={@selected_codex_entry}
                 codex_prefs={@codex_prefs}
                 chrome_menu={@chrome_menu}
+                root={assigns}
               />
             </footer>
           </div>
@@ -413,54 +401,7 @@ defmodule CatalystWeb.ShellComponents do
           <.icon name="hero-eye-slash" class="size-3.5" />
         </button>
 
-        <button
-          id="computer-toggle"
-          type="button"
-          phx-click="toggle_computer_use"
-          aria-pressed={to_string(@machine_prefs.computer_use)}
-          title="Computer use: let the agent see the screen and drive this machine. Full access, no sandbox — applies to the next run and is never inherited by subagents."
-          class={icon_btn_class(@machine_prefs.computer_use, :warn)}
-        >
-          <.icon name="hero-computer-desktop" class="size-3.5" />
-        </button>
-
-        <.form
-          :if={show_workflow_picker?(@workflow_options, @workflow_prefs)}
-          for={@workflow_form}
-          id="workflow-form"
-          phx-change="select_workflow"
-          class="sr-only"
-        >
-          <.input
-            field={@workflow_form[:workflow]}
-            id="workflow-select"
-            type="select"
-            options={workflow_select_options(@workflow_options)}
-            container_class="m-0"
-            class={codex_select_class()}
-            title="Agent workflow (applies to the next run)"
-          />
-        </.form>
-
-        <.chrome_menu
-          :if={show_workflow_picker?(@workflow_options, @workflow_prefs)}
-          id="workflow-menu"
-          menu="workflow"
-          open?={@chrome_menu == :workflow}
-          label={workflow_label(@workflow_prefs, @workflow_options)}
-          title="Agent workflow (applies to the next run)"
-        >
-          <button
-            :for={option <- @workflow_options}
-            id={"workflow-option-#{workflow_option_value(option) || "default"}"}
-            type="button"
-            phx-click="select_workflow"
-            phx-value-workflow={workflow_option_value(option)}
-            class={menu_item_class(workflow_selected?(option, @workflow_prefs))}
-          >
-            {workflow_option_label(option)}
-          </button>
-        </.chrome_menu>
+        {PageRenderer.render_components(:run_controls, @root)}
 
         <div id="codex-control-group" class="flex min-w-0 items-center gap-0.5">
           <.form for={@codex_form} id="codex-opts" phx-change="codex_opts" class="sr-only">
@@ -590,10 +531,6 @@ defmodule CatalystWeb.ShellComponents do
   defp subscription_name(%{auth_label: label}), do: label
   defp subscription_name(_entry), do: "Subscription"
 
-  defp workflow_form(prefs) do
-    to_form(%{"workflow" => prefs.workflow || ""})
-  end
-
   attr :id, :string, required: true
   attr :menu, :string, required: true
   attr :open?, :boolean, required: true
@@ -641,48 +578,9 @@ defmodule CatalystWeb.ShellComponents do
     """
   end
 
-  defp show_workflow_picker?(options, prefs) do
-    length(options) > 1 or prefs.workflow != nil
-  end
-
-  defp workflow_select_options(options) do
-    Enum.map(options, fn option ->
-      {workflow_option_label(option), workflow_option_value(option)}
-    end)
-  end
-
-  defp workflow_option_value(%{name: :default}), do: ""
-  defp workflow_option_value(%{name: name}), do: name
-
-  defp workflow_option_label(%{name: :default, source: source}),
-    do: "default" <> workflow_suffix(source)
-
-  defp workflow_option_label(%{name: name, source: source}),
-    do: name <> workflow_suffix(source)
-
-  defp workflow_selected?(%{name: :default}, %{workflow: nil}), do: true
-  defp workflow_selected?(%{name: name}, %{workflow: name}), do: true
-  defp workflow_selected?(_option, _prefs), do: false
-
-  defp workflow_label(%{workflow: nil}, _options), do: "default"
-
-  defp workflow_label(%{workflow: name}, options) do
-    case Enum.find(options, &(&1.name == name)) do
-      nil -> name
-      option -> workflow_option_label(option)
-    end
-  end
-
   defp diagnostics_title(%{prompt: %{digest: digest}}), do: "Prompt " <> digest_prefix(digest)
   defp diagnostics_title(%{preview: :loading}), do: "Resolving prompt…"
   defp diagnostics_title(_assigns), do: "Run details"
-
-  defp workflow_suffix(:builtin), do: ""
-  defp workflow_suffix(:unavailable), do: " (unavailable)"
-  defp workflow_suffix({:runtime, _owner, _key}), do: " (extension)"
-  defp workflow_suffix({:application, _setting}), do: " (config)"
-  defp workflow_suffix({:template, _metadata}), do: " (template)"
-  defp workflow_suffix(_source), do: ""
 
   attr :status, :map, required: true
 
@@ -910,7 +808,6 @@ defmodule CatalystWeb.ShellComponents do
       "flex size-7 items-center justify-center rounded-md transition",
       !active? && "text-muted hover:bg-raised hover:text-ink",
       active? && kind == :default && "bg-raised text-ink",
-      active? && kind == :warn && "bg-danger/10 text-danger",
       # Amber is the accepted second hue for "fast mode" — kept out of the token
       # palette on purpose, so it stays a `dark:` pair.
       active? && kind == :fast &&

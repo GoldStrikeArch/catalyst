@@ -42,7 +42,6 @@ defmodule Catalyst.Auth.XAIOAuth do
   def request_device_code(opts \\ []) do
     issuer = issuer(opts)
     client_id = Keyword.get(opts, :client_id, @client_id)
-
     form = %{"client_id" => client_id, "scope" => @scope, "referrer" => "grok-build"}
 
     case Req.post(issuer <> "/oauth2/device/code",

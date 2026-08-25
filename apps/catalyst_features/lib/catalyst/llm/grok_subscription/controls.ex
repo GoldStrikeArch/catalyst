@@ -31,6 +31,12 @@ defmodule Catalyst.LLM.GrokSubscription.Controls do
   def auth_label, do: "SuperGrok"
 
   @impl true
+  def login, do: Catalyst.Auth.XAILogin.login()
+
+  @impl true
+  def refresh_auth(creds), do: XAIOAuth.refresh(creds)
+
+  @impl true
   def run_opts(prefs) do
     [reasoning_effort: prefs.effort, service_tier: nil, transport: nil]
   end

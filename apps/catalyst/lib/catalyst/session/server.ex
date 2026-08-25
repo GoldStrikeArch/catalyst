@@ -17,7 +17,7 @@ defmodule Catalyst.Session.Server do
   require Logger
 
   alias Catalyst.Agent.Event
-  alias Catalyst.{Message, Tasks}
+  alias Catalyst.{Content, Message, Tasks}
 
   alias Catalyst.Session.{
     EventSink,
@@ -25,7 +25,6 @@ defmodule Catalyst.Session.Server do
     Reducer,
     RunConfig,
     RunContext,
-    Snapshot,
     Store
   }
 
@@ -79,9 +78,31 @@ defmodule Catalyst.Session.Server do
   @spec abort(GenServer.server()) :: :ok
   def abort(server), do: GenServer.cast(server, :abort)
 
-  @doc "Snapshot of the current session state (see `Catalyst.Session.Snapshot.of/1`)."
+  @doc "Snapshot of the current session state."
   @spec state(GenServer.server()) :: map()
   def state(server), do: GenServer.call(server, :state)
+
+  @doc false
+  @spec snapshot(map()) :: map()
+  def snapshot(state) do
+    %{
+      id: state.id,
+      cwd: state.cwd,
+      parent_id: state.parent_id,
+      root_session_id: state.root_session_id,
+      agent_depth: state.agent_depth,
+      messages: Enum.reverse(state.messages),
+      streaming_message: project_streaming(state),
+      pending_tool_calls: MapSet.to_list(state.pending_tool_calls),
+      running: state.run != nil,
+      model: state.model,
+      opts: state.opts || [],
+      system_prompt: state.system_prompt,
+      run_metadata: visible_run_metadata(state),
+      store_path: state.store.path,
+      error_message: state.error_message
+    }
+  end
 
   @doc "Persist and broadcast an assistant message recovered outside an active session run."
   @spec append_recovered(GenServer.server(), Message.Assistant.t()) :: :ok | {:error, term()}
@@ -258,7 +279,7 @@ defmodule Catalyst.Session.Server do
     {:reply, {:error, :stale_run}, state}
   end
 
-  def handle_call(:state, _from, state), do: {:reply, Snapshot.of(state), state}
+  def handle_call(:state, _from, state), do: {:reply, snapshot(state), state}
 
   def handle_call({:append_recovered, message}, _from, state) do
     event = %Event.MessageEnd{message: message}
@@ -958,6 +979,41 @@ defmodule Catalyst.Session.Server do
   end
 
   defp cleanup_resource_now(_resource), do: :ok
+
+  defp visible_run_metadata(%{
+         run: run,
+         agent_ended: true,
+         run_final_assistant: %Message.Assistant{stop_reason: reason},
+         current_run_metadata: current
+       })
+       when not is_nil(run) and reason not in [:error, :aborted],
+       do: current
+
+  defp visible_run_metadata(%{run: run, agent_ended: true} = state) when not is_nil(run),
+    do: state.last_successful_run_metadata
+
+  defp visible_run_metadata(%{run: run, current_run_metadata: current}) when not is_nil(run),
+    do: current
+
+  defp visible_run_metadata(state), do: state.last_successful_run_metadata
+
+  defp project_streaming(%{streaming_message: nil}), do: nil
+
+  defp project_streaming(state) do
+    thinking = streaming_binary(state.streaming_thinking)
+    text = streaming_binary(state.streaming_text)
+
+    blocks =
+      [
+        thinking != "" && %Content.Thinking{thinking: thinking},
+        text != "" && %Content.Text{text: text}
+      ]
+      |> Enum.filter(& &1)
+
+    %{state.streaming_message | content: blocks}
+  end
+
+  defp streaming_binary(chunks), do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
   defp append_best_effort(state, operation, append) when is_function(append, 0) do
     case append.() do
