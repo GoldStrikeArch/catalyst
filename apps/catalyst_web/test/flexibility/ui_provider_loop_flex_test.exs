@@ -9,7 +9,8 @@ defmodule CatalystWeb.Flex.UIProviderLoopFlexTest do
   @shell_keys [
     {CatalystWeb.ShellLive, :current_session},
     {CatalystWeb.ShellLive, :codex_prefs},
-    {CatalystWeb.ShellLive, :ui_prefs}
+    {CatalystWeb.ShellLive, :ui_prefs},
+    {CatalystWeb.ShellLive, :machine_prefs}
   ]
 
   test "W2: stock Codex UI composes provider injection, model data, and a custom loop", %{

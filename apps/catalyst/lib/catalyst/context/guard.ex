@@ -10,7 +10,7 @@ defmodule Catalyst.Context.Guard do
 
   alias Catalyst.Agent.Event
   alias Catalyst.{Hooks, Tasks}
-  alias Catalyst.Context.{Compaction, Registry, Tokens, Transcript, Window}
+  alias Catalyst.Context.{Compaction, Tokens, Transcript, Window}
   alias Catalyst.LLM.Context, as: LLMContext
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
@@ -38,7 +38,7 @@ defmodule Catalyst.Context.Guard do
       when is_map(context) and is_map(config) and is_function(emit, 1) do
     with {:ok, llm_context} <- build_llm_context(context, config),
          {:ok, estimate} <- estimate(config, llm_context),
-         {:ok, policy, policy_source} <- Registry.policy(),
+         {:ok, policy, policy_source} <- Window.policy(),
          {:ok, threshold, threshold_source} <-
            resolve_threshold(policy, policy_source, config, estimate, guard_opts) do
       status = status_event(estimate, threshold, threshold_source)

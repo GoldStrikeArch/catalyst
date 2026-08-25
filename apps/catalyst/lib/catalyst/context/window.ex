@@ -1,25 +1,45 @@
+defmodule Catalyst.Context.Compaction do
+  @moduledoc """
+  A context policy's proposed chronological transcript replacement.
+
+  The replacement is advisory until `Catalyst.Context.Guard` validates the
+  message shape and recomputes authoritative accounting for the staged request.
+  """
+
+  @enforce_keys [:replacement]
+  defstruct [:replacement, :summary]
+
+  @type t :: %__MODULE__{
+          replacement: [Catalyst.Message.t()],
+          summary: Catalyst.Message.User.t() | nil
+        }
+end
+
 defmodule Catalyst.Context.Window do
   @moduledoc """
   Catalyst's provider-neutral context-window policy.
 
-  Threshold resolution is exact and live: session option, runtime registry,
-  application configuration, then a conservative catalog/window fallback.  The
+  Threshold resolution is exact and live: session option, runtime overlay,
+  application configuration, then a conservative catalog/window fallback. The
   compactor removes only a complete old prefix and returns a staged replacement;
   `Catalyst.Context.Guard` performs the authoritative transformed-request check
-  before anything is emitted or persisted.  Transcript structure rules live in
+  before anything is emitted or persisted. Transcript structure rules live in
   `Catalyst.Context.Transcript`; provider-backed summarization lives in
   `Catalyst.Context.Summarizer`.
   """
 
   @behaviour Catalyst.Context.Policy
 
+  alias Catalyst.ExtensionAPI
   alias Catalyst.Message
-  alias Catalyst.Context.{Compaction, Registry, Summarizer, Transcript}
+  alias Catalyst.Context.{Compaction, Summarizer, Transcript}
+  alias Catalyst.Runtime.Registry, as: Runtime
 
-  # Ordered threshold resolution: the first source producing a value wins and
-  # is normalized against the model's effective window. This literal list is
-  # the resolution order.
+  @policy_key {:policy, :default}
   @threshold_sources [:session, :registry, :builtin]
+
+  @type model_key :: String.t() | :default
+  @type overlay_threshold :: :none | pos_integer() | float()
 
   @impl true
   @spec threshold(Catalyst.Model.t() | nil, map()) ::
@@ -36,12 +56,10 @@ defmodule Catalyst.Context.Window do
   @doc """
   Resolve a threshold together with the winning provenance layer.
 
-  Sources are consulted in order (session option, runtime/application
-  registry, built-in catalog/ratio fallback); each returns
-  `{:ok, raw, source} | :missing | {:error, reason}`.  A raw `:none` means the
-  winning source explicitly disabled compaction and keeps that source's
-  provenance; a bare `:none` return means every source was missing — no window
-  and no catalog limit exist, so no threshold can apply.
+  Sources are consulted in order (session option, runtime/application overlay,
+  built-in catalog/ratio fallback). A raw `:none` means the winning source
+  explicitly disabled compaction; a bare `:none` return means every source was
+  missing.
   """
   @spec threshold_with_source(Catalyst.Model.t() | nil, map()) ::
           {:ok, pos_integer() | :none, term()} | :none | {:error, term()}
@@ -92,9 +110,77 @@ defmodule Catalyst.Context.Window do
   @spec companion_id(String.t()) :: String.t()
   defdelegate companion_id(session_id), to: Summarizer
 
+  @doc "Register the runtime default context policy."
+  @spec register_policy(module(), keyword()) :: :ok | {:error, term()}
+  def register_policy(module, opts \\ []) do
+    with :ok <- validate_overlay(@policy_key, module) do
+      Runtime.put(:context_policy, :default, module, Keyword.put(opts, :collision_key, nil))
+    end
+  end
+
+  @doc "Register a runtime threshold for an exact model id/api or `:default`."
+  @spec register_threshold(model_key(), overlay_threshold(), keyword()) ::
+          :ok | {:error, term()}
+  def register_threshold(model_key, value, opts \\ []) do
+    with :ok <- validate_overlay({:threshold, model_key}, value) do
+      Runtime.put(:context_threshold, model_key, value, opts)
+    end
+  end
+
+  @doc "Remove the runtime policy overlay."
+  @spec unregister_policy() :: :ok
+  def unregister_policy, do: Runtime.delete(:context_policy, :default)
+
+  @doc "Remove one runtime threshold overlay."
+  @spec unregister_threshold(model_key()) :: :ok
+  def unregister_threshold(model_key), do: Runtime.delete(:context_threshold, model_key)
+
+  @doc "Resolve the effective context policy (runtime, live app config, built-in)."
+  @spec policy() :: {:ok, module(), term()} | {:error, term()}
+  def policy do
+    case Runtime.fetch(:context_policy, :default) do
+      {:ok, module, owner} -> {:ok, module, {:extension, owner, @policy_key}}
+      :error -> configured_policy()
+    end
+  end
+
+  @doc """
+  Resolve an explicit threshold overlay for a model using exact id, api, then
+  `:default`. Returns `:missing` when the built-in window strategy should run.
+  """
+  @spec overlay_threshold(Catalyst.Model.t() | nil) ::
+          {:ok, overlay_threshold(), term()} | :missing | {:error, term()}
+  def overlay_threshold(model) do
+    keys = Catalyst.Prompt.model_keys(model)
+
+    case first_runtime_threshold(keys) do
+      {:ok, _value, _source} = found -> found
+      :missing -> configured_threshold(keys)
+    end
+  end
+
   @doc false
   @spec builtin_threshold(Catalyst.Model.t() | nil) :: {:ok, pos_integer(), :builtin} | :missing
   def builtin_threshold(model), do: builtin_source(model, effective_window(model))
+
+  @doc false
+  @spec register_extension_policy(ExtensionAPI.t(), module(), keyword()) ::
+          :ok | {:error, term()}
+  def register_extension_policy(%ExtensionAPI{owner: owner}, module, opts) do
+    register_policy(module, Keyword.put(opts, :owner, owner))
+  end
+
+  @doc false
+  @spec register_extension_threshold(
+          ExtensionAPI.t(),
+          model_key(),
+          overlay_threshold(),
+          keyword()
+        ) ::
+          :ok | {:error, term()}
+  def register_extension_threshold(%ExtensionAPI{owner: owner}, model_key, value, opts) do
+    register_threshold(model_key, value, Keyword.put(opts, :owner, owner))
+  end
 
   defp threshold_source(:session, _model, _window, context) do
     opts = Map.get(context, :opts, []) || []
@@ -111,7 +197,7 @@ defmodule Catalyst.Context.Window do
     end
   end
 
-  defp threshold_source(:registry, model, _window, _context), do: Registry.threshold(model)
+  defp threshold_source(:registry, model, _window, _context), do: overlay_threshold(model)
 
   defp threshold_source(:builtin, model, window, _context),
     do: builtin_source(model, window)
@@ -187,7 +273,6 @@ defmodule Catalyst.Context.Window do
   end
 
   defp ratio_limit({:ok, window}), do: floor(window * 0.70)
-
   defp ratio_limit(:error), do: nil
 
   defp fetch_positive(context, key) do
@@ -243,8 +328,6 @@ defmodule Catalyst.Context.Window do
         {:ok, %Compaction{replacement: replacement, summary: accepted_summary}}
 
       {:error, _reason} ->
-        # A failed/oversized summary is not fatal.  Retry the same deterministic
-        # whole-unit tightening without it before declaring the suffix irreducible.
         case fit_candidate(nil, kept, protected_count, before, target, threshold, context) do
           {:ok, replacement, nil, _after_tokens} ->
             {:ok, %Compaction{replacement: replacement}}
@@ -291,9 +374,6 @@ defmodule Catalyst.Context.Window do
     end
   end
 
-  # A candidate fits only when its estimate succeeded, shrinks the transcript,
-  # and the replacement stays structurally valid. A failed estimate is a
-  # tagged miss (`:unfit`) rather than a huge sentinel token count.
   defp fit_tokens(replacement, before, context) do
     with {:ok, tokens} when tokens < before <- estimate_replacement(replacement, context),
          true <- Transcript.valid_transcript?(replacement) do
@@ -318,8 +398,6 @@ defmodule Catalyst.Context.Window do
     end
   end
 
-  # Estimator seams may return a raw count (tests, simple policies) or the
-  # tagged `Catalyst.Context.Tokens.estimate_tokens/3` result (the guard).
   defp normalize_estimate({:ok, tokens}) when is_integer(tokens) and tokens >= 0,
     do: {:ok, tokens}
 
@@ -371,4 +449,87 @@ defmodule Catalyst.Context.Window do
   defp user_unit?(_unit), do: false
 
   defp positive_integer?(value), do: is_integer(value) and value > 0
+
+  defp validate_overlay(@policy_key = key, module) do
+    case policy_module?(module) do
+      true -> :ok
+      false -> {:error, {:invalid_registration, key, module}}
+    end
+  end
+
+  defp validate_overlay({:threshold, model_key} = key, value) do
+    case valid_overlay_key?(model_key) and valid_overlay_threshold?(value) do
+      true -> :ok
+      false -> {:error, {:invalid_registration, key, value}}
+    end
+  end
+
+  defp valid_overlay_threshold?(:none), do: true
+  defp valid_overlay_threshold?(value) when is_integer(value), do: value > 0
+  defp valid_overlay_threshold?(value) when is_float(value), do: value > 0.0 and value <= 1.0
+  defp valid_overlay_threshold?(_value), do: false
+
+  defp valid_overlay_key?(:default), do: true
+  defp valid_overlay_key?(key) when is_binary(key), do: String.trim(key) != ""
+  defp valid_overlay_key?(_key), do: false
+
+  defp first_runtime_threshold(keys) do
+    Enum.find_value(keys, :missing, fn key ->
+      case Runtime.fetch(:context_threshold, key) do
+        {:ok, value, owner} -> {:ok, value, {:extension, owner, {:threshold, key}}}
+        :error -> false
+      end
+    end)
+  end
+
+  defp configured_policy do
+    module = Application.get_env(:catalyst, :context_policy, __MODULE__)
+
+    case policy_module?(module) do
+      true ->
+        source =
+          case Application.fetch_env(:catalyst, :context_policy) do
+            {:ok, _value} -> {:application, :context_policy}
+            :error -> :builtin
+          end
+
+        {:ok, module, source}
+
+      false ->
+        {:error, {:invalid_configuration, :context_policy, module}}
+    end
+  end
+
+  defp configured_threshold(keys) do
+    case Application.get_env(:catalyst, :context_thresholds, %{}) do
+      config when is_map(config) ->
+        with :ok <- validate_threshold_config(config) do
+          Enum.find_value(keys, :missing, fn key ->
+            case Map.fetch(config, key) do
+              {:ok, value} -> {:ok, value, {:application, :context_thresholds, key}}
+              :error -> false
+            end
+          end)
+        end
+
+      malformed ->
+        {:error, {:invalid_configuration, :context_thresholds, malformed}}
+    end
+  end
+
+  defp validate_threshold_config(config) do
+    Enum.reduce_while(config, :ok, fn {key, value}, :ok ->
+      case valid_overlay_key?(key) and valid_overlay_threshold?(value) do
+        true -> {:cont, :ok}
+        false -> {:halt, {:error, {:invalid_configuration, :context_thresholds, {key, value}}}}
+      end
+    end)
+  end
+
+  defp policy_module?(module) when is_atom(module) do
+    Code.ensure_loaded?(module) and function_exported?(module, :threshold, 2) and
+      function_exported?(module, :compact, 2)
+  end
+
+  defp policy_module?(_module), do: false
 end

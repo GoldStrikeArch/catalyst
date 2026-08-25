@@ -1,7 +1,7 @@
-defmodule Catalyst.Session.RunConfigTest do
+defmodule Catalyst.Session.RunContextTest do
   use ExUnit.Case, async: false
 
-  alias Catalyst.Session.RunConfig
+  alias Catalyst.Session.RunContext
   alias Catalyst.LLM.Registry
 
   defp state(overrides) do
@@ -20,16 +20,16 @@ defmodule Catalyst.Session.RunConfigTest do
 
   defp build_base!(state) do
     {:ok, config} =
-      RunConfig.build_base(state, self(), make_ref(), Catalyst.LLM.Faux)
+      RunContext.build_base(state, self(), make_ref(), Catalyst.LLM.Faux)
 
     config
   end
 
   test "a session without a resolvable provider is a tagged error, not a raise" do
-    assert {:error, :no_provider} = RunConfig.resolve_provider(state(provider: nil))
+    assert {:error, :no_provider} = RunContext.resolve_provider(state(provider: nil))
 
     assert {:error, {:unknown_api, "nope"}} =
-             RunConfig.resolve_provider(state(provider: "nope"))
+             RunContext.resolve_provider(state(provider: "nope"))
   end
 
   test "the canonical session id overrides nested caller options" do
@@ -45,7 +45,7 @@ defmodule Catalyst.Session.RunConfigTest do
   test "child inheritance keeps tuning data and removes parent controls and process terms" do
     ref = make_ref()
 
-    assert RunConfig.inheritable_opts(
+    assert RunContext.inheritable_opts(
              reasoning_effort: "high",
              context_threshold: 42_000,
              # A bare boolean passes `inheritable_term?/1`, so the machine-access
@@ -67,7 +67,7 @@ defmodule Catalyst.Session.RunConfigTest do
   end
 
   test "an improper list option is dropped instead of crashing inheritance" do
-    assert RunConfig.inheritable_opts(custom: [1 | 2], kept: [1, 2]) == [kept: [1, 2]]
+    assert RunContext.inheritable_opts(custom: [1 | 2], kept: [1, 2]) == [kept: [1, 2]]
   end
 
   test "prewarm receives the canonical session id" do
@@ -75,7 +75,7 @@ defmodule Catalyst.Session.RunConfigTest do
     on_exit(fn -> Application.delete_env(:catalyst, :blocking_prewarm_test) end)
 
     assert {:ok, pid} =
-             RunConfig.start_prewarm(
+             RunContext.start_prewarm(
                state(
                  provider: Catalyst.Test.BlockingPrewarmProvider,
                  opts: [session_id: "../../outside"],
@@ -122,7 +122,7 @@ defmodule Catalyst.Session.RunConfigTest do
         {Task,
          fn ->
            result =
-             RunConfig.cleanup_session(
+             RunContext.cleanup_session(
                state(id: session_id, provider: Catalyst.Test.BlockingCleanupProvider)
              )
 

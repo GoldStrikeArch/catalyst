@@ -3,7 +3,7 @@ defmodule Catalyst.Workflow.ComputerUseGateTest do
   use ExUnit.Case, async: false
 
   alias Catalyst.Extensions
-  alias Catalyst.Session.RunConfig
+  alias Catalyst.Session.RunContext
   alias Catalyst.Tools.Registry, as: ToolRegistry
   alias Catalyst.Workflow.Support
 
@@ -119,7 +119,7 @@ defmodule Catalyst.Workflow.ComputerUseGateTest do
     with_backend(true)
 
     parent_opts = [computer_use: true, reasoning_effort: "high"]
-    child_opts = RunConfig.inheritable_opts(parent_opts)
+    child_opts = RunContext.inheritable_opts(parent_opts)
 
     refute Keyword.has_key?(child_opts, :computer_use)
     assert child_opts == [reasoning_effort: "high"]
@@ -160,7 +160,7 @@ defmodule Catalyst.Workflow.ComputerUseGateTest do
     # A child run carries agent_depth > 0 and (via inheritable_opts/1) no
     # :computer_use opt of its own. The app-env fallback must not answer for
     # it — otherwise the global override silently re-grants every subagent.
-    child_opts = RunConfig.inheritable_opts(computer_use: true)
+    child_opts = RunContext.inheritable_opts(computer_use: true)
     refute Keyword.has_key?(child_opts, :computer_use)
 
     assert Support.resolve_tools(config([])) == [PlainTool, GatedTool]

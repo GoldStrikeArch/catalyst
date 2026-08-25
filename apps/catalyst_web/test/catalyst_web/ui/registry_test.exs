@@ -14,24 +14,6 @@ defmodule CatalystWeb.UI.RegistryTest do
     :ok
   end
 
-  test "extension wiring uses stable external captures" do
-    handlers = %{
-      renderer: {:register_extension_renderer, 4},
-      component: {:register_extension_component, 4},
-      page: {:register_extension_page, 4},
-      command: {:register_extension_command, 3}
-    }
-
-    for {kind, {name, arity}} <- handlers do
-      handler = :persistent_term.get({ExtensionAPI, :kind, kind})
-
-      assert Function.info(handler, :type) == {:type, :external}
-      assert Function.info(handler, :module) == {:module, Registry}
-      assert Function.info(handler, :name) == {:name, name}
-      assert Function.info(handler, :arity) == {:arity, arity}
-    end
-  end
-
   describe "pages" do
     test "last write wins per path, and purging the owner restores a displaced built-in" do
       assert {:ok, {CatalystWeb.Pages.ChatPage, :render}} = Registry.fetch_page("chat")

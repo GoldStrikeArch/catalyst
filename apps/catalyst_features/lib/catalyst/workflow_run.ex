@@ -9,7 +9,6 @@ defmodule Catalyst.WorkflowRun do
 
   alias Catalyst.{Content, Message}
   alias Catalyst.Session.{Manager, Server}
-  alias Catalyst.Session.Store.Codec
   alias Catalyst.WorkflowRun.{Coordinator, Names, Store}
 
   @dynamic_supervisor Catalyst.WorkflowRun.DynamicSupervisor
@@ -170,7 +169,7 @@ defmodule Catalyst.WorkflowRun do
     with parent when is_binary(parent) <- checkpoint["input"]["parent_session_id"],
          artifact when is_binary(artifact) <- final_artifact(checkpoint),
          {:ok, session} <- parent_session(parent, checkpoint["input"]),
-         {:ok, model} <- Codec.decode_model(checkpoint["input"]["model"]) do
+         {:ok, model} <- Catalyst.Session.Store.decode_model(checkpoint["input"]["model"]) do
       Server.append_recovered(session, recovered_message(artifact, model.id))
     else
       _missing_or_unavailable -> :ok

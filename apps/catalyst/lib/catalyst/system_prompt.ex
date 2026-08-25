@@ -13,7 +13,8 @@ defmodule Catalyst.SystemPrompt do
 
   @behaviour Catalyst.Prompt
 
-  alias Catalyst.Prompt.{Config, Registry, Request, Resolution}
+  alias Catalyst.Prompt
+  alias Catalyst.Prompt.{Request, Resolution}
   alias Catalyst.Tools.Truncate
 
   @default """
@@ -134,7 +135,7 @@ defmodule Catalyst.SystemPrompt do
   defp request_override(nil), do: :error
 
   defp request_override(override) do
-    case Config.nonblank_text?(override) do
+    case Prompt.nonblank_text?(override) do
       true -> {:ok, override, [{:session, :override}]}
       false -> {:error, {:invalid_prompt_override, override}}
     end
@@ -142,7 +143,7 @@ defmodule Catalyst.SystemPrompt do
 
   defp runtime_text(purpose, keys) do
     lookup_keys(keys, fn model_key ->
-      case Registry.runtime_text(purpose, model_key) do
+      case Prompt.runtime_text(purpose, model_key) do
         {:ok, text, owner} ->
           key = {:text, purpose, model_key}
           {:ok, text, [{:extension, owner, key}]}
@@ -155,7 +156,7 @@ defmodule Catalyst.SystemPrompt do
 
   defp application_text(purpose, keys) do
     lookup_keys(keys, fn model_key ->
-      case Config.lookup(purpose, model_key) do
+      case Prompt.lookup(purpose, model_key) do
         {:ok, text} ->
           source = {:application, {:prompts, purpose, model_key}}
           {:ok, text, [source]}
@@ -215,11 +216,11 @@ defmodule Catalyst.SystemPrompt do
     end)
   end
 
-  defp model_keys(model), do: Config.model_keys(model)
+  defp model_keys(model), do: Prompt.model_keys(model)
 
   defp read_nonblank(path) do
     with {:ok, text} <- File.read(path),
-         true <- Config.nonblank_text?(text) do
+         true <- Prompt.nonblank_text?(text) do
       {:ok, text}
     else
       _missing_or_blank -> :error

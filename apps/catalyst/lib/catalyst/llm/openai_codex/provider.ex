@@ -88,7 +88,7 @@ defmodule Catalyst.LLM.OpenAICodex.Provider do
 
   Best-effort semantics: no-op when not authenticated, when a connection
   is already cached for the session, or on any failure (the first turn just
-  does a normal full upload). Started by `Session.RunConfig.start_prewarm/1` in a
+  does a normal full upload). Started by `Session.RunContext.start_prewarm/1` in a
   supervised task; `context` must mirror what the next run would send
   (system prompt, transcript, live tools) or the continuation's body probe
   won't match and the warmup is wasted (never wrong — just wasted).

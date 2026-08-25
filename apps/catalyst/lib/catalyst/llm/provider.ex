@@ -21,7 +21,7 @@ defmodule Catalyst.LLM.Provider do
   inside `{:ok, assistant}`; reserve `{:error, reason}` for programmer errors.
 
   `model` may be `nil` (a session can run before any model is configured —
-  `RunConfig` declares `Model.t() | nil`); providers must tolerate it, as
+  `RunContext` declares `Model.t() | nil`); providers must tolerate it, as
   `Faux` does with its `model && model.id` guard.
   """
   @callback stream(

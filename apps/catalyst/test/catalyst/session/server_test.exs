@@ -5,7 +5,7 @@ defmodule Catalyst.Session.ServerTest do
 
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Hooks, Message, Model}
-  alias Catalyst.Session.{EventSink, Manager, Server, Store}
+  alias Catalyst.Session.{Manager, RunContext, Server, Store}
 
   setup do
     tmp = Path.join(System.tmp_dir!(), "catalyst_session_#{System.unique_integer([:positive])}")
@@ -582,7 +582,7 @@ defmodule Catalyst.Session.ServerTest do
 
     event = %Event.ContextCompacted{replacement: [Message.user("durable replacement")]}
 
-    assert :ok = EventSink.persist(pid, run_ref, event)
+    assert :ok = RunContext.persist(pid, run_ref, event)
     assert_receive {:agent_event, ^id, ^event}
     assert :ok = Hooks.await_observers(id)
     assert_receive {:observed, ^event}
@@ -612,7 +612,7 @@ defmodule Catalyst.Session.ServerTest do
       start_supervised!(
         {Task,
          fn ->
-           :ok = EventSink.persist(pid, run_ref, event)
+           :ok = RunContext.persist(pid, run_ref, event)
          end}
       )
 
@@ -641,11 +641,37 @@ defmodule Catalyst.Session.ServerTest do
 
     event = %Event.ContextCompacted{replacement: [Message.user("must not install")]}
 
-    assert {:error, {:write_failed, _reason}} = EventSink.persist(pid, run_ref, event)
+    assert {:error, {:write_failed, _reason}} = RunContext.persist(pid, run_ref, event)
     assert Server.state(pid).messages == []
     refute_receive {:agent_event, ^id, ^event}
     assert :ok = Hooks.await_observers(id)
     refute_receive {:observed, ^event}
+  end
+
+  test "durable persist returns before observer callbacks run", %{tmp: tmp, model: model} do
+    {id, pid} = start(tmp, model, [])
+    run_ref = install_run_ref(pid)
+    owner = make_ref()
+    parent = self()
+    on_exit(fn -> Hooks.unregister(owner) end)
+
+    :ok =
+      Hooks.on(
+        fn event ->
+          send(parent, {:observer_started, event, self()})
+
+          receive do
+            :release -> :ok
+          end
+        end,
+        owner: owner
+      )
+
+    event = %Event.ContextCompacted{replacement: [Message.user("committed without waiting")]}
+    assert :ok = RunContext.persist(pid, run_ref, event)
+    assert_receive {:observer_started, ^event, observer}
+    send(observer, :release)
+    assert :ok = Hooks.await_observers(id)
   end
 
   test "a stale drain is a no-op: queued steering survives for the next run", %{

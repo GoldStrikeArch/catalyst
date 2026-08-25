@@ -1,20 +1,11 @@
 defmodule CatalystWeb.Pages.ExtensionsPage do
   @moduledoc """
-  The extensions/settings panel — registered as the `"extensions"` page in
-  `CatalystWeb.UI.Registry` (a built-in page, exactly like `Pages.ChatPage`).
+  Extensions panel — built-in `"extensions"` page.
 
-  Shows everything the runtime-extensibility layer knows: loaded extensions
-  (owner, source file, tools/modules/processes, degraded status), disabled
-  extensions, boot status with safe-mode recovery, and the live contents of
-  every registry (tools, LLM providers, loop hooks, pages, renderers,
-  components, commands). Per-extension reload / rollback / disable buttons
-  make the rollback system usable without a terminal — recovery no longer
-  requires asking the agent.
-
-  Render-only: data is assembled by `CatalystWeb.ShellLive.ExtensionsPanel`
-  (assigned by `ShellLive` as `@ext_panel` on navigation and after each
-  action), and all button events (`ext_*`) are handled in `ShellLive`.
-  Reloading this module hot-swaps the panel with no restart.
+  Loaded/disabled lists, boot status with safe-mode recovery, per-extension
+  reload/rollback/disable/enable, and live registry contents (recovery UX).
+  Data comes from `CatalystWeb.ShellLive.ExtensionsPanel` (`@ext_panel`);
+  `ext_*` events are handled in `ShellLive`.
   """
   use CatalystWeb, :html
 
@@ -25,8 +16,6 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
   defdelegate panel_data(model \\ nil, opts \\ [], diagnostics \\ %{}),
     to: ExtensionsPanel,
     as: :build
-
-  # ---- render -----------------------------------------------------------------
 
   def render(assigns) do
     assigns = assign(assigns, :diagnostic_prompt, diagnostic_prompt(assigns))
@@ -53,27 +42,18 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     """
   end
 
-  # ---- header -------------------------------------------------------------------
-
   defp panel_header(assigns) do
     ~H"""
     <div class={card_class()}>
       <div class="flex flex-wrap items-center gap-3 px-4 py-3">
         <div class="min-w-0 flex-1">
           <h1 class="text-base font-semibold text-ink">Extensions</h1>
-          <p class="mt-0.5 truncate font-mono text-xs text-faint">
-            {@panel.dir}
-          </p>
+          <p class="mt-0.5 truncate font-mono text-xs text-faint">{@panel.dir}</p>
         </div>
-
-        <span
-          :if={@action}
-          class="flex items-center gap-2 text-xs text-muted"
-        >
+        <span :if={@action} class="flex items-center gap-2 text-xs text-muted">
           <span class="size-3 animate-spin rounded-full border-2 border-edge-strong border-t-muted"></span>
           {@action.label}…
         </span>
-
         <span
           :if={!@panel.git?}
           class="rounded-full border border-amber-300/60 bg-amber-50 px-2 py-0.5 text-xs text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200"
@@ -81,7 +61,6 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         >
           no git — rollback unavailable
         </span>
-
         <button
           class={pill_button_class()}
           phx-click="ext_reload_all"
@@ -131,13 +110,10 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     """
   end
 
-  # ---- loaded / disabled ----------------------------------------------------------
-
   defp loaded_extensions(assigns) do
     ~H"""
     <section id="loaded-extensions">
       <.section_title>Loaded extensions ({length(@panel.loaded)})</.section_title>
-
       <div
         :if={@panel.loaded == []}
         class="rounded-2xl border border-dashed border-edge-strong px-4 py-6 text-center text-sm text-muted"
@@ -147,119 +123,107 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         file into <code class="font-mono">{@panel.dir}</code>
         and reload.
       </div>
-
       <div class="flex flex-col gap-3">
-        <div :for={ext <- @panel.loaded} class={card_class()} data-ext-owner={ext.owner}>
-          <div class="flex flex-wrap items-center gap-2 border-b border-edge px-4 py-2.5">
-            <span class="font-mono text-sm font-semibold text-ink">
-              {ext.owner}
-            </span>
-            <span
-              :if={ext.path}
-              class="truncate font-mono text-xs text-faint"
-            >
-              {Path.basename(ext.path)}
-            </span>
-            <span
-              :if={is_nil(ext.path)}
-              class="rounded-full bg-raised px-2 py-0.5 text-xs text-muted"
-              title="Registered at runtime without a source file (e.g. by another app); reload/disable need a file"
-            >
-              no source file
-            </span>
-            <span
-              :if={ext.path && !ext.managed?}
-              class="rounded-full bg-raised px-2 py-0.5 text-xs text-muted"
-              title="Loaded from outside the managed extensions directory; reload is available, but disable and rollback are not"
-            >
-              external source
-            </span>
-            <span
-              :if={ext.status == :degraded}
-              class="rounded-full bg-danger/10 px-2 py-0.5 text-xs text-danger"
-              title={degraded_note(ext.purge_failures)}
-              data-degraded-owner={ext.owner}
-            >
-              degraded
-            </span>
-            <span
-              :if={is_integer(ext.process_count) and ext.process_count > 0}
-              class="rounded-full bg-ok/10 px-2 py-0.5 text-xs text-ok"
-            >
-              {ext.process_count} process(es)
-            </span>
-
-            <span class="flex-1"></span>
-
-            <button
-              :if={ext.path}
-              class={pill_button_class()}
-              phx-click="ext_reload"
-              phx-value-owner={ext.owner}
-              disabled={@action != nil}
-              type="button"
-            >
-              Reload
-            </button>
-            <button
-              :if={ext.managed? && @panel.git?}
-              class={pill_button_class()}
-              phx-click="ext_rollback"
-              phx-value-owner={ext.owner}
-              disabled={@action != nil}
-              data-confirm={"Revert #{ext.owner}'s most recent change (git revert) and reload?"}
-              type="button"
-            >
-              Roll back
-            </button>
-            <button
-              :if={ext.managed?}
-              class={danger_pill_button_class()}
-              phx-click="ext_disable"
-              phx-value-owner={ext.owner}
-              disabled={@action != nil}
-              type="button"
-            >
-              Disable
-            </button>
-          </div>
-
-          <div class="flex flex-col gap-1.5 px-4 py-2.5 text-xs">
-            <p
-              :if={is_binary(ext.metadata[:description])}
-              class="text-muted"
-            >
-              {ext.metadata[:description]}
-            </p>
-            <p
-              :if={ext.status == :degraded}
-              class="text-danger"
-            >
-              {degraded_note(ext.purge_failures)}
-            </p>
-            <div :if={ext.tools != []} class="flex flex-wrap items-center gap-1.5">
-              <span class="text-faint">tools</span>
-              <code
-                :for={tool <- ext.tools}
-                class="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 font-mono text-accent"
-              >
-                {tool}
-              </code>
-            </div>
-            <div :if={ext.modules != []} class="flex flex-wrap items-center gap-1.5">
-              <span class="text-faint">modules</span>
-              <code :for={mod <- ext.modules} class="font-mono text-muted">
-                {inspect(mod)}
-              </code>
-            </div>
-          </div>
-        </div>
+        <.loaded_card :for={ext <- @panel.loaded} ext={ext} action={@action} git?={@panel.git?} />
       </div>
     </section>
     """
   end
 
-  # A prior purge left residue in these subsystems; reload/disable retries it.
+  defp loaded_card(assigns) do
+    ~H"""
+    <div class={card_class()} data-ext-owner={@ext.owner}>
+      <div class="flex flex-wrap items-center gap-2 border-b border-edge px-4 py-2.5">
+        <span class="font-mono text-sm font-semibold text-ink">{@ext.owner}</span>
+        <span :if={@ext.path} class="truncate font-mono text-xs text-faint">
+          {Path.basename(@ext.path)}
+        </span>
+        <span
+          :if={is_nil(@ext.path)}
+          class="rounded-full bg-raised px-2 py-0.5 text-xs text-muted"
+          title="Registered at runtime without a source file (e.g. by another app); reload/disable need a file"
+        >
+          no source file
+        </span>
+        <span
+          :if={@ext.path && !@ext.managed?}
+          class="rounded-full bg-raised px-2 py-0.5 text-xs text-muted"
+          title="Loaded from outside the managed extensions directory; reload is available, but disable and rollback are not"
+        >
+          external source
+        </span>
+        <span
+          :if={@ext.status == :degraded}
+          class="rounded-full bg-danger/10 px-2 py-0.5 text-xs text-danger"
+          title={degraded_note(@ext.purge_failures)}
+          data-degraded-owner={@ext.owner}
+        >
+          degraded
+        </span>
+        <span
+          :if={is_integer(@ext.process_count) and @ext.process_count > 0}
+          class="rounded-full bg-ok/10 px-2 py-0.5 text-xs text-ok"
+        >
+          {@ext.process_count} process(es)
+        </span>
+        <span class="flex-1"></span>
+        <button
+          :if={@ext.path}
+          class={pill_button_class()}
+          phx-click="ext_reload"
+          phx-value-owner={@ext.owner}
+          disabled={@action != nil}
+          type="button"
+        >
+          Reload
+        </button>
+        <button
+          :if={@ext.managed? && @git?}
+          class={pill_button_class()}
+          phx-click="ext_rollback"
+          phx-value-owner={@ext.owner}
+          disabled={@action != nil}
+          data-confirm={"Revert #{@ext.owner}'s most recent change (git revert) and reload?"}
+          type="button"
+        >
+          Roll back
+        </button>
+        <button
+          :if={@ext.managed?}
+          class={danger_pill_button_class()}
+          phx-click="ext_disable"
+          phx-value-owner={@ext.owner}
+          disabled={@action != nil}
+          type="button"
+        >
+          Disable
+        </button>
+      </div>
+      <div class="flex flex-col gap-1.5 px-4 py-2.5 text-xs">
+        <p :if={is_binary(@ext.metadata[:description])} class="text-muted">
+          {@ext.metadata[:description]}
+        </p>
+        <p :if={@ext.status == :degraded} class="text-danger">
+          {degraded_note(@ext.purge_failures)}
+        </p>
+        <div :if={@ext.tools != []} class="flex flex-wrap items-center gap-1.5">
+          <span class="text-faint">tools</span>
+          <code
+            :for={tool <- @ext.tools}
+            class="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 font-mono text-accent"
+          >
+            {tool}
+          </code>
+        </div>
+        <div :if={@ext.modules != []} class="flex flex-wrap items-center gap-1.5">
+          <span class="text-faint">modules</span>
+          <code :for={mod <- @ext.modules} class="font-mono text-muted">{inspect(mod)}</code>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
   defp degraded_note(purge_failures) do
     "a previous purge left residue (retried on reload/disable) — failed: " <>
       Enum.map_join(purge_failures, ", ", &degraded_failure/1)
@@ -278,12 +242,8 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
           class="flex flex-wrap items-center gap-2 rounded-2xl border border-edge bg-raised px-4 py-2.5 opacity-80"
           data-ext-owner={ext.owner}
         >
-          <span class="font-mono text-sm font-semibold text-muted line-through">
-            {ext.owner}
-          </span>
-          <span class="truncate font-mono text-xs text-faint">
-            {Path.basename(ext.path)}
-          </span>
+          <span class="font-mono text-sm font-semibold text-muted line-through">{ext.owner}</span>
+          <span class="truncate font-mono text-xs text-faint">{Path.basename(ext.path)}</span>
           <span class="flex-1"></span>
           <button
             class={pill_button_class()}
@@ -299,8 +259,6 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     </section>
     """
   end
-
-  # ---- registries -------------------------------------------------------------------
 
   defp effective_diagnostics(assigns) do
     ~H"""
@@ -324,28 +282,16 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
               <p class="mt-0.5 break-all text-[0.65rem] text-faint">
                 source: {display_value(row.source)}
               </p>
-              <p
-                :if={row.note}
-                class="mt-0.5 text-[0.65rem] text-amber-600 dark:text-amber-300"
-              >
+              <p :if={row.note} class="mt-0.5 text-[0.65rem] text-amber-600 dark:text-amber-300">
                 {row.note}
               </p>
             </div>
           </div>
         </div>
-
-        <div
-          :if={@prompt}
-          id="effective-prompt-resolution"
-          class="border-t border-edge px-4 py-3"
-        >
+        <div :if={@prompt} id="effective-prompt-resolution" class="border-t border-edge px-4 py-3">
           <div class="flex flex-wrap items-baseline justify-between gap-2">
-            <p class="text-xs font-semibold text-ink">
-              {@prompt.label}
-            </p>
-            <code class="break-all font-mono text-[0.6rem] text-faint">
-              {@prompt.digest}
-            </code>
+            <p class="text-xs font-semibold text-ink">{@prompt.label}</p>
+            <code class="break-all font-mono text-[0.6rem] text-faint">{@prompt.digest}</code>
           </div>
           <ol class="mt-2 space-y-1">
             <li
@@ -369,6 +315,8 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
   end
 
   defp runtime_overlays(assigns) do
+    assigns = assign(assigns, :tables, overlay_tables(assigns.panel))
+
     ~H"""
     <section id="runtime-overlay-registries">
       <.section_title>Owned runtime overlays</.section_title>
@@ -377,107 +325,26 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
         separately above.
       </p>
       <div class="flex flex-col gap-2">
-        <.owned_registry_table label="Prompt registry" rows={@panel.prompt_runtime} />
-        <.owned_registry_table label="Workflow registry" rows={@panel.workflow_runtime} />
-        <.owned_registry_table label="Context registry" rows={@panel.context_runtime} />
+        <.rows_table
+          :for={{label, rows} <- @tables}
+          label={label}
+          rows={rows}
+          registry={label}
+          empty="(no runtime overlays)"
+        />
       </div>
     </section>
-    """
-  end
-
-  attr :label, :string, required: true
-  attr :rows, :list, required: true
-
-  defp owned_registry_table(assigns) do
-    ~H"""
-    <details class={card_class()} data-runtime-registry={@label}>
-      <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-ink">
-        {@label}
-        <span class="ml-1 text-xs text-faint">({length(@rows)})</span>
-      </summary>
-      <div class="border-t border-edge">
-        <p :if={@rows == []} class="px-4 py-2.5 text-xs text-faint">
-          (no runtime overlays)
-        </p>
-        <div
-          :for={row <- @rows}
-          class="grid gap-1 border-b border-edge px-4 py-2 text-xs last:border-b-0 sm:grid-cols-[minmax(8rem,1fr)_minmax(10rem,2fr)_auto]"
-        >
-          <code class="break-all font-mono font-semibold text-ink">
-            {display_value(row.key)}
-          </code>
-          <code
-            class="break-all font-mono text-faint"
-            title={display_value(row.value, :full)}
-          >
-            {display_value(row.value)}
-          </code>
-          <.owner_badge owner={row.owner} />
-        </div>
-      </div>
-    </details>
     """
   end
 
   defp registries(assigns) do
+    assigns = assign(assigns, :tables, live_tables(assigns.panel))
+
     ~H"""
     <section id="live-registries">
       <.section_title>Live registries</.section_title>
       <div class="flex flex-col gap-2">
-        <.registry_table label="Tools" rows={@panel.tools}>
-          <:row :let={t}>
-            <code class="font-mono font-semibold">{t.name}</code>
-            <span class="font-mono text-faint">{inspect(t.module)}</span>
-            <.owner_badge owner={t.owner} />
-          </:row>
-        </.registry_table>
-
-        <.registry_table label="LLM providers" rows={@panel.providers}>
-          <:row :let={p}>
-            <code class="font-mono font-semibold">{p.api}</code>
-            <span class="font-mono text-faint">{inspect(p.module)}</span>
-            <span :if={p.name} class="text-muted">{p.name}</span>
-          </:row>
-        </.registry_table>
-
-        <.registry_table label="Loop hooks" rows={@panel.hooks}>
-          <:row :let={h}>
-            <code class="font-mono font-semibold">{h.point}</code>
-            <span class="text-muted">{h.id} · priority {h.priority}</span>
-            <.owner_badge owner={h.owner} />
-          </:row>
-        </.registry_table>
-
-        <.registry_table label="Pages" rows={@panel.pages}>
-          <:row :let={p}>
-            <code class="font-mono font-semibold">/{p.path}</code>
-            <span class="text-muted">{p.label}</span>
-            <span class="font-mono text-faint">{inspect(p.mod)}</span>
-            <.owner_badge owner={p.owner} />
-          </:row>
-        </.registry_table>
-
-        <.registry_table label="Message renderers" rows={@panel.renderers}>
-          <:row :let={r}>
-            <code class="font-mono font-semibold">{r.kind}</code>
-            <.owner_badge owner={r.owner} />
-          </:row>
-        </.registry_table>
-
-        <.registry_table label="Slot components" rows={@panel.components}>
-          <:row :let={c}>
-            <code class="font-mono font-semibold">{c.slot}</code>
-            <.owner_badge owner={c.owner} />
-          </:row>
-        </.registry_table>
-
-        <.registry_table label="Commands" rows={@panel.commands}>
-          <:row :let={c}>
-            <code class="font-mono font-semibold">{c.name}</code>
-            <span class="text-muted">{c.label}</span>
-            <.owner_badge owner={c.owner} />
-          </:row>
-        </.registry_table>
+        <.rows_table :for={{label, rows} <- @tables} label={label} rows={rows} />
       </div>
     </section>
     """
@@ -485,25 +352,28 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
 
   attr :label, :string, required: true
   attr :rows, :list, required: true
+  attr :registry, :string, default: nil
+  attr :empty, :string, default: "(empty)"
 
-  slot :row, required: true
-
-  defp registry_table(assigns) do
+  defp rows_table(assigns) do
     ~H"""
-    <details class={card_class()}>
+    <details class={card_class()} data-runtime-registry={@registry}>
       <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-ink">
         {@label}
         <span class="ml-1 text-xs text-faint">({length(@rows)})</span>
       </summary>
       <div class="border-t border-edge">
-        <p :if={@rows == []} class="px-4 py-2.5 text-xs text-faint">
-          (empty)
-        </p>
+        <p :if={@rows == []} class="px-4 py-2.5 text-xs text-faint">{@empty}</p>
         <div
           :for={row <- @rows}
           class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge px-4 py-1.5 text-xs last:border-b-0"
         >
-          {render_slot(@row, row)}
+          <code class="break-all font-mono font-semibold text-ink">{row.primary}</code>
+          <span :if={row[:secondary]} class="break-all font-mono text-faint" title={row[:title]}>
+            {row.secondary}
+          </span>
+          <span :if={row[:extra]} class="text-muted">{row.extra}</span>
+          <.owner_badge :if={Map.has_key?(row, :owner)} owner={row.owner} />
         </div>
       </div>
     </details>
@@ -526,18 +396,64 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     """
   end
 
-  # Effective-current-model diagnostics prefer the live selected-model preview.
-  # Last-run prompt text belongs in chat diagnostics, not this panel.
-  defp diagnostic_prompt(assigns) do
-    case preview_prompt(Map.get(assigns, :prompt_preview)) do
-      %{} = preview ->
-        preview
+  defp overlay_tables(panel) do
+    [
+      {"Prompt registry", panel.prompt_runtime},
+      {"Workflow registry", panel.workflow_runtime},
+      {"Context registry", panel.context_runtime}
+    ]
+    |> Enum.map(fn {label, rows} ->
+      {label,
+       Enum.map(rows, fn row ->
+         %{
+           primary: display_value(row.key),
+           secondary: display_value(row.value),
+           title: display_value(row.value, :full),
+           owner: row.owner
+         }
+       end)}
+    end)
+  end
 
-      nil ->
-        case Map.get(assigns, :run_metadata) do
-          %{prompt: %{} = prompt} -> Map.put(prompt, :label, "Resolved run prompt")
-          _no_run -> nil
-        end
+  defp live_tables(panel) do
+    [
+      {"Tools",
+       Enum.map(
+         panel.tools,
+         &%{primary: &1.name, secondary: inspect(&1.module), owner: &1.owner}
+       )},
+      {"LLM providers",
+       Enum.map(
+         panel.providers,
+         &%{primary: &1.api, secondary: inspect(&1.module), extra: &1.name}
+       )},
+      {"Loop hooks",
+       Enum.map(
+         panel.hooks,
+         &%{primary: &1.point, extra: "#{&1.id} · priority #{&1.priority}", owner: &1.owner}
+       )},
+      {"Pages",
+       Enum.map(
+         panel.pages,
+         &%{
+           primary: "/#{&1.path}",
+           extra: &1.label,
+           secondary: inspect(&1.mod),
+           owner: &1.owner
+         }
+       )},
+      {"Message renderers", Enum.map(panel.renderers, &%{primary: &1.kind, owner: &1.owner})},
+      {"Slot components", Enum.map(panel.components, &%{primary: &1.slot, owner: &1.owner})},
+      {"Commands",
+       Enum.map(panel.commands, &%{primary: &1.name, extra: &1.label, owner: &1.owner})}
+    ]
+  end
+
+  defp diagnostic_prompt(assigns) do
+    case {preview_prompt(Map.get(assigns, :prompt_preview)), Map.get(assigns, :run_metadata)} do
+      {%{} = preview, _} -> preview
+      {_, %{prompt: %{} = prompt}} -> Map.put(prompt, :label, "Resolved run prompt")
+      _no_prompt -> nil
     end
   end
 
@@ -570,21 +486,15 @@ defmodule CatalystWeb.Pages.ExtensionsPage do
     """
   end
 
-  # ---- shared classes ----------------------------------------------------------------
+  defp card_class, do: "overflow-hidden rounded-xl border border-edge bg-surface"
 
-  defp card_class do
-    "overflow-hidden rounded-xl border border-edge bg-surface"
-  end
+  defp pill_button_class,
+    do:
+      "rounded-full px-3 py-1 text-xs font-medium text-muted transition hover:bg-raised " <>
+        "hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 border border-edge"
 
-  defp pill_button_class do
-    "rounded-full px-3 py-1 text-xs font-medium text-muted transition hover:bg-raised " <>
-      "hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 " <>
-      "border border-edge"
-  end
-
-  defp danger_pill_button_class do
-    "rounded-full px-3 py-1 text-xs font-medium text-danger transition hover:bg-danger/10 " <>
-      "disabled:cursor-not-allowed disabled:opacity-40 " <>
-      "border border-danger/40"
-  end
+  defp danger_pill_button_class,
+    do:
+      "rounded-full px-3 py-1 text-xs font-medium text-danger transition hover:bg-danger/10 " <>
+        "disabled:cursor-not-allowed disabled:opacity-40 border border-danger/40"
 end

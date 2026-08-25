@@ -11,7 +11,7 @@ defmodule Catalyst.Agent.ToolRunner do
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Hooks, Message}
   alias Catalyst.Content.Text
-  alias Catalyst.Session.RunConfig
+  alias Catalyst.Session.RunContext
   alias Catalyst.Tools.{Context, Registry, Truncate}
 
   @type outcome :: %{message: Message.ToolResult.t(), terminate: boolean()}
@@ -199,7 +199,7 @@ defmodule Catalyst.Agent.ToolRunner do
   # thresholds, provider tuning) flow into subsequently spawned children.
   defp current_inheritable_opts(config) do
     case Map.get(config, :opts) do
-      opts when is_list(opts) -> RunConfig.inheritable_opts(opts)
+      opts when is_list(opts) -> RunContext.inheritable_opts(opts)
       _missing -> Map.get(config, :inheritable_opts, [])
     end
   end

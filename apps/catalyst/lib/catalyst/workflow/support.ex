@@ -9,9 +9,8 @@ defmodule Catalyst.Workflow.Support do
   """
 
   alias Catalyst.Agent.Event
+  alias Catalyst.{Debug, Hooks, Message}
   alias Catalyst.Context.Guard
-  alias Catalyst.Session.EventSink
-  alias Catalyst.Message
   alias Catalyst.Tools.Profiles
   alias Catalyst.Tools.Registry, as: ToolRegistry
 
@@ -29,8 +28,19 @@ defmodule Catalyst.Workflow.Support do
   @spec observed_emit((Event.t() -> any()), map()) :: (Event.t() -> any())
   def observed_emit(emit, config) when is_function(emit, 1) and is_map(config) do
     observer_key = option(config, :session_id, self())
-    EventSink.observed(emit, observer_key)
+    observed(emit, observer_key)
   end
+
+  defp observed(emit, session_key) when is_function(emit, 1) do
+    fn event ->
+      Debug.log_event(debug_session_id(session_key), event)
+      Hooks.notify(event, session_key)
+      emit.(event)
+    end
+  end
+
+  defp debug_session_id(session_id) when is_binary(session_id), do: session_id
+  defp debug_session_id(_session_key), do: nil
 
   @doc "Resolve the original live tool source, then apply final capability and profile filtering."
   @spec resolve_tools(map()) :: [module()]

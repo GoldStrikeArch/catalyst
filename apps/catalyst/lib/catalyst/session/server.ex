@@ -20,10 +20,8 @@ defmodule Catalyst.Session.Server do
   alias Catalyst.{Content, Message, Tasks}
 
   alias Catalyst.Session.{
-    EventSink,
     Manager,
     Reducer,
-    RunConfig,
     RunContext,
     Store
   }
@@ -123,7 +121,7 @@ defmodule Catalyst.Session.Server do
   `:provider`, `:system_prompt` (a nonblank override binary; nil clears it back
   to the prompt policy's file/built-in chain), and/or `:opts` (a keyword merged
   into the session opts; a nil value deletes the key). Takes effect on the NEXT
-  run — an in-flight run keeps the config it started with (`RunConfig.build/3`
+  run — an in-flight run keeps the config it started with (`RunContext.build/3`
   reads state per run).
 
   Model, thinking level, workflow name (`opts[:workflow]`), and the system
@@ -193,7 +191,7 @@ defmodule Catalyst.Session.Server do
         end
 
         # Fire-and-forget provider warmup (the Codex ws prewarm): the first turn
-        # can then ride a delta upload. RunConfig decides (hot-swappable) and the
+        # can then ride a delta upload. RunContext decides (hot-swappable) and the
         # work runs in a supervised task — it never blocks or fails the session.
         {:noreply, start_prewarm(state)}
 
@@ -394,7 +392,7 @@ defmodule Catalyst.Session.Server do
     _state = stop_prewarm(state)
     shutdown_terminating_run(state.run)
     cleanup_run_resources(state)
-    RunConfig.cleanup_session(state)
+    RunContext.cleanup_session(state)
     :ok
   end
 
@@ -404,7 +402,7 @@ defmodule Catalyst.Session.Server do
   defp shutdown_terminating_run(_no_run), do: :ok
 
   defp start_prewarm(%State{} = state) do
-    case RunConfig.start_prewarm(state) do
+    case RunContext.start_prewarm(state) do
       {:ok, pid} -> %{state | prewarm: {pid, Process.monitor(pid)}}
       _not_started -> %{state | prewarm: nil}
     end
@@ -424,7 +422,7 @@ defmodule Catalyst.Session.Server do
       {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
     end
 
-    RunConfig.cleanup_session(state)
+    RunContext.cleanup_session(state)
     %{state | prewarm: nil}
   end
 
@@ -617,7 +615,7 @@ defmodule Catalyst.Session.Server do
 
   defp accept_committed_event(state, event) do
     state = Reducer.reduce(event, state)
-    :ok = EventSink.committed(event, state.id)
+    :ok = notify_committed(event, state.id)
     broadcast(state, event)
     track_agent_end(state, event)
   end
@@ -709,8 +707,13 @@ defmodule Catalyst.Session.Server do
     |> Enum.reduce(queue, fn {_kind, msg}, q -> :queue.in_r(msg, q) end)
   end
 
+  defp notify_committed(event, session_id) do
+    _debug_task = Catalyst.Debug.log_event_async(session_id, event)
+    Catalyst.Hooks.notify(event, session_id)
+  end
+
   defp synthetic_and_broadcast(state, event) do
-    EventSink.synthetic(event, state.id)
+    :ok = Catalyst.Hooks.notify_async(event, state.id)
     broadcast(state, event)
   end
 
@@ -868,7 +871,7 @@ defmodule Catalyst.Session.Server do
   defp external_backend?(_backend), do: false
 
   defp validate_system_prompt(text) do
-    case is_binary(text) and Catalyst.Prompt.Config.nonblank_text?(text) do
+    case is_binary(text) and Catalyst.Prompt.nonblank_text?(text) do
       true -> :ok
       false -> {:error, {:invalid_system_prompt, text}}
     end

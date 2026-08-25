@@ -10,10 +10,14 @@ defmodule Catalyst.Session.Store do
 
   require Logger
 
+  alias Catalyst.{Content, Message, Model, Usage}
   alias Catalyst.Context.Transcript
-  alias Catalyst.Message
-  alias Catalyst.Session.Store.Codec
 
+  @type decode_error ::
+          {:invalid_message, term()}
+          | {:unknown_role, term()}
+          | {:invalid_content, term()}
+          | {:invalid_content_block, term()}
   @type handle :: %{id: String.t(), path: String.t(), cwd: String.t()}
   @type open_error ::
           {:invalid_cwd, term()}
@@ -143,7 +147,7 @@ defmodule Catalyst.Session.Store do
     append_line(handle, fn ->
       %{
         "type" => "compaction",
-        "replacement" => Enum.map(compaction.replacement, &Codec.encode/1),
+        "replacement" => Enum.map(compaction.replacement, &encode/1),
         "summary" => encode_optional_message(Map.get(compaction, :summary)),
         "replacedCount" => Map.get(compaction, :replaced_count),
         "tokensBefore" => Map.get(compaction, :tokens_before),
@@ -162,7 +166,7 @@ defmodule Catalyst.Session.Store do
           :ok | {:error, append_error()}
   def append_model_change(handle, %Catalyst.Model{} = model) do
     append_line(handle, fn ->
-      %{"type" => "model_change", "model" => Codec.encode_model(model)}
+      %{"type" => "model_change", "model" => encode_model(model)}
     end)
   end
 
@@ -400,12 +404,122 @@ defmodule Catalyst.Session.Store do
 
   @doc "Encode a session message into its persisted JSON map."
   @spec encode(Message.t()) :: map()
-  defdelegate encode(message), to: Codec
+  def encode(%Message.User{content: content, timestamp: timestamp}) do
+    %{"role" => "user", "content" => encode_content(content), "timestamp" => timestamp}
+  end
+
+  def encode(%Message.Assistant{} = message) do
+    %{
+      "role" => "assistant",
+      "content" => encode_content(message.content),
+      "api" => message.api,
+      "provider" => message.provider,
+      "model" => message.model,
+      "usage" => encode_usage(message.usage),
+      "stopReason" => to_string(message.stop_reason),
+      "errorMessage" => message.error_message,
+      "responseId" => message.response_id,
+      "timestamp" => message.timestamp
+    }
+  end
+
+  def encode(%Message.ToolResult{} = message) do
+    %{
+      "role" => "toolResult",
+      "toolCallId" => message.tool_call_id,
+      "toolName" => message.tool_name,
+      "content" => encode_content(message.content),
+      "isError" => message.is_error,
+      "details" => message.details,
+      "timestamp" => message.timestamp
+    }
+  end
 
   # test seam: decode a persisted JSON message map back into a session message.
   @doc false
-  @spec decode(term()) :: {:ok, Message.t()} | {:error, Codec.decode_error()}
-  defdelegate decode(message), to: Codec
+  @spec decode(term()) :: {:ok, Message.t()} | {:error, decode_error()}
+  def decode(%{"role" => "user"} = message) do
+    with {:ok, content} <- decode_content(message["content"]) do
+      {:ok, %Message.User{content: content, timestamp: message["timestamp"]}}
+    end
+  end
+
+  def decode(%{"role" => "assistant"} = message) do
+    with {:ok, content} <- decode_content(message["content"]) do
+      {:ok,
+       %Message.Assistant{
+         content: content,
+         api: message["api"],
+         provider: message["provider"],
+         model: message["model"],
+         usage: decode_usage(message["usage"]),
+         stop_reason: decode_reason(message["stopReason"]),
+         error_message: message["errorMessage"],
+         response_id: message["responseId"],
+         timestamp: message["timestamp"]
+       }}
+    end
+  end
+
+  def decode(%{"role" => "toolResult"} = message) do
+    with {:ok, content} <- decode_content(message["content"]) do
+      {:ok,
+       %Message.ToolResult{
+         tool_call_id: message["toolCallId"],
+         tool_name: message["toolName"],
+         content: content,
+         details: message["details"],
+         is_error: message["isError"] || false,
+         timestamp: message["timestamp"]
+       }}
+    end
+  end
+
+  def decode(%{"role" => role}), do: {:error, {:unknown_role, role}}
+  def decode(invalid), do: {:error, {:invalid_message, invalid}}
+
+  @doc "Encode a model descriptor for a persisted `model_change` entry."
+  @spec encode_model(Model.t()) :: map()
+  def encode_model(%Model{} = model) do
+    %{
+      "id" => model.id,
+      "name" => model.name,
+      "api" => model.api,
+      "provider" => model.provider,
+      "baseUrl" => model.base_url,
+      "reasoning" => model.reasoning,
+      "input" => Enum.map(model.input || [], &to_string/1),
+      "contextWindow" => model.context_window,
+      "maxContextWindow" => model.max_context_window,
+      "effectiveContextWindowPercent" => model.effective_context_window_percent,
+      "autoCompactTokenLimit" => model.auto_compact_token_limit,
+      "contextWindowSource" => encode_context_window_source(model.context_window_source),
+      "maxTokens" => model.max_tokens
+    }
+  end
+
+  @doc "Decode a persisted model map, returning `:error` for an invalid shape."
+  @spec decode_model(term()) :: {:ok, Model.t()} | :error
+  def decode_model(%{"id" => id} = model) when is_binary(id) do
+    {:ok,
+     %Model{
+       id: id,
+       name: model["name"],
+       api: model["api"],
+       provider: model["provider"],
+       base_url: model["baseUrl"],
+       reasoning: model["reasoning"],
+       input: decode_model_input(model["input"]),
+       context_window: model["contextWindow"],
+       max_context_window: model["maxContextWindow"],
+       effective_context_window_percent: model["effectiveContextWindowPercent"],
+       auto_compact_token_limit: model["autoCompactTokenLimit"],
+       context_window_source: decode_context_window_source(model["contextWindowSource"]),
+       max_tokens: model["maxTokens"]
+     }}
+  end
+
+  def decode_model(_malformed), do: :error
 
   defp empty_loaded_state do
     %{
@@ -456,7 +570,7 @@ defmodule Catalyst.Session.Store do
   end
 
   defp fold_entry(%{"type" => "message", "message" => message}, state) do
-    case Codec.decode(message) do
+    case decode(message) do
       {:ok, decoded} -> %{state | messages: [decoded | state.messages]}
       {:error, _reason} -> state
     end
@@ -489,7 +603,7 @@ defmodule Catalyst.Session.Store do
 
   defp fold_entry(%{"type" => "model_change", "model" => encoded}, state)
        when is_map(encoded) do
-    case Codec.decode_model(encoded) do
+    case decode_model(encoded) do
       {:ok, model} -> %{state | model: model, model_set?: true}
       :error -> state
     end
@@ -525,7 +639,7 @@ defmodule Catalyst.Session.Store do
   defp decode_messages(messages) do
     messages
     |> Enum.reduce_while({:ok, []}, fn encoded, {:ok, acc} ->
-      case Codec.decode(encoded) do
+      case decode(encoded) do
         {:ok, message} -> {:cont, {:ok, [message | acc]}}
         {:error, _reason} = error -> {:halt, error}
       end
@@ -571,13 +685,13 @@ defmodule Catalyst.Session.Store do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp encode_optional_message(nil), do: nil
-  defp encode_optional_message(message), do: Codec.encode(message)
+  defp encode_optional_message(message), do: encode(message)
 
   defp encode_setting_model(nil), do: nil
-  defp encode_setting_model(%Catalyst.Model{} = model), do: Codec.encode_model(model)
+  defp encode_setting_model(%Catalyst.Model{} = model), do: encode_model(model)
 
   defp decode_setting_model(nil), do: {:ok, nil}
-  defp decode_setting_model(%{} = model), do: Codec.decode_model(model)
+  defp decode_setting_model(%{} = model), do: decode_model(model)
   defp decode_setting_model(_model), do: :error
 
   defp valid_optional_id(value) when is_binary(value), do: value
@@ -588,4 +702,136 @@ defmodule Catalyst.Session.Store do
 
   defp cwd_hash(cwd),
     do: :sha256 |> :crypto.hash(cwd) |> Base.encode16(case: :lower) |> binary_part(0, 16)
+
+  defp decode_model_input(input) when is_list(input) do
+    Enum.flat_map(input, fn
+      "text" -> [:text]
+      "image" -> [:image]
+      _unknown -> []
+    end)
+  end
+
+  defp decode_model_input(_input), do: [:text]
+
+  defp encode_usage(nil), do: nil
+
+  defp encode_usage(%Usage{} = usage) do
+    %{
+      "input" => usage.input,
+      "output" => usage.output,
+      "cacheRead" => usage.cache_read,
+      "cacheWrite" => usage.cache_write,
+      "totalTokens" => usage.total_tokens,
+      "cost" => usage.cost,
+      "contextDigest" => usage.context_digest
+    }
+  end
+
+  defp encode_content(content) when is_list(content), do: Enum.map(content, &encode_block/1)
+
+  # Tool results are duck-typed (extension/LLM-authored tools return arbitrary
+  # shapes), so non-list content is wrapped as a single block rather than crash.
+  defp encode_content(other), do: [encode_block(other)]
+
+  defp encode_block(%Content.Text{text: text}), do: %{"type" => "text", "text" => text}
+
+  defp encode_block(%Content.Thinking{} = block) do
+    %{
+      "type" => "thinking",
+      "thinking" => block.thinking,
+      "signature" => block.signature,
+      "redacted" => block.redacted
+    }
+  end
+
+  defp encode_block(%Content.Image{data: data, mime_type: mime_type}) do
+    %{"type" => "image", "data" => data, "mimeType" => mime_type}
+  end
+
+  defp encode_block(%Content.ToolCall{id: id, name: name, arguments: arguments}) do
+    %{"type" => "toolCall", "id" => id, "name" => name, "arguments" => arguments}
+  end
+
+  # Unknown block shapes degrade to inspected text so the line stays decodable.
+  defp encode_block(other), do: %{"type" => "text", "text" => inspect(other)}
+
+  defp decode_usage(%{} = usage) do
+    %Usage{
+      input: usage["input"] || 0,
+      output: usage["output"] || 0,
+      cache_read: usage["cacheRead"] || 0,
+      cache_write: usage["cacheWrite"] || 0,
+      total_tokens: usage["totalTokens"] || 0,
+      cost: usage["cost"] || 0.0,
+      context_digest: usage["contextDigest"]
+    }
+  end
+
+  defp decode_usage(_usage), do: %Usage{}
+
+  defp decode_content(nil), do: {:ok, []}
+
+  defp decode_content(blocks) when is_list(blocks) do
+    blocks
+    |> Enum.reduce_while({:ok, []}, fn block, {:ok, acc} ->
+      case decode_block(block) do
+        {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> then(fn
+      {:ok, decoded} -> {:ok, Enum.reverse(decoded)}
+      {:error, _reason} = error -> error
+    end)
+  end
+
+  defp decode_content(invalid), do: {:error, {:invalid_content, invalid}}
+
+  defp decode_block(%{"type" => "text", "text" => text}),
+    do: {:ok, %Content.Text{text: text}}
+
+  defp decode_block(%{"type" => "thinking"} = block) do
+    {:ok,
+     %Content.Thinking{
+       thinking: block["thinking"],
+       signature: block["signature"],
+       redacted: block["redacted"] || false
+     }}
+  end
+
+  defp decode_block(%{"type" => "image"} = block) do
+    {:ok, %Content.Image{data: block["data"], mime_type: block["mimeType"]}}
+  end
+
+  defp decode_block(%{"type" => "toolCall"} = block) do
+    {:ok,
+     %Content.ToolCall{
+       id: block["id"],
+       name: block["name"],
+       arguments: block["arguments"] || %{}
+     }}
+  end
+
+  defp decode_block(invalid), do: {:error, {:invalid_content_block, invalid}}
+
+  # Explicit clauses, not `String.to_existing_atom/1`: in an interactive
+  # (lazily loaded) VM the target atom only exists once some module using it
+  # has been loaded, so whitelist+to_existing_atom crashes on load order —
+  # which made `Store.load_state/1` return `{:error, {:read_failed, ...}}`
+  # and resume an empty transcript.
+  defp decode_reason("stop"), do: :stop
+  defp decode_reason("length"), do: :length
+  defp decode_reason("tool_use"), do: :tool_use
+  defp decode_reason("error"), do: :error
+  defp decode_reason("aborted"), do: :aborted
+  defp decode_reason(_reason), do: :stop
+
+  defp encode_context_window_source(nil), do: nil
+  defp encode_context_window_source(source), do: to_string(source)
+
+  defp decode_context_window_source("session"), do: :session
+  defp decode_context_window_source("catalog"), do: :catalog
+  defp decode_context_window_source("persisted"), do: :persisted
+  defp decode_context_window_source("fallback"), do: :fallback
+  defp decode_context_window_source(_source), do: nil
 end

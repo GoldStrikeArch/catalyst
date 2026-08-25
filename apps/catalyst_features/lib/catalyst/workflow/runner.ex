@@ -10,7 +10,7 @@ defmodule Catalyst.Workflow.Runner do
 
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Message}
-  alias Catalyst.Session.Store.Codec
+  alias Catalyst.Session.Store
   alias Catalyst.Workflow.Template
 
   @impl true
@@ -57,7 +57,7 @@ defmodule Catalyst.Workflow.Runner do
     input = %{
       "goal" => goal,
       "cwd" => config.cwd,
-      "model" => Codec.encode_model(config.model),
+      "model" => Store.encode_model(config.model),
       "parent_session_id" => config.parent_session_id,
       "root_session_id" => config.root_session_id,
       "reasoning_effort" => config.opts[:reasoning_effort],

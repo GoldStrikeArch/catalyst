@@ -93,7 +93,7 @@ defmodule CatalystWeb.FlexCase do
   end
 
   defp shell_persistent_snapshot do
-    Map.new([:current_session, :codex_prefs, :ui_prefs], fn name ->
+    Map.new([:current_session, :codex_prefs, :ui_prefs, :machine_prefs], fn name ->
       key = {CatalystWeb.ShellLive, name}
       {key, Catalyst.Flex.Harness.persistent_snapshot(key)}
     end)

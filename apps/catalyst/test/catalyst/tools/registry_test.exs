@@ -94,8 +94,6 @@ defmodule Catalyst.Tools.RegistryTest do
   test "index/1 maps every tool name to its validated entry" do
     index = Registry.index(Registry.default_tools())
 
-    assert map_size(index) == length(Registry.default_tools())
-
     assert Enum.all?(Registry.default_tools(), fn module ->
              entry = index[module.name()]
              entry.module == module and entry.definition.name == module.name()

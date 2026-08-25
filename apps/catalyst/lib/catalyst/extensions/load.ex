@@ -2,10 +2,9 @@ defmodule Catalyst.Extensions.Load do
   @moduledoc """
   Serialized source and lifecycle operations for runtime extensions.
 
-  This module owns the caller-independent load saga. Canonical ownership state,
-  ETS mutation, and purge side effects remain in the registered
-  `Catalyst.Extensions` server and are reached through its existing message
-  protocol.
+  This module owns the caller-independent load saga. Canonical ownership state
+  and purge side effects stay in the `Catalyst.Extensions` process and are
+  reached through its message protocol.
   """
 
   require Logger

@@ -4,7 +4,6 @@ defmodule Catalyst.WorkflowRunTest do
   alias Catalyst.Agent.Event
   alias Catalyst.{Content, Model}
   alias Catalyst.Session.{Manager, Server}
-  alias Catalyst.Session.Store.Codec
   alias Catalyst.WorkflowRun
   alias Catalyst.WorkflowRun.{Names, Store}
 
@@ -188,6 +187,7 @@ defmodule Catalyst.WorkflowRunTest do
              )
 
     assert {:ok, %{"status" => "interrupted"}} = WorkflowRun.get(id)
+
     assert {:ok, _pid} =
              Supervisor.restart_child(Catalyst.Features.WorkflowSupervisor, supervisor)
   end
@@ -298,7 +298,7 @@ defmodule Catalyst.WorkflowRunTest do
       "input" => %{
         "parent_session_id" => parent_id,
         "cwd" => cwd,
-        "model" => Codec.encode_model(model)
+        "model" => Catalyst.Session.Store.encode_model(model)
       },
       "results" => [],
       "last_error" => nil,

@@ -1,9 +1,8 @@
-defmodule Catalyst.Session.Store.CodecTest do
+defmodule Catalyst.Session.StoreEncodeTest do
   use ExUnit.Case, async: true
 
   alias Catalyst.{Content, Message, Model, Usage}
   alias Catalyst.Session.Store
-  alias Catalyst.Session.Store.Codec
 
   test "user messages round-trip" do
     message = %Message.User{
@@ -58,13 +57,6 @@ defmodule Catalyst.Session.Store.CodecTest do
     assert round_trip(message) == message
   end
 
-  test "Store encode and decode remain compatibility shims" do
-    message = %Message.User{content: [%Content.Text{text: "shim"}], timestamp: 104}
-
-    assert Store.encode(message) == Codec.encode(message)
-    assert {:ok, ^message} = message |> Store.encode() |> Store.decode()
-  end
-
   test "context model metadata round-trips independently from max_tokens" do
     model = %Model{
       id: "gpt-test",
@@ -78,7 +70,7 @@ defmodule Catalyst.Session.Store.CodecTest do
       max_tokens: 128_000
     }
 
-    encoded = Codec.encode_model(model)
+    encoded = Store.encode_model(model)
 
     assert encoded["contextWindow"] == 272_000
     assert encoded["maxContextWindow"] == 300_000
@@ -86,30 +78,30 @@ defmodule Catalyst.Session.Store.CodecTest do
     assert encoded["autoCompactTokenLimit"] == 240_000
     assert encoded["contextWindowSource"] == "catalog"
     assert encoded["maxTokens"] == 128_000
-    assert {:ok, ^model} = Codec.decode_model(encoded)
+    assert {:ok, ^model} = Store.decode_model(encoded)
   end
 
   test "legacy usage without contextDigest remains valid and unanchored" do
     assistant = %Message.Assistant{usage: %Usage{total_tokens: 12}}
 
     encoded =
-      assistant |> Codec.encode() |> Map.update!("usage", &Map.delete(&1, "contextDigest"))
+      assistant |> Store.encode() |> Map.update!("usage", &Map.delete(&1, "contextDigest"))
 
     assert {:ok, %Message.Assistant{usage: %Usage{total_tokens: 12, context_digest: nil}}} =
-             Codec.decode(encoded)
+             Store.decode(encoded)
   end
 
   test "invalid persisted messages return tagged decode errors" do
-    assert {:error, {:unknown_role, "martian"}} = Codec.decode(%{"role" => "martian"})
+    assert {:error, {:unknown_role, "martian"}} = Store.decode(%{"role" => "martian"})
 
     assert {:error, {:invalid_content_block, %{"type" => "future"}}} =
-             Codec.decode(%{"role" => "user", "content" => [%{"type" => "future"}]})
+             Store.decode(%{"role" => "user", "content" => [%{"type" => "future"}]})
 
-    assert {:error, {:invalid_message, :not_a_map}} = Codec.decode(:not_a_map)
+    assert {:error, {:invalid_message, :not_a_map}} = Store.decode(:not_a_map)
   end
 
   defp round_trip(message) do
-    assert {:ok, decoded} = message |> Codec.encode() |> Codec.decode()
+    assert {:ok, decoded} = message |> Store.encode() |> Store.decode()
     decoded
   end
 end

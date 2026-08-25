@@ -79,7 +79,7 @@ defmodule Catalyst.Flex.Baseline do
       disabled: Extensions.list_disabled() |> stable_term(),
       sources: source_manifest(Extensions.dir()),
       providers: Catalyst.LLM.Registry.list() |> stable_term(),
-      runtime: Catalyst.Runtime.Registry.list_all() |> stable_term(),
+      runtime: runtime_snapshot(),
       hooks: hook_snapshot(),
       extension_processes: extension_process_snapshot(),
       sessions: registry_keys(Catalyst.Session.Registry),
@@ -211,6 +211,31 @@ defmodule Catalyst.Flex.Baseline do
 
   defp source_loaded?(file) when is_binary(file), do: String.ends_with?(file, ".ex")
   defp source_loaded?(_preloaded_or_cover), do: false
+
+  # Hook/UI rows carry a monotonic `:seq` used only for stable ordering. A
+  # rebuild (load_all, coordinator restart) re-registers the same contributions
+  # under a new seq; that is not a leak.
+  defp runtime_snapshot do
+    Runtime.list_all()
+    |> Enum.map(&normalize_runtime_entry/1)
+    |> stable_term()
+  end
+
+  defp normalize_runtime_entry(entry) do
+    entry
+    |> normalize_runtime_key()
+    |> normalize_runtime_value()
+  end
+
+  defp normalize_runtime_key(%{key: {tag, seq}} = entry) when is_integer(seq),
+    do: %{entry | key: {tag, :_}}
+
+  defp normalize_runtime_key(entry), do: entry
+
+  defp normalize_runtime_value(%{value: value} = entry) when is_map(value),
+    do: %{entry | value: Map.delete(value, :seq)}
+
+  defp normalize_runtime_value(entry), do: entry
 
   defp hook_snapshot do
     (Catalyst.Hooks.points() ++ [:event])

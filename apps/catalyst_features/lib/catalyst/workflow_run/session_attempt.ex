@@ -9,7 +9,7 @@ defmodule Catalyst.WorkflowRun.SessionAttempt do
 
   @behaviour Catalyst.WorkflowRun.Attempt
 
-  alias Catalyst.Session.Store.Codec
+  alias Catalyst.Session.Store
   alias Catalyst.Workflow.Attempt
 
   @impl true
@@ -82,7 +82,7 @@ defmodule Catalyst.WorkflowRun.SessionAttempt do
   end
 
   defp model(_stage, %{"model" => encoded}) do
-    case Codec.decode_model(encoded) do
+    case Store.decode_model(encoded) do
       {:ok, model} -> {:ok, model}
       :error -> {:error, :invalid_workflow_model}
     end

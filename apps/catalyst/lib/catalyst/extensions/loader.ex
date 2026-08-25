@@ -3,11 +3,12 @@ defmodule Catalyst.Extensions.Loader do
   Isolated compile, classification, metadata, and setup pipeline for extension
   source files.
 
-  Compilation happens in a short-lived external BEAM. A broken or hostile
-  compile therefore cannot redefine modules in the live VM, and all selected
-  sources are staged before the runtime projection is rebuilt. This module
-  mutates no Catalyst registry; setup callbacks run only after staged binaries
-  have been accepted and loaded by `Catalyst.Extensions.Load`.
+  Compilation happens in a short-lived external BEAM that re-enters
+  `run_from_env/0`. A broken or hostile compile therefore cannot redefine
+  modules in the live VM, and all selected sources are staged before the
+  runtime projection is rebuilt. This module mutates no Catalyst registry;
+  setup callbacks run only after staged binaries have been accepted and loaded
+  by `Catalyst.Extensions.Load`.
   """
 
   require Logger
@@ -55,14 +56,29 @@ defmodule Catalyst.Extensions.Loader do
   end
 
   @doc false
-  @spec classify_compiled([{module(), binary()}]) :: {:ok, contribution()} | {:error, term()}
-  def classify_compiled(compiled) do
-    modules = Enum.map(compiled, &elem(&1, 0))
-    {extension_modules, tool_modules} = classify(modules)
+  @spec run_from_env() :: no_return()
+  def run_from_env do
+    {:ok, _apps} = Application.ensure_all_started(:elixir)
+    {:ok, _apps} = Application.ensure_all_started(:logger)
+    request = System.fetch_env!("CATALYST_EXTENSION_STAGE_REQUEST")
+    response = System.fetch_env!("CATALYST_EXTENSION_STAGE_RESPONSE")
 
-    with {:ok, definitions} <- tool_definitions(tool_modules) do
-      {:ok, contribution(compiled, extension_modules, tool_modules, definitions)}
-    end
+    result =
+      request
+      |> File.read!()
+      |> :erlang.binary_to_term()
+      |> compile_request()
+
+    File.write!(response, :erlang.term_to_binary(result, compressed: 6))
+    System.halt(0)
+  rescue
+    error ->
+      write_crash_response(Exception.message(error))
+      System.halt(2)
+  catch
+    kind, reason ->
+      write_crash_response({kind, reason})
+      System.halt(2)
   end
 
   @doc false
@@ -254,7 +270,7 @@ defmodule Catalyst.Extensions.Loader do
       ["+S", "2:2", "+SDio", "1", "+SDcpu", "1", "-noshell", "-noinput"] ++
         runtime_args ++
         code_path_args() ++
-        ["-eval", "'Elixir.Catalyst.Extensions.StageCompiler':run_from_env()."]
+        ["-eval", "'Elixir.Catalyst.Extensions.Loader':run_from_env()."]
 
     timeout = max(count, 1) * compile_timeout() + 5_000
 
@@ -334,5 +350,55 @@ defmodule Catalyst.Extensions.Loader do
   defp scratch_path(kind) do
     id = System.unique_integer([:positive, :monotonic])
     Path.join(System.tmp_dir!(), "catalyst_extension_stage_#{kind}_#{id}")
+  end
+
+  defp classify_compiled(compiled) do
+    modules = Enum.map(compiled, &elem(&1, 0))
+    {extension_modules, tool_modules} = classify(modules)
+
+    with {:ok, definitions} <- tool_definitions(tool_modules) do
+      {:ok, contribution(compiled, extension_modules, tool_modules, definitions)}
+    end
+  end
+
+  defp compile_request(%{paths: paths, timeout: timeout}) do
+    previous = Code.compiler_options()
+    Code.compiler_options(ignore_module_conflict: true)
+
+    try do
+      Enum.map(paths, &compile_path(&1, timeout))
+    after
+      Code.compiler_options(previous)
+    end
+  end
+
+  defp compile_path({source, path}, timeout) do
+    task = Task.async(fn -> compile_staged_file(path) end)
+
+    result =
+      case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+        {:ok, result} -> result
+        {:exit, reason} -> {:error, {:exit, reason}}
+        nil -> {:error, :timeout}
+      end
+
+    {source, path, result}
+  end
+
+  defp compile_staged_file(path) do
+    path
+    |> Code.compile_file()
+    |> classify_compiled()
+  rescue
+    error -> {:error, {:compile, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:compile, {kind, reason}}}
+  end
+
+  defp write_crash_response(reason) do
+    case System.get_env("CATALYST_EXTENSION_STAGE_RESPONSE") do
+      nil -> :ok
+      path -> File.write(path, :erlang.term_to_binary({:stage_crash, reason}))
+    end
   end
 end

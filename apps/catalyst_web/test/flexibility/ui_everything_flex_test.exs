@@ -9,7 +9,8 @@ defmodule CatalystWeb.Flex.UIEverythingFlexTest do
   @shell_keys [
     {CatalystWeb.ShellLive, :current_session},
     {CatalystWeb.ShellLive, :codex_prefs},
-    {CatalystWeb.ShellLive, :ui_prefs}
+    {CatalystWeb.ShellLive, :ui_prefs},
+    {CatalystWeb.ShellLive, :machine_prefs}
   ]
 
   @tag :git

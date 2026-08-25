@@ -83,23 +83,23 @@ catalyst/                      # umbrella
         agent/{event.ex, loop.ex, tool_runner.ex, children.ex, children/table_owner.ex}
         hooks.ex hooks/observer.ex                  # hooks + PubSub-backed event observers (§11)
         runtime/registry.ex                         # one owner-aware live contribution table (§11)
-        system_prompt.ex prompt.ex prompt/{config.ex,registry.ex,store.ex}
+        system_prompt.ex prompt.ex prompt/{registry.ex,store.ex}
                                                    # purpose/model-aware prompt resolution (§11)
         workflow.ex workflow/{registry.ex,source.ex,support.ex}
         context/{policy.ex,registry.ex,tokens.ex,window.ex,guard.ex,
                  transcript.ex,summarizer.ex}      # request guard + persistent compaction (§4/§9)
         extension.ex extension_api.ex              # extension behaviour + unified API (§11)
-        extensions.ex                              # stable public facade + registered process name (§11)
-        extensions/{server.ex, load.ex, versioning.ex, boot_guard.ex,
+        extensions.ex                              # public API + registered GenServer (§11)
+        extensions/{load.ex, versioning.ex, boot_guard.ex,
                     processes.ex, contribution.ex, modules.ex, sources.ex,
-                    installer.ex, loader.ex, stage_compiler.ex}
+                    installer.ex, loader.ex}
                                                    # git versioning + crash-safe boot + isolated loading
                                                    # + shared write→load→commit pipeline w/ self-mod kill switch (§11)
         debug.ex                                   # per-session debug log (§12)
-        session/{server.ex, manager.ex, store.ex, event_sink.ex,
-                 reducer.ex, run_config.ex, run_context.ex, catalog.ex,
-                 server/state.ex, store/codec.ex}
-                                                   # thin server + extracted state/codec + hot-swap logic
+        session/{server.ex, manager.ex, store.ex,
+                 reducer.ex, run_context.ex, catalog.ex,
+                 server/state.ex}
+                                                   # session owner + JSONL store + hot-swap reducer
                                                    # + persisted {id, cwd, title} session catalog
         tools/{tool.ex, registry.ex, exec.ex, binaries.ex, truncate.ex, listing.ex, paths.ex,
                diff.ex,
@@ -212,13 +212,10 @@ installers but skips user sources.
 - **`Session.Server`** = PI's `Agent`: the single writer of transcript / model / queues /
   pending state. API: `prompt/2`, `continue/1`, `steer/2`, `follow_up/2`, `abort/1`,
   `state/1`, `reset/1`. "Subscribe" = the caller subscribes to PubSub topic `"session:<id>"`.
-  Event fold/reduce (`Session.Reducer`), host-side run
-  preflight/configuration (`Session.RunConfig`), worker-side run construction
-  (`Session.RunContext`), and the state struct (`Session.Server.State`) remain separate where they
-  define independently replaceable contracts. The small late-joiner projection lives directly in
-  `Session.Server`; a second snapshot module would not add a replacement boundary because the live
-  callback already invokes newly loaded server code. Additive `%State{}` fields are free;
-  destructive changes need `code_change/3` or a rebuild-from-JSONL.
+  Event fold/reduce (`Session.Reducer`) and worker-side run construction
+  (`Session.RunContext`) stay separate so they can be hot-reloaded without restarting
+  the session process. The state struct lives in `Session.Server.State`. Additive `%State{}`
+  fields are free; destructive changes need `code_change/3` or a rebuild-from-JSONL.
 - **`Agent.Loop.run(prompts, context, config, emit)`** = `agent-loop.ts` and implements
   `Catalyst.Workflow`: a plain recursive
   function run through `Catalyst.Tasks.async/1` under the shared task supervisor. `emit` casts
@@ -268,8 +265,8 @@ estimates it, resolves the context policy/threshold, and emits transient `Contex
 request meets the threshold, it stages a policy-supplied chronological replacement, applies the
 transform once more to that candidate, and accepts it only after transcript validation, strict
 token progress, and a below-threshold re-estimate. Only then does it emit durable
-`ContextCompacted`. `Session.EventSink` synchronously appends it before the session folds or
-broadcasts the replacement, then publishes the committed notification to event observers;
+`ContextCompacted`. `Session.RunContext.persist/3` synchronously appends it before the session
+folds or broadcasts the replacement, then publishes the committed notification to event observers;
 observer callbacks remain outside the Session GenServer. An append failure leaves both live and
 restored transcripts unchanged and aborts the provider request. A rejected candidate changes
 nothing. Internal summarizer requests bypass recursive guarding.
@@ -498,7 +495,7 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   applied on the next run): `:reasoning_effort`, `:service_tier` (`"priority"` = **Fast mode**,
   ~1.5x speed / increased usage, the GPT-5.6 family plus gpt-5.5 and gpt-5.4), `:transport`.
   `:session_id` is reserved:
-  `Session.Server` strips nested caller values and `RunConfig` always installs the validated
+  `Session.Server` strips nested caller values and `RunContext` always installs the validated
   `state.id`, so cache/header/debug/tool identities cannot diverge.
 - **Transports** (`opts[:transport]` | `config :catalyst, :codex_transport`, default `:auto`):
   `:websocket` — the CLI's preferred transport (`Catalyst.LLM.OpenAICodex.WebSocket`,
@@ -520,7 +517,7 @@ provider module changes behavior on the next `stream/4` with no restart (§11).
   transcript prefix and the request's non-input fields are checked first, and ANY mismatch
   (reconnect, model/tool/option change, rewritten history, prior error) falls back to the full
   input. **Prewarm** (`Provider.prewarm/3`, started and tracked by
-  `RunConfig.start_prewarm/1` from session init/configure): a full `response.create` with
+  `RunContext.start_prewarm/1` from session init/configure): a full `response.create` with
   `"generate": false` uploads the instructions/context while the user is still typing, so turn 1
   can ride a delta. Starting a run first cancels and joins any unfinished prewarm and invalidates
   its provider resources, preventing a late warmup stash from replacing the run's connection.
@@ -769,12 +766,11 @@ Lifecycle calls into the state server share
 `config :catalyst, :extension_lifecycle_call_timeout` (default 30s), including direct uninstall
 and disable's purge. This is independent of the extension-process tree's shorter graceful
 shutdown deadline, after which that tree is killed.
-`Catalyst.Extensions` remains the stable public facade, registered process name, and supervisor
-child id. Its GenServer implementation lives in `Extensions.Server`; serialized compile/setup,
-lifecycle, rollback, and source rebuild live in `Extensions.Load`; isolated multi-file staging
-lives in `Extensions.StageCompiler`; module load and release-code restoration live in
-`Extensions.Modules`. The public facade itself owns the one re-entrant load lock and its small
-status/error presentation boundary. Tool rows store their complete
+`Catalyst.Extensions` is the public API, registered process name, and GenServer. Serialized
+compile/setup, lifecycle, rollback, and source rebuild live in `Extensions.Load`; isolated
+multi-file staging lives in `Extensions.Loader` (`run_from_env/0` in a disposable BEAM); module
+load and release-code restoration live in `Extensions.Modules`. The GenServer owns the one
+re-entrant load lock and its small status/error presentation boundary. Tool rows store their complete
 validated metadata/execution entries in `Runtime.Registry`; that table alone owns tool claims and
 collisions. The state-owning server keeps one plain activation map and its local transitions
 (module contribution commit, conflict checks, owner drop/snapshot, and purge-result recording);
@@ -959,7 +955,7 @@ API rejects disable instead of renaming a file that `list_disabled/0` could neve
 symlink to the most recent session). It captures structural/final agent-loop events (streaming
 deltas are intentionally skipped), each **tool call + result**, and the **truncated Codex request
 (+byte size) / response / error** — written from
-`Session.EventSink`/background tasks (full reason on failure) and the `OpenAICodex.Provider`, so
+`Session.RunContext.persist/3`/background tasks (full reason on failure) and the `OpenAICodex.Provider`, so
 default-on file IO does not run in `Session.Server` callbacks. Toggle with
 `CATALYST_DEBUG=0`. Log/tool text is scrubbed to valid UTF-8 after byte bounds are applied, and a
 deleted cached debug directory is revalidated and recreated on the next write. The `read_log` tool
@@ -987,7 +983,7 @@ process trees. None of those processes is an unconditional kernel child.
   opt (`Session.Server.configure(pid, opts: [computer_use: true])`, header toggle, persisted in
   the `machine_prefs` persistent_term) and requires backend availability
   (`Catalyst.Tools.Computer.Availability`: Darwin + helper binary). `:computer_use` is on the
-  `RunConfig.inheritable_opts/1` denylist: **child sessions never inherit the grant**.
+  `RunContext.inheritable_opts/1` denylist: **child sessions never inherit the grant**.
 - **Native helper.** `rel/macos/computer_helper.m` → `catalyst-input`, a long-lived
   newline-delimited-JSON process on a BEAM Port owned by the supervised
   `Catalyst.Tools.Computer.Helper` GenServer (lazy Port open so no TCC prompt at boot; permanent,

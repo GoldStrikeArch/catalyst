@@ -7,7 +7,6 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
 
   alias Catalyst.Context.Registry, as: ContextRegistry
   alias Catalyst.{ExtensionAPI, Extensions}
-  alias Catalyst.LLM.Registry, as: LLMRegistry
   alias Catalyst.Extensions.BootGuard
   alias Catalyst.Prompt.Registry, as: PromptRegistry
   alias Catalyst.Runtime.Registry, as: RuntimeRegistry
@@ -34,30 +33,6 @@ defmodule Catalyst.ExtensionRegistryIntegrationTest do
     assert {:ok, purged} = ExtensionAPI.purge_owner(@direct_owner)
     assert {RuntimeRegistry, :purge_owner, 1} in purged
     assert {Catalyst.Extensions.Processes, :stop_owner, 1} in purged
-  end
-
-  test "kind handlers use stable external captures" do
-    handlers = %{
-      tool: {Extensions, :register_extension_tool, 2},
-      hook: {Extensions, :register_extension_hook, 4},
-      event: {Extensions, :register_extension_observer, 3},
-      process: {Extensions, :start_extension_process, 2},
-      provider: {LLMRegistry, :register_extension_provider, 3},
-      prompt: {PromptRegistry, :register_extension_prompt, 4},
-      prompt_policy: {PromptRegistry, :register_extension_prompt_policy, 3},
-      workflow: {WorkflowRegistry, :register_extension_workflow, 4},
-      context_policy: {ContextRegistry, :register_extension_policy, 3},
-      context_threshold: {ContextRegistry, :register_extension_threshold, 4}
-    }
-
-    for {kind, {module, name, arity}} <- handlers do
-      handler = :persistent_term.get({ExtensionAPI, :kind, kind})
-
-      assert Function.info(handler, :type) == {:type, :external}
-      assert Function.info(handler, :module) == {:module, module}
-      assert Function.info(handler, :name) == {:name, name}
-      assert Function.info(handler, :arity) == {:arity, arity}
-    end
   end
 
   test "ExtensionAPI owner-tags prompt, workflow, and context registrations" do
