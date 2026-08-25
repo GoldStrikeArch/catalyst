@@ -29,7 +29,7 @@ defmodule Catalyst.Context.ResourceCleanupTest do
     on_exit(fn ->
       Registry.unregister_policy()
       restore_runtime_policy(Registry, previous_policy)
-      ProviderRegistry.unregister_owner(owner)
+      Catalyst.Runtime.Registry.purge_owner(owner)
       Application.delete_env(:catalyst, :summary_cleanup_test_pid)
       File.rm_rf!(tmp)
     end)

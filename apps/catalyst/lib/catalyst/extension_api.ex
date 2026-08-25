@@ -30,7 +30,7 @@ defmodule Catalyst.ExtensionAPI do
     %__MODULE__{
       owner: owner,
       load_ref: load_ref,
-      server: Catalyst.Extensions.Transaction.server()
+      server: Catalyst.Extensions.transaction_server()
     }
   end
 

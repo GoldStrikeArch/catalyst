@@ -74,7 +74,7 @@ defmodule Catalyst.Session.Server.State do
     # never mistake an assistant from an older persisted run for this result.
     run_final_assistant: nil,
     # Transcript, stored NEWEST-FIRST so per-event appends are O(1); reversed
-    # at the boundaries (Snapshot.of/1, start_run's loop context).
+    # at the boundaries (Server.snapshot/1, start_run's loop context).
     messages: [],
     streaming_message: nil,
     # Streamed deltas of the in-flight assistant message, accumulated in

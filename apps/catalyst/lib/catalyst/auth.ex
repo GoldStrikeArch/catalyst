@@ -2,12 +2,12 @@ defmodule Catalyst.Auth do
   @moduledoc """
   Authentication facade for subscription-backed model providers.
 
-  `login_openai_codex/0` runs ChatGPT's browser PKCE flow;
-  `login_grok/0` runs xAI's device authorization flow for SuperGrok.
+  `login_openai_codex/0` runs ChatGPT's browser PKCE flow. Optional providers
+  own their login and refresh flows through `Catalyst.LLM.Controls`.
   """
 
   require Logger
-  alias Catalyst.Auth.{CallbackServer, OpenAIOAuth, PKCE, TokenStore, XAIOAuth}
+  alias Catalyst.Auth.{CallbackServer, OpenAIOAuth, PKCE, TokenStore}
 
   @doc "Whether the selected subscription provider has stored credentials."
   @spec logged_in?(String.t()) :: boolean()
@@ -28,7 +28,7 @@ defmodule Catalyst.Auth do
     url = OpenAIOAuth.authorize_url(challenge, state)
 
     with {:ok, callback} <- CallbackServer.start(state) do
-      maybe_open_browser(url, opts)
+      open_browser(url, opts)
 
       IO.puts("""
       Opening your browser to sign in to ChatGPT (Codex subscription).
@@ -46,47 +46,27 @@ defmodule Catalyst.Auth do
   end
 
   @doc """
-  Run xAI's device OAuth flow and store credentials for the SuperGrok-backed
-  provider. The browser opens xAI's verification page while this call polls
-  until the user approves, rejects, or the code expires.
+  Open an authentication URL in the platform browser unless `:no_browser` is set.
+
+  Optional providers use this shared edge while retaining ownership of their
+  protocol. `:open_browser` may inject a one-argument function in tests.
   """
-  @spec login_grok(keyword()) :: {:ok, String.t() | nil} | {:error, term()}
-  def login_grok(opts \\ []) do
-    with {:ok, device} <- XAIOAuth.request_device_code(opts) do
-      url = device.verification_uri_complete || device.verification_uri
-      maybe_open_browser(url, opts)
-
-      IO.puts("""
-      Opening your browser to sign in to SuperGrok.
-      If it doesn't open automatically, visit:
-
-        #{device.verification_uri}
-
-      and enter code: #{device.user_code}
-      """)
-
-      with {:ok, creds} <- XAIOAuth.await_device_code(device, opts),
-           :ok <- TokenStore.put(XAIOAuth.provider_id(), creds) do
-        {:ok, creds["account_id"]}
-      end
-    end
-  end
-
-  defp maybe_open_browser(url, opts) do
+  @spec open_browser(String.t(), keyword()) :: :ok
+  def open_browser(url, opts \\ []) do
     case Keyword.get(opts, :no_browser, false) do
       true ->
         :ok
 
       false ->
         opts
-        |> Keyword.get(:open_browser, &open_browser/1)
+        |> Keyword.get(:open_browser, &open_system_browser/1)
         |> then(& &1.(url))
 
         :ok
     end
   end
 
-  defp open_browser(url) do
+  defp open_system_browser(url) do
     cmd =
       case :os.type() do
         {:unix, :darwin} ->

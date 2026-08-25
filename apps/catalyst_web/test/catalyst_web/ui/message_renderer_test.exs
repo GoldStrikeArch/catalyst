@@ -273,7 +273,7 @@ defmodule CatalystWeb.UI.MessageRendererTest do
   end
 
   test "an extension renderer that raises at diff time falls back to built-in" do
-    on_exit(fn -> Registry.unregister_owner("broken_renderer_test") end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner("broken_renderer_test") end)
 
     Registry.register_renderer(
       :message,

@@ -10,7 +10,7 @@ defmodule CatalystWeb.UI.RegistryTest do
   @dispatch_probe_key {__MODULE__, :dispatch_probe}
 
   setup do
-    on_exit(fn -> Registry.unregister_owner(@owner) end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner(@owner) end)
     :ok
   end
 
@@ -39,7 +39,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       Registry.register_page("chat", {__MODULE__, :fake_render}, owner: @owner)
       assert {:ok, {__MODULE__, :fake_render}} = Registry.fetch_page("chat")
 
-      Registry.unregister_owner(@owner)
+      Catalyst.Runtime.Registry.purge_owner(@owner)
       assert {:ok, {CatalystWeb.Pages.ChatPage, :render}} = Registry.fetch_page("chat")
     end
 
@@ -47,7 +47,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       Registry.register_page("extensions", {__MODULE__, :fake_render}, owner: @owner)
       assert {:ok, {__MODULE__, :fake_render}} = Registry.fetch_page("extensions")
 
-      Registry.unregister_owner(@owner)
+      Catalyst.Runtime.Registry.purge_owner(@owner)
 
       assert {:ok, {CatalystWeb.Pages.ExtensionsPage, :render}} =
                Registry.fetch_page("extensions")
@@ -57,7 +57,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       Registry.register_page("scratch", {__MODULE__, :fake_render}, owner: @owner)
       assert {:ok, _} = Registry.fetch_page("scratch")
 
-      Registry.unregister_owner(@owner)
+      Catalyst.Runtime.Registry.purge_owner(@owner)
       assert :error = Registry.fetch_page("scratch")
     end
 
@@ -94,7 +94,7 @@ defmodule CatalystWeb.UI.RegistryTest do
 
       # Purging the real owner must remove everything it registered; a spoofed
       # :owner in opts cannot detach a registration from its extension.
-      Registry.unregister_owner(@owner)
+      Catalyst.Runtime.Registry.purge_owner(@owner)
 
       assert :error = Registry.fetch_page("spoof-page")
       assert :error = Registry.fetch_command("spoofcmd")
@@ -109,7 +109,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       Registry.register_command("cd", owner: @owner, handler: &__MODULE__.fake_command/2)
       assert {:ok, %{owner: @owner}} = Registry.fetch_command("cd")
 
-      Registry.unregister_owner(@owner)
+      Catalyst.Runtime.Registry.purge_owner(@owner)
       assert {:ok, entry} = Registry.fetch_command("cd")
       assert entry.owner == nil
       assert entry.handler == (&CatalystWeb.ShellLive.Commands.change_directory/2)
@@ -159,7 +159,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       Registry.register_component(:header_extra, fn _ -> :x end, owner: @owner)
       Registry.register_command("sweepcmd", owner: @owner, handler: &__MODULE__.fake_command/2)
 
-      Registry.unregister_owner(@owner)
+      Catalyst.Runtime.Registry.purge_owner(@owner)
 
       assert :error = Registry.fetch_page("sweep")
       assert Registry.renderer(:message, :sweep_probe) == :error
@@ -214,7 +214,7 @@ defmodule CatalystWeb.UI.RegistryTest do
       on_exit(fn ->
         :persistent_term.erase(@dispatch_probe_key)
         ExtensionAPI.register_kind(:page, previous_handler)
-        Registry.unregister_owner(owner)
+        Catalyst.Runtime.Registry.purge_owner(owner)
       end)
 
       stale_api = ExtensionAPI.new(owner)

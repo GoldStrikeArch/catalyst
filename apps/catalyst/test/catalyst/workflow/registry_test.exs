@@ -39,7 +39,7 @@ defmodule Catalyst.Workflow.RegistryTest do
     owner = "workflow_registry_test_#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
-      Registry.unregister_owner(owner)
+      Catalyst.Runtime.Registry.purge_owner(owner)
       restore_env(:workflows, previous.workflows)
       restore_env(:agent_loop, previous.agent_loop)
     end)
@@ -53,22 +53,15 @@ defmodule Catalyst.Workflow.RegistryTest do
     assert WorkflowB.describe() == %{name: "workflow-b"}
   end
 
-  test "runtime registration is owner-aware and runtime_entries are stable", %{owner: owner} do
-    assert :ok = Registry.register_workflow("z-review", WorkflowA, owner: owner)
+  test "runtime registration is owner-aware and owner purge reveals fallbacks", %{owner: owner} do
     assert :ok = Registry.register_workflow("a-review", WorkflowB, owner: owner)
     assert :ok = Registry.register_workflow(:default, WorkflowA, owner: owner)
 
     assert {:ok, WorkflowB} = Registry.fetch("a-review")
+    assert {:ok, WorkflowB, ^owner} = RuntimeRegistry.fetch(:workflow, "a-review")
 
-    # Stable inspect-order, matching the prompt/context registries' convention.
-    assert Registry.runtime_entries() == [
-             %{key: {:workflow, "a-review"}, value: WorkflowB, owner: owner},
-             %{key: {:workflow, "z-review"}, value: WorkflowA, owner: owner},
-             %{key: {:workflow, :default}, value: WorkflowA, owner: owner}
-           ]
-
-    assert :ok = Registry.unregister_owner(owner)
-    assert Registry.runtime_entries() == []
+    assert :ok = Catalyst.Runtime.Registry.purge_owner(owner)
+    refute Enum.any?(RuntimeRegistry.list(:workflow), &(&1.owner == owner))
     assert {:error, {:unknown_workflow, "a-review"}} = Registry.fetch("a-review")
   end
 
@@ -85,7 +78,7 @@ defmodule Catalyst.Workflow.RegistryTest do
     assert {:error, {:owner_collision, :workflow, "review", ^owner, :host}} =
              Registry.register_workflow("review", WorkflowA)
 
-    assert :ok = Registry.unregister_owner("other")
+    assert :ok = Catalyst.Runtime.Registry.purge_owner("other")
     assert {:ok, WorkflowB} = Registry.fetch("review")
   end
 
@@ -101,7 +94,7 @@ defmodule Catalyst.Workflow.RegistryTest do
                Registry.register_workflow(name, module, owner: owner)
     end
 
-    assert Registry.runtime_entries() == []
+    refute Enum.any?(RuntimeRegistry.list(:workflow), &(&1.owner == owner))
   end
 
   test "application workflow values are live and deleting them reveals lower layers" do
@@ -174,10 +167,8 @@ defmodule Catalyst.Workflow.RegistryTest do
   test "list/0 composes runtime, application, and built-in layers into picker rows", %{
     owner: owner
   } do
-    # Built-in-only baseline: exactly the default row.
-    assert Registry.list() == [
-             %{name: :default, module: Catalyst.Agent.Loop, source: :builtin}
-           ]
+    assert %{name: :default, module: Catalyst.Agent.Loop, source: :builtin} =
+             Enum.find(Registry.list(), &(&1.name == :default))
 
     Application.put_env(:catalyst, :workflows, %{
       "zeta" => WorkflowA,
@@ -188,7 +179,8 @@ defmodule Catalyst.Workflow.RegistryTest do
     assert :ok = Registry.register_workflow("review", WorkflowB, owner: owner)
     assert :ok = Registry.register_workflow("alpha", WorkflowA, owner: owner)
 
-    assert Registry.list() == [
+    assert Registry.list()
+           |> Enum.filter(&(&1.name in [:default, "alpha", "review", "zeta"])) == [
              %{
                name: :default,
                module: WorkflowB,
@@ -220,7 +212,8 @@ defmodule Catalyst.Workflow.RegistryTest do
 
     # The misconfigured app names and default are skipped; resolve/1 still
     # reports them as tagged errors when explicitly selected.
-    assert Registry.list() == [
+    assert Registry.list()
+           |> Enum.filter(&(&1.name in [:default, "review", "valid"])) == [
              %{name: "valid", module: WorkflowA, source: {:runtime, owner, {:workflow, "valid"}}}
            ]
 
@@ -230,7 +223,8 @@ defmodule Catalyst.Workflow.RegistryTest do
     # A malformed :workflows value degrades list/0 to the valid layers only.
     Application.put_env(:catalyst, :workflows, :malformed)
 
-    assert Registry.list() == [
+    assert Registry.list()
+           |> Enum.filter(&(&1.name in [:default, "review", "valid"])) == [
              %{name: "valid", module: WorkflowA, source: {:runtime, owner, {:workflow, "valid"}}}
            ]
   end
@@ -282,10 +276,10 @@ defmodule Catalyst.Workflow.RegistryTest do
     })
 
     with_runtime_absent(fn ->
-      assert Registry.runtime_entries() == []
+      assert RuntimeRegistry.list(:workflow) == []
       assert {:ok, WorkflowA} = Registry.fetch("review")
       assert {:ok, %{module: WorkflowB}} = Registry.resolve([])
-      assert catch_exit(Registry.unregister_owner(owner))
+      assert catch_exit(Catalyst.Runtime.Registry.purge_owner(owner))
     end)
   end
 

@@ -83,24 +83,22 @@ catalyst/                      # umbrella
         agent/{event.ex, loop.ex, tool_runner.ex, children.ex, children/table_owner.ex}
         hooks.ex hooks/observer.ex                  # hooks + PubSub-backed event observers (§11)
         runtime/registry.ex                         # one owner-aware live contribution table (§11)
-        system_prompt.ex prompt.ex prompt/{request.ex,resolution.ex,config.ex,registry.ex}
+        system_prompt.ex prompt.ex prompt/{config.ex,registry.ex,store.ex}
                                                    # purpose/model-aware prompt resolution (§11)
         workflow.ex workflow/{registry.ex,source.ex,support.ex}
-        context/{policy.ex,registry.ex,tokens.ex,window.ex,guard.ex,compaction.ex,
+        context/{policy.ex,registry.ex,tokens.ex,window.ex,guard.ex,
                  transcript.ex,summarizer.ex}      # request guard + persistent compaction (§4/§9)
         extension.ex extension_api.ex              # extension behaviour + unified API (§11)
         extensions.ex                              # stable public facade + registered process name (§11)
-        extensions/{server.ex, load.ex, presenter.ex,
-                    versioning.ex, boot_guard.ex, processes.ex, state.ex,
-                    contribution.ex,
-                    transaction.ex, modules.ex, sources.ex,
+        extensions/{server.ex, load.ex, versioning.ex, boot_guard.ex,
+                    processes.ex, contribution.ex, modules.ex, sources.ex,
                     installer.ex, loader.ex, stage_compiler.ex}
                                                    # git versioning + crash-safe boot + isolated loading
                                                    # + shared write→load→commit pipeline w/ self-mod kill switch (§11)
         debug.ex                                   # per-session debug log (§12)
         session/{server.ex, manager.ex, store.ex, event_sink.ex,
-                 reducer.ex, run_config.ex, run_context.ex, snapshot.ex,
-                 catalog.ex, server/state.ex, store/codec.ex}
+                 reducer.ex, run_config.ex, run_context.ex, catalog.ex,
+                 server/state.ex, store/codec.ex}
                                                    # thin server + extracted state/codec + hot-swap logic
                                                    # + persisted {id, cwd, title} session catalog
         tools/{tool.ex, registry.ex, exec.ex, binaries.ex, truncate.ex, listing.ex, paths.ex,
@@ -214,13 +212,13 @@ installers but skips user sources.
 - **`Session.Server`** = PI's `Agent`: the single writer of transcript / model / queues /
   pending state. API: `prompt/2`, `continue/1`, `steer/2`, `follow_up/2`, `abort/1`,
   `state/1`, `reset/1`. "Subscribe" = the caller subscribes to PubSub topic `"session:<id>"`.
-  The server is deliberately **thin**: event fold/reduce (`Session.Reducer`), host-side run
+  Event fold/reduce (`Session.Reducer`), host-side run
   preflight/configuration (`Session.RunConfig`), worker-side run construction
-  (`Session.RunContext`), and snapshotting for late joiners (`Session.Snapshot`) live in stateless,
-  hot-swappable modules it delegates to — so deep behavior changes are module reloads, not session
-  restarts. The struct definition lives in `Session.Server.State`; the
-  queues and state ownership remain in the GenServer callbacks (additive `%State{}` fields are
-  free; destructive changes need `code_change/3` or a rebuild-from-JSONL).
+  (`Session.RunContext`), and the state struct (`Session.Server.State`) remain separate where they
+  define independently replaceable contracts. The small late-joiner projection lives directly in
+  `Session.Server`; a second snapshot module would not add a replacement boundary because the live
+  callback already invokes newly loaded server code. Additive `%State{}` fields are free;
+  destructive changes need `code_change/3` or a rebuild-from-JSONL.
 - **`Agent.Loop.run(prompts, context, config, emit)`** = `agent-loop.ts` and implements
   `Catalyst.Workflow`: a plain recursive
   function run through `Catalyst.Tasks.async/1` under the shared task supervisor. `emit` casts
@@ -456,7 +454,8 @@ testable with no network — built before the real provider. `Catalyst.LLM.Demo`
 provider is Codex; the LiveView test helper overrides the Codex API through
 `Catalyst.LLM.Registry` to drive full turns offline.
 
-Providers are resolved through **`Catalyst.LLM.Registry`** (ETS-GenServer), keyed by `api` name
+Providers are resolved through **`Catalyst.LLM.Registry`**, a validating facade over the shared
+`Catalyst.Runtime.Registry`, keyed by `api` name
 and seeded with the built-ins (`faux`, `openai-codex-responses`). A session resolves its provider
 by module or by api-name; new providers are added at runtime with
 `register_provider(api, %Catalyst.LLM.ProviderConfig{…})` (or a bare module), and recompiling a
@@ -728,9 +727,13 @@ owning file's `ext_id`. Web-only kinds (renderers/components/pages/commands) are
 reserved `:host` owner; they may refresh their own names but cannot detach or replace an
 extension-owned tool/provider.
 Provider configs may carry a `Catalyst.LLM.Controls` module, which supplies model catalog,
-model construction, auth labels/ids, and run-option translation to the shell. The bundled Grok
+model construction, login/credential refresh, auth labels/ids, and run-option translation to the shell. The bundled Grok
 feature therefore contributes its full picker/login behavior with its provider registration;
 `catalyst_web` has no Grok module reference or provider-name branch.
+Shell slot contributions may be plain render functions or behavior-owning LiveComponents. The
+latter own local events and can contribute new-session options or request a bounded parent-shell
+action; computer and workflow controls use this path, so their state and handlers are not shell
+kernel concepts.
 
 **Extension processes.** `ExtensionAPI.start_child(api, child_spec)` gives extensions a supervised
 home for long-lived processes (watchers, pollers, client connections): each owner gets its own
@@ -770,12 +773,13 @@ shutdown deadline, after which that tree is killed.
 child id. Its GenServer implementation lives in `Extensions.Server`; serialized compile/setup,
 lifecycle, rollback, and source rebuild live in `Extensions.Load`; isolated multi-file staging
 lives in `Extensions.StageCompiler`; module load and release-code restoration live in
-`Extensions.Modules`; and user-facing
-status/error rendering lives in the pure `Extensions.Presenter`. Typed ownership transitions
-(claim tracking, contribution commit, module-conflict checks, owner drop/snapshot, purge-result
-recording) live in `Extensions.State`; caller-independent load locking and coordinator pinning live
-in `Transaction`; and all source discovery, owner derivation, and managed-path checks live in
-`Sources`. A loader
+`Extensions.Modules`. The public facade itself owns the one re-entrant load lock and its small
+status/error presentation boundary. Tool rows store their complete
+validated metadata/execution entries in `Runtime.Registry`; that table alone owns tool claims and
+collisions. The state-owning server keeps one plain activation map and its local transitions
+(module contribution commit, conflict checks, owner drop/snapshot, and purge-result recording);
+there is no parallel state-machine module or second ownership ledger. Source discovery, owner
+derivation, and managed-path checks live in `Sources`. A loader
 contribution is a typed `%Extensions.Contribution{}`, and `Runtime.Registry` normalizes missing
 owners to the reserved `:host` id. A failed purge does not forget the owner: its
 entry stays tracked as `:degraded` with per-subsystem `purge_failures`, so live residue is never
@@ -887,8 +891,9 @@ policy/thresholds. They and `CatalystWeb.UI.Registry` are pure domain facades ov
 as the context policy). Each facade retains its validation, fallback layers, and domain error
 tuples. Each lookup reads the runtime entry first, then current application
 configuration, then its documented file/built-in layers; deleting an overlay never re-seeds a
-stale boot value. Their `runtime_entries/0` results expose `key`, `value`, and `owner` fields for rollback and
-diagnostics. `CatalystWeb.UI.Registry` resolves **pages / renderers / components / commands**.
+stale boot value. Runtime diagnostics read `Runtime.Registry.list/1` or `list_all/0` directly
+instead of every facade exposing a duplicate introspection API.
+`CatalystWeb.UI.Registry` resolves **pages / renderers / components / commands**.
 `CatalystWeb.UI.MessageRenderer` dispatches transcript rendering to registered renderers
 (newest-first, `match_fun`) falling back to built-ins. Routing is **catch-all**: one
 `CatalystWeb.ShellLive` is mounted at `/` and `/*path` (router ships this once), and

@@ -24,7 +24,7 @@ defmodule Catalyst.FeatureBoundaryTest do
     Application.delete_env(:catalyst, :workflows)
 
     on_exit(fn ->
-      Registry.unregister_owner("feature-boundary-test")
+      Catalyst.Runtime.Registry.purge_owner("feature-boundary-test")
       restore_env(:acp_agents, previous.acp_agents)
       restore_env(:workflows, previous.workflows)
     end)

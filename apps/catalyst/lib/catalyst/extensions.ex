@@ -58,11 +58,9 @@ defmodule Catalyst.Extensions do
   alias Catalyst.Extensions.{
     BootGuard,
     Load,
-    Presenter,
     Processes,
     Server,
-    Sources,
-    Transaction
+    Sources
   }
 
   alias Catalyst.Runtime.Registry, as: Runtime
@@ -70,6 +68,9 @@ defmodule Catalyst.Extensions do
 
   @ready_poll_ms 10
   @ready_timeout 30_000
+  @load_lock {__MODULE__, :load_lock}
+  @load_context_key {__MODULE__, :load_context}
+  @load_server_key {__MODULE__, :load_server}
 
   @typedoc "Per-file load summary. `:conflicts` is present only when this file redefines modules another loaded file also defines."
   @type summary :: %{
@@ -99,18 +100,18 @@ defmodule Catalyst.Extensions do
   @doc "All registered tool modules."
   @spec tools() :: [module()]
   def tools do
-    ToolRegistry.default_tools()
-    |> Map.new(&{&1.name(), &1})
-    |> Map.merge(runtime_tools())
+    :extensions
+    |> tool_index()
     |> Enum.sort_by(&elem(&1, 0))
-    |> Enum.map(&elem(&1, 1))
+    |> Enum.map(fn {_name, entry} -> entry.module end)
   end
 
   @doc "Look up a tool module by its tool name. Returns `{:ok, module}` or `:error`."
   @spec fetch(String.t()) :: {:ok, module()} | :error
   def fetch(name) do
     case Runtime.fetch(:tool, name) do
-      {:ok, module, _owner} -> {:ok, module}
+      {:ok, %{module: module}, _owner} -> {:ok, module}
+      {:ok, module, _owner} when is_atom(module) -> {:ok, module}
       :error -> fetch_builtin(name)
     end
   end
@@ -122,8 +123,8 @@ defmodule Catalyst.Extensions do
   @doc "Register a validated tool module. `opts[:owner]` tags it for purge-on-reload."
   @spec register_tool(module(), keyword()) :: {:ok, module()} | {:error, term()}
   def register_tool(module, opts \\ []) do
-    with {:ok, definition} <- ToolRegistry.definition(module) do
-      GenServer.call(__MODULE__, {:register, module, definition, opts})
+    with {:ok, entry} <- ToolRegistry.entry(module) do
+      GenServer.call(__MODULE__, {:register, entry, opts})
     end
   end
 
@@ -246,7 +247,26 @@ defmodule Catalyst.Extensions do
   critical section that a concurrent load cannot interleave.
   """
   @spec locked((-> result)) :: result when result: term()
-  def locked(fun) when is_function(fun, 0), do: Transaction.run(fun)
+  def locked(fun) when is_function(fun, 0) do
+    case Process.get(@load_context_key, false) do
+      true -> fun.()
+      false -> run_locked_task(fun)
+    end
+  end
+
+  @doc false
+  @spec locked_inline((-> result)) :: result when result: term()
+  def locked_inline(fun) when is_function(fun, 0) do
+    case Process.get(@load_context_key, false) do
+      true -> fun.()
+      false -> with_load_lock(transaction_server(), fun)
+    end
+  end
+
+  @doc false
+  @spec transaction_server() :: GenServer.server()
+  def transaction_server,
+    do: Process.get(@load_server_key, Process.whereis(__MODULE__) || __MODULE__)
 
   @typedoc """
   One live owner's footprint: source file (nil when registered without a file),
@@ -325,6 +345,17 @@ defmodule Catalyst.Extensions do
   def resolve(tools) when is_list(tools), do: tools
   def resolve(fun) when is_function(fun, 0), do: fun.()
   def resolve(_), do: tools()
+
+  @doc "Validated name-to-entry index for a tool source."
+  @spec tool_index([module()] | (-> [module()]) | term()) :: ToolRegistry.index()
+  def tool_index(tools) when is_list(tools), do: ToolRegistry.index(tools)
+  def tool_index(fun) when is_function(fun, 0), do: fun.() |> ToolRegistry.index()
+
+  def tool_index(_) do
+    ToolRegistry.default_tools()
+    |> ToolRegistry.index()
+    |> Map.merge(runtime_tool_entries())
+  end
 
   @doc "Whether extensions are skipped at boot (safe mode)."
   @spec safe_mode?() :: boolean()
@@ -406,7 +437,19 @@ defmodule Catalyst.Extensions do
     |> max(0)
   end
 
-  defp runtime_tools, do: Map.new(Runtime.list(:tool), &{&1.key, &1.value})
+  defp runtime_tool_entries do
+    Runtime.list(:tool)
+    |> Enum.reduce(%{}, fn
+      %{key: name, value: %{module: _module} = entry}, entries ->
+        Map.put(entries, name, entry)
+
+      %{key: name, value: module}, entries when is_atom(module) ->
+        case ToolRegistry.cached_entry(module) do
+          {:ok, entry} -> Map.put(entries, name, entry)
+          {:error, _reason} -> entries
+        end
+    end)
+  end
 
   defp fetch_builtin(name) do
     case Enum.find(ToolRegistry.default_tools(), &(&1.name() == name)) do
@@ -440,14 +483,86 @@ defmodule Catalyst.Extensions do
   Tools format at this boundary; the tagged tuples stay matchable for callers.
   """
   @spec format_error(term()) :: String.t()
-  defdelegate format_error(reason), to: Presenter
+  def format_error(:self_mod_disabled) do
+    "self-modification is disabled on this machine " <>
+      "(CATALYST_DISABLE_SELF_MOD / config :catalyst, :allow_self_modification)"
+  end
+
+  def format_error({:compile, reason}), do: "compile failed: " <> format_error(reason)
+  def format_error({:register, reason}), do: "registration failed: " <> format_error(reason)
+
+  def format_error({:owner_collision, owner, paths}) do
+    "multiple extension files normalize to owner #{inspect(owner)}: #{Enum.join(paths, ", ")}"
+  end
+
+  def format_error(:no_file), do: "no extension source file found for that owner"
+
+  def format_error(:external_source),
+    do: "only files inside the extensions directory can be disabled"
+
+  def format_error(:timeout), do: "timed out"
+  def format_error({:exit, reason}), do: "exited: #{inspect(reason)}"
+
+  def format_error({:not_a_tool, module}) do
+    "#{inspect(module)} is not a tool " <>
+      "(needs name/0, description/0, parameters/0, execute/2)"
+  end
+
+  def format_error({:bad_tool_name, reason}), do: "tool name/0 failed: #{inspect(reason)}"
+
+  def format_error({:bad_tool_description, reason}),
+    do: "tool description/0 failed: #{inspect(reason)}"
+
+  def format_error({:bad_tool_parameters, reason}),
+    do: "tool parameters/0 failed: #{inspect(reason)}"
+
+  def format_error({:bad_tool_mode, reason}),
+    do: "tool execution_mode/0 failed: #{inspect(reason)}"
+
+  def format_error({:tool_metadata_timeout, module}),
+    do: "tool metadata timed out for #{inspect(module)}"
+
+  def format_error({:tool_metadata_exit, module, reason}),
+    do: "tool metadata exited for #{inspect(module)}: #{inspect(reason)}"
+
+  def format_error({:owner_collision, kind, key, existing, attempted}) do
+    "#{collision_subject(kind, key)} is already owned by #{inspect(existing)}; " <>
+      "#{inspect(attempted)} cannot replace it"
+  end
+
+  def format_error(reason) when is_binary(reason), do: reason
+  def format_error(reason), do: inspect(reason)
 
   @doc """
   Human-readable `{title, reason}` for a `boot_status/0` value — the single
   presenter behind the safe-mode/boot-failure banners in the UIs.
   """
   @spec describe_boot_status(term()) :: {String.t(), String.t()}
-  defdelegate describe_boot_status(status), to: Presenter
+  def describe_boot_status(:ok),
+    do: {"Extensions loaded", "The boot-time extension load completed."}
+
+  def describe_boot_status({:waiting_for_host, :web}) do
+    {"Waiting for the web extension host",
+     "Extensions will load after the web registry finishes wiring its contribution kinds."}
+  end
+
+  def describe_boot_status({:safe_mode, :env}) do
+    {"Safe mode — extensions were not loaded",
+     "CATALYST_SAFE_MODE is set, so loading was skipped on purpose."}
+  end
+
+  def describe_boot_status({:safe_mode, :crash_detected}) do
+    {"Safe mode — extensions were not loaded",
+     "The previous boot died while extensions were active, so this boot skipped them."}
+  end
+
+  def describe_boot_status({:load_failed, reason}) do
+    {"Extension boot load failed",
+     "The boot-time load returned an error: #{format_error(reason)}."}
+  end
+
+  def describe_boot_status(_status),
+    do: {"Extensions were not loaded", "Extension loading was skipped."}
 
   @typedoc "One `snapshot/0` owner entry: `loaded_info/0` plus a bounded process count."
   @type snapshot_owner :: %{
@@ -510,6 +625,64 @@ defmodule Catalyst.Extensions do
 
   defp snapshot_timeout,
     do: Application.get_env(:catalyst, :extensions_snapshot_timeout, 1_000)
+
+  defp run_locked_task(fun) do
+    server = transaction_server()
+
+    case start_lock_task(server, fun) do
+      {:ok, task} -> await_lock_task(task)
+      :error -> with_load_lock(server, fun)
+    end
+  end
+
+  defp start_lock_task(server, fun) do
+    task =
+      Task.Supervisor.async_nolink(Catalyst.TaskSupervisor, fn ->
+        capture_lock_outcome(fn -> with_load_lock(server, fun) end)
+      end)
+
+    {:ok, task}
+  catch
+    :exit, _reason -> :error
+  end
+
+  defp await_lock_task(task) do
+    case Task.yield(task, :infinity) do
+      {:ok, {:return, result}} -> result
+      {:ok, {:raised, kind, reason, stacktrace}} -> :erlang.raise(kind, reason, stacktrace)
+      {:exit, reason} -> exit(reason)
+    end
+  end
+
+  defp capture_lock_outcome(fun) do
+    {:return, fun.()}
+  catch
+    kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+  end
+
+  defp with_load_lock(server, fun) do
+    :global.trans(
+      {@load_lock, self()},
+      fn ->
+        Process.put(@load_context_key, true)
+        Process.put(@load_server_key, server)
+
+        try do
+          fun.()
+        after
+          Process.delete(@load_context_key)
+          Process.delete(@load_server_key)
+        end
+      end,
+      [node()],
+      :infinity
+    )
+  end
+
+  defp collision_subject(:context_policy, _key), do: "context policy"
+
+  defp collision_subject(kind, key),
+    do: "#{kind |> Atom.to_string() |> String.replace("_", " ")} #{inspect(key)}"
 
   @doc """
   Roll back the most recent non-reverted extension change and reload.

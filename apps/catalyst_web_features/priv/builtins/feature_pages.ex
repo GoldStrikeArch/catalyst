@@ -9,6 +9,20 @@ defmodule Catalyst.BuiltinExtensions.FeaturePages do
   @impl true
   def setup(api) do
     with :ok <-
+           Catalyst.ExtensionAPI.register_component(
+             api,
+             :run_controls,
+             CatalystWeb.Components.ComputerControl,
+             id: "computer-control"
+           ),
+         :ok <-
+           Catalyst.ExtensionAPI.register_component(
+             api,
+             :run_controls,
+             CatalystWeb.Components.WorkflowControl,
+             id: "workflow-control"
+           ),
+         :ok <-
            Catalyst.ExtensionAPI.register_page(
              api,
              "computer",

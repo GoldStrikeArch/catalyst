@@ -67,6 +67,14 @@ defmodule Catalyst.Runtime.Registry do
   @spec available?() :: boolean()
   def available?, do: :ets.whereis(@table) != :undefined
 
+  @doc "Monotonic projection revision used to invalidate runtime-backed UI state."
+  @spec revision() :: non_neg_integer()
+  def revision do
+    GenServer.call(__MODULE__, :revision)
+  catch
+    :exit, _reason -> 0
+  end
+
   @doc "Normalize a missing host owner to the reserved `:host` id."
   @spec normalize_owner(term()) :: term()
   def normalize_owner(nil), do: :host
@@ -101,10 +109,12 @@ defmodule Catalyst.Runtime.Registry do
   @impl true
   def init(:ok) do
     :ets.new(@table, [:named_table, :protected, read_concurrency: true])
-    {:ok, :ok}
+    {:ok, 0}
   end
 
   @impl true
+  def handle_call(:revision, _from, revision), do: {:reply, revision, revision}
+
   def handle_call({:put, kind, key, value, opts}, _from, state) do
     owner = opts |> Keyword.get(:owner) |> normalize_owner()
     collision_key = Keyword.get(opts, :collision_key, key)
@@ -112,11 +122,11 @@ defmodule Catalyst.Runtime.Registry do
     case fetch(kind, key) do
       :error ->
         insert(kind, key, owner, value)
-        {:reply, :ok, state}
+        {:reply, :ok, state + 1}
 
       {:ok, _previous, ^owner} ->
         insert(kind, key, owner, value)
-        {:reply, :ok, state}
+        {:reply, :ok, state + 1}
 
       {:ok, _previous, existing} ->
         collision = {:owner_collision, kind, collision_key, existing, owner}
@@ -126,17 +136,17 @@ defmodule Catalyst.Runtime.Registry do
 
   def handle_call({:delete, kind, key}, _from, state) do
     :ets.delete(@table, {kind, key})
-    {:reply, :ok, state}
+    {:reply, :ok, state + 1}
   end
 
   def handle_call({:purge_owner, owner, :all}, _from, state) do
     :ets.match_delete(@table, {{:_, :_}, owner, :_})
-    {:reply, :ok, state}
+    {:reply, :ok, state + 1}
   end
 
   def handle_call({:purge_owner, owner, kinds}, _from, state) do
     Enum.each(kinds, &:ets.match_delete(@table, {{&1, :_}, owner, :_}))
-    {:reply, :ok, state}
+    {:reply, :ok, state + 1}
   end
 
   defp insert(kind, key, owner, value),

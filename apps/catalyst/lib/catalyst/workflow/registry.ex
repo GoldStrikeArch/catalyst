@@ -45,8 +45,6 @@ defmodule Catalyst.Workflow.Registry do
               source: source(),
               template: term()
             }
-  @type runtime_entry :: %{key: key(), value: module(), owner: term()}
-
   @doc "Resolve the effective workflow for a run's option collection."
   @spec resolve(keyword() | map()) :: {:ok, selection()} | {:error, term()}
   def resolve(opts \\ []) do
@@ -108,22 +106,6 @@ defmodule Catalyst.Workflow.Registry do
   @doc "Drop one runtime overlay, revealing the current lower-precedence layer."
   @spec unregister_workflow(term()) :: :ok
   def unregister_workflow(name), do: Runtime.delete(:workflow, name)
-
-  @doc "Drop every runtime workflow owned by `owner`."
-  @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner), do: Runtime.purge_owner(owner, :workflow)
-
-  @doc "Return the owner-aware runtime overlay in stable key order."
-  @spec runtime_entries() :: [runtime_entry()]
-  def runtime_entries do
-    Enum.map(Runtime.list(:workflow), fn entry ->
-      %{key: {:workflow, entry.key}, value: entry.value, owner: entry.owner}
-    end)
-  end
-
-  @doc false
-  @spec table() :: atom()
-  def table, do: Runtime.table()
 
   defp default_rows do
     case resolve_default() do
@@ -380,14 +362,6 @@ defmodule Catalyst.Workflow.Registry do
       false ->
         {:error, {:invalid_workflow_source, module}}
     end
-  end
-
-  @doc false
-  @spec wire_extension_api() :: :ok
-  def wire_extension_api do
-    ExtensionAPI.register_kind(:workflow, &__MODULE__.register_extension_workflow/4)
-    ExtensionAPI.register_kind(:workflow_source, &__MODULE__.register_extension_source/3)
-    :ok
   end
 
   defp valid_source_module?(module) do

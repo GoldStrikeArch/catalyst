@@ -18,8 +18,7 @@ defmodule Catalyst.Extensions.Server do
     Contribution,
     Load,
     Modules,
-    Sources,
-    State
+    Sources
   }
 
   alias Catalyst.Files.AtomicWrite
@@ -43,7 +42,7 @@ defmodule Catalyst.Extensions.Server do
     :ok = Hooks.begin_runtime_rebuild()
 
     state =
-      State.new()
+      new_state()
       |> revoke_prior_runtime()
 
     cond do
@@ -94,7 +93,7 @@ defmodule Catalyst.Extensions.Server do
     |> Enum.reduce(state, fn {owner, modules}, current ->
       purge_result = ExtensionAPI.purge_owner(owner)
       Enum.each(modules, &Modules.restore_original/1)
-      State.record_purge_result(current, owner, purge_result)
+      record_purge_result(current, owner, purge_result)
     end)
     |> persist_footprint()
   end
@@ -195,8 +194,8 @@ defmodule Catalyst.Extensions.Server do
 
   def handle_call(:explicit_load_finished, _from, state), do: explicit_load_finished(state)
 
-  def handle_call({:register, module, definition, opts}, _from, state) do
-    {result, state} = do_register(module, definition, opts, state)
+  def handle_call({:register, entry, opts}, _from, state) do
+    {result, state} = do_register(entry, opts, state)
     {:reply, result, state}
   end
 
@@ -243,7 +242,7 @@ defmodule Catalyst.Extensions.Server do
   end
 
   def handle_call({:owner_snapshot, owner}, _from, state) do
-    {:reply, State.owner_snapshot(state, owner), state}
+    {:reply, contribution_snapshot(state, owner, runtime_tool_pairs(owner)), state}
   end
 
   def handle_call({:path_for, owner}, _from, state) do
@@ -256,7 +255,7 @@ defmodule Catalyst.Extensions.Server do
   def handle_call(:snapshot, _from, state) do
     snapshot =
       state
-      |> State.tracked_owners()
+      |> tracked_owners()
       |> Enum.map(&owner_snapshot(&1, state))
 
     {:reply, snapshot, state}
@@ -277,8 +276,8 @@ defmodule Catalyst.Extensions.Server do
 
   defp owner_snapshot(owner, state) do
     tools =
-      state.contrib
-      |> Map.get(owner, MapSet.new())
+      owner
+      |> runtime_tool_pairs()
       |> Enum.map(&elem(&1, 0))
       |> Enum.sort()
 
@@ -353,11 +352,46 @@ defmodule Catalyst.Extensions.Server do
     ExtensionAPI.register_kind(:hook, &Catalyst.Extensions.register_extension_hook/4)
     ExtensionAPI.register_kind(:event, &Catalyst.Extensions.register_extension_observer/3)
     ExtensionAPI.register_kind(:process, &Catalyst.Extensions.start_extension_process/2)
-    Catalyst.LLM.Registry.wire_extension_api()
-    Catalyst.Prompt.Registry.wire_extension_api()
-    Catalyst.Workflow.Registry.wire_extension_api()
-    Catalyst.Context.Registry.wire_extension_api()
-    Catalyst.Capabilities.wire_extension_api()
+
+    ExtensionAPI.register_kind(
+      :provider,
+      &Catalyst.LLM.Registry.register_extension_provider/3
+    )
+
+    ExtensionAPI.register_kind(
+      :prompt,
+      &Catalyst.Prompt.Registry.register_extension_prompt/4
+    )
+
+    ExtensionAPI.register_kind(
+      :prompt_policy,
+      &Catalyst.Prompt.Registry.register_extension_prompt_policy/3
+    )
+
+    ExtensionAPI.register_kind(
+      :workflow,
+      &Catalyst.Workflow.Registry.register_extension_workflow/4
+    )
+
+    ExtensionAPI.register_kind(
+      :workflow_source,
+      &Catalyst.Workflow.Registry.register_extension_source/3
+    )
+
+    ExtensionAPI.register_kind(
+      :context_policy,
+      &Catalyst.Context.Registry.register_extension_policy/3
+    )
+
+    ExtensionAPI.register_kind(
+      :context_threshold,
+      &Catalyst.Context.Registry.register_extension_threshold/4
+    )
+
+    ExtensionAPI.register_kind(
+      :capability,
+      &Catalyst.Capabilities.register_extension_capability/3
+    )
   end
 
   defp reseeders, do: :persistent_term.get(@reseeders_key, %{})
@@ -482,7 +516,7 @@ defmodule Catalyst.Extensions.Server do
   end
 
   defp commit_load(owner, path, %Contribution{} = contribution, state) do
-    case State.tool_owner_conflicts(state, owner, contribution.tool_names) do
+    case runtime_tool_conflicts(owner, contribution.tool_names) do
       [] ->
         commit_contribution(owner, path, contribution, state)
 
@@ -492,19 +526,19 @@ defmodule Catalyst.Extensions.Server do
   end
 
   defp commit_contribution(owner, path, contribution, state) do
-    conflicts = State.module_conflicts(state, owner, contribution.modules)
+    conflicts = module_conflicts(state, owner, contribution.modules)
     log_conflicts(owner, conflicts)
 
     try do
       purge_result = purge_owner_effects(owner, state)
 
-      Enum.each(Contribution.pairs(contribution), fn {name, module} ->
-        :ok = Runtime.put(:tool, name, module, owner: owner)
+      Enum.each(contribution.tool_entries, fn {name, entry} ->
+        :ok = Runtime.put(:tool, name, entry, owner: owner)
       end)
 
       result = build_summary(owner, contribution.tool_names, contribution.ext_mods, conflicts)
-      committed = State.commit_contribution(state, owner, path, contribution)
-      {{:ok, result}, State.record_purge_result(committed, owner, purge_result)}
+      committed = put_contribution_state(state, owner, path, contribution)
+      {{:ok, result}, record_purge_result(committed, owner, purge_result)}
     rescue
       error -> {{:error, {:register, Exception.message(error)}}, state}
     catch
@@ -534,12 +568,12 @@ defmodule Catalyst.Extensions.Server do
     end)
   end
 
-  defp do_register(module, definition, opts, state) do
+  defp do_register(%{module: module, definition: definition} = entry, opts, state) do
     name = definition.name
     owner = Runtime.normalize_owner(opts[:owner])
 
-    case Runtime.put(:tool, name, module, owner: owner) do
-      :ok -> {{:ok, module}, State.track(state, name, module, owner)}
+    case Runtime.put(:tool, name, entry, owner: owner) do
+      :ok -> {{:ok, module}, state}
       {:error, reason} -> {{:error, reason}, state}
     end
   end
@@ -548,14 +582,13 @@ defmodule Catalyst.Extensions.Server do
     purge_result = purge_owner_effects(owner, state)
 
     state
-    |> State.drop_owner(owner)
-    |> State.record_purge_result(owner, purge_result)
+    |> drop_owner(owner)
+    |> record_purge_result(owner, purge_result)
   end
 
   defp purge_owner_effects(owner, state) do
-    pairs = Map.get(state.contrib, owner, MapSet.new())
-
-    pairs
+    owner
+    |> runtime_tool_pairs()
     |> Enum.map(&elem(&1, 1))
     |> Enum.concat(Map.get(state.modules, owner, []))
     |> Enum.uniq()
@@ -564,11 +597,126 @@ defmodule Catalyst.Extensions.Server do
     ExtensionAPI.purge_owner(owner)
   end
 
+  defp runtime_tool_conflicts(owner, names) do
+    Enum.flat_map(names, fn name ->
+      case Runtime.fetch(:tool, name) do
+        {:ok, _entry, ^owner} -> []
+        {:ok, _entry, existing_owner} -> [{name, existing_owner}]
+        :error -> []
+      end
+    end)
+  end
+
+  defp runtime_tool_pairs(owner) do
+    :tool
+    |> Runtime.list()
+    |> Enum.flat_map(fn
+      %{key: name, owner: ^owner, value: %{module: module}} -> [{name, module}]
+      %{key: name, owner: ^owner, value: module} when is_atom(module) -> [{name, module}]
+      _other_owner_or_shape -> []
+    end)
+  end
+
   defp put_boot_status(status), do: :persistent_term.put(@boot_status_key, status)
 
   defp persist_footprint(state) do
-    :persistent_term.put(@runtime_footprint_key, State.footprint(state))
+    :persistent_term.put(@runtime_footprint_key, runtime_state_footprint(state))
     state
+  end
+
+  defp new_state do
+    %{
+      modules: %{},
+      beams: %{},
+      extensions: %{},
+      metadata: %{},
+      paths: %{},
+      degraded: %{},
+      setup_collisions: %{},
+      boot_token: nil,
+      bootstrap: :waiting
+    }
+  end
+
+  defp put_contribution_state(state, owner, path, contribution) do
+    %{
+      state
+      | modules: Map.put(state.modules, owner, contribution.modules),
+        beams: Map.put(state.beams, owner, contribution.beams),
+        extensions: Map.put(state.extensions, owner, contribution.ext_mods),
+        metadata: Map.put(state.metadata, owner, contribution.metadata),
+        paths: Map.put(state.paths, owner, path)
+    }
+  end
+
+  defp module_conflicts(state, owner, modules) do
+    modules = MapSet.new(modules)
+
+    state.modules
+    |> Map.delete(owner)
+    |> Enum.flat_map(fn {other, other_modules} ->
+      case Enum.filter(other_modules, &MapSet.member?(modules, &1)) do
+        [] -> []
+        overlap -> [{other, overlap}]
+      end
+    end)
+  end
+
+  defp drop_owner(state, owner) do
+    %{
+      state
+      | modules: Map.delete(state.modules, owner),
+        beams: Map.delete(state.beams, owner),
+        extensions: Map.delete(state.extensions, owner),
+        metadata: Map.delete(state.metadata, owner),
+        paths: Map.delete(state.paths, owner)
+    }
+  end
+
+  defp record_purge_result(state, owner, {:ok, _purged}),
+    do: %{state | degraded: Map.delete(state.degraded, owner)}
+
+  defp record_purge_result(state, owner, {:error, failures}) do
+    Logger.warning(
+      "[extensions] purge of #{inspect(owner)} left residue; owner kept as degraded: " <>
+        inspect(failures)
+    )
+
+    %{state | degraded: Map.put(state.degraded, owner, failures)}
+  end
+
+  defp contribution_snapshot(state, owner, tools) do
+    with {:ok, path} <- Map.fetch(state.paths, owner),
+         {:ok, modules} <- Map.fetch(state.modules, owner) do
+      pairs = Enum.sort(tools)
+
+      {:ok,
+       %{
+         path: path,
+         modules: modules,
+         beams: Map.get(state.beams, owner, %{}),
+         ext_mods: Map.get(state.extensions, owner, []),
+         tool_names: Enum.map(pairs, &elem(&1, 0)),
+         tool_mods: Enum.map(pairs, &elem(&1, 1)),
+         metadata: Map.get(state.metadata, owner, %{})
+       }}
+    else
+      _missing -> :none
+    end
+  end
+
+  defp tracked_owners(state) do
+    state.modules
+    |> Map.keys()
+    |> MapSet.new()
+    |> MapSet.union(MapSet.new(Map.keys(state.degraded)))
+  end
+
+  defp runtime_state_footprint(state) do
+    state.degraded
+    |> Map.keys()
+    |> Map.new(&{&1, []})
+    |> Map.merge(state.modules)
   end
 
   defp runtime_footprint, do: :persistent_term.get(@runtime_footprint_key, %{})

@@ -40,29 +40,6 @@ defmodule Catalyst.Prompt.Registry do
   @spec unregister_policy() :: :ok
   def unregister_policy, do: unregister(@policy_key)
 
-  @doc "Remove every runtime overlay owned by owner."
-  @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner), do: Runtime.purge_owner(owner, :prompt)
-
-  # test seam. Resolves one text layer through runtime and live application
-  # configuration. Built-in policy file and text fallbacks are intentionally
-  # handled by Catalyst.SystemPrompt so its documented file layers can sit
-  # between application configuration and built-in text.
-  @doc false
-  @spec lookup_text(purpose(), model_key()) ::
-          {:ok, binary(), source()} | :error | {:error, term()}
-  def lookup_text(purpose, model_key) do
-    key = {:text, purpose, model_key}
-
-    case lookup_runtime(key) do
-      {:ok, text, owner} ->
-        {:ok, text, {:extension, owner, key}}
-
-      :error ->
-        application_text(purpose, model_key)
-    end
-  end
-
   @doc "Read only the runtime text overlay and its owner."
   @spec runtime_text(purpose(), model_key()) :: {:ok, binary(), term()} | :error
   def runtime_text(purpose, model_key), do: lookup_runtime({:text, purpose, model_key})
@@ -79,24 +56,6 @@ defmodule Catalyst.Prompt.Registry do
     end
   end
 
-  # test seam: compatibility projection returning only the effective policy module.
-  @doc false
-  @spec fetch_policy() :: {:ok, module()} | {:error, term()}
-  def fetch_policy do
-    case policy() do
-      {:ok, module, _source} -> {:ok, module}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  @doc "Return sorted owner-aware runtime registrations; fallback layers are excluded."
-  @spec runtime_entries() :: [%{key: key(), value: term(), owner: term()}]
-  def runtime_entries do
-    Enum.map(Runtime.list(:prompt), fn entry ->
-      %{key: entry.key, value: entry.value, owner: entry.owner}
-    end)
-  end
-
   defp register(key, value, opts) do
     with :ok <- validate_registration(key, value) do
       Runtime.put(:prompt, key, value, opts)
@@ -107,14 +66,6 @@ defmodule Catalyst.Prompt.Registry do
     case Runtime.fetch(:prompt, key) do
       {:ok, value, owner} -> {:ok, value, owner}
       :error -> :error
-    end
-  end
-
-  defp application_text(purpose, model_key) do
-    case Config.lookup(purpose, model_key) do
-      {:ok, text} -> {:ok, text, {:application, {:prompts, purpose, model_key}}}
-      :error -> :error
-      {:error, _reason} = error -> error
     end
   end
 
@@ -167,18 +118,5 @@ defmodule Catalyst.Prompt.Registry do
           :ok | {:error, term()}
   def register_extension_prompt_policy(%ExtensionAPI{owner: owner}, module, opts) do
     register_policy(module, Keyword.put(opts, :owner, owner))
-  end
-
-  @doc false
-  @spec wire_extension_api() :: :ok
-  def wire_extension_api do
-    ExtensionAPI.register_kind(:prompt, &__MODULE__.register_extension_prompt/4)
-
-    ExtensionAPI.register_kind(
-      :prompt_policy,
-      &__MODULE__.register_extension_prompt_policy/3
-    )
-
-    :ok
   end
 end

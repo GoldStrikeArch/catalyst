@@ -43,7 +43,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "a runtime-registered page renders via the catch-all route", %{conn: conn} do
-    on_exit(fn -> Registry.unregister_owner("e5_page") end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner("e5_page") end)
 
     Registry.register_page("settings", {SettingsPage, :render},
       owner: "e5_page",
@@ -56,7 +56,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "a runtime-registered page handles its own events", %{conn: conn} do
-    on_exit(fn -> Registry.unregister_owner("event_page") end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner("event_page") end)
 
     Registry.register_page("settings", SettingsPage, owner: "event_page", label: "Settings")
 
@@ -68,7 +68,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "an extension page that raises at diff time falls back to chat", %{conn: conn} do
-    on_exit(fn -> Registry.unregister_owner("e5_broken_page") end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner("e5_broken_page") end)
 
     Registry.register_page("broken", {BrokenPage, :render},
       owner: "e5_broken_page",
@@ -85,7 +85,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "a custom message renderer overrides the built-in tool card", %{conn: conn} do
-    on_exit(fn -> Registry.unregister_owner("e5_render") end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner("e5_render") end)
 
     Registry.register_renderer(
       :message,
@@ -569,7 +569,7 @@ defmodule CatalystWeb.ShellLiveTest do
   end
 
   test "an asset reload keeps users on their current (non-chat) page", %{conn: conn} do
-    on_exit(fn -> Registry.unregister_owner("e5_reload_page") end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner("e5_reload_page") end)
 
     Registry.register_page("settings", {SettingsPage, :render},
       owner: "e5_reload_page",
@@ -612,7 +612,7 @@ defmodule CatalystWeb.ShellLiveTest do
       end
     )
 
-    on_exit(fn -> CatalystWeb.UI.Registry.unregister_owner("cmd_test") end)
+    on_exit(fn -> Catalyst.Runtime.Registry.purge_owner("cmd_test") end)
 
     {:ok, view, _html} = live(conn, ~p"/")
 

@@ -69,6 +69,18 @@ defmodule Catalyst.Extensions.Loader do
   @spec load(Path.t(), contribution()) :: :ok | {:error, term()}
   def load(path, %Contribution{beams: beams}), do: Modules.load(path, beams)
 
+  @doc false
+  @spec prepare_tools(contribution()) :: {:ok, contribution()} | {:error, term()}
+  def prepare_tools(%Contribution{} = contribution) do
+    with {:ok, entries} <- tool_entries(contribution.tool_mods),
+         true <- Map.keys(entries) |> Enum.sort() == Enum.sort(contribution.tool_names) do
+      {:ok, %{contribution | tool_entries: entries}}
+    else
+      false -> {:error, :staged_tool_names_changed}
+      {:error, _reason} = error -> error
+    end
+  end
+
   @doc """
   Run every `setup/1` callback in bounded work and collect cleanly surfaced
   failures. Registrations completed before a failure remain owner-tagged and
@@ -125,6 +137,15 @@ defmodule Catalyst.Extensions.Loader do
 
   defp reverse_definitions({:ok, definitions}), do: {:ok, Enum.reverse(definitions)}
   defp reverse_definitions({:error, _reason} = error), do: error
+
+  defp tool_entries(modules) do
+    Enum.reduce_while(modules, {:ok, %{}}, fn module, {:ok, entries} ->
+      case ToolRegistry.entry(module) do
+        {:ok, entry} -> {:cont, {:ok, Map.put(entries, entry.definition.name, entry)}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
 
   defp tool_module?(module) do
     Code.ensure_loaded?(module) and

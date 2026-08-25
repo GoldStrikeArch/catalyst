@@ -61,7 +61,7 @@ defmodule Catalyst.Prompt.SystemPromptTest do
       [{:extension, "runtime-owner", {:text, :system, "test-api"}}]
     )
 
-    assert :ok = Registry.unregister_owner("runtime-owner")
+    assert :ok = Catalyst.Runtime.Registry.purge_owner("runtime-owner")
 
     assert_resolution(
       resolve(:system, model),
@@ -269,7 +269,7 @@ defmodule Catalyst.Prompt.SystemPromptTest do
   end
 
   defp clear_runtime do
-    Registry.runtime_entries()
-    |> Enum.each(&Registry.unregister(&1.key))
+    Catalyst.Runtime.Registry.list(:prompt)
+    |> Enum.each(&Catalyst.Runtime.Registry.delete(:prompt, &1.key))
   end
 end

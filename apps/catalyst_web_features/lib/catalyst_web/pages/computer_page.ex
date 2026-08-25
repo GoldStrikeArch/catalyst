@@ -40,14 +40,28 @@ defmodule CatalystWeb.Pages.ComputerPage do
   import Phoenix.LiveView, only: [connected?: 1, put_flash: 3, start_async: 3]
 
   alias Catalyst.Tools.Computer.{Availability, Backend, Helper}
+  alias CatalystWeb.Components.ComputerControl
 
   @doc false
   @spec mount_page(map(), Phoenix.LiveView.Socket.t()) :: Phoenix.LiveView.Socket.t()
-  def mount_page(_params, socket), do: refresh(socket)
+  def mount_page(_params, socket) do
+    socket
+    |> assign(computer_enabled: ComputerControl.enabled?())
+    |> refresh()
+  end
 
   @doc false
   def handle_event("refresh_computer_state", _params, socket),
     do: {:noreply, refresh(socket)}
+
+  def handle_event("toggle_computer_use", _params, socket) do
+    socket =
+      :toggle
+      |> ComputerControl.handle_shell_action(socket)
+      |> assign(computer_enabled: ComputerControl.enabled?())
+
+    {:noreply, socket}
+  end
 
   def handle_event("open_system_settings", %{"pane" => pane}, socket) do
     case settings_url(pane) do
@@ -231,7 +245,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
     ~H"""
     <main id="computer-page" class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
       <div class="mx-auto flex max-w-3xl flex-col gap-5">
-        <.grant_card machine_prefs={@machine_prefs} backend={@computer_panel} />
+        <.grant_card enabled={@computer_enabled} backend={@computer_panel} />
         <.backend_card backend={@computer_panel} />
         <.permissions_card :if={@computer_panel.available?} backend={@computer_panel} />
         <.preview_card :if={@computer_panel.available?} backend={@computer_panel} />
@@ -241,7 +255,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
     """
   end
 
-  attr :machine_prefs, :map, required: true
+  attr :enabled, :boolean, required: true
   attr :backend, :map, required: true
 
   defp grant_card(assigns) do
@@ -257,11 +271,11 @@ defmodule CatalystWeb.Pages.ComputerPage do
 
         <span
           id="computer-grant-state"
-          data-granted={to_string(@machine_prefs.computer_use and @backend.available?)}
-          data-toggle={to_string(@machine_prefs.computer_use)}
-          class={state_pill_class(@machine_prefs.computer_use and @backend.available?)}
+          data-granted={to_string(@enabled and @backend.available?)}
+          data-toggle={to_string(@enabled)}
+          class={state_pill_class(@enabled and @backend.available?)}
         >
-          {grant_label(@machine_prefs.computer_use, @backend.available?)}
+          {grant_label(@enabled, @backend.available?)}
         </span>
 
         <button
@@ -270,7 +284,7 @@ defmodule CatalystWeb.Pages.ComputerPage do
           phx-click="toggle_computer_use"
           class={pill_button_class()}
         >
-          {toggle_label(@machine_prefs.computer_use)}
+          {toggle_label(@enabled)}
         </button>
       </div>
 

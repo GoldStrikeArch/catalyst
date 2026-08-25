@@ -429,7 +429,17 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   every active source in a disposable external BEAM before any live mutation. Successful stages
   rebuild the runtime projection from source; compile failures retain the prior active owner, and
   rejected live contributions use only the current reconstructible contribution cache. The compiler tracer,
-  provisional journal, and accepted-BEAM version stacks are gone.
+  provisional journal, and accepted-BEAM version stacks are gone. Runtime tool rows now hold their
+  validated execution entries and are the sole tool-claim ledger; extension state retains only
+  activation/recovery data. Workflow template types and xAI OAuth moved to the feature app,
+  provider controls own login and refresh, and registered LiveComponents now own optional
+  computer/workflow shell controls. `mix test.kernel` verifies the core and web shell without
+  selecting either feature application. The extension facade now owns its load lock and presentation
+  boundary directly; the server uses one plain activation map, eliminating the separate
+  Transaction, Presenter, and State layers. Domain diagnostics read the one runtime table directly
+  instead of duplicating `runtime_entries/0` on each resolver. Prompt/context struct families are
+  colocated with their contracts, and the session's small late-joiner projection lives with its
+  state-owning server.
 - **Next options:** notarize for distribution (the launcher step must then re-sign inside-out +
   re-sign the dmg); replace the placeholder icon; optional approval gate as an extension via the
   `before_tool_call` hook (a panel toggle could install it); optional `self_test/0` extension

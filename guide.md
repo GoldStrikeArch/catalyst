@@ -396,8 +396,8 @@ and a `setup(api)` callback. Inside `setup/1`, register any mix of:
   starting a session whose model `api` is `"my-api"`. (Refactoring an _existing_
   provider needs no registration — just rewrite its module; the next call uses it.)
   A provider that should appear in the shell model picker can set the config's `controls`
-  module to an implementation of `Catalyst.LLM.Controls`; picker, login, and run-option
-  behavior then arrive with the provider rather than requiring shell edits.
+  module to an implementation of `Catalyst.LLM.Controls`; picker, login, credential refresh,
+  and run-option behavior then arrive with the provider rather than requiring shell edits.
 - **Prompts, workflows, and context policy** — `register_prompt(api, model_key, text, opts)`
   registers exact model/API text (`opts[:purpose]` is `:system` by default or
   `:compaction`); `register_prompt_policy/3` replaces the complete prompt resolver;
@@ -423,8 +423,10 @@ and a `setup(api)` callback. Inside `setup/1`, register any mix of:
   routes and `render_mode: :live` only when the page intentionally needs direct LiveView behavior
   (`:safe` is the isolated default);
   `register_renderer(api, :message, match_fun, render_fun)` overrides how a message or
-  tool result is shown; `register_component(api, :header_extra, fun)` adds a header/
-  sidebar/footer widget. Render functions are `Phoenix.Component`s.
+  tool result is shown; `register_component(api, :header_extra, fun)` adds a render-only
+  widget. A component target may instead be a LiveComponent module, which owns its local
+  events and may export `session_options/0` plus `handle_shell_action/2` for controls that
+  affect the attached session. Render functions are `Phoenix.Component`s.
 - **Chat commands** — `register_command(api, "mycmd", handler: fn arg, socket -> socket end,
 label: "/mycmd — what it does")`. Typing `/mycmd some arg` in the chat dispatches to your
   handler (crash-isolated; return the socket, e.g. after `Phoenix.LiveView.put_flash/3`).

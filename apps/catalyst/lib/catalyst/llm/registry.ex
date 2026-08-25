@@ -79,10 +79,6 @@ defmodule Catalyst.LLM.Registry do
   @spec unregister_provider(String.t()) :: :ok
   def unregister_provider(api) when is_binary(api), do: Runtime.delete(:provider, api)
 
-  @doc "Remove every provider registered by `owner` (extension purge hook)."
-  @spec unregister_owner(term()) :: :ok
-  def unregister_owner(owner), do: Runtime.purge_owner(owner, :provider)
-
   defp register(api, config, opts) do
     with :ok <- validate_provider_module(config.module),
          :ok <- validate_controls_module(config.controls) do
@@ -154,12 +150,5 @@ defmodule Catalyst.LLM.Registry do
           :ok | {:error, term()}
   def register_extension_provider(%ExtensionAPI{owner: owner}, api, config) do
     register_provider(api, config, owner: owner)
-  end
-
-  @doc false
-  @spec wire_extension_api() :: :ok
-  def wire_extension_api do
-    ExtensionAPI.register_kind(:provider, &__MODULE__.register_extension_provider/3)
-    :ok
   end
 end

@@ -69,7 +69,7 @@ defmodule Catalyst.Session.ReducerTest do
       ]
       |> Enum.reduce(state, &Reducer.reduce/2)
 
-    snapshot = Catalyst.Session.Snapshot.of(state)
+    snapshot = Catalyst.Session.Server.snapshot(state)
 
     assert state.streaming_text == ["lo", "hel"]
     assert state.streaming_thinking == ["hm"]
