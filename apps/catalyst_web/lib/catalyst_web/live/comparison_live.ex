@@ -12,8 +12,7 @@ defmodule CatalystWeb.ComparisonLive do
 
   @impl true
   def mount(params, _session, socket) do
-    selected_model = Catalyst.LLM.OpenAICodex.model().id
-    models = Catalyst.LLM.OpenAICodex.catalog_snapshot(selected_model).models
+    models = Comparison.available_models()
     options = Enum.map(models, &{&1.name, &1.id})
     default = models |> List.first() |> Map.fetch!(:id)
     second = models |> Enum.at(1, List.first(models)) |> Map.fetch!(:id)
@@ -179,7 +178,7 @@ defmodule CatalystWeb.ComparisonLive do
       class="h-screen overflow-hidden bg-bg text-ink antialiased"
     >
       <main id="comparison-view" class="flex h-screen min-h-0 flex-col">
-        <header class="flex h-12 shrink-0 items-center gap-3 border-b border-edge bg-surface px-4">
+        <header class="flex h-10 shrink-0 items-center gap-2.5 border-b border-edge bg-surface px-3">
           <.link
             navigate={~p"/"}
             id="comparison-back"
@@ -202,16 +201,17 @@ defmodule CatalystWeb.ComparisonLive do
         <%= if @comparison do %>
           <section
             id="comparison-lanes"
-            class="min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-3"
+            class="min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-2"
           >
-            <div class="grid h-full auto-cols-[minmax(28rem,1fr)] grid-flow-col gap-3">
+            <div class="grid h-full auto-cols-[minmax(24rem,1fr)] grid-flow-col gap-2">
               <div
                 :for={lane <- @comparison["lanes"]}
                 id={"comparison-lane-host-#{lane["id"]}"}
-                class="h-full min-w-0"
+                class="h-full min-h-0 min-w-0"
               >
                 {live_render(@socket, CatalystWeb.ComparisonLaneLive,
                   id: "comparison-lane-live-#{lane["id"]}",
+                  container: {:div, class: "h-full min-h-0"},
                   session: %{
                     "comparison_id" => @comparison["id"],
                     "lane_id" => lane["id"]
@@ -221,7 +221,7 @@ defmodule CatalystWeb.ComparisonLive do
 
               <aside
                 id="add-lane-card"
-                class="flex h-full min-h-80 items-center justify-center rounded-2xl border border-dashed border-edge-strong bg-surface/40 p-6"
+                class="flex h-full min-h-64 items-center justify-center rounded-2xl border border-dashed border-edge-strong bg-surface/40 p-4"
               >
                 <.form
                   for={@add_form}
@@ -229,8 +229,8 @@ defmodule CatalystWeb.ComparisonLive do
                   phx-submit="add_lane"
                   class="w-full max-w-xs"
                 >
-                  <div class="mb-4 flex size-10 items-center justify-center rounded-xl bg-accent/10 text-accent">
-                    <.icon name="hero-plus" class="size-5" />
+                  <div class="mb-3 flex size-9 items-center justify-center rounded-xl bg-accent/10 text-accent">
+                    <.icon name="hero-plus" class="size-4" />
                   </div>
                   <h2 class="text-sm font-semibold">Add another model</h2>
                   <p class="mt-1 text-xs leading-5 text-muted">
@@ -241,13 +241,13 @@ defmodule CatalystWeb.ComparisonLive do
                     type="select"
                     id="add-lane-model"
                     options={@model_options}
-                    container_class="my-4"
+                    container_class="my-3"
                   />
                   <button
                     id="add-lane-submit"
                     type="submit"
                     disabled={@adding?}
-                    class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
+                    class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-white transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
                   >
                     <.icon
                       name={if(@adding?, do: "hero-arrow-path", else: "hero-plus")}

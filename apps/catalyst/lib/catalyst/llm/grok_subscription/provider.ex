@@ -104,7 +104,7 @@ defmodule Catalyst.LLM.GrokSubscription.Provider do
       {"user-agent", "catalyst"},
       {"x-xai-token-auth", "xai-grok-cli"},
       {"x-authenticateresponse", "authenticate-response"},
-      {"x-grok-client-version", version()},
+      {"x-grok-client-version", XAIOAuth.client_version()},
       {"x-grok-model-override", model_id},
       {"x-grok-conv-id", session_id},
       {"x-grok-session-id", session_id},
@@ -121,13 +121,6 @@ defmodule Catalyst.LLM.GrokSubscription.Provider do
 
   defp maybe_user_id(headers, _account_id), do: headers
 
-  defp version do
-    case Application.spec(:catalyst, :vsn) do
-      nil -> "dev"
-      version -> to_string(version)
-    end
-  end
-
   defp http_error(429, body),
     do: structured_error(body) || "You have hit your SuperGrok usage limit. Try again later."
 
@@ -137,6 +130,7 @@ defmodule Catalyst.LLM.GrokSubscription.Provider do
   defp structured_error(body) do
     case Jason.decode(body) do
       {:ok, %{"error" => %{"message" => message}}} when is_binary(message) -> message
+      {:ok, %{"error" => message}} when is_binary(message) -> message
       {:ok, %{"message" => message}} when is_binary(message) -> message
       _unstructured -> nil
     end

@@ -77,6 +77,7 @@ defmodule Catalyst.Auth.XAIOAuthTest do
     assert device_form["scope"] =~ "offline_access"
     assert device_form["referrer"] == "grok-build"
     assert {"x-grok-client-surface", "ui"} in device_headers
+    assert {"x-grok-client-version", XAIOAuth.client_version()} in device_headers
 
     parent = self()
 
@@ -93,6 +94,7 @@ defmodule Catalyst.Auth.XAIOAuthTest do
 
     assert token_form["device_code"] == "device-secret"
     assert {"x-grok-client-surface", "ui"} in token_headers
+    assert {"x-grok-client-version", XAIOAuth.client_version()} in token_headers
     assert creds["refresh"] == "refresh-secret"
     assert creds["account_id"] == "xai-user-42"
     assert creds["issuer"] == issuer

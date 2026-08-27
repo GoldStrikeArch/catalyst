@@ -11,6 +11,10 @@ defmodule Catalyst.Auth.XAIOAuth do
 
   @provider_id "xai-grok"
   @issuer "https://auth.x.ai"
+  # Version of the Grok Build CLI whose wire protocol these headers mirror. xAI's
+  # proxy rejects clients that report an older version (HTTP 426), so this must
+  # track the published CLI — it is deliberately NOT Catalyst's own version.
+  @client_version "1.0.5"
   @client_id "b1a00492-073a-47ea-816f-4c329264a828"
   @scope Enum.join(
            ~w(openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write),
@@ -36,6 +40,16 @@ defmodule Catalyst.Auth.XAIOAuth do
   @doc "Provider identity for this flow — the `Catalyst.Auth.TokenStore` key."
   @spec provider_id() :: String.t()
   def provider_id, do: @provider_id
+
+  @doc """
+  Grok Build client version sent as `x-grok-client-version` on every xAI request.
+
+  Defaults to the bundled constant; override with `config :catalyst,
+  :grok_client_version` when the proxy raises its minimum before a release ships.
+  """
+  @spec client_version() :: String.t()
+  def client_version,
+    do: Application.get_env(:catalyst, :grok_client_version, @client_version)
 
   @doc "Request a device code from xAI."
   @spec request_device_code(keyword()) :: {:ok, device_code()} | {:error, term()}
@@ -259,16 +273,9 @@ defmodule Catalyst.Auth.XAIOAuth do
 
   defp client_headers do
     [
-      {"x-grok-client-version", version()},
+      {"x-grok-client-version", client_version()},
       {"x-grok-client-surface", "ui"},
       {"accept", "application/json"}
     ]
-  end
-
-  defp version do
-    case Application.spec(:catalyst, :vsn) do
-      nil -> "dev"
-      version -> to_string(version)
-    end
   end
 end
