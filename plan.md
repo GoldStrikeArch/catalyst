@@ -98,8 +98,10 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   the **bundled ERTS** (`Catalyst.smp`), endpoint up on 127.0.0.1:4000, `Desktop.Auth`
   gating (401 to curl), wx window opens the chat. Caveats: **ad-hoc signed** (not Developer
   ID/notarized → Gatekeeper warns; `xattr -dr com.apple.quarantine Catalyst.app` or
-  right-click→Open locally; `mix desktop.notarize …` for distribution); placeholder solid
-  icon (replace `apps/catalyst_desktop/priv/icon.png`).
+  right-click→Open locally; `mix desktop.notarize …` for distribution). The icon is a
+  generated pixel-art alchemy flask (`rel/icon/gen_icon.py` → `apps/catalyst_desktop/priv/icon.png`,
+  `rel/macosx/icons.icns` (the deployer reuses this cache when present — regenerate it with the
+  icon), and the web favicon); `CatalystDesktop.DockIcon` also sets the Dock tile in dev runs.
 - **GUI Codex login — DONE ✅.** In-GUI "Sign in to ChatGPT" button runs the OAuth flow in a
   supervised Task (non-blocking; pending spinner; auto-switches to Codex on success), plus a
   sign-out (⏏) button. Backend got `TokenStore.delete/1` + `Catalyst.Auth.logout/0`. Login fn
@@ -408,8 +410,34 @@ desktop.installer`). Produces **`Catalyst.app`**, **`Catalyst-0.1.0.dmg`** (20M)
   `:live_wire` 1/1.** Remaining manual residue (needs a human at the keyboard): packaged-`.app`
   TCC grant flow + rebuild re-grant, revoked-grant `/computer` reporting, and the LibreOffice
   zero-screenshot drive (LibreOffice not installed).
+- **Open project folder — DONE ✅.** The sidebar's **+** (next to "Projects") now opens a project
+  instead of a sibling thread: `CatalystWeb.FolderPicker` is a config-injected seam
+  (`config :catalyst_web, :folder_picker`, a 1-arity fun → `{:ok, path} | :cancelled | {:error, _}`);
+  `CatalystDesktop.Application` registers `CatalystDesktop.FolderPicker.pick/1` (a wx `wxDirDialog`
+  parented to the Catalyst window, `wxDD_DIR_MUST_EXIST`) when the native window is enabled, and the
+  LiveView runs it in `start_async` (spinner on the button, one dialog at a time). In browser mode
+  (no picker registered) the button reveals an inline path form (`~`/relative paths resolve like
+  `/cd`; errors keep the form open). A chosen folder becomes the `cwd` of a **new session** started
+  there (`SessionLifecycle.project_dir/2` + the existing `start_in/2`), which the persisted session
+  catalog groups under its own project heading and restores on the next launch — that is the
+  "remembered" project list. Header **+** and per-project **+** still start sibling threads.
+  Tests: `folder_picker_test.exs` + `open_project_test.exs` (native pick / cancel / error / crash,
+  form submit / relative / missing / blank / cancel). The wx dialog itself is verified by a boot
+  smoke (registration + dialog construction against the live window); clicking through it is a
+  manual check.
+- **Sidebar order + compare project chooser — DONE ✅.** (1) Switching threads no longer
+  reshuffles the sidebar: `Threads.project/2` sorted the *current* project first and threads in
+  catalog (most-recently-used) order, so every click moved groups around. The catalog now persists
+  a fixed `created_at` per entry (legacy rows adopt their `last_used_at`, written back on the next
+  save); projects sort by name (then path) and threads newest-first by creation, independent of
+  focus and recency. (2) The compare page's "Project directory" free-text field (seeded with the
+  process cwd) became a **Project select** of the catalog's known projects (`basename · ~/path`,
+  most recently used preselected) with an "Other folder…" option that reveals the path field;
+  with no known projects the plain field remains. Tests: `catalog_test` (created_at fixed/legacy),
+  new `shell_live/threads_test.exs` (order invariant under focus), `comparison_live_test`
+  (free-form vs select, preselection, other-folder path feeds creation).
 - **Next options:** notarize for distribution (the launcher step must then re-sign inside-out +
-  re-sign the dmg); replace the placeholder icon; optional approval gate as an extension via the
+  re-sign the dmg); optional approval gate as an extension via the
   `before_tool_call` hook (a panel toggle could install it); optional `self_test/0` extension
   callback (loader runs it post-`setup/1`, rolls back on failure); runtime crash circuit breaker
   (auto-disable an extension implicated in repeated crashes — `disable/1` is the mechanism now);

@@ -133,8 +133,10 @@ from the bundled toolchain and reloads connected windows; the `rebuild_assets` t
   `.app` runs from a **user-writable** location (e.g. `…/_build/prod/Catalyst.app`); if copied to
   `/Applications` (root-owned) it fails — tell the user.
 - **Working directory:** defaults to the user's **home**, not their project. Don't assume the cwd
-  is any repo. The user repoints the session by typing **`/cd <path>`** in the chat. Resolve user
-  paths with `Catalyst.Tools.Paths.resolve(path, ctx.cwd)`.
+  is any repo. The user repoints the session by typing **`/cd <path>`** in the chat or by opening a
+  project folder with the sidebar's **+** (a native folder dialog in the desktop app); each project
+  gets its own session group in the sidebar. Resolve user paths with
+  `Catalyst.Tools.Paths.resolve(path, ctx.cwd)`.
 - **macOS privacy (TCC):** the `.app` cannot read `~/Desktop`, `~/Documents`, or `~/Downloads`
   without Full Disk Access — those return `:eperm` ("not owner" / "Operation not permitted"). If a
   read/bash on such a path fails that way it's not your bug: tell the user to grant Full Disk

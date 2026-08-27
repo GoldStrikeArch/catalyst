@@ -134,7 +134,12 @@ defmodule CatalystWeb.ShellComponents do
         </div>
 
         <div class="flex min-h-0 flex-1">
-          <.sidebar sidebar={@thread_sidebar} open?={@ui_prefs.sidebar} root={assigns} />
+          <.sidebar
+            sidebar={@thread_sidebar}
+            picker={@project_picker}
+            open?={@ui_prefs.sidebar}
+            root={assigns}
+          />
 
           <div class="flex min-h-0 min-w-0 flex-1 flex-col">
             <div class={[
@@ -178,6 +183,7 @@ defmodule CatalystWeb.ShellComponents do
   end
 
   attr :sidebar, :map, required: true
+  attr :picker, :atom, required: true, doc: ":closed | :pending (native dialog open) | :form"
   attr :open?, :boolean, required: true
   attr :root, :map, required: true
 
@@ -194,15 +200,55 @@ defmodule CatalystWeb.ShellComponents do
         <div class="mb-1 flex items-center gap-1 px-1.5">
           <p class="min-w-0 flex-1 truncate text-[10px] text-faint">Projects</p>
           <button
-            id="sidebar-new-thread"
+            id="sidebar-open-project"
             type="button"
-            phx-click="new_session"
-            title="New thread"
-            class="rounded p-0.5 text-faint transition hover:bg-raised hover:text-ink"
+            phx-click="pick_project"
+            disabled={@picker == :pending}
+            title="Open a project folder…"
+            class="rounded p-0.5 text-faint transition hover:bg-raised hover:text-ink disabled:cursor-progress disabled:hover:bg-transparent"
           >
-            <.icon name="hero-plus" class="size-3" />
+            <span
+              :if={@picker == :pending}
+              class="block size-3 animate-spin rounded-full border-2 border-edge border-t-muted"
+            ></span>
+            <.icon :if={@picker != :pending} name="hero-plus" class="size-3" />
           </button>
         </div>
+
+        <form
+          :if={@picker == :form}
+          id="open-project-form"
+          phx-submit="open_project"
+          class="mb-2 flex flex-col gap-1 px-1.5"
+        >
+          <input
+            id="open-project-path"
+            name="path"
+            type="text"
+            placeholder="~/path/to/project"
+            autocomplete="off"
+            spellcheck="false"
+            phx-mounted={JS.focus()}
+            class="w-full rounded-md border border-edge bg-raised px-1.5 py-1 font-mono text-[11px] text-ink placeholder:text-faint transition focus:border-muted focus:outline-none"
+          />
+          <div class="flex items-center justify-end gap-1">
+            <button
+              id="open-project-cancel"
+              type="button"
+              phx-click="cancel_open_project"
+              class="rounded px-1.5 py-0.5 text-[11px] text-faint transition hover:bg-raised hover:text-ink"
+            >
+              Cancel
+            </button>
+            <button
+              id="open-project-submit"
+              type="submit"
+              class="rounded bg-raised px-1.5 py-0.5 text-[11px] font-medium text-ink transition hover:bg-edge"
+            >
+              Open
+            </button>
+          </div>
+        </form>
 
         <p :if={@sidebar.projects == []} class="px-1.5 py-2 text-[11px] text-faint">
           No threads yet

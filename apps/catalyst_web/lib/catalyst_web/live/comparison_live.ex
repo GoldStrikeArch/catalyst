@@ -9,6 +9,10 @@ defmodule CatalystWeb.ComparisonLive do
   use CatalystWeb, :live_view
 
   alias Catalyst.Comparison
+  alias Catalyst.Session.Catalog
+
+  # Select value that reveals the free-form folder field.
+  @other_source "__other__"
 
   @impl true
   def mount(params, _session, socket) do
@@ -16,20 +20,23 @@ defmodule CatalystWeb.ComparisonLive do
     options = Enum.map(models, &{&1.name, &1.id})
     default = models |> List.first() |> Map.fetch!(:id)
     second = models |> Enum.at(1, List.first(models)) |> Map.fetch!(:id)
-    source = default_cwd()
+    projects = project_options()
 
     socket =
       assign(socket,
         comparison: nil,
         comparisons: Comparison.list(),
         model_options: options,
+        project_options: projects,
+        other_source: @other_source,
         creating?: false,
         adding?: false,
         dispatching?: false,
         create_form:
           to_form(
             %{
-              "source" => source,
+              "source" => default_source(projects),
+              "source_other" => "",
               "model_a" => default,
               "model_b" => second,
               "system_prompt" => ""
@@ -49,8 +56,12 @@ defmodule CatalystWeb.ComparisonLive do
   end
 
   @impl true
+  def handle_event("validate_create", %{"comparison" => params}, socket) do
+    {:noreply, assign(socket, create_form: to_form(params, as: :comparison))}
+  end
+
   def handle_event("create", %{"comparison" => params}, socket) do
-    source = String.trim(params["source"] || "")
+    source = chosen_source(params)
     models = [params["model_a"], params["model_b"]]
     prompt = blank_to_nil(params["system_prompt"])
 
@@ -349,6 +360,7 @@ defmodule CatalystWeb.ComparisonLive do
               <.form
                 for={@create_form}
                 id="create-comparison-form"
+                phx-change="validate_create"
                 phx-submit="create"
                 class="rounded-2xl border border-edge bg-surface p-5 shadow-sm"
               >
@@ -356,14 +368,35 @@ defmodule CatalystWeb.ComparisonLive do
                 <p class="mt-1 text-xs text-muted">
                   The initial lanes share one frozen snapshot.
                 </p>
-                <.input
-                  field={@create_form[:source]}
-                  id="comparison-source"
-                  label="Project directory"
-                  autocomplete="off"
-                  class="w-full rounded-xl border border-edge bg-raised px-3 py-2 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
-                  container_class="mt-5"
-                />
+                <%= if @project_options == [] do %>
+                  <.input
+                    field={@create_form[:source]}
+                    id="comparison-source"
+                    label="Project directory"
+                    autocomplete="off"
+                    class="w-full rounded-xl border border-edge bg-raised px-3 py-2 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+                    container_class="mt-5"
+                  />
+                <% else %>
+                  <.input
+                    field={@create_form[:source]}
+                    type="select"
+                    id="comparison-source"
+                    label="Project"
+                    options={@project_options ++ [{"Other folder…", @other_source}]}
+                    container_class="mt-5"
+                  />
+                  <.input
+                    :if={@create_form[:source].value == @other_source}
+                    field={@create_form[:source_other]}
+                    id="comparison-source-other"
+                    label="Folder path"
+                    autocomplete="off"
+                    placeholder="/path/to/project"
+                    class="w-full rounded-xl border border-edge bg-raised px-3 py-2 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+                    container_class="mt-4"
+                  />
+                <% end %>
                 <div class="grid grid-cols-2 gap-3">
                   <.input
                     field={@create_form[:model_a]}
@@ -441,6 +474,57 @@ defmodule CatalystWeb.ComparisonLive do
       {:error, _reason} -> ""
     end
   end
+
+  # Projects the user has already opened (session catalog), as select options
+  # `{label, cwd}` in name order. Deleted directories are left out.
+  defp project_options do
+    case Catalog.entries() do
+      {:ok, entries} ->
+        entries
+        |> Enum.map(& &1.cwd)
+        |> Enum.uniq()
+        |> Enum.filter(&File.dir?/1)
+        |> Enum.map(&{project_label(&1), &1})
+        |> Enum.sort_by(fn {label, cwd} -> {String.downcase(label), cwd} end)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp project_label(cwd), do: Path.basename(cwd) <> "  ·  " <> home_relative(cwd)
+
+  defp home_relative(path) do
+    case System.user_home() do
+      home when is_binary(home) -> String.replace_prefix(path, home, "~")
+      nil -> path
+    end
+  end
+
+  # Preselect the project most recently worked in; without any, fall back to
+  # the free-form directory field seeded with the process default.
+  defp default_source([]), do: default_cwd()
+
+  defp default_source(projects) do
+    cwds = Enum.map(projects, &elem(&1, 1))
+
+    case Catalog.most_recent() do
+      {:ok, %{cwd: cwd}} -> if_known(cwd, cwds)
+      _none -> hd(cwds)
+    end
+  end
+
+  defp if_known(cwd, cwds) do
+    case cwd in cwds do
+      true -> cwd
+      false -> hd(cwds)
+    end
+  end
+
+  defp chosen_source(%{"source" => @other_source} = params),
+    do: String.trim(params["source_other"] || "")
+
+  defp chosen_source(params), do: String.trim(params["source"] || "")
 
   defp blank_to_nil(value) when is_binary(value) do
     case String.trim(value) do

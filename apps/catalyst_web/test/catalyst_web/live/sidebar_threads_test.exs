@@ -47,18 +47,15 @@ defmodule CatalystWeb.SidebarThreadsTest do
     assert has_element?(view, "#thread-#{second}")
   end
 
-  test "the Projects header + starts a thread in the current directory", %{conn: conn} do
+  test "the Projects header + opens a project folder rather than a sibling thread", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
     first = session_id(view)
-    assert {:ok, %{cwd: cwd}} = Catalog.lookup(first)
 
-    view |> element("#sidebar-new-thread") |> render_click()
-    second = session_id(view)
+    # No native picker in tests → the inline path form; the current thread is untouched.
+    view |> element("#sidebar-open-project") |> render_click()
 
-    refute second == first
-    assert {:ok, %{cwd: ^cwd}} = Catalog.lookup(second)
-    assert has_element?(view, "#thread-#{first}")
-    assert has_element?(view, "#thread-#{second}")
+    assert session_id(view) == first
+    assert has_element?(view, "#open-project-form")
   end
 
   test "a project's + starts a thread in that project's directory", %{conn: conn} do
