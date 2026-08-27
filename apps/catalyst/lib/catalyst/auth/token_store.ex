@@ -237,6 +237,9 @@ defmodule Catalyst.Auth.TokenStore do
     LLMRegistry.list()
     |> Map.values()
     |> Enum.find_value(:error, fn
+      %{controls: nil} ->
+        nil
+
       %{controls: controls} when is_atom(controls) ->
         case controls.auth_provider() == provider do
           true -> {:ok, controls}

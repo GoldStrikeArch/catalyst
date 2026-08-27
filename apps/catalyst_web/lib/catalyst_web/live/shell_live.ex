@@ -18,6 +18,7 @@ defmodule CatalystWeb.ShellLive do
   alias Catalyst.Agent.Event
   alias Catalyst.Session.Server
   alias CatalystWeb.Assets
+  alias CatalystWeb.FolderPicker
   alias CatalystWeb.UI.Registry, as: UIRegistry
 
   alias CatalystWeb.ShellLive.{
@@ -63,6 +64,7 @@ defmodule CatalystWeb.ShellLive do
         diagnostics_open: false,
         chrome_menu: nil,
         cwd: SessionLifecycle.default_cwd(),
+        project_picker: :closed,
         thread_sidebar: %{projects: []}
       )
       |> stream_configure(:prompt_rows, dom_id: & &1.id)
@@ -234,6 +236,20 @@ defmodule CatalystWeb.ShellLive do
     {:noreply, start_thread(socket, cwd)}
   end
 
+  # Sidebar "+": native folder dialog when the shell registered one, else an
+  # inline path form. `project_picker` is :closed | :pending | :form.
+  def handle_event("pick_project", _params, socket) do
+    {:noreply, open_project_picker(socket)}
+  end
+
+  def handle_event("open_project", %{"path" => path}, socket) when is_binary(path) do
+    {:noreply, open_project(socket, path, :form)}
+  end
+
+  def handle_event("cancel_open_project", _params, socket) do
+    {:noreply, assign(socket, project_picker: :closed)}
+  end
+
   def handle_event("close_session", %{"id" => id}, socket) when is_binary(id) do
     {:noreply, close_thread(socket, id)}
   end
@@ -383,6 +399,22 @@ defmodule CatalystWeb.ShellLive do
   end
 
   @impl true
+  def handle_async(:folder_pick, {:ok, {:ok, path}}, socket) do
+    {:noreply, open_project(socket, path, :closed)}
+  end
+
+  def handle_async(:folder_pick, {:ok, :cancelled}, socket) do
+    {:noreply, assign(socket, project_picker: :closed)}
+  end
+
+  def handle_async(:folder_pick, {:ok, {:error, reason}}, socket) do
+    {:noreply, folder_pick_failed(socket, reason)}
+  end
+
+  def handle_async(:folder_pick, {:exit, reason}, socket) do
+    {:noreply, folder_pick_failed(socket, reason)}
+  end
+
   def handle_async({:file_search, _token}, {:ok, result}, socket) do
     {:noreply, ChatInput.apply_search(socket, result)}
   end
@@ -641,6 +673,39 @@ defmodule CatalystWeb.ShellLive do
       :exit, _reason ->
         {:noreply, put_flash(socket, :error, "Session is restarting — try again.")}
     end
+  end
+
+  defp open_project_picker(%{assigns: %{project_picker: :pending}} = socket), do: socket
+
+  defp open_project_picker(socket) do
+    case FolderPicker.available?() do
+      true ->
+        cwd = socket.assigns.cwd
+
+        socket
+        |> assign(project_picker: :pending)
+        |> start_async(:folder_pick, fn -> FolderPicker.pick(cwd) end)
+
+      false ->
+        assign(socket, project_picker: :form)
+    end
+  end
+
+  # `on_error` keeps the inline form open so a typo can be fixed in place.
+  defp open_project(socket, path, on_error) do
+    case SessionLifecycle.project_dir(path, socket.assigns.cwd) do
+      {:ok, dir} ->
+        socket |> assign(project_picker: :closed) |> start_thread(dir)
+
+      {:error, message} ->
+        socket |> assign(project_picker: on_error) |> put_flash(:error, message)
+    end
+  end
+
+  defp folder_pick_failed(socket, reason) do
+    socket
+    |> assign(project_picker: :closed)
+    |> put_flash(:error, "Could not open the folder picker: #{format_error(reason)}")
   end
 
   defp start_thread(socket, cwd) do

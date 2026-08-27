@@ -227,22 +227,20 @@ jobs:
         run: |
           release="_build/prod/rel/catalyst_cli/bin/catalyst_cli"
           test -x "${release}"
-          "${release}" eval 'Code.require_file("rel/ci_release_smoke.exs")'
+          "${release}" eval 'Code.require_file(~s(rel/ci_release_smoke.exs))'
 
+      # Mix's Windows .bat eval uses %~2, which strips surrounding quotes and
+      # leaves inner "..." unquoted. PowerShell also interpolates that string,
+      # so pass a quote-free Elixir expression through cmd.
       - name: Boot and exercise the Windows release
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: cmd
         env:
           CATALYST_HOME: ${{ runner.temp }}/catalyst-release-smoke
         run: |
-          $release = "_build/prod/rel/catalyst_cli/bin/catalyst_cli.bat"
-
-          if (-not (Test-Path -Path $release -PathType Leaf)) {
-            throw "Missing release entrypoint: $release"
-          }
-
-          & $release eval 'Code.require_file("rel/ci_release_smoke.exs")'
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Release smoke test exited with status $LASTEXITCODE"
-          }
+          set RELEASE=_build\prod\rel\catalyst_cli\bin\catalyst_cli.bat
+          if not exist "%RELEASE%" (
+            echo Missing release entrypoint: %RELEASE%
+            exit /b 1
+          )
+          "%RELEASE%" eval "Code.require_file(~s(rel/ci_release_smoke.exs))"

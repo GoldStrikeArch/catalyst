@@ -6,7 +6,7 @@ defmodule Catalyst.Session.Catalog do
   pair, so resuming a session after a full VM restart needs both halves.
   Live front ends typically remember only the id in VM-local state (the web
   shell keeps it in `:persistent_term`), which dies with the VM. The catalog
-  persists `{id, cwd, last_used_at}` entries under `Catalyst.Paths.home/0`
+  persists `{id, cwd, created_at, last_used_at}` entries under `Catalyst.Paths.home/0`
   so any front end (the GUI today, CLI resume later) can rediscover the exact
   pair after a restart. Core-owned; no web dependencies.
 
@@ -16,7 +16,7 @@ defmodule Catalyst.Session.Catalog do
   via `Catalyst.Files.AtomicWrite`:
 
       {"version": 1,
-       "entries": [{"id": "…", "cwd": "…", "title": "…", "last_used_at": "2026-07-23T…Z"}]}
+       "entries": [{"id": "…", "cwd": "…", "title": "…", "created_at": "…", "last_used_at": "2026-07-23T…Z"}]}
 
   `title` is optional. Older catalogs without it still decode; a missing title
   displays as `"New thread"`.
@@ -37,10 +37,17 @@ defmodule Catalyst.Session.Catalog do
 
   @version 1
 
-  @typedoc "One catalog entry (`last_used_at` is UTC ISO 8601; `title` may be nil)."
+  @typedoc """
+  One catalog entry. `created_at`/`last_used_at` are UTC ISO 8601; `title` may be nil.
+
+  `created_at` is fixed when the id is first remembered (a legacy entry without
+  one adopts its `last_used_at`), so UIs can order threads stably by creation
+  while `last_used_at` keeps tracking recency.
+  """
   @type entry :: %{
           id: String.t(),
           cwd: String.t(),
+          created_at: String.t(),
           last_used_at: String.t(),
           title: String.t() | nil
         }
@@ -71,7 +78,7 @@ defmodule Catalyst.Session.Catalog do
   def remember(id, cwd) when is_binary(id) and is_binary(cwd) do
     entries = readable_entries()
     previous = Enum.find(entries, &(&1.id == id))
-    persist([new_entry(id, cwd, title_of(previous)) | Enum.reject(entries, &(&1.id == id))])
+    persist([new_entry(id, cwd, previous) | Enum.reject(entries, &(&1.id == id))])
   end
 
   @doc """
@@ -218,8 +225,18 @@ defmodule Catalyst.Session.Catalog do
 
   # ---- helpers --------------------------------------------------------------
 
-  defp new_entry(id, cwd, title),
-    do: %{id: id, cwd: cwd, last_used_at: now(), title: normalize_title(title)}
+  defp new_entry(id, cwd, previous) do
+    %{
+      id: id,
+      cwd: cwd,
+      created_at: created_of(previous),
+      last_used_at: now(),
+      title: title_of(previous)
+    }
+  end
+
+  defp created_of(%{created_at: at}) when is_binary(at), do: at
+  defp created_of(_new_entry), do: now()
 
   defp title_of(%{title: title}), do: normalize_title(title)
   defp title_of(_entry), do: nil
@@ -274,8 +291,8 @@ defmodule Catalyst.Session.Catalog do
     end
   end
 
-  defp encode_entry(%{id: id, cwd: cwd, last_used_at: at} = entry) do
-    base = %{"id" => id, "cwd" => cwd, "last_used_at" => at}
+  defp encode_entry(%{id: id, cwd: cwd, created_at: created, last_used_at: at} = entry) do
+    base = %{"id" => id, "cwd" => cwd, "created_at" => created, "last_used_at" => at}
 
     case entry do
       %{title: title} when is_binary(title) and title != "" -> Map.put(base, "title", title)
@@ -327,7 +344,13 @@ defmodule Catalyst.Session.Catalog do
   # each entry is independent and the transcripts remain the source of truth.
   defp decode_entries(entries) do
     for %{"id" => id, "cwd" => cwd} = entry <- entries, is_binary(id), is_binary(cwd) do
-      %{id: id, cwd: cwd, last_used_at: timestamp_of(entry), title: decode_title(entry)}
+      %{
+        id: id,
+        cwd: cwd,
+        created_at: created_at_of(entry),
+        last_used_at: timestamp_of(entry),
+        title: decode_title(entry)
+      }
     end
   end
 
@@ -336,4 +359,9 @@ defmodule Catalyst.Session.Catalog do
 
   defp timestamp_of(%{"last_used_at" => at}) when is_binary(at), do: at
   defp timestamp_of(_entry), do: now()
+
+  # Catalogs written before created_at existed: the last use is the best fixed
+  # point available, and it is persisted as created_at on the next write.
+  defp created_at_of(%{"created_at" => at}) when is_binary(at), do: at
+  defp created_at_of(entry), do: timestamp_of(entry)
 end
