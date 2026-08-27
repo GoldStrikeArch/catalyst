@@ -32,7 +32,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
           replayed_tail: [],
           prompt_form: to_form(%{"message" => ""}, as: :prompt),
           config_form: config_form(lane),
-          model_options: model_options(),
+          model_options: model_options(lane["model_id"]),
           workflow_options: workflow_options()
         )
         |> stream_configure(:messages,
@@ -85,7 +85,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
   end
 
   def handle_event("configure", %{"config" => params}, socket) do
-    model = Catalyst.LLM.OpenAICodex.model(params["model"])
+    model = Comparison.model_for(params["model"])
     prompt = Comparison.system_prompt(params["system_prompt"])
 
     changes = [
@@ -93,7 +93,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
       provider: model.api,
       system_prompt: prompt,
       opts: [
-        reasoning_effort: blank_to_nil(params["effort"]),
+        reasoning_effort: clamp_effort(params["model"], blank_to_nil(params["effort"])),
         workflow: blank_to_nil(params["workflow"])
       ]
     ]
@@ -170,7 +170,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
           </button>
         </div>
 
-        <header class="shrink-0 border-b border-edge px-3 py-2.5">
+        <header class="shrink-0 border-b border-edge px-2.5 py-1.5">
           <div class="flex items-center gap-2">
             <span class={[
               "size-2 rounded-full",
@@ -195,7 +195,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
             </button>
           </div>
 
-          <details class="mt-2">
+          <details class="mt-1">
             <summary class="cursor-pointer select-none text-[10px] font-medium text-faint transition hover:text-ink">
               Model and system prompt
             </summary>
@@ -203,7 +203,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
               for={@config_form}
               id={"lane-config-form-#{@lane["id"]}"}
               phx-submit="configure"
-              class="mt-3 grid gap-2"
+              class="mt-2 grid gap-2"
             >
               <div class="grid grid-cols-2 gap-2">
                 <.input
@@ -218,7 +218,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
                   field={@config_form[:effort]}
                   type="select"
                   id={"lane-effort-#{@lane["id"]}"}
-                  options={Enum.map(Catalyst.LLM.OpenAICodex.efforts(), &{String.capitalize(&1), &1})}
+                  options={effort_options(@config_form)}
                   disabled={not @session_ready?}
                   container_class="m-0"
                 />
@@ -254,7 +254,8 @@ defmodule CatalystWeb.ComparisonLaneLive do
 
         <div
           id={"lane-transcript-#{@lane["id"]}"}
-          class="min-h-0 flex-1 overflow-y-auto px-3 py-4"
+          phx-hook="ScrollBottom"
+          class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2.5 py-2.5"
         >
           <p
             :if={@message_count == 0 and @streaming_text == ""}
@@ -267,7 +268,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
           <div
             id={"lane-message-stream-#{@lane["id"]}"}
             phx-update="stream"
-            class="flex flex-col gap-3"
+            class="flex flex-col gap-2"
           >
             <div :for={{dom_id, %{msg: msg}} <- @streams.messages} id={dom_id}>
               {MessageRenderer.render_message(%{msg: msg})}
@@ -297,7 +298,7 @@ defmodule CatalystWeb.ComparisonLaneLive do
           </div>
         </div>
 
-        <footer class="shrink-0 border-t border-edge p-2">
+        <footer class="shrink-0 border-t border-edge p-1.5">
           <.form
             for={@prompt_form}
             id={"lane-prompt-form-#{@lane["id"]}"}
@@ -354,7 +355,8 @@ defmodule CatalystWeb.ComparisonLaneLive do
           message_count: length(items),
           message_seq: length(items),
           replayed_tail: replayed_tail(snapshot.messages),
-          config_form: config_form(snapshot)
+          config_form: config_form(snapshot),
+          model_options: model_options(snapshot.model.id)
         )
         |> stream(:messages, items, reset: true)
 
@@ -474,11 +476,38 @@ defmodule CatalystWeb.ComparisonLaneLive do
     )
   end
 
-  defp model_options do
-    selected_model = Catalyst.LLM.OpenAICodex.model().id
+  # The lane's current model is appended when the auth-gated catalog no longer
+  # lists it (signed out of its provider since the lane was created), so the
+  # `<select>` always contains its value instead of silently showing another
+  # model (the P5a picker-desync lesson).
+  defp model_options(selected_id) do
+    models = Comparison.available_models()
 
-    Catalyst.LLM.OpenAICodex.catalog_snapshot(selected_model).models
-    |> Enum.map(&{&1.name, &1.id})
+    models =
+      case Enum.any?(models, &(&1.id == selected_id)) do
+        true -> models
+        false -> models ++ [Comparison.catalog_entry(selected_id)]
+      end
+
+    Enum.map(models, &{&1.name, &1.id})
+  end
+
+  defp effort_options(form) do
+    Comparison.catalog_entry(form[:model].value).efforts
+    |> Enum.map(&{String.capitalize(&1), &1})
+  end
+
+  # The effort select renders the previously applied model's efforts, so a
+  # model switch can arrive with an effort the new model does not support.
+  defp clamp_effort(_model_id, nil), do: nil
+
+  defp clamp_effort(model_id, effort) do
+    entry = Comparison.catalog_entry(model_id)
+
+    case effort in entry.efforts do
+      true -> effort
+      false -> entry.default_effort
+    end
   end
 
   defp workflow_options do
@@ -501,7 +530,11 @@ defmodule CatalystWeb.ComparisonLaneLive do
 
         {:noreply,
          socket
-         |> assign(lane: configured_lane, config_form: config_form(configured_lane))
+         |> assign(
+           lane: configured_lane,
+           config_form: config_form(configured_lane),
+           model_options: model_options(configured_lane["model_id"])
+         )
          |> put_flash(:info, "Lane settings apply to the next run.")}
 
       {:error, reason} ->

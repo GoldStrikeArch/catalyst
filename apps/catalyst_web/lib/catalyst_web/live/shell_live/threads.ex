@@ -26,7 +26,13 @@ defmodule CatalystWeb.ShellLive.Threads do
 
   @type sidebar :: %{projects: [project()]}
 
-  @doc "Group catalog entries by cwd and attach live flags."
+  @doc """
+  Group catalog entries by cwd and attach live flags.
+
+  The order is stable across focus and use: projects sort by name (then path)
+  and threads newest-first by creation — never by recency or by which thread
+  is current, so switching threads doesn't reshuffle the list under the cursor.
+  """
   @spec project([Catalog.entry()], String.t() | nil) :: sidebar()
   def project(entries, current_id) when is_list(entries) do
     live = live_ids()
@@ -35,7 +41,10 @@ defmodule CatalystWeb.ShellLive.Threads do
       entries
       |> Enum.group_by(& &1.cwd)
       |> Enum.map(fn {cwd, threads} ->
-        rows = Enum.map(threads, &thread_row(&1, current_id, live))
+        rows =
+          threads
+          |> Enum.sort_by(&{&1.created_at, &1.id}, :desc)
+          |> Enum.map(&thread_row(&1, current_id, live))
 
         %{
           cwd: cwd,
@@ -45,7 +54,7 @@ defmodule CatalystWeb.ShellLive.Threads do
           threads: rows
         }
       end)
-      |> Enum.sort_by(fn project -> {not project.current?, String.downcase(project.label)} end)
+      |> Enum.sort_by(fn project -> {String.downcase(project.label), project.cwd} end)
 
     %{projects: projects}
   end

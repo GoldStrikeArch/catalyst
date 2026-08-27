@@ -70,6 +70,28 @@ defmodule Catalyst.LLM.GrokSubscription.ProviderTest do
     end
   end
 
+  defmodule OutdatedClientPlug do
+    @moduledoc false
+
+    import Plug.Conn
+
+    def init(test_pid), do: test_pid
+
+    def call(%Plug.Conn{request_path: "/v1/chat/completions"} = conn, test_pid) do
+      send(test_pid, {:grok_headers, conn.req_headers})
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(
+        426,
+        Jason.encode!(%{
+          "error" =>
+            "Your Grok CLI version (0.1.0) is outdated. Please update to version 0.1.202 or later."
+        })
+      )
+    end
+  end
+
   setup do
     provider = XAIOAuth.provider_id()
 
@@ -119,6 +141,8 @@ defmodule Catalyst.LLM.GrokSubscription.ProviderTest do
     assert {"x-xai-token-auth", "xai-grok-cli"} in headers
     assert {"x-grok-model-override", "grok-4.6"} in headers
     assert {"x-grok-session-id", "session-1"} in headers
+    assert {"x-grok-client-version", XAIOAuth.client_version()} in headers
+    refute {"x-grok-client-version", "0.1.0"} in headers
 
     assert assistant.stop_reason == :tool_use
     assert assistant.response_id == "chatcmpl-1"
@@ -138,6 +162,41 @@ defmodule Catalyst.LLM.GrokSubscription.ProviderTest do
     assert_received {:event, %Event.ToolCallStart{id: "call_1", name: "grep"}}
     assert_received {:event, %Event.ToolCallDelta{id: "call_1", delta: "{\"pattern\":"}}
     assert_received {:event, %Event.ToolCallEnd{arguments: %{"pattern" => "TODO"}}}
+  end
+
+  test "advertises the Grok Build client version, not Catalyst's, and surfaces string errors" do
+    previous = Application.get_env(:catalyst, :grok_client_version, :not_set)
+    Application.put_env(:catalyst, :grok_client_version, "9.9.9")
+
+    on_exit(fn ->
+      case previous do
+        :not_set -> Application.delete_env(:catalyst, :grok_client_version)
+        value -> Application.put_env(:catalyst, :grok_client_version, value)
+      end
+    end)
+
+    server =
+      start_supervised!(
+        {Bandit, plug: {OutdatedClientPlug, self()}, scheme: :http, ip: :loopback, port: 0}
+      )
+
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+    model = GrokSubscription.model("grok-4.6", base_url: "http://127.0.0.1:#{port}/v1")
+    context = %Context{messages: [Message.user("hi")]}
+
+    assert XAIOAuth.client_version() == "9.9.9"
+    assert {:ok, assistant} = Provider.stream(model, context, [], fn _event -> :ok end)
+
+    assert_receive {:grok_headers, headers}
+    assert {"x-grok-client-version", "9.9.9"} in headers
+
+    assert assistant.stop_reason == :error
+    assert assistant.error_message =~ "Your Grok CLI version (0.1.0) is outdated"
+    refute assistant.error_message =~ "Grok HTTP 426"
+  end
+
+  test "bundled Grok Build client version satisfies the proxy minimum" do
+    assert Version.compare(XAIOAuth.client_version(), "0.1.202") in [:gt, :eq]
   end
 
   test "malformed tool arguments are never returned as executable tool calls" do

@@ -126,6 +126,7 @@ catalyst/                      # umbrella
       lib/catalyst_web/
         {endpoint.ex, router.ex, application.ex, assets.ex}
         file_search.ex                             # "@" file references for the chat input (fd-backed)
+        folder_picker.ex                           # native "open project folder" seam, injected by the desktop shell
         live/shell_live.ex                         # ONE LiveView; catch-all routes / and /:page
         live/shell_live/{chat_input.ex, commands.ex, conversation.ex,
                          extension_actions.ex, run_diagnostics.ex,

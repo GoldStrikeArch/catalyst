@@ -7,7 +7,9 @@ defmodule Catalyst.Comparison do
   filesystem work belongs to `Catalyst.Comparison.Workspace`.
   """
 
+  alias Catalyst.Auth.{OpenAIOAuth, XAIOAuth}
   alias Catalyst.Comparison.{Store, Workspace}
+  alias Catalyst.LLM.{GrokSubscription, OpenAICodex}
   alias Catalyst.Session.{Manager, Server}
 
   @workspace_instruction """
@@ -69,7 +71,7 @@ defmodule Catalyst.Comparison do
         {:ok, pid}
 
       :error ->
-        model = Catalyst.LLM.OpenAICodex.model(model_id)
+        model = model_for(model_id)
 
         case Manager.start_session(
                id: id,
@@ -138,6 +140,50 @@ defmodule Catalyst.Comparison do
   end
 
   def lane(_manifest, _id), do: {:error, :lane_not_found}
+
+  @doc """
+  Catalog entries offered for comparison lanes, newest provider list first.
+
+  Each subscription provider's models are offered only while that provider has
+  stored credentials, so the picker never suggests a model the user cannot run.
+  When neither subscription is signed in, the Codex catalog is returned as a
+  fallback so the picker still renders (matching the main chat, where the
+  sign-in button — not the picker — gates actual use).
+  """
+  @spec available_models() :: [map()]
+  def available_models do
+    codex = Enum.map(OpenAICodex.list_models(), &Map.put(&1, :provider, "openai-codex"))
+    grok = GrokSubscription.list_models()
+
+    case {Catalyst.Auth.logged_in?(OpenAIOAuth.provider_id()),
+          Catalyst.Auth.logged_in?(XAIOAuth.provider_id())} do
+      {true, true} -> codex ++ grok
+      {true, false} -> codex
+      {false, true} -> grok
+      {false, false} -> codex
+    end
+  end
+
+  @doc "Resolve a lane model id through the subscription provider that owns it."
+  @spec model_for(String.t()) :: Catalyst.Model.t()
+  def model_for(model_id) do
+    case grok_model?(model_id) do
+      true -> GrokSubscription.model(model_id)
+      false -> OpenAICodex.model(model_id)
+    end
+  end
+
+  @doc "Catalog entry for a lane model id from the provider that owns it."
+  @spec catalog_entry(String.t()) :: map()
+  def catalog_entry(model_id) do
+    case grok_model?(model_id) do
+      true -> GrokSubscription.catalog_entry(model_id)
+      false -> OpenAICodex.catalog_entry(model_id)
+    end
+  end
+
+  defp grok_model?(model_id),
+    do: Enum.any?(GrokSubscription.list_models(), &(&1.id == model_id))
 
   @doc "System prompt used by comparison lanes, including the workspace boundary."
   @spec system_prompt(String.t() | nil) :: String.t()
@@ -266,7 +312,8 @@ defmodule Catalyst.Comparison do
 
   defp start_lane_session(workspace, snapshot, model_id, prompt) do
     session_id = Catalyst.Ids.hex(16)
-    model = Catalyst.LLM.OpenAICodex.model(model_id)
+    model = model_for(model_id)
+    effort = default_lane_effort(model_id)
 
     case Manager.start_unique_session(
            id: session_id,
@@ -274,7 +321,7 @@ defmodule Catalyst.Comparison do
            model: model,
            provider: model.api,
            system_prompt: prompt,
-           opts: [reasoning_effort: "medium"]
+           opts: [reasoning_effort: effort]
          ) do
       {:ok, %{pid: _pid}} ->
         {:ok,
@@ -286,7 +333,7 @@ defmodule Catalyst.Comparison do
            "snapshot_id" => snapshot["id"],
            "model_id" => model_id,
            "system_prompt" => prompt,
-           "reasoning_effort" => "medium",
+           "reasoning_effort" => effort,
            "workflow" => nil,
            "created_at" => now()
          }}
@@ -294,6 +341,17 @@ defmodule Catalyst.Comparison do
       {:error, reason} ->
         Workspace.cleanup(workspace.cwd)
         {:error, {:lane_session_start_failed, reason}}
+    end
+  end
+
+  # "medium" is every Codex model's historical lane default; a model whose
+  # catalog entry does not support it (e.g. a Grok entry) uses its own default.
+  defp default_lane_effort(model_id) do
+    entry = catalog_entry(model_id)
+
+    case "medium" in entry.efforts do
+      true -> "medium"
+      false -> entry.default_effort
     end
   end
 

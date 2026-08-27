@@ -9,28 +9,34 @@ defmodule CatalystWeb.Pages.ComparisonPage do
   use CatalystWeb, :live_view
 
   alias Catalyst.Comparison
+  alias Catalyst.Session.Catalog
+
+  # Select value that reveals the free-form folder field.
+  @other_source "__other__"
 
   @doc false
   def mount_page(params, socket) do
-    selected_model = Catalyst.LLM.OpenAICodex.model().id
-    models = Catalyst.LLM.OpenAICodex.catalog_snapshot(selected_model).models
+    models = Comparison.available_models()
     options = Enum.map(models, &{&1.name, &1.id})
     default = models |> List.first() |> Map.fetch!(:id)
     second = models |> Enum.at(1, List.first(models)) |> Map.fetch!(:id)
-    source = default_cwd()
+    projects = project_options()
 
     socket =
       assign(socket,
         comparison: nil,
         comparisons: Comparison.list(),
         model_options: options,
+        project_options: projects,
+        other_source: @other_source,
         creating?: false,
         adding?: false,
         dispatching?: false,
         create_form:
           to_form(
             %{
-              "source" => source,
+              "source" => default_source(projects),
+              "source_other" => "",
               "model_a" => default,
               "model_b" => second,
               "system_prompt" => ""
@@ -50,8 +56,12 @@ defmodule CatalystWeb.Pages.ComparisonPage do
   end
 
   @impl true
+  def handle_event("validate_create", %{"comparison" => params}, socket) do
+    {:noreply, assign(socket, create_form: to_form(params, as: :comparison))}
+  end
+
   def handle_event("create", %{"comparison" => params}, socket) do
-    source = String.trim(params["source"] || "")
+    source = chosen_source(params)
     models = [params["model_a"], params["model_b"]]
     prompt = blank_to_nil(params["system_prompt"])
 
@@ -175,182 +185,185 @@ defmodule CatalystWeb.Pages.ComparisonPage do
   def render(assigns) do
     ~H"""
     <main id="comparison-view" class="flex h-full min-h-0 flex-col">
-        <header class="flex h-12 shrink-0 items-center gap-3 border-b border-edge bg-surface px-4">
-          <.link
-            navigate={~p"/"}
-            id="comparison-back"
-            class="flex size-8 items-center justify-center rounded-lg text-muted transition hover:bg-raised hover:text-ink"
-            title="Back to Catalyst"
-          >
-            <.icon name="hero-arrow-left" class="size-4" />
-          </.link>
-          <div class="min-w-0">
-            <h1 class="truncate text-sm font-semibold">
-              {if(@comparison, do: @comparison["title"], else: "Model comparison")}
-            </h1>
-            <p :if={@comparison} class="truncate font-mono text-[10px] text-faint">
-              {@comparison["source_root"]}
-            </p>
-          </div>
-        </header>
+      <header class="flex h-12 shrink-0 items-center gap-3 border-b border-edge bg-surface px-4">
+        <.link
+          navigate={~p"/"}
+          id="comparison-back"
+          class="flex size-8 items-center justify-center rounded-lg text-muted transition hover:bg-raised hover:text-ink"
+          title="Back to Catalyst"
+        >
+          <.icon name="hero-arrow-left" class="size-4" />
+        </.link>
+        <div class="min-w-0">
+          <h1 class="truncate text-sm font-semibold">
+            {if(@comparison, do: @comparison["title"], else: "Model comparison")}
+          </h1>
+          <p :if={@comparison} class="truncate font-mono text-[10px] text-faint">
+            {@comparison["source_root"]}
+          </p>
+        </div>
+      </header>
 
-        <%= if @comparison do %>
-          <section
-            id="comparison-lanes"
-            class="min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-3"
-          >
-            <div class="grid h-full auto-cols-[minmax(28rem,1fr)] grid-flow-col gap-3">
-              <div
-                :for={lane <- @comparison["lanes"]}
-                id={"comparison-lane-host-#{lane["id"]}"}
-                class="h-full min-w-0"
-              >
-                {live_render(@socket, CatalystWeb.ComparisonLaneLive,
-                  id: "comparison-lane-live-#{lane["id"]}",
-                  session: %{
-                    "comparison_id" => @comparison["id"],
-                    "lane_id" => lane["id"]
-                  }
-                )}
-              </div>
-
-              <aside
-                id="add-lane-card"
-                class="flex h-full min-h-80 items-center justify-center rounded-2xl border border-dashed border-edge-strong bg-surface/40 p-6"
-              >
-                <.form
-                  for={@add_form}
-                  id="add-lane-form"
-                  phx-submit="add_lane"
-                  class="w-full max-w-xs"
-                >
-                  <div class="mb-4 flex size-10 items-center justify-center rounded-xl bg-accent/10 text-accent">
-                    <.icon name="hero-plus" class="size-5" />
-                  </div>
-                  <h2 class="text-sm font-semibold">Add another model</h2>
-                  <p class="mt-1 text-xs leading-5 text-muted">
-                    Captures a fresh snapshot of the original project.
-                  </p>
-                  <.input
-                    field={@add_form[:model]}
-                    type="select"
-                    id="add-lane-model"
-                    options={@model_options}
-                    container_class="my-4"
-                  />
-                  <button
-                    id="add-lane-submit"
-                    type="submit"
-                    disabled={@adding?}
-                    class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
-                  >
-                    <.icon
-                      name={if(@adding?, do: "hero-arrow-path", else: "hero-plus")}
-                      class={["size-4", @adding? && "animate-spin"]}
-                    />
-                    {if(@adding?, do: "Creating clone…", else: "Add lane")}
-                  </button>
-                </.form>
-              </aside>
-            </div>
-          </section>
-
-          <footer class="shrink-0 border-t border-edge bg-surface px-3 py-2">
-            <.form
-              for={@shared_form}
-              id="shared-prompt-form"
-              phx-submit="send_shared"
-              class="mx-auto max-w-5xl"
+      <%= if @comparison do %>
+        <section
+          id="comparison-lanes"
+          class="min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-2"
+        >
+          <div class="grid h-full auto-cols-[minmax(24rem,1fr)] grid-flow-col gap-2">
+            <div
+              :for={lane <- @comparison["lanes"]}
+              id={"comparison-lane-host-#{lane["id"]}"}
+              class="h-full min-h-0 min-w-0"
             >
-              <div class="mb-1.5 flex flex-wrap items-center gap-1.5">
-                <span class="mr-1 text-[10px] font-semibold uppercase tracking-wider text-faint">
-                  Send to
-                </span>
-                <label
-                  :for={lane <- @comparison["lanes"]}
-                  class="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-edge px-2 py-1 text-[10px] font-medium text-muted transition has-[:checked]:border-accent/40 has-[:checked]:bg-accent/10 has-[:checked]:text-accent"
-                >
-                  <input
-                    id={"shared-lane-#{lane["id"]}"}
-                    type="checkbox"
-                    name="shared[lanes][]"
-                    value={lane["id"]}
-                    checked
-                    class="size-3 rounded border-edge-strong text-accent focus:ring-accent"
-                  />
-                  <span id={"shared-lane-label-#{lane["id"]}"}>{lane["model_id"]}</span>
-                </label>
-              </div>
-              <div class="flex items-end gap-2 rounded-2xl border border-edge bg-raised px-3 py-2 shadow-sm focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
+              {live_render(@socket, CatalystWeb.ComparisonLaneLive,
+                id: "comparison-lane-live-#{lane["id"]}",
+                container: {:div, class: "h-full min-h-0"},
+                session: %{
+                  "comparison_id" => @comparison["id"],
+                  "lane_id" => lane["id"]
+                }
+              )}
+            </div>
+
+            <aside
+              id="add-lane-card"
+              class="flex h-full min-h-64 items-center justify-center rounded-2xl border border-dashed border-edge-strong bg-surface/40 p-4"
+            >
+              <.form
+                for={@add_form}
+                id="add-lane-form"
+                phx-submit="add_lane"
+                class="w-full max-w-xs"
+              >
+                <div class="mb-3 flex size-9 items-center justify-center rounded-xl bg-accent/10 text-accent">
+                  <.icon name="hero-plus" class="size-4" />
+                </div>
+                <h2 class="text-sm font-semibold">Add another model</h2>
+                <p class="mt-1 text-xs leading-5 text-muted">
+                  Captures a fresh snapshot of the original project.
+                </p>
                 <.input
-                  field={@shared_form[:message]}
-                  type="textarea"
-                  id="shared-prompt-input"
-                  rows="1"
-                  placeholder="Ask every selected model…"
-                  container_class="m-0 min-w-0 flex-1"
-                  class="w-full resize-none border-0 bg-transparent px-0 py-1 text-sm leading-6 text-ink outline-none placeholder:text-faint focus:ring-0"
+                  field={@add_form[:model]}
+                  type="select"
+                  id="add-lane-model"
+                  options={@model_options}
+                  container_class="my-3"
                 />
                 <button
-                  id="shared-prompt-submit"
+                  id="add-lane-submit"
                   type="submit"
-                  disabled={@dispatching?}
-                  class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-accent text-white shadow-sm transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
-                  aria-label="Send shared prompt"
+                  disabled={@adding?}
+                  class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-white transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
                 >
                   <.icon
-                    name={if(@dispatching?, do: "hero-arrow-path", else: "hero-arrow-up")}
-                    class={["size-4", @dispatching? && "animate-spin"]}
+                    name={if(@adding?, do: "hero-arrow-path", else: "hero-plus")}
+                    class={["size-4", @adding? && "animate-spin"]}
                   />
+                  {if(@adding?, do: "Creating clone…", else: "Add lane")}
                 </button>
-              </div>
-            </.form>
-          </footer>
-        <% else %>
-          <section class="min-h-0 flex-1 overflow-y-auto px-5 py-10">
-            <div class="mx-auto grid max-w-5xl gap-8 lg:grid-cols-[1.2fr_0.8fr]">
-              <div>
-                <p class="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
-                  Independent workspaces
-                </p>
-                <h2 class="mt-3 max-w-xl text-3xl font-semibold tracking-tight">
-                  Compare models against the same project snapshot.
-                </h2>
-                <p class="mt-3 max-w-xl text-sm leading-6 text-muted">
-                  Catalyst creates two private Git clones containing HEAD, tracked changes, and non-ignored untracked files.
-                </p>
+              </.form>
+            </aside>
+          </div>
+        </section>
 
-                <div id="comparison-list" class="mt-8 space-y-2">
-                  <.link
-                    :for={comparison <- @comparisons}
-                    navigate={~p"/compare/#{comparison["id"]}"}
-                    id={"open-comparison-#{comparison["id"]}"}
-                    class="flex items-center gap-3 rounded-xl border border-edge bg-surface p-3 transition hover:border-accent/40 hover:shadow-sm"
-                  >
-                    <div class="flex size-9 items-center justify-center rounded-lg bg-raised">
-                      <.icon name="hero-squares-2x2" class="size-4 text-muted" />
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <p class="truncate text-sm font-medium">{comparison["title"]}</p>
-                      <p class="truncate text-[10px] text-faint">
-                        {length(comparison["lanes"])} lanes · {comparison["updated_at"]}
-                      </p>
-                    </div>
-                    <.icon name="hero-chevron-right" class="size-4 text-faint" />
-                  </.link>
-                </div>
-              </div>
-
-              <.form
-                for={@create_form}
-                id="create-comparison-form"
-                phx-submit="create"
-                class="rounded-2xl border border-edge bg-surface p-5 shadow-sm"
+        <footer class="shrink-0 border-t border-edge bg-surface px-3 py-2">
+          <.form
+            for={@shared_form}
+            id="shared-prompt-form"
+            phx-submit="send_shared"
+            class="mx-auto max-w-5xl"
+          >
+            <div class="mb-1.5 flex flex-wrap items-center gap-1.5">
+              <span class="mr-1 text-[10px] font-semibold uppercase tracking-wider text-faint">
+                Send to
+              </span>
+              <label
+                :for={lane <- @comparison["lanes"]}
+                class="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-edge px-2 py-1 text-[10px] font-medium text-muted transition has-[:checked]:border-accent/40 has-[:checked]:bg-accent/10 has-[:checked]:text-accent"
               >
-                <h2 class="text-sm font-semibold">New comparison</h2>
-                <p class="mt-1 text-xs text-muted">
-                  The initial lanes share one frozen snapshot.
-                </p>
+                <input
+                  id={"shared-lane-#{lane["id"]}"}
+                  type="checkbox"
+                  name="shared[lanes][]"
+                  value={lane["id"]}
+                  checked
+                  class="size-3 rounded border-edge-strong text-accent focus:ring-accent"
+                />
+                <span id={"shared-lane-label-#{lane["id"]}"}>{lane["model_id"]}</span>
+              </label>
+            </div>
+            <div class="flex items-end gap-2 rounded-2xl border border-edge bg-raised px-3 py-2 shadow-sm focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
+              <.input
+                field={@shared_form[:message]}
+                type="textarea"
+                id="shared-prompt-input"
+                rows="1"
+                placeholder="Ask every selected model…"
+                container_class="m-0 min-w-0 flex-1"
+                class="w-full resize-none border-0 bg-transparent px-0 py-1 text-sm leading-6 text-ink outline-none placeholder:text-faint focus:ring-0"
+              />
+              <button
+                id="shared-prompt-submit"
+                type="submit"
+                disabled={@dispatching?}
+                class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-accent text-white shadow-sm transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
+                aria-label="Send shared prompt"
+              >
+                <.icon
+                  name={if(@dispatching?, do: "hero-arrow-path", else: "hero-arrow-up")}
+                  class={["size-4", @dispatching? && "animate-spin"]}
+                />
+              </button>
+            </div>
+          </.form>
+        </footer>
+      <% else %>
+        <section class="min-h-0 flex-1 overflow-y-auto px-5 py-10">
+          <div class="mx-auto grid max-w-5xl gap-8 lg:grid-cols-[1.2fr_0.8fr]">
+            <div>
+              <p class="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                Independent workspaces
+              </p>
+              <h2 class="mt-3 max-w-xl text-3xl font-semibold tracking-tight">
+                Compare models against the same project snapshot.
+              </h2>
+              <p class="mt-3 max-w-xl text-sm leading-6 text-muted">
+                Catalyst creates two private Git clones containing HEAD, tracked changes, and non-ignored untracked files.
+              </p>
+
+              <div id="comparison-list" class="mt-8 space-y-2">
+                <.link
+                  :for={comparison <- @comparisons}
+                  navigate={~p"/compare/#{comparison["id"]}"}
+                  id={"open-comparison-#{comparison["id"]}"}
+                  class="flex items-center gap-3 rounded-xl border border-edge bg-surface p-3 transition hover:border-accent/40 hover:shadow-sm"
+                >
+                  <div class="flex size-9 items-center justify-center rounded-lg bg-raised">
+                    <.icon name="hero-squares-2x2" class="size-4 text-muted" />
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <p class="truncate text-sm font-medium">{comparison["title"]}</p>
+                    <p class="truncate text-[10px] text-faint">
+                      {length(comparison["lanes"])} lanes · {comparison["updated_at"]}
+                    </p>
+                  </div>
+                  <.icon name="hero-chevron-right" class="size-4 text-faint" />
+                </.link>
+              </div>
+            </div>
+
+            <.form
+              for={@create_form}
+              id="create-comparison-form"
+              phx-change="validate_create"
+              phx-submit="create"
+              class="rounded-2xl border border-edge bg-surface p-5 shadow-sm"
+            >
+              <h2 class="text-sm font-semibold">New comparison</h2>
+              <p class="mt-1 text-xs text-muted">
+                The initial lanes share one frozen snapshot.
+              </p>
+              <%= if @project_options == [] do %>
                 <.input
                   field={@create_form[:source]}
                   id="comparison-source"
@@ -359,50 +372,70 @@ defmodule CatalystWeb.Pages.ComparisonPage do
                   class="w-full rounded-xl border border-edge bg-raised px-3 py-2 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
                   container_class="mt-5"
                 />
-                <div class="grid grid-cols-2 gap-3">
-                  <.input
-                    field={@create_form[:model_a]}
-                    type="select"
-                    id="comparison-model-a"
-                    label="Left model"
-                    options={@model_options}
-                    container_class="mt-4"
-                  />
-                  <.input
-                    field={@create_form[:model_b]}
-                    type="select"
-                    id="comparison-model-b"
-                    label="Right model"
-                    options={@model_options}
-                    container_class="mt-4"
-                  />
-                </div>
+              <% else %>
                 <.input
-                  field={@create_form[:system_prompt]}
-                  type="textarea"
-                  id="comparison-system-prompt"
-                  label="System prompt override"
-                  rows="5"
-                  placeholder="Blank inherits Catalyst's effective system prompt."
-                  class="w-full resize-y rounded-xl border border-edge bg-raised px-3 py-2 text-sm leading-5 text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+                  field={@create_form[:source]}
+                  type="select"
+                  id="comparison-source"
+                  label="Project"
+                  options={@project_options ++ [{"Other folder…", @other_source}]}
+                  container_class="mt-5"
+                />
+                <.input
+                  :if={@create_form[:source].value == @other_source}
+                  field={@create_form[:source_other]}
+                  id="comparison-source-other"
+                  label="Folder path"
+                  autocomplete="off"
+                  placeholder="/path/to/project"
+                  class="w-full rounded-xl border border-edge bg-raised px-3 py-2 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
                   container_class="mt-4"
                 />
-                <button
-                  id="create-comparison-submit"
-                  type="submit"
-                  disabled={@creating?}
-                  class="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
-                >
-                  <.icon
-                    name={if(@creating?, do: "hero-arrow-path", else: "hero-squares-2x2")}
-                    class={["size-4", @creating? && "animate-spin"]}
-                  />
-                  {if(@creating?, do: "Capturing and cloning…", else: "Create comparison")}
-                </button>
-              </.form>
-            </div>
-          </section>
-        <% end %>
+              <% end %>
+              <div class="grid grid-cols-2 gap-3">
+                <.input
+                  field={@create_form[:model_a]}
+                  type="select"
+                  id="comparison-model-a"
+                  label="Left model"
+                  options={@model_options}
+                  container_class="mt-4"
+                />
+                <.input
+                  field={@create_form[:model_b]}
+                  type="select"
+                  id="comparison-model-b"
+                  label="Right model"
+                  options={@model_options}
+                  container_class="mt-4"
+                />
+              </div>
+              <.input
+                field={@create_form[:system_prompt]}
+                type="textarea"
+                id="comparison-system-prompt"
+                label="System prompt override"
+                rows="5"
+                placeholder="Blank inherits Catalyst's effective system prompt."
+                class="w-full resize-y rounded-xl border border-edge bg-raised px-3 py-2 text-sm leading-5 text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+                container_class="mt-4"
+              />
+              <button
+                id="create-comparison-submit"
+                type="submit"
+                disabled={@creating?}
+                class="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-accent/90 disabled:cursor-wait disabled:opacity-60"
+              >
+                <.icon
+                  name={if(@creating?, do: "hero-arrow-path", else: "hero-squares-2x2")}
+                  class={["size-4", @creating? && "animate-spin"]}
+                />
+                {if(@creating?, do: "Capturing and cloning…", else: "Create comparison")}
+              </button>
+            </.form>
+          </div>
+        </section>
+      <% end %>
     </main>
     """
   end
@@ -435,6 +468,57 @@ defmodule CatalystWeb.Pages.ComparisonPage do
       {:error, _reason} -> ""
     end
   end
+
+  # Projects the user has already opened (session catalog), as select options
+  # `{label, cwd}` in name order. Deleted directories are left out.
+  defp project_options do
+    case Catalog.entries() do
+      {:ok, entries} ->
+        entries
+        |> Enum.map(& &1.cwd)
+        |> Enum.uniq()
+        |> Enum.filter(&File.dir?/1)
+        |> Enum.map(&{project_label(&1), &1})
+        |> Enum.sort_by(fn {label, cwd} -> {String.downcase(label), cwd} end)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp project_label(cwd), do: Path.basename(cwd) <> "  ·  " <> home_relative(cwd)
+
+  defp home_relative(path) do
+    case System.user_home() do
+      home when is_binary(home) -> String.replace_prefix(path, home, "~")
+      nil -> path
+    end
+  end
+
+  # Preselect the project most recently worked in; without any, fall back to
+  # the free-form directory field seeded with the process default.
+  defp default_source([]), do: default_cwd()
+
+  defp default_source(projects) do
+    cwds = Enum.map(projects, &elem(&1, 1))
+
+    case Catalog.most_recent() do
+      {:ok, %{cwd: cwd}} -> if_known(cwd, cwds)
+      _none -> hd(cwds)
+    end
+  end
+
+  defp if_known(cwd, cwds) do
+    case cwd in cwds do
+      true -> cwd
+      false -> hd(cwds)
+    end
+  end
+
+  defp chosen_source(%{"source" => @other_source} = params),
+    do: String.trim(params["source_other"] || "")
+
+  defp chosen_source(params), do: String.trim(params["source"] || "")
 
   defp blank_to_nil(value) when is_binary(value) do
     case String.trim(value) do
