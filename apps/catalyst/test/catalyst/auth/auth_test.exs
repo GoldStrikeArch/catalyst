@@ -117,6 +117,22 @@ defmodule Catalyst.AuthTest do
     assert band(mode, 0o7777) == 0o600
   end
 
+  test "refresh ignores providers that registered no controls module" do
+    # Faux is a built-in with `controls: nil`. Walking the registry used to
+    # call `nil.auth_provider/0` (`nil` is an atom) before a matching provider
+    # could refresh.
+    TokenStore.put("nil-controls-provider", %{
+      access: "old",
+      refresh: "ref_1",
+      expires: 0,
+      account_id: "acct_nil"
+    })
+
+    on_exit(fn -> TokenStore.delete("nil-controls-provider") end)
+
+    assert {:error, _reason} = TokenStore.get_access_token("nil-controls-provider")
+  end
+
   test "stale tokens refresh single-flight without blocking other calls" do
     test_pid = self()
 

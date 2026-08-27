@@ -104,16 +104,30 @@ defmodule CatalystWeb.ShellLive.SessionLifecycle do
   @doc "Changes the working directory and opens a new thread there."
   @spec change_cwd(socket(), String.t()) :: socket()
   def change_cwd(socket, path) do
-    expanded = Path.expand(path, socket.assigns.cwd)
+    case project_dir(path, socket.assigns.cwd) do
+      {:ok, dir} -> socket |> ChatInput.put_text("") |> start_in(dir)
+      {:error, message} -> put_flash(socket, :error, message)
+    end
+  end
 
+  @doc """
+  Resolves a user-entered project path to an existing directory.
+
+  `path` may be relative (to `base`) or start with `~`; blank input and
+  non-directories are rejected with a message ready for a flash.
+  """
+  @spec project_dir(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def project_dir(path, base) when is_binary(path) and is_binary(base) do
+    case String.trim(path) do
+      "" -> {:error, "Enter a project folder path"}
+      trimmed -> existing_dir(Path.expand(trimmed, base))
+    end
+  end
+
+  defp existing_dir(expanded) do
     case File.dir?(expanded) do
-      true ->
-        socket
-        |> ChatInput.put_text("")
-        |> start_in(expanded)
-
-      false ->
-        put_flash(socket, :error, "Not a directory: #{expanded}")
+      true -> {:ok, expanded}
+      false -> {:error, "Not a directory: #{expanded}"}
     end
   end
 

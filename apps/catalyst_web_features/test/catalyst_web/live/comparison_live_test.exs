@@ -5,7 +5,7 @@ defmodule CatalystWeb.ComparisonLiveTest do
 
   alias Catalyst.Comparison
   alias Catalyst.{Content, Message}
-  alias Catalyst.Session.{Manager, Server}
+  alias Catalyst.Session.{Catalog, Manager, Server, Store}
 
   setup do
     tmp =
@@ -211,4 +211,94 @@ defmodule CatalystWeb.ComparisonLiveTest do
 
   defp restore(key, nil), do: Application.delete_env(:catalyst, key)
   defp restore(key, value), do: Application.put_env(:catalyst, key, value)
+
+  describe "new comparison project chooser" do
+    setup %{source: source} do
+      previous = Application.get_env(:catalyst, :session_catalog_path)
+
+      catalog =
+        Path.join(
+          System.tmp_dir!(),
+          "catalyst_cmp_catalog_#{System.unique_integer([:positive])}.json"
+        )
+
+      Application.put_env(:catalyst, :session_catalog_path, catalog)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:catalyst, :session_catalog_path)
+          path -> Application.put_env(:catalyst, :session_catalog_path, path)
+        end
+
+        File.rm(catalog)
+      end)
+
+      %{source: source}
+    end
+
+    test "the current shell project is offered in a select", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/compare")
+      cwd = session_cwd(view)
+
+      assert has_element?(view, "select#comparison-source")
+      assert has_element?(view, ~s(#comparison-source option[value="#{cwd}"][selected]))
+      refute has_element?(view, "input#comparison-source[type=text]")
+    end
+
+    test "known projects are offered in a select with the most recent one preselected",
+         %{conn: conn, source: source} do
+      other = Path.join(Path.dirname(source), "another_project")
+      File.mkdir_p!(other)
+      remember!(other, "cmp-other")
+      remember!(source, "cmp-source")
+
+      {:ok, view, _html} = live(conn, ~p"/compare")
+      current = session_cwd(view)
+
+      assert has_element?(view, "select#comparison-source")
+      assert has_element?(view, ~s(#comparison-source option[value="#{current}"][selected]))
+      assert has_element?(view, ~s(#comparison-source option[value="#{source}"]))
+      assert has_element?(view, ~s(#comparison-source option[value="#{other}"]))
+      assert has_element?(view, ~s(#comparison-source option[value="__other__"]))
+      refute has_element?(view, "#comparison-source-other")
+    end
+
+    test "choosing 'Other folder…' reveals a path field that feeds creation",
+         %{conn: conn, source: source} do
+      remember!(source, "cmp-source")
+      {:ok, view, _html} = live(conn, ~p"/compare")
+
+      view
+      |> form("#create-comparison-form", %{"comparison" => %{"source" => "__other__"}})
+      |> render_change()
+
+      assert has_element?(view, "#comparison-source-other")
+
+      not_a_repo = Path.join(Path.dirname(source), "plain_dir")
+      File.mkdir_p!(not_a_repo)
+
+      view
+      |> form("#create-comparison-form", %{
+        "comparison" => %{"source" => "__other__", "source_other" => not_a_repo}
+      })
+      |> render_submit()
+
+      render_async(view)
+      assert has_element?(view, "[id$=flash-error]", "Comparison failed")
+      assert Comparison.list() == []
+    end
+
+    defp remember!(cwd, id) do
+      {:ok, _handle} = Store.open(cwd, id: id)
+      :ok = Catalog.remember(id, cwd)
+      # Untitled idle rows are dropped when the shell refreshes the sidebar.
+      :ok = Catalog.put_title(id, Path.basename(cwd))
+    end
+
+    defp session_cwd(view) do
+      id = session_id(view)
+      assert {:ok, %{cwd: cwd}} = Catalog.lookup(id)
+      cwd
+    end
+  end
 end

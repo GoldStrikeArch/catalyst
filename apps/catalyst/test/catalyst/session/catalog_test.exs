@@ -47,6 +47,38 @@ defmodule Catalyst.Session.CatalogTest do
     assert Catalog.display_title(%{title: nil}) == "New thread"
   end
 
+  test "created_at is fixed on first remember and survives later use and titling" do
+    create_store!("/tmp/proj-a", "sess-a")
+    assert :ok = Catalog.remember("sess-a", "/tmp/proj-a")
+    assert {:ok, %{created_at: created, last_used_at: created}} = Catalog.lookup("sess-a")
+
+    assert :ok = Catalog.remember("sess-a", "/tmp/proj-a")
+    assert :ok = Catalog.put_title("sess-a", "Later title")
+    assert {:ok, %{created_at: ^created, last_used_at: later}} = Catalog.lookup("sess-a")
+    assert later >= created
+  end
+
+  test "legacy entries without created_at adopt their last_used_at and persist it", %{path: path} do
+    create_store!("/tmp/proj-a", "sess-a")
+    create_store!("/tmp/proj-b", "sess-b")
+
+    File.write!(
+      path,
+      ~s({"version": 1, "entries": [) <>
+        ~s({"id": "sess-a", "cwd": "/tmp/proj-a", "last_used_at": "2026-01-01T00:00:00.000Z"},) <>
+        ~s({"id": "sess-b", "cwd": "/tmp/proj-b", "last_used_at": "2026-01-02T00:00:00.000Z"}]})
+    )
+
+    assert {:ok, %{created_at: "2026-01-01T00:00:00.000Z"}} = Catalog.lookup("sess-a")
+
+    # Touching another entry rewrites the file; sess-a's adopted created_at is now durable.
+    assert :ok = Catalog.remember("sess-b", "/tmp/proj-b")
+    assert %{"entries" => entries} = path |> File.read!() |> Jason.decode!()
+
+    assert %{"created_at" => "2026-01-01T00:00:00.000Z"} =
+             Enum.find(entries, &(&1["id"] == "sess-a"))
+  end
+
   test "older catalogs without a title field still decode", %{path: path} do
     create_store!("/tmp/proj-a", "sess-a")
 
